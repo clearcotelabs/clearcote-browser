@@ -17,6 +17,7 @@ FINGERPRINT_KEYS = (
     "hardware_concurrency",
     "location",
     "timezone",
+    "accept_language",
     "webrtc_ip",
     "disable_gpu_fingerprint",
 )
@@ -38,6 +39,14 @@ _FLAGS = {
 }
 
 
+def clean_accept_language(value):
+    """Normalize an Accept-Language value for Chromium's ``--accept-lang``: a plain comma-separated
+    tag list with NO ``;q=`` weights or spaces (Chromium adds the q-weights to the header itself; a
+    ``;`` in the switch value trips a DCHECK and crashes the renderer)."""
+    tags = [t.split(";")[0].strip() for t in str(value).split(",")]
+    return ",".join(t for t in tags if t)
+
+
 def fingerprint_args(opts):
     """Build the Chromium switches for a dict of fingerprint options."""
     args = []
@@ -45,6 +54,9 @@ def fingerprint_args(opts):
         value = opts.get(key)
         if value is not None and value != "":
             args.append(f"--{flag}={value}")
+    accept_language = opts.get("accept_language")
+    if accept_language:
+        args.append(f"--accept-lang={clean_accept_language(accept_language)}")
     if opts.get("disable_gpu_fingerprint"):
         args.append("--disable-gpu-fingerprint")
     return args

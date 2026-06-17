@@ -19,20 +19,38 @@ import type {
 } from "playwright-core";
 import { ensureBinary, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
+import { resolveGeo, type Geo } from "./geoip.js";
 import { RELEASE } from "./release.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
+export { resolveGeo, type Geo } from "./geoip.js";
 export { RELEASE } from "./release.js";
 
+/** When true (and a proxy is set), resolve the proxy's exit-IP geo and auto-fill any unset
+ * `timezone` + `acceptLanguage` (+ `location`) so they match the proxy region. */
+interface GeoipOption {
+  geoip?: boolean;
+}
+
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, GeoipOption {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
   extends PlaywrightLaunchOptions,
     BrowserContextOptions,
-    FingerprintOptions {}
+    FingerprintOptions,
+    GeoipOption {}
+
+/** Fill unset timezone/acceptLanguage/location on `fp` from the proxy's exit-IP geo. */
+async function applyGeoip(fp: FingerprintOptions, proxy: unknown): Promise<void> {
+  const geo: Geo | null = await resolveGeo(proxy as { server?: string; username?: string; password?: string } | undefined);
+  if (!geo) return;
+  if (geo.timezone && fp.timezone == null) fp.timezone = geo.timezone;
+  if (geo.acceptLanguage && fp.acceptLanguage == null) fp.acceptLanguage = geo.acceptLanguage;
+  if (geo.location && fp.location == null) fp.location = geo.location;
+}
 
 function ensureRunnableHere(exe: string): void {
   if (process.platform !== "win32") {
@@ -63,8 +81,9 @@ export async function download(options: DownloadOptions = {}): Promise<string> {
 
 /** Launch Clearcote and return a standard Playwright {@link Browser}. */
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
-  const { executablePath: exeOption, args, ...rest } = options;
+  const { executablePath: exeOption, args, geoip, ...rest } = options;
   const { fingerprint, rest: pwOptions } = splitFingerprintOptions(rest);
+  if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
   const exe = await executablePath({ executablePath: exeOption });
   ensureRunnableHere(exe);
   return chromium.launch({
@@ -82,8 +101,9 @@ export async function launchPersistentContext(
   userDataDir: string,
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
-  const { executablePath: exeOption, args, ...rest } = options;
+  const { executablePath: exeOption, args, geoip, ...rest } = options;
   const { fingerprint, rest: pwOptions } = splitFingerprintOptions(rest);
+  if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
   const exe = await executablePath({ executablePath: exeOption });
   ensureRunnableHere(exe);
   return chromium.launchPersistentContext(userDataDir, {

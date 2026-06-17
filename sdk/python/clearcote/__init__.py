@@ -19,6 +19,7 @@ import sys
 
 from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args
 from .download import ensure_binary
+from .geoip import resolve_geo
 from .release import RELEASE
 
 __all__ = [
@@ -26,10 +27,11 @@ __all__ = [
     "launch_persistent_context",
     "executable_path",
     "download",
+    "resolve_geo",
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -88,11 +90,19 @@ def _guard(exe):
 
 
 def _prepare(kwargs):
+    geoip = kwargs.pop("geoip", False)
     fp = {k: kwargs.pop(k) for k in list(kwargs) if k in FINGERPRINT_KEYS}
     exe_path = kwargs.pop("executable_path", None)
     extra_args = kwargs.pop("args", None)
     cache_dir = kwargs.pop("cache_dir", None)
     quiet = kwargs.pop("quiet", False)
+    if geoip:
+        # resolve the proxy's exit-IP geo and fill any UNSET timezone/accept_language/location
+        geo = resolve_geo(kwargs.get("proxy"), quiet=quiet)
+        if geo:
+            for opt in ("timezone", "accept_language", "location"):
+                if geo.get(opt) and fp.get(opt) is None:
+                    fp[opt] = geo[opt]
     exe = _resolve_binary(exe_path, cache_dir, quiet)
     _guard(exe)
     args = fingerprint_args(fp) + list(extra_args or [])
@@ -103,9 +113,10 @@ def launch(**kwargs):
     """Launch Clearcote and return a standard Playwright sync ``Browser``.
 
     Fingerprint kwargs: fingerprint, platform, platform_version, brand, brand_version,
-    gpu_vendor, gpu_renderer, hardware_concurrency, location, timezone, webrtc_ip,
-    disable_gpu_fingerprint. All other kwargs (headless, proxy, args, timeout, ...) pass
-    through to Playwright's chromium.launch().
+    gpu_vendor, gpu_renderer, hardware_concurrency, location, timezone, accept_language,
+    webrtc_ip, disable_gpu_fingerprint. Pass geoip=True to resolve the proxy's exit-IP geo and
+    auto-fill any unset timezone/accept_language/location. All other kwargs (headless, proxy,
+    args, timeout, ...) pass through to Playwright's chromium.launch().
     """
     exe, args, pw_kwargs = _prepare(kwargs)
     return _playwright().chromium.launch(executable_path=exe, args=args, **pw_kwargs)

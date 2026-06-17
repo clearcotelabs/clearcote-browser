@@ -52,6 +52,20 @@ const browser = await launch({
 });
 ```
 
+### Auto geo-match (`geoip`)
+
+Set `geoip: true` and Clearcote resolves the **proxy's exit IP** (looked up *through* the proxy) and auto-fills any unset `timezone`, `acceptLanguage`, and `location` so they match the proxy's region — no manual timezone/locale bookkeeping:
+
+```ts
+const browser = await launch({
+  fingerprint: "user-7423",
+  proxy: { server: "http://host:8080", username: "u", password: "p" },
+  geoip: true,              // timezone + navigator.languages/Accept-Language auto-set from the proxy's geo
+});
+```
+
+Anything you set explicitly wins over `geoip`. With no proxy it uses your direct connection's IP. The lookup needs an **http(s) proxy** — SOCKS proxies are skipped (set `timezone`/`acceptLanguage` yourself).
+
 ### Persistent profile
 
 ```ts
@@ -80,8 +94,10 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `hardwareConcurrency` | `--fingerprint-hardware-concurrency` | `navigator.hardwareConcurrency`. |
 | `location` | `--fingerprint-location` | `"lat,lng"` (only when geo permission is granted). |
 | `timezone` | `--timezone` | IANA timezone, e.g. `America/New_York`. |
+| `acceptLanguage` | `--accept-lang` | `navigator.languages` + `Accept-Language` header, e.g. `en-US,en`. |
 | `webrtcIp` | `--webrtc-ip` | WebRTC egress IP to report (your proxy IP). |
 | `disableGpuFingerprint` | `--disable-gpu-fingerprint` | Turn off GPU/WebGL spoofing. |
+| `geoip` | _(directive)_ | `true` → resolve the proxy's exit-IP geo and auto-fill timezone/acceptLanguage/location. |
 
 ## API
 

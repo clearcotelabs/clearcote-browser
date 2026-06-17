@@ -26,6 +26,12 @@ export interface FingerprintOptions {
   location?: string;
   /** IANA timezone, e.g. "America/New_York". */
   timezone?: string;
+  /**
+   * Accept-Language / navigator.languages, e.g. "en-US,en". Sets BOTH the server-side
+   * Accept-Language header and navigator.language(s) coherently (Chromium `--accept-lang`).
+   * Set this to match the timezone/proxy region — or let `geoip` fill it automatically.
+   */
+  acceptLanguage?: string;
   /** WebRTC egress IP to report (typically your proxy's public IP). */
   webrtcIp?: string;
   /** Turn OFF GPU/WebGL fingerprint spoofing (advertise the real backend). */
@@ -43,6 +49,7 @@ const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "hardwareConcurrency",
   "location",
   "timezone",
+  "acceptLanguage",
   "webrtcIp",
   "disableGpuFingerprint",
 ];
@@ -63,6 +70,17 @@ export function splitFingerprintOptions<T extends FingerprintOptions>(
   return { fingerprint, rest: rest as Omit<T, keyof FingerprintOptions> };
 }
 
+/** Normalize an Accept-Language value for Chromium's `--accept-lang`: a plain comma-separated
+ * tag list with NO `;q=` weights or spaces (Chromium adds the q-weights to the header itself; a
+ * `;` in the switch value trips a DCHECK and crashes the renderer). */
+export function cleanAcceptLanguage(v: string): string {
+  return String(v)
+    .split(",")
+    .map((t) => t.split(";")[0].trim())
+    .filter(Boolean)
+    .join(",");
+}
+
 /** Build the Chromium switches for a set of fingerprint options. */
 export function fingerprintArgs(o: FingerprintOptions): string[] {
   const args: string[] = [];
@@ -81,6 +99,7 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   set("fingerprint-hardware-concurrency", o.hardwareConcurrency);
   set("fingerprint-location", o.location);
   set("timezone", o.timezone);
+  if (o.acceptLanguage) args.push(`--accept-lang=${cleanAcceptLanguage(String(o.acceptLanguage))}`);
   set("webrtc-ip", o.webrtcIp);
   if (o.disableGpuFingerprint) args.push("--disable-gpu-fingerprint");
   return args;
