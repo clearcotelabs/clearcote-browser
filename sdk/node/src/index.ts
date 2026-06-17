@@ -87,16 +87,18 @@ export async function download(options: DownloadOptions = {}): Promise<string> {
 
 /** Launch Clearcote and return a standard Playwright {@link Browser}. */
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
-  const { executablePath: exeOption, args, geoip, ...rest } = options;
+  const { executablePath: exeOption, args, geoip, humanize, showCursor, ...rest } = options;
   const { fingerprint, rest: pwOptions } = splitFingerprintOptions(rest);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
   const exe = await executablePath({ executablePath: exeOption });
   ensureRunnableHere(exe);
-  return chromium.launch({
+  const browser = await chromium.launch({
     ...(pwOptions as PlaywrightLaunchOptions),
     executablePath: exe,
     args: [...fingerprintArgs(fingerprint), ...(args ?? [])],
   });
+  installHumanize(browser, { humanize, showCursor });
+  return browser;
 }
 
 /**
@@ -107,16 +109,18 @@ export async function launchPersistentContext(
   userDataDir: string,
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
-  const { executablePath: exeOption, args, geoip, ...rest } = options;
+  const { executablePath: exeOption, args, geoip, humanize, showCursor, ...rest } = options;
   const { fingerprint, rest: pwOptions } = splitFingerprintOptions(rest);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
   const exe = await executablePath({ executablePath: exeOption });
   ensureRunnableHere(exe);
-  return chromium.launchPersistentContext(userDataDir, {
+  const context = await chromium.launchPersistentContext(userDataDir, {
     ...(pwOptions as PlaywrightLaunchOptions & BrowserContextOptions),
     executablePath: exe,
     args: [...fingerprintArgs(fingerprint), ...(args ?? [])],
   });
+  installHumanizeOnContext(context, { humanize, showCursor });
+  return context;
 }
 
 export default { launch, launchPersistentContext, executablePath, download, RELEASE };

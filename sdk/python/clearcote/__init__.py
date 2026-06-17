@@ -18,6 +18,7 @@ import os
 import sys
 
 from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args
+from ._humanize import install_humanize, install_humanize_on_context
 from .download import ensure_binary
 from .geoip import resolve_geo
 from .release import RELEASE
@@ -91,6 +92,8 @@ def _guard(exe):
 
 def _prepare(kwargs):
     geoip = kwargs.pop("geoip", False)
+    humanize = kwargs.pop("humanize", False)
+    show_cursor = kwargs.pop("show_cursor", False)
     fp = {k: kwargs.pop(k) for k in list(kwargs) if k in FINGERPRINT_KEYS}
     exe_path = kwargs.pop("executable_path", None)
     extra_args = kwargs.pop("args", None)
@@ -110,7 +113,7 @@ def _prepare(kwargs):
     exe = _resolve_binary(exe_path, cache_dir, quiet)
     _guard(exe)
     args = fingerprint_args(fp) + list(extra_args or [])
-    return exe, args, kwargs
+    return exe, args, kwargs, humanize, show_cursor
 
 
 def launch(**kwargs):
@@ -122,14 +125,18 @@ def launch(**kwargs):
     auto-fill any unset timezone/accept_language/location. All other kwargs (headless, proxy,
     args, timeout, ...) pass through to Playwright's chromium.launch().
     """
-    exe, args, pw_kwargs = _prepare(kwargs)
-    return _playwright().chromium.launch(executable_path=exe, args=args, **pw_kwargs)
+    exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
+    browser = _playwright().chromium.launch(executable_path=exe, args=args, **pw_kwargs)
+    install_humanize(browser, humanize, show_cursor)
+    return browser
 
 
 def launch_persistent_context(user_data_dir, **kwargs):
     """Launch Clearcote with a persistent profile directory; returns a Playwright
     ``BrowserContext`` (cookies/storage persist in ``user_data_dir``)."""
-    exe, args, pw_kwargs = _prepare(kwargs)
-    return _playwright().chromium.launch_persistent_context(
+    exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
+    context = _playwright().chromium.launch_persistent_context(
         user_data_dir, executable_path=exe, args=args, **pw_kwargs
     )
+    install_humanize_on_context(context, humanize, show_cursor)
+    return context
