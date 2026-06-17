@@ -78,20 +78,6 @@ The build then runs with **`DEPOT_TOOLS_WIN_TOOLCHAIN=1`** (not 0) pointing `GYP
 
 `scripts/05-package.sh` zips the runtime (chrome.exe, chrome.dll, paks, ICU, locales, ANGLE/SwiftShader DLLs) and bundles the five VC++ runtime DLLs so it launches on a clean Windows box. Then **sign + publish** per [RELEASING.md](RELEASING.md) and verify a download per [VERIFY.md](VERIFY.md).
 
-## Iterating on patches (incremental — don't rebuild clean)
-
-You pay the multi-hour build **once**. After it, edit a file under `patches/` and run:
-
-```bash
-scripts/rebuild.sh        # re-apply the Clearcote series + incremental ninja (minutes)
-```
-
-It re-applies only the Clearcote series (the ungoogled base + windows overlay stay put) and runs
-`ninja` with `out/Default` preserved, so only the translation units whose source changed are
-recompiled and `chrome.dll` is relinked. Do **not** `rm -rf out/Default`, re-run `gn gen`, or
-change `args.gn` for a patch tweak — any of those can cascade into a full recompile. Editing a
-widely-included header fans out wider than a `.cc`; that's inherent to C++.
-
 ## Gotchas (the cross-build journey, distilled)
 
 These bit us; the scripts handle them, but know they exist:
