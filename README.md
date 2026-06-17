@@ -72,6 +72,34 @@ Clearcote is a thin, transparent stack over Chromium:
 
 Nothing here is hidden: the de-Googling comes from ungoogled-chromium, the identity controls live in readable patches, and the build is something you can run end-to-end yourself.
 
+## 🧪 Fingerprint test results
+
+Every build is audited against [CreepJS](https://abrahamjuliot.github.io/creepjs/) with [`scripts/creepjs_audit.py`](scripts/creepjs_audit.py): it reads the signals the browser actually exposes, cross-checks them for internal consistency (e.g. **User-Agent vs. UA Client Hints**), confirms the WebRTC mock leaks no LAN address, and checks that CreepJS does not flag it as headless/automated. Latest build:
+
+<!-- CREEPJS_RESULTS:START -->
+**Build `149.0.7827.114` · audited 2026-06-17 · seed `demo` · platform `windows`**
+
+| Signal | Value | Verdict |
+|---|---|---|
+| `navigator.webdriver` | False | ✅ hidden |
+| User-Agent | `Chrome/149` | ✅ |
+| UA-CH Chromium version | 149.0.7827.66 | ✅ matches UA |
+| UA-CH platform | Windows 19.0.0 | ✅ |
+| WebGL vendor / renderer | Google Inc. (NVIDIA) / ANGLE (NVIDIA, NVIDIA GeForce RTX 5080 (0x00002C02) Direct3D… | ✅ spoofed |
+| Canvas 2D | `1ca291c12d74236f` (deterministic per seed) | ✅ noised |
+| hardwareConcurrency | 12 | ✅ |
+| deviceMemory | 8 | ✅ |
+| Timezone | America/New_York | ✅ |
+| WebRTC host (LAN) candidate | none | ✅ no LAN leak |
+| WebRTC srflx (public) | none gathered (STUN unreachable on this network) | — |
+| CreepJS headless (hard) | 0% | ✅ |
+| CreepJS stealth-detect | 0% | ✅ |
+
+_UA ↔ UA-CH version consistency: ✅ (UA major `149`, UA-CH major `149`). WebRTC srflx is mocked to the proxy/egress IP; real host candidates are suppressed. With a real proxy the public-IP row shows the proxy's egress IP._
+<!-- CREEPJS_RESULTS:END -->
+
+> Regenerated on each release with `py -3 scripts/creepjs_audit.py --readme README.md`. Values are the **spoofed** per-seed identity (synthetic, not real machine data); a demo timezone and documentation WebRTC IP are used so no real PII appears here.
+
 ## Inspiration & credits
 
 Clearcote stands on the shoulders of excellent open-source work and is grateful to:
