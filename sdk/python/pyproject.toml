@@ -23,6 +23,7 @@ keywords = [
 ]
 dependencies = [
     "playwright>=1.40",
+    "maxminddb>=2.2",
 ]
 
 [project.urls]

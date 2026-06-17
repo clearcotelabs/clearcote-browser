@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "extract-zip": "^2.0.1",
+    "maxmind": "^4.3.0",
     "playwright-core": "^1.49.0"
   },
   "devDependencies": {
