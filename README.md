@@ -117,9 +117,14 @@ Already using Playwright/Puppeteer? Migration is meant to be a one-line import c
 
 ## Build it yourself
 
-You never have to take our word for what's inside. Clearcote is designed to be rebuilt from source by anyone:
+You never have to take our word for what's inside. Clearcote cross-compiles the Windows binary on a Linux box — one command on a capable host:
 
-- **[docs/BUILDING.md](docs/BUILDING.md)** — full build-from-source guide (Windows-first; cross-build supported).
+```bash
+git clone https://github.com/clearcotelabs/clearcote-browser.git
+cd clearcote-browser && WORK=~/clearcote-build ./build.sh
+```
+
+- **[docs/BUILDING.md](docs/BUILDING.md)** — full build-from-source guide: pinned versions, the [`scripts/`](scripts) pipeline, and every cross-build gotcha.
 - **[docs/VERIFY.md](docs/VERIFY.md)** — how to verify a release: signature, checksums, reproducibility, and diffing the patch set against pinned upstream.
 
 Releases are GPG-signed. Pin the **Clearcote release signing key** fingerprint and check every download against it — it does not change between releases:

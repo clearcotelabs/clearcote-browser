@@ -81,7 +81,7 @@ Full recipe: [BUILDING.md](BUILDING.md); deep cross-build gotchas: [RESEARCH-DOS
 Pre-flight checks:
 
 - [ ] `cat <repo>/UPSTREAM_REVISION` equals `$V` (the repo-root file is the canonical pin).
-- [ ] `config/args.gn` matches the args the artifact is actually built with — in particular `is_official_build`. **Known discrepancy to resolve before a stable release:** `config/args.gn` ships `is_official_build = true`, but pre-release binaries were built `false`. Either rebuild with the published config or align the config to what shipped; they must be identical for the "rebuild it" claim (§0.4).
+- [ ] `config/args.gn` matches the args the artifact is actually built with — in particular `is_official_build`. The published `config/args.gn` is `is_official_build = false`, matching the pre-release binary. To promote to a **stable** stealth-grade build, flip the config **and** the build to `true` together — they must stay identical for the "rebuild it" claim (§0.4).
 - [ ] `out/Default/chrome.exe` and `chrome.dll` are freshly built.
 
 **Stage the build into the codename zip** (this is the input §5 expects — produce it here if missing/stale). Mirror the known-good archive contents (`unzip -l` an existing release zip to confirm; ~700 entries):

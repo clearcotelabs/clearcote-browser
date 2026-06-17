@@ -1,0 +1,6 @@
+# The build pipeline runs on Linux — keep LF line endings so the shell scripts work there.
+* text=auto eol=lf
+*.sh   text eol=lf
+*.gn   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf

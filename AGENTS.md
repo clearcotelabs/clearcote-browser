@@ -17,6 +17,8 @@ clearcote-browser/
 ├── CREDITS.md           # upstream attributions + licenses
 ├── DISCLAIMER.md        # responsible use + legal
 ├── UPSTREAM_REVISION    # pinned Chromium revision the patches target
+├── build.sh             # one-shot Linux cross-build orchestrator
+├── scripts/             # numbered build stages (fetch, toolchain, windows-sdk, build, package)
 ├── patches/             # Clearcote's source patches (unified diffs) + series
 ├── config/              # args.gn and build configuration
 └── docs/

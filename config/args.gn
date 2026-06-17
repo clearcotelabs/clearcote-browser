@@ -1,39 +1,54 @@
-# Clearcote reference build configuration (Windows x64).
+# Clearcote reference build configuration — Windows x64, cross-compiled on Linux.
 #
-# This is the GN configuration used to build Clearcote. The de-Googling flags
-# (empty Google API keys, disabled telemetry/integration, etc.) come from the
-# ungoogled-chromium base applied before this file; the settings here pin the
-# build to a clang/lld toolchain, a release configuration, and Clearcote's
-# identity controls. Everything is plain and inspectable — no hidden flags.
+# This is the effective build configuration used to produce the published pre-release
+# (same flags and values as the build host's out/Default/args.gn; only ordering/comments
+# differ, which gn ignores). Copy it verbatim into the build:
+#   cp config/args.gn <chromium-src>/out/Default/args.gn
+# then `gn gen out/Default && ninja -C out/Default chrome`. (scripts/04-configure-build.sh
+# does this for you.) Everything here is plain and inspectable — no hidden flags.
 
-# --- Toolchain ---
-is_clang = true                  # build with Chromium's clang/lld
+# --- De-Google (from ungoogled-chromium's flags.gn; kept explicit so this file is self-contained) ---
+clang_use_chrome_plugins = false
+disable_fieldtrial_testing_config = true
+enable_hangout_services_extension = false
+enable_mdns = false
+enable_remoting = false
+enable_reporting = false
+enable_service_discovery = false
+enable_widevine = false
+exclude_unwind_tables = true
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+safe_browsing_mode = 0
+use_official_google_api_keys = false
+use_unofficial_version_number = false
+
+# --- Target + toolchain ---
 target_os = "win"
 target_cpu = "x64"
+is_clang = true
+clang_base_path = "//third_party/llvm-build/Release+Asserts"
+rust_sysroot_absolute = ""            # build rust std from source (no prebuilt absolute sysroot)
 
 # --- Release configuration ---
 is_debug = false
-is_official_build = true          # production optimization profile
-is_component_build = false        # single, shippable binary
+is_official_build = false             # NOTE: the published pre-release was built non-official.
+                                      # Flip to true for a production/stealth-grade build, but
+                                      # then config + shipped binary must match (see docs/RELEASING.md).
+is_component_build = false            # single, shippable binary
 symbol_level = 0
 blink_symbol_level = 0
-v8_symbol_level = 0
-dcheck_always_on = false
+chrome_pgo_phase = 0                  # no downloaded PGO profiles
+use_remoteexec = false
 
 # --- Media / codecs (match a normal desktop browser) ---
 proprietary_codecs = true
 ffmpeg_branding = "Chrome"
-enable_mse_mpeg2ts_stream_parser = true
 
-# --- Build hygiene ---
-enable_swiftshader = false
-use_sysroot = false
-enable_rust = true
-
-# --- PGO ---
-# Set to 0 to build without downloaded PGO profiles, or 2 to use them.
-chrome_pgo_phase = 0
-
-# Note: the full set of privacy/de-Google flags is provided by the
-# ungoogled-chromium base (google_api_key="", safe_browsing_mode=0,
-# enable_reporting=false, enable_mdns=false, etc.). See docs/BUILDING.md.
+# --- Cross-build hygiene ---
+enable_nacl = false
+dawn_use_built_dxc = false
+treat_warnings_as_errors = false
+fatal_linker_warnings = false
+v8_drumbrake_bounds_checks = true
