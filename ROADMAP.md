@@ -6,41 +6,41 @@ Clearcote is being built in the open. This roadmap is intentionally public so yo
 
 ---
 
-## Phase 0 — Foundations *(in progress)*
+## Phase 0 — Foundations *(complete)*
 
 The unglamorous groundwork that everything else depends on.
 
 - [x] Project scope, principles, and architecture
 - [x] De-Googled base via ungoogled-chromium, pinned to an exact upstream revision
 - [x] Reproducible source-prep pipeline (fetch → prune → patch → verify)
-- [ ] Clean, automated build from source on a commodity machine
-- [ ] Published patch set: every change human-readable and individually documented
+- [x] Clean, automated build from source on a commodity machine
+- [x] Published patch set: every change human-readable and individually documented
 
-## Phase 1 — First public build *(next)*
+## Phase 1 — First public build *(shipped — v0.1.0-pre.2)*
 
 The moment you can download something and check it yourself.
 
-- [ ] **Windows x64 build** as the first target
-- [ ] **Checksummed release artifacts** (SHA-256) on GitHub Releases
-- [ ] **Reproducible build instructions** that a third party can follow to get a matching binary
-- [ ] One-command source bootstrap for contributors
+- [x] **Windows x64 build** as the first target
+- [x] **Checksummed release artifacts** (SHA-256) on GitHub Releases
+- [x] **Reproducible build instructions** that a third party can follow to get a matching binary
+- [x] One-command source bootstrap for contributors
 
-## Phase 2 — Coherent identity controls
+## Phase 2 — Coherent identity controls *(in progress)*
 
 Engine-level control over the signals a browser exposes — designed to be *consistent*, not random.
 
-- [ ] Per-profile, deterministic identity seed (stable across sessions when you want it; fresh when you don't)
-- [ ] Engine-level controls for canvas, WebGL, audio, fonts, locale/timezone, navigator & hardware reporting, and WebRTC
-- [ ] **Per-site coherence** (farbling-style): the same site sees a stable identity; different sites don't correlate
+- [x] Per-profile, deterministic identity seed (stable across sessions when you want it; fresh when you don't)
+- [ ] Engine-level controls for canvas, WebGL, audio, fonts, locale/timezone, navigator & hardware reporting, and WebRTC *(all done except WebRTC proxy-IP reporting, which is in progress)*
+- [x] **Per-site coherence** (farbling-style): the same site sees a stable identity; different sites don't correlate
 - [ ] Sensible, documented defaults — privacy-respecting out of the box
 
-## Phase 3 — Automation SDK
+## Phase 3 — Automation SDK *(Node SDK shipped)*
 
 Make it a true drop-in for the tools developers already use.
 
-- [ ] **Python + Node SDKs**, Playwright-first, Puppeteer supported
-- [ ] `launch()` returns a standard Playwright object — one-line migration
-- [ ] Auto-download + local cache of the verified binary
+- [ ] **Python + Node SDKs**, Playwright-first, Puppeteer supported *(Node/TypeScript SDK published to npm as `clearcote`; Python next)*
+- [x] `launch()` returns a standard Playwright object — one-line migration
+- [x] Auto-download + local cache of the verified binary
 - [ ] Recipes: persistent profiles, proxy configuration, headless on servers
 
 ## Phase 4 — Trust & supply-chain
@@ -50,7 +50,7 @@ Raise the bar on verifiability beyond "here's a checksum."
 - [ ] **Build provenance / attestation** (e.g. Sigstore-style) for every release
 - [ ] Signed tags and a documented verification workflow
 - [ ] CI that builds, checksums, and publishes in the open
-- [ ] A public "verify this release" guide anyone can run in minutes
+- [x] A public "verify this release" guide anyone can run in minutes
 
 ## Phase 5 — Beyond
 

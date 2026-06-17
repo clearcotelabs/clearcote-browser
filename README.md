@@ -131,31 +131,29 @@ with sync_playwright() as p:
 
 Same `--fingerprint=<seed>` ⇒ a stable identity across launches; a new seed ⇒ a fresh one.
 
-## SDK *(landing next)*
+## SDK
 
-> The one-line drop-in below is the target developer experience for v1.0 — the same objects and methods as Playwright/Puppeteer, just a different import. It's published here so the design is in the open.
+The **Node / TypeScript SDK is published on npm** — a Playwright drop-in that auto-downloads and SHA-256-verifies the Clearcote binary on first use, then hands you a standard Playwright `Browser`:
 
-**Python**
-```python
-from clearcote import launch
-
-browser = launch()                 # standard Chromium, Clearcote identity controls on
-page = browser.new_page()
-page.goto("https://example.com")
-browser.close()
+```bash
+npm install clearcote
 ```
-
-**Node (Playwright)**
 ```javascript
 import { launch } from "clearcote";
 
-const browser = await launch();
+const browser = await launch({
+  fingerprint: "user-7423",        // per-eTLD+1 seed: same seed ⇒ same identity, different ⇒ unlinkable
+  platform: "windows",
+  timezone: "America/New_York",
+});
 const page = await browser.newPage();
 await page.goto("https://example.com");
 await browser.close();
 ```
 
-Already using Playwright/Puppeteer? Migration is meant to be a one-line import change — same objects, same methods.
+`launch()` returns a standard Playwright `Browser` — already using Playwright? It's a one-line import change, and the verified Windows binary is fetched + cached automatically (no manual download). Full options and source: [`sdk/node`](sdk/node).
+
+A **Python SDK** is next — see the [Roadmap](ROADMAP.md).
 
 ## Build it yourself
 
