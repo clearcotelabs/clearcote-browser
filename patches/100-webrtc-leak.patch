@@ -27,6 +27,22 @@
    // Copy the flag from Preference associated with this WebLocalFrame.
    P2PPortAllocator::Config port_config;
    uint16_t min_port = 0;
+@@ -1108,6 +1121,15 @@
+     }
+   }
+ 
++  // clearcoat: when mocking the WebRTC IP (--webrtc-ip), force gathering on so
++  // a STUN server-reflexive candidate is produced (then rewritten to the proxy
++  // IP in stun_port.cc). Real host candidates are suppressed in port.cc, so the
++  // real LAN/public IP never leaks.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("webrtc-ip")) {
++    port_config.enable_multiple_routes = true;
++    port_config.enable_nonproxied_udp = true;
++  }
++
+   std::unique_ptr<webrtc::NetworkManager> network_manager;
+   if (port_config.enable_multiple_routes) {
+     network_manager = std::make_unique<FilteringNetworkManager>(
 --- a/third_party/webrtc/p2p/base/port.cc
 +++ b/third_party/webrtc/p2p/base/port.cc
 @@ -9,6 +9,9 @@
