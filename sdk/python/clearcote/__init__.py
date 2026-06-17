@@ -97,12 +97,16 @@ def _prepare(kwargs):
     cache_dir = kwargs.pop("cache_dir", None)
     quiet = kwargs.pop("quiet", False)
     if geoip:
-        # resolve the proxy's exit-IP geo and fill any UNSET timezone/accept_language/location
+        # resolve the proxy's exit-IP geo and fill any UNSET timezone/accept_language/location/webrtc_ip
         geo = resolve_geo(kwargs.get("proxy"), quiet=quiet)
         if geo:
             for opt in ("timezone", "accept_language", "location"):
                 if geo.get(opt) and fp.get(opt) is None:
                     fp[opt] = geo[opt]
+            # make WebRTC report the proxy egress IP too, coherent with HTTP egress (engine
+            # fabricates the srflx candidate at this IP; no real STUN leaves the host).
+            if geo.get("ip") and fp.get("webrtc_ip") is None:
+                fp["webrtc_ip"] = geo["ip"]
     exe = _resolve_binary(exe_path, cache_dir, quiet)
     _guard(exe)
     args = fingerprint_args(fp) + list(extra_args or [])

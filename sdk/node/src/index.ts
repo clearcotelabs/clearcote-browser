@@ -20,11 +20,13 @@ import type {
 import { ensureBinary, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
 import { resolveGeo, type Geo } from "./geoip.js";
+import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
 import { RELEASE } from "./release.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
 export { resolveGeo, type Geo } from "./geoip.js";
+export type { HumanizeOptions } from "./humanize.js";
 export { RELEASE } from "./release.js";
 
 /** When true (and a proxy is set), resolve the proxy's exit-IP geo and auto-fill any unset
@@ -34,22 +36,26 @@ interface GeoipOption {
 }
 
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, GeoipOption {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, GeoipOption, HumanizeOptions {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
   extends PlaywrightLaunchOptions,
     BrowserContextOptions,
     FingerprintOptions,
-    GeoipOption {}
+    GeoipOption,
+    HumanizeOptions {}
 
-/** Fill unset timezone/acceptLanguage/location on `fp` from the proxy's exit-IP geo. */
+/** Fill unset timezone/acceptLanguage/location/webrtcIp on `fp` from the proxy's exit-IP geo. */
 async function applyGeoip(fp: FingerprintOptions, proxy: unknown): Promise<void> {
   const geo: Geo | null = await resolveGeo(proxy as { server?: string; username?: string; password?: string } | undefined);
   if (!geo) return;
   if (geo.timezone && fp.timezone == null) fp.timezone = geo.timezone;
   if (geo.acceptLanguage && fp.acceptLanguage == null) fp.acceptLanguage = geo.acceptLanguage;
   if (geo.location && fp.location == null) fp.location = geo.location;
+  // make WebRTC report the proxy egress IP too, coherent with HTTP egress (engine fabricates
+  // the srflx candidate at this IP; no real STUN leaves the host).
+  if (geo.ip && fp.webrtcIp == null) fp.webrtcIp = geo.ip;
 }
 
 function ensureRunnableHere(exe: string): void {
