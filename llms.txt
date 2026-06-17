@@ -1,6 +1,6 @@
 # Clearcote Browser
 
-> An open-source, reproducible Chromium build with engine-level privacy and identity controls. De-Googled base (ungoogled-chromium) plus a transparent, readable patch set. Designed as a drop-in for Playwright/Puppeteer automation. Windows x64 first; buildable on Linux (native or cross-compile). 100% open — every change is a patch, every build is reproducible and checksummed.
+> An open-source, reproducible Chromium build with engine-level privacy and identity controls. De-Googled base (ungoogled-chromium) plus a transparent, readable patch set. Designed as a drop-in for Playwright/Puppeteer automation. **Windows x64 only for now** — that is the single platform currently focused on (the Windows binary is cross-compiled on Linux); macOS and Linux targets are on the roadmap, not yet available. 100% open — every change is a patch, every build is reproducible and checksummed.
 
 ## Status
 Pre-release, building in the open. First tagged build, SDKs, and signed artifacts are planned — see /ROADMAP.md.
