@@ -13,8 +13,12 @@ ASSET="clearcote-$V-windows-x64.zip"
 
 cd "$OUT"
 rm -f "$DIST/$ASSET"
+# NOTE: *.manifest (the SxS version-assembly manifest, e.g. 149.0.7827.114.manifest) is
+# REQUIRED at the archive root — without it chrome.exe fails to start with "the side-by-side
+# configuration is incorrect" (surfaced as `spawn UNKNOWN` via Playwright). Do not drop it.
 zip -r "$DIST/$ASSET" \
   chrome.exe chrome.dll chrome_elf.dll chrome_wer.dll \
+  *.manifest \
   *.pak *.bin *.dat *.json locales \
   libEGL.dll libGLESv2.dll d3dcompiler_47.dll \
   vk_swiftshader.dll vulkan-1.dll VkICD_mock_icd.dll VkLayer_khronos_validation.dll

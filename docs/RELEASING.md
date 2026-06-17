@@ -92,6 +92,7 @@ set -e
 cd ~/clearcoat/build/src/out/Default
 zip -r ~/clearcoat/dist/clearcoat-win-x64.zip \
     chrome.exe chrome.dll chrome_elf.dll chrome_wer.dll \
+    *.manifest \
     *.pak *.bin *.dat *.json locales \
     libEGL.dll libGLESv2.dll d3dcompiler_47.dll \
     vk_swiftshader.dll vulkan-1.dll VkICD_mock_icd.dll VkLayer_khronos_validation.dll
@@ -131,7 +132,7 @@ unzip -l "$ASSET" | grep -iE "msvcp140|vcruntime140|vcruntime140_1|concrt140|ucr
 EOF
 ```
 
-> **Never publish a zip without confirming the five DLLs are present.** Verify on a clean Windows VM that `chrome.exe` actually launches.
+> **Never publish a zip without confirming the five VC++ DLLs *and* the SxS `*.manifest` are present** — `unzip -l "$ASSET" | grep -iE "msvcp140|vcruntime140|vcruntime140_1|concrt140|ucrtbase|\.manifest"` should list all six. The `149.*.manifest` is as essential as the DLLs: without it `chrome.exe` fails with *"the side-by-side configuration is incorrect"* (`spawn UNKNOWN` via Playwright). Verify on a clean Windows VM that `chrome.exe` actually launches.
 
 ---
 
