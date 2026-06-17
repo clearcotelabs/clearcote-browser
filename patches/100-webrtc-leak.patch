@@ -131,7 +131,31 @@
    // not started yet.
 --- a/third_party/webrtc/p2p/base/stun_port.cc
 +++ b/third_party/webrtc/p2p/base/stun_port.cc
-@@ -574,7 +574,13 @@
+@@ -260,6 +260,23 @@
+ }
+ 
+ void UDPPort::MaybePrepareStunCandidate() {
++
++  // clearcoat: with a proxy egress IP (--webrtc-ip) set, FABRICATE the server-reflexive
++  // candidate at that IP and send NO real STUN binding request. A real STUN request would
++  // egress UDP from the host real interface -- a packet-level IP leak that no JS relabel can
++  // hide. Here no packet ever leaves the host; WebRTC still presents a coherent srflx
++  // candidate carrying the proxy IP. The related address is emptied so the local IP is never
++  // exposed; raw host candidates are already suppressed in port.cc.
++  if (HasForcedWebRtcSrflxIP() && socket_) {
++    SocketAddress clearcoat_reflected(ForcedWebRtcSrflxIP(),
++                                      socket_->GetLocalAddress().port());
++    AddAddress(clearcoat_reflected, socket_->GetLocalAddress(),
++               EmptySocketAddressWithFamily(clearcoat_reflected.family()),
++               UDP_PROTOCOL_NAME, "", "", IceCandidateType::kSrflx,
++               ICE_TYPE_PREFERENCE_SRFLX, 0, "", false);
++    MaybeSetPortCompleteOrError();
++    return;
++  }
+   // Sending binding request to the STUN server if address is available to
+   // prepare STUN candidate.
+   if (!server_addresses_.empty()) {
+@@ -574,7 +591,13 @@
      StringBuilder url;
      url << "stun:" << stun_server_addr.hostname() << ":"
          << stun_server_addr.port();
