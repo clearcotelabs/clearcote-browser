@@ -1,0 +1,12 @@
+<svg width="120" height="120" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Clearcote logomark">
+  <defs>
+    <linearGradient id="cc" x1="4" y1="4" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38e0d6"/>
+      <stop offset="0.5" stop-color="#6ee7ff"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="28" height="28" rx="9" fill="url(#cc)"/>
+  <path d="M21 11.5a7 7 0 1 0 0 9" stroke="#07080a" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="M7.5 9.5C9 6.8 12 5.3 15 6" stroke="white" stroke-opacity="0.55" stroke-width="2" stroke-linecap="round"/>
+</svg>

@@ -1,10 +1,24 @@
 <div align="center">
 
+<img src="docs/assets/clyde.svg" alt="Clyde — the Clearcote chameleon" width="170" />
+
 # Clearcote Browser
 
-### A fully open, fully auditable Chromium build for a consistent, private browser identity.
+### Blend in. Stay clear.
 
-**No opaque binaries. No phone-home. Every change is a readable patch, every build is reproducible from source.**
+**A fully open, fully auditable Chromium build for a consistent, private browser identity.**
+
+No opaque binaries. No phone-home. Every change is a readable patch, every build is reproducible from source.
+
+<br />
+
+[![Release](https://img.shields.io/github/v/release/clearcotelabs/clearcote-browser?include_prereleases&label=release&style=flat-square&labelColor=07080a&color=38e0d6)](https://github.com/clearcotelabs/clearcote-browser/releases)
+[![Chromium](https://img.shields.io/badge/Chromium-149-6ee7ff?style=flat-square&labelColor=07080a)](https://www.chromium.org/)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-a78bfa?style=flat-square&labelColor=07080a)](https://github.com/clearcotelabs/clearcote-browser/releases)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-38e0d6?style=flat-square&labelColor=07080a)](LICENSE)
+[![Open source](https://img.shields.io/badge/100%25-open%20source-54d39b?style=flat-square&labelColor=07080a)](#license)
+
+<sub><i>Meet <b>Clyde</b> — chameleons blend in to stay unseen. So does your browser.</i></sub>
 
 </div>
 
