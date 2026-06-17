@@ -1,0 +1,38 @@
+--- a/ui/accessibility/platform/uia_client_info_source_win.cc
++++ b/ui/accessibility/platform/uia_client_info_source_win.cc
+@@ -23,6 +23,13 @@
+ 
+ #include <UIAutomationCore.h>
+ 
++// clearcoat win-cross-build fix: the cross Windows SDK uuid.lib predates the
++// CUIAutomationClientInfoSource coclass, so CLSID_CUIAutomationClientInfoSource is
++// declared (EXTERN_C const CLSID) but never defined. Define it here from the
++// Windows SDK 10.0.26100 UIAutomationCore.idl coclass uuid.
++extern "C" const CLSID CLSID_CUIAutomationClientInfoSource = {
++    0xA8D4F123, 0x7B2C, 0x4E5F, {0x9A, 0x1B, 0x3C, 0x8D, 0x6E, 0x9F, 0x0A, 0x2B}};
++
+ namespace ui {
+ namespace {
+ 
+--- a/build/config/clang/BUILD.gn
++++ b/build/config/clang/BUILD.gn
+@@ -243,7 +243,9 @@
+ 
+ # Adds a dependency on the Clang runtime library clang_rt.builtins.
+ clang_lib("compiler_builtins") {
+-  if (is_mac) {
++  if (is_win) {
++    libname = "builtins"
++  } else if (is_mac) {
+     libname = "osx"
+   } else if (is_ios) {
+     if (target_platform == "iphoneos") {
+@@ -267,8 +269,6 @@
+     } else {
+       assert(false, "unsupported target_platform=$target_platform")
+     }
+-  } else if (current_cpu != "ppc64" && current_cpu != "s390x") {
+-    libname = "builtins"
+   }
+ }
+ 

@@ -1,0 +1,67 @@
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+@@ -28,10 +28,14 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/audio_buffer.h"
+ 
++#include <cmath>
+ #include <memory>
+ 
++#include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
++#include "components/ungoogled/ungoogled_switches.h"
++#include "base/strings/string_number_conversions.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_audio_buffer_options.h"
+ #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
+ #include "third_party/blink/renderer/platform/audio/audio_bus.h"
+@@ -188,6 +192,7 @@
+   // Copy audio data from the bus to the Float32Arrays we manage.
+   unsigned number_of_channels = bus->NumberOfChannels();
+   channels_.reserve(number_of_channels);
++
+   for (unsigned i = 0; i < number_of_channels; ++i) {
+     DOMFloat32Array* channel_data_array = CreateFloat32ArrayOrNull(
+         length_, InitializationPolicy::kDontInitialize);
+@@ -221,6 +226,41 @@
+     return NotShared<DOMFloat32Array>(nullptr);
+   }
+ 
++  // 应用幂等音频指纹噪声
++  // 原理：
++  // 1. 量化：将 data[i] 量化到 0.00001 精度（5位小数）
++  // 2. 噪声：基于量化值计算确定性噪声 (±0.000005)
++  // 3. 幂等：因为噪声 < 量化精度的一半，所以 (quantized + noise) 再量化还是 quantized
++  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(switches::kFingerprint)) {
++    // Per-eTLD+1 farbling seed threaded in at buffer creation. 0 => stable
++    // global-fallback seed (never a crash). The --fingerprint gate above is
++    // preserved so noise is only applied when farbling is enabled.
++    std::string fingerprint = base::NumberToString(farble_seed_);
++    if (!fingerprint.empty()) {
++      DOMFloat32Array* array = channels_[channel_index].Get();
++      if (array) {
++        float* data = array->Data();
++        size_t len = array->length();
++
++        std::string seed_str = fingerprint + "audio";
++        uint32_t base_seed = std::hash<std::string>{}(seed_str);
++
++        for (size_t i = 0; i < len; ++i) {
++          // 量化到 0.00001 精度（5 位小数）
++          float quantized = roundf(data[i] * 100000.0f) / 100000.0f;
++
++          // 基于量化值和索引计算确定性噪声
++          uint32_t seed = base_seed ^ std::hash<float>{}(quantized) ^ static_cast<uint32_t>(i);
++          seed = seed * 1664525 + 1013904223;  // LCG
++          float noise = ((static_cast<float>(seed) / 4294967296.0f) - 0.5f) * 0.00001f;  // ±0.000005
++
++          data[i] = quantized + noise;
++        }
++      }
++    }
++  }
++
+   return NotShared<DOMFloat32Array>(channels_[channel_index].Get());
+ }
+ 

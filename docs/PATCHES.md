@@ -1,11 +1,52 @@
-# clearcote Stealth-Patch Manifest
+# Clearcote patch set
 
-**Target:** Chromium 149.0.7827.114 (ungoogled base) · Windows x64 · cross-compiled on Linux/Wine (SSH box)
-**Base spoofing layer:** adryfish/fingerprint-chromium 142→149 port
-**Coherence model:** Brave per-eTLD+1 farbling, ported onto clearcote's session-seed root
-**Status:** execution-ready · file paths are real Chromium 149 targets, grounded against the SSH-box tree
+**Target:** Chromium 149.0.7827.114 (ungoogled base) · Windows x64 · cross-compiled on Linux.
+
+This file documents both **what ships today** and **where the patch set is headed**. The actual
+diffs in [`../patches/`](../patches) are the source of truth; this is the map.
+
+## Shipped today (`patches/` — applies clean to 149, zero rejects)
+
+The current layer is an **engine-level, single-global-seed** fingerprint port
+(adryfish/fingerprint-chromium, replayed 142 → 149) plus the two source fixes needed to
+cross-compile for Windows. Patches are grouped by their primary source file, so a few surfaces
+ride along in the group that owns their file (e.g. `navigator.webdriver` lives in the user-agent
+group). Every clearcote change to a touched file is captured exactly once; the set re-applies to a
+fresh post-ungoogled 149 tree with zero rejects.
+
+| Patch | Covers |
+|---|---|
+| `000-add-fingerprint-switches` | `--fingerprint*` command-line switches + fingerprint data table |
+| `001-disable-runtime.enable` | hide the DevTools `Runtime.enable` automation tell (V8 inspector) |
+| `002-user-agent-fingerprint` | UA / UA-CH brand+platform+version spoof; **`navigator.webdriver=false`**; navigator surfaces; client-hints |
+| `003-audio-fingerprint` / `003-audio-fingerprint-2` | AudioBuffer + OfflineAudioContext per-seed noise |
+| `005-hardware-concurrency-fingerprint` | `navigator.hardwareConcurrency` + `deviceMemory` |
+| `006-font-fingerprint` | font enumeration spoof (font cache) |
+| `007-shadow-root` | closed shadow-root access without the open-shadow automation tell |
+| `010-headless` | drop the `HeadlessChrome` product tell |
+| `011-gpu-info` | WebGL GPU vendor/renderer + `readPixels` |
+| `012-canvas-get-image-data` | canvas `getImageData` per-seed perturbation (+ `measureText`) |
+| `013-canvas-toDataURL` | canvas `toDataURL`/`toBlob` per-seed perturbation |
+| `014-client-rects` | `getClientRects` / `getBoundingClientRect` jitter |
+| `018-timezone` | `--timezone` override (incl. the 149 `String::FromUtf8` API fix) |
+| `090-windows-cross-build-fixes` | non-stealth: CLSID define + `compiler_builtins` fix for the Windows cross-link |
+
+Same `--fingerprint=<seed>` ⇒ stable identity across launches; a new seed ⇒ a fresh identity.
+**Caveat:** it is a *single global seed* — every site sees the same farbled values, which is
+cross-site linkable. Per-site unlinkability (farbling) is the planned upgrade below.
+
+> **Seed input:** the engine parses the seed as an integer. A non-numeric seed currently crashes
+> the renderer (uncaught C++ exception); pass an integer, or hash your label to one, until the
+> seed parser is hardened.
 
 ---
+
+## Planned design (aspirational — NOT yet in `patches/`)
+
+Everything below is the **target architecture**, not the current code: a per-eTLD+1 farbling
+engine (Brave model), a coherent persona system, and broader surface coverage. It is kept here so
+the design is public and reviewable. Do not assume a row below is implemented unless a matching
+diff exists in `../patches/`.
 
 ## 1. Overview — Stealth Thesis
 
