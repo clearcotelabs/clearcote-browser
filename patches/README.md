@@ -29,6 +29,7 @@ crash the renderer.
 |---|---|
 | `000-fingerprint-switches` | Defines the `--fingerprint*` command-line switches and forwards them from the browser to renderer/child processes. |
 | `001-farble-seed-core` | The per-eTLD+1 seed engine (`farble_seed.{cc,h}`), the `fingerprint_data.h` tables, and its `BUILD.gn`. Every surface below reads from this. |
+| `002-persona-profile` | Coherent per-seed persona engine (`components/ungoogled/persona_profile.{cc,h}`) — derives an internally consistent identity so surfaces agree rather than contradict. |
 | `010-user-agent-and-webdriver` | UA / UA-CH (`navigator.userAgent`, `Sec-CH-UA*`), `navigator.platform` spoofing, and hiding `navigator.webdriver` / the automation + Headless tells. |
 | `020-audio` | AudioContext farbling (`AudioBuffer`, analyser, offline render) keyed to the per-site seed. |
 | `030-hardware-concurrency` | `navigator.hardwareConcurrency` and `deviceMemory` (seed-derived, with the `--fingerprint-hardware-concurrency` override). |
@@ -36,11 +37,15 @@ crash the renderer.
 | `050-shadow-dom` | Closed shadow-root semantics + related DOM (`document`, `element`, `range`). |
 | `060-canvas` | Canvas 2D farbling — `toDataURL`/`getImageData`/`toBlob`/`measureText` and the encoder/bitmap paths. |
 | `070-webgl-gpu` | WebGL `UNMASKED_VENDOR/RENDERER`, GPU info, and `readPixels` farbling (`gpu_fingerprint.{cc,h}`). |
+| `075-webgpu-coherence` | WebGPU `GPUAdapterInfo` (vendor/architecture/device/description) forced coherent with the WebGL persona GPU (`webgpu/gpu_adapter.cc`) so WebGPU can't contradict WebGL. |
 | `080-client-rects` | Sub-pixel jitter for client-rect geometry (`quad_f`). |
 | `090-timezone` | Native timezone pin (`timezone_controller.cc`, `--timezone`). |
-| `100-webrtc-leak` | WebRTC IP-leak coverage — ICE handling + the `webrtc-ip` switch (`peer_connection_dependency_factory`, `p2p/base` port/stun). |
+| `100-webrtc-leak` | WebRTC: **fabricates** the server-reflexive candidate at `--webrtc-ip` and sends **no real STUN** (`stun_port.cc`), and suppresses raw host candidates (`port.cc`) — reports the proxy IP, never leaks the real IP at the packet level. |
 | `110-runtime-enable` | Suppresses the `Runtime.enable` CDP automation tell (`v8-runtime-agent-impl`). |
 | `120-headless` | Removes a headless-mode tell (`headless_browser_impl`). |
+| `130-humanized-input` | Human-like CDP input + cursor overlay (`devtools/protocol/input_handler`, `browser_handler`, `humanized_cursor_overlay`) so dispatched input isn't trivially bot-flagged. |
+| `140-screen` | `screen.*` object changes (`core/frame/screen.cc`). |
+| `145-storage-quota` | `navigator.storage.estimate()` quota coherence (`quota/storage_manager.cc`). |
 | `900-windows-build-fixes` | Cross-build mechanics for the Windows target: the `rc.py` resource-compiler wrapper, the `.rc` branding conditionals, a missing UIA `CLSID`, and the `compiler_builtins` fix. Not fingerprint behavior — needed to link the Windows binary on Linux. |
 
 ## Re-generating / verifying

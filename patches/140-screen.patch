@@ -1,0 +1,97 @@
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -28,6 +28,10 @@
+ 
+ #include "third_party/blink/renderer/core/frame/screen.h"
+ 
++#include "base/command_line.h"
++#include "components/ungoogled/persona_profile.h"
++#include "components/ungoogled/ungoogled_switches.h"
++
+ #include "base/numerics/safe_conversions.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+ #include "third_party/blink/renderer/core/event_target_names.h"
+@@ -40,6 +44,15 @@
+ 
+ namespace blink {
+ 
++namespace {
++// clearcote: when --fingerprint is set, screen.* report the coherent
++// session persona's display instead of the host's real screen.
++bool PersonaScreenActive() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  return cmd && cmd->HasSwitch(switches::kFingerprint);
++}
++}  // namespace
++
+ Screen::Screen(LocalDOMWindow* window, int64_t display_id)
+     : ExecutionContextClient(window), display_id_(display_id) {}
+ 
+@@ -81,12 +94,16 @@
+ int Screen::height() const {
+   if (!DomWindow())
+     return 0;
++  if (PersonaScreenActive())
++    return ungoogled::CurrentPersona().screen_height;
+   return GetRect(/*available=*/false).height();
+ }
+ 
+ int Screen::width() const {
+   if (!DomWindow())
+     return 0;
++  if (PersonaScreenActive())
++    return ungoogled::CurrentPersona().screen_width;
+   return GetRect(/*available=*/false).width();
+ }
+ 
+@@ -100,6 +117,8 @@
+   if (!DomWindow()) {
+     return unknown_color_depth;
+   }
++  if (PersonaScreenActive())
++    return ungoogled::CurrentPersona().color_depth;
+   return GetScreenInfo().depth == 0
+              ? unknown_color_depth
+              : base::saturated_cast<unsigned>(GetScreenInfo().depth);
+@@ -112,24 +131,32 @@
+ int Screen::availLeft() const {
+   if (!DomWindow())
+     return 0;
++  if (PersonaScreenActive())
++    return 0;
+   return GetRect(/*available=*/true).x();
+ }
+ 
+ int Screen::availTop() const {
+   if (!DomWindow())
+     return 0;
++  if (PersonaScreenActive())
++    return 0;
+   return GetRect(/*available=*/true).y();
+ }
+ 
+ int Screen::availHeight() const {
+   if (!DomWindow())
+     return 0;
++  if (PersonaScreenActive())
++    return ungoogled::CurrentPersona().avail_screen_height;
+   return GetRect(/*available=*/true).height();
+ }
+ 
+ int Screen::availWidth() const {
+   if (!DomWindow())
+     return 0;
++  if (PersonaScreenActive())
++    return ungoogled::CurrentPersona().avail_screen_width;
+   return GetRect(/*available=*/true).width();
+ }
+ 
+@@ -151,6 +178,8 @@
+   if (!DomWindow()) {
+     return false;
+   }
++  if (PersonaScreenActive())
++    return false;
+   auto* context = GetExecutionContext();
+   if (!context->IsFeatureEnabled(
+           network::mojom::PermissionsPolicyFeature::kWindowManagement)) {

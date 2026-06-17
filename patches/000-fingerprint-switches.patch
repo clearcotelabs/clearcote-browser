@@ -60,7 +60,7 @@
  #endif  // THIRD_PARTY_UNGOOGLED_FINGERPRINTING_SWITCHES_H_
 --- a/content/browser/renderer_host/render_process_host_impl.cc
 +++ b/content/browser/renderer_host/render_process_host_impl.cc
-@@ -3868,6 +3868,18 @@
+@@ -3868,6 +3868,23 @@
        switches::kFingerprintingClientRectsNoise,
        switches::kFingerprintingCanvasMeasureTextNoise,
        switches::kFingerprintingCanvasImageDataNoise,
@@ -70,11 +70,16 @@
 +      switches::kFingerprintGpuVendor,
 +      switches::kFingerprintGpuRenderer,
 +      switches::kFingerprintHardwareConcurrency,
++      "fingerprint-webgpu-vendor",        // clearcote: WebGPU coherence
++      "fingerprint-webgpu-architecture",  // clearcote: WebGPU coherence
++      "fingerprint-webgpu-device",        // clearcote: WebGPU coherence
++      "fingerprint-webgpu-description",   // clearcote: WebGPU coherence
 +      "webrtc-ip",  // clearcoat: forward WebRTC IP mock switch to renderer
 +      switches::kFingerprintPlatform,
 +      switches::kFingerprintPlatformVersion,
 +      switches::kFingerprintLocation,
 +      switches::kFingerprintTimezone,
++      "fingerprint-storage-quota",  // clearcoat: forward storage-quota spoof
 +      switches::kDisableGpuFingerprint,
        switches::kForceDeviceScaleFactor,
        switches::kForceDisplayColorProfile,

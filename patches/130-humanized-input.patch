@@ -1,0 +1,903 @@
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -926,6 +926,7 @@
+     "devtools/protocol/background_service_handler.h",
+     "devtools/protocol/browser_handler.cc",
+     "devtools/protocol/browser_handler.h",
++    "devtools/protocol/humanized_cursor_overlay_mac.h",
+     "devtools/protocol/device_access_handler.cc",
+     "devtools/protocol/device_access_handler.h",
+     "devtools/protocol/device_orientation_handler.cc",
+@@ -2866,6 +2867,8 @@
+         [ "file_system_access/file_path_watcher/file_path_watcher_stub.cc" ]
+ 
+     sources += [
++      # Lightweight-fork: cursor overlay for humanizedClick visualization.
++      "devtools/protocol/humanized_cursor_overlay_mac.mm",
+       "../app_shim_remote_cocoa/ns_view_bridge_factory_impl.mm",
+       "../app_shim_remote_cocoa/popup_window_mac.h",
+       "../app_shim_remote_cocoa/popup_window_mac.mm",
+--- a/content/browser/devtools/protocol/browser_handler.cc
++++ b/content/browser/devtools/protocol/browser_handler.cc
+@@ -32,6 +32,21 @@
+ #include "content/browser/devtools/devtools_agent_host_impl.h"
+ #include "content/browser/devtools/devtools_manager.h"
+ #include "content/browser/devtools/protocol/devtools_download_manager_delegate.h"
++#include "base/rand_util.h"
++#include "base/timer/timer.h"
++#include "components/input/render_widget_host_input_event_router.h"
++#include "content/browser/renderer_host/render_widget_host_impl.h"
++#include "content/browser/renderer_host/render_widget_host_view_base.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_delegate.h"
++#include "third_party/blink/public/common/input/web_mouse_event.h"
++#include "ui/events/base_event_utils.h"
++#include "ui/latency/latency_info.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/common/isolated_world_ids.h"
++#if BUILDFLAG(IS_MAC)
++#include "content/browser/devtools/protocol/humanized_cursor_overlay_mac.h"
++#endif
+ #include "content/browser/gpu/gpu_process_host.h"
+ #include "content/browser/interest_group/interest_group_manager_impl.h"
+ #include "content/browser/permissions/permission_controller_impl.h"
+@@ -704,6 +719,446 @@
+   return Response::Success();
+ }
+ 
++namespace {
++
++// Cubic bezier at t in [0,1].
++gfx::PointF CubicBezier(gfx::PointF p0,
++                        gfx::PointF p1,
++                        gfx::PointF p2,
++                        gfx::PointF p3,
++                        double t) {
++  const double u = 1.0 - t;
++  return gfx::PointF(
++      u * u * u * p0.x() + 3 * u * u * t * p1.x() + 3 * u * t * t * p2.x() +
++          t * t * t * p3.x(),
++      u * u * u * p0.y() + 3 * u * u * t * p1.y() + 3 * u * t * t * p2.y() +
++          t * t * t * p3.y());
++}
++
++// Smoothstep — slow start, fast middle, slow end.
++double EaseInOut(double t) {
++  return t * t * (3.0 - 2.0 * t);
++}
++
++// Bounded gaussian using Box-Muller, clamped.
++double Gauss(double sigma, double clamp_abs) {
++  if (sigma <= 0) {
++    return 0.0;
++  }
++  const double u1 = std::max(1e-9, base::RandDouble());
++  const double u2 = base::RandDouble();
++  const double z = std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * 3.14159265358979323846 * u2);
++  return std::clamp(z * sigma, -clamp_abs, clamp_abs);
++}
++
++// Self-owned humanized-click state machine. Lives on the UI thread, drives
++// itself via base::OneShotTimer, and self-destructs when done (success or
++// after firing the CDP callback once).
++class HumanizedClickRunner {
++ public:
++  using CallbackPtr =
++      std::unique_ptr<BrowserHandler::HumanizedClickCallback>;
++
++  static void Start(base::WeakPtr<RenderWidgetHostImpl> rwh,
++                    base::WeakPtr<WebContents> web_contents,
++                    gfx::PointF target,
++                    double duration_seconds,
++                    bool no_click,
++                    bool visualize,
++                    CallbackPtr callback) {
++    new HumanizedClickRunner(std::move(rwh), std::move(web_contents), target,
++                             duration_seconds, no_click, visualize,
++                             std::move(callback));
++  }
++
++ private:
++  HumanizedClickRunner(base::WeakPtr<RenderWidgetHostImpl> rwh,
++                       base::WeakPtr<WebContents> web_contents,
++                       gfx::PointF target,
++                       double duration_seconds,
++                       bool no_click,
++                       bool visualize,
++                       CallbackPtr callback)
++      : rwh_(std::move(rwh)),
++        web_contents_(std::move(web_contents)),
++        target_(target),
++        no_click_(no_click),
++        visualize_(visualize),
++        callback_(std::move(callback)) {
++    // Start from a neutral cursor position. We don't know where the renderer
++    // thinks the cursor currently is, so start somewhere off the path and let
++    // the move sequence walk to target. Use the document origin as the start
++    // (gives a deterministic, non-suspicious entry).
++    const gfx::PointF start(0.f, 0.f);
++    const double dx = target.x() - start.x();
++    const double dy = target.y() - start.y();
++    const double dist = std::hypot(dx, dy);
++
++    const double duration = std::clamp(duration_seconds, 0.05, 10.0);
++    const int steps = std::max(8, static_cast<int>(duration * 120.0));
++    step_dt_ = base::Microseconds(static_cast<int64_t>(duration * 1e6 / steps));
++
++    // Bow the path perpendicular to the straight line by ±15% of distance.
++    const double px = dist > 0 ? -dy / dist : 0.0;
++    const double py = dist > 0 ? dx / dist : 0.0;
++    const double bow1 = (base::RandDouble() * 0.30 - 0.15) * dist;
++    const double bow2 = (base::RandDouble() * 0.30 - 0.15) * dist;
++    const gfx::PointF cp1(start.x() + dx * 0.33 + px * bow1,
++                          start.y() + dy * 0.33 + py * bow1);
++    const gfx::PointF cp2(start.x() + dx * 0.66 + px * bow2,
++                          start.y() + dy * 0.66 + py * bow2);
++
++    path_.reserve(steps + 1);
++    for (int i = 1; i <= steps; ++i) {
++      const double t = EaseInOut(static_cast<double>(i) / steps);
++      gfx::PointF p = CubicBezier(start, cp1, cp2, target, t);
++      p.set_x(static_cast<float>(p.x() + Gauss(0.4, 2.0)));
++      p.set_y(static_cast<float>(p.y() + Gauss(0.4, 2.0)));
++      path_.push_back(p);
++    }
++    // Exact landing (no jitter) so the click lands on target.
++    path_.push_back(target);
++
++    // Kick the first event immediately, then schedule the next.
++    Tick();
++  }
++
++  ~HumanizedClickRunner() = default;
++
++  void UpdateOverlay(gfx::PointF viewport_point) {
++    if (!visualize_) {
++      return;
++    }
++#if BUILDFLAG(IS_MAC)
++    if (!web_contents_) {
++      return;
++    }
++    RenderWidgetHostViewBase* view =
++        rwh_ && rwh_->GetView()
++            ? static_cast<RenderWidgetHostViewBase*>(rwh_->GetView())
++            : nullptr;
++    if (!view) {
++      return;
++    }
++    // The cursor overlay is a child view of the content view, positioned in the
++    // view's own coordinate space (CSS/DIP, top-left) — which is exactly the
++    // viewport point. No screen / primary-display conversion (that was wrong on
++    // secondary or fractionally-scaled displays).
++    const int vx = static_cast<int>(viewport_point.x());
++    const int vy = static_cast<int>(viewport_point.y());
++    if (!overlay_visible_) {
++      devtools::ShowCursorOverlay(view->GetNativeView(), vx, vy);
++      overlay_visible_ = true;
++    } else {
++      devtools::UpdateCursorOverlay(vx, vy);
++    }
++#endif
++  }
++
++  void Tick() {
++    if (!rwh_) {
++      Finish();
++      return;
++    }
++    if (index_ < path_.size()) {
++      Dispatch(blink::WebInputEvent::Type::kMouseMove, path_[index_]);
++      UpdateOverlay(path_[index_]);
++      ++index_;
++      // Schedule next with ±5% timing jitter.
++      const double jitter_factor =
++          1.0 + Gauss(0.05, 0.20);  // up to ±20% clamped
++      const base::TimeDelta next_dt =
++          base::Microseconds(static_cast<int64_t>(
++              step_dt_.InMicroseconds() * std::max(0.5, jitter_factor)));
++      timer_.Start(FROM_HERE, next_dt,
++                   base::BindOnce(&HumanizedClickRunner::Tick,
++                                  base::Unretained(this)));
++      return;
++    }
++    // Path exhausted. Maybe click, then finish.
++    if (!no_click_) {
++      Dispatch(blink::WebInputEvent::Type::kMouseDown, target_);
++      // Human dwell 40–110 ms.
++      const base::TimeDelta dwell =
++          base::Milliseconds(40 + static_cast<int>(base::RandDouble() * 70));
++      timer_.Start(FROM_HERE, dwell,
++                   base::BindOnce(&HumanizedClickRunner::Release,
++                                  base::Unretained(this)));
++      return;
++    }
++    Finish();
++  }
++
++  void Release() {
++    if (rwh_) {
++      Dispatch(blink::WebInputEvent::Type::kMouseUp, target_);
++    }
++    Finish();
++  }
++
++  void Dispatch(blink::WebInputEvent::Type type, gfx::PointF point) {
++    blink::WebMouseEvent event(type, blink::WebInputEvent::kNoModifiers,
++                               ui::EventTimeForNow());
++    event.SetPositionInWidget(point.x(), point.y());
++    event.SetPositionInScreen(point.x(), point.y());
++    event.button = blink::WebMouseEvent::Button::kLeft;
++    event.click_count = (type == blink::WebInputEvent::Type::kMouseDown ||
++                         type == blink::WebInputEvent::Type::kMouseUp)
++                            ? 1
++                            : 0;
++    // No kFromDebugger marker — we want this to look like real input.
++    //
++    // Route via the cross-process input event router so that points that
++    // hit-test into a cross-origin (OOPIF) iframe are forwarded to the
++    // iframe's own renderer. Without this, ForwardMouseEvent would post
++    // the event directly to the parent renderer, which would deliver it
++    // to the parent's <iframe> element node but never cross the process
++    // boundary into the embedded frame — so clicks on cross-origin
++    // iframes would silently do nothing. Falls back to the direct path
++    // if there's no router (e.g. embedded views without a delegate).
++    RenderWidgetHostViewBase* root_view =
++        rwh_->GetView() ? static_cast<RenderWidgetHostViewBase*>(rwh_->GetView())
++                        : nullptr;
++    input::RenderWidgetHostInputEventRouter* router =
++        rwh_->delegate() ? rwh_->delegate()->GetInputEventRouter() : nullptr;
++    if (root_view && router) {
++      ui::LatencyInfo latency_info;
++      latency_info.AddLatencyNumber(ui::INPUT_EVENT_LATENCY_UI_COMPONENT);
++      router->RouteMouseEvent(root_view, &event, latency_info);
++    } else {
++      rwh_->ForwardMouseEvent(event);
++    }
++  }
++
++  void Finish() {
++#if BUILDFLAG(IS_MAC)
++    if (overlay_visible_) {
++      // Let the ring sit at the target for ~1.5s so the user can actually
++      // see where the click landed. Without this delay, HideCursorOverlay
++      // would run as soon as the click sequence finishes (via Finish()), so
++      // the ring could vanish within a frame or two of the user noticing it.
++      // ScheduleFinishAfterLinger keeps `this` alive long enough for the
++      // linger then tears down.
++      ScheduleFinishAfterLinger();
++      return;
++    }
++#endif
++    DoFinish();
++  }
++
++  void ScheduleFinishAfterLinger() {
++    constexpr base::TimeDelta kLinger = base::Milliseconds(1500);
++    timer_.Start(FROM_HERE, kLinger,
++                 base::BindOnce(&HumanizedClickRunner::FinishAfterLinger,
++                                base::Unretained(this)));
++  }
++
++  void FinishAfterLinger() {
++#if BUILDFLAG(IS_MAC)
++    if (overlay_visible_) {
++      devtools::HideCursorOverlay();
++      overlay_visible_ = false;
++    }
++#endif
++    DoFinish();
++  }
++
++  void DoFinish() {
++    if (callback_) {
++      callback_->sendSuccess();
++    }
++    delete this;
++  }
++
++  base::WeakPtr<RenderWidgetHostImpl> rwh_;
++  base::WeakPtr<WebContents> web_contents_;
++  gfx::PointF target_;
++  bool no_click_;
++  bool visualize_;
++  std::vector<gfx::PointF> path_;
++  size_t index_ = 0;
++  base::TimeDelta step_dt_;
++  base::OneShotTimer timer_;
++  CallbackPtr callback_;
++  [[maybe_unused]] bool overlay_visible_ = false;
++};
++
++}  // namespace
++
++void BrowserHandler::HumanizedClick(
++    const std::string& in_target_id,
++    double in_x,
++    double in_y,
++    std::optional<double> in_duration,
++    std::optional<bool> in_no_click,
++    std::optional<bool> in_visualize,
++    std::unique_ptr<HumanizedClickCallback> callback) {
++  scoped_refptr<DevToolsAgentHost> host =
++      DevToolsAgentHost::GetForId(in_target_id);
++  if (!host) {
++    callback->sendFailure(
++        Response::InvalidParams("No target with given targetId"));
++    return;
++  }
++  WebContents* web_contents = host->GetWebContents();
++  if (!web_contents) {
++    callback->sendFailure(
++        Response::InvalidParams("Target has no WebContents"));
++    return;
++  }
++  RenderWidgetHost* rwh = web_contents->GetRenderWidgetHostView()
++                              ? web_contents->GetRenderWidgetHostView()
++                                    ->GetRenderWidgetHost()
++                              : nullptr;
++  if (!rwh) {
++    callback->sendFailure(Response::ServerError("No active RenderWidgetHost"));
++    return;
++  }
++  HumanizedClickRunner::Start(
++      static_cast<RenderWidgetHostImpl*>(rwh)->GetWeakPtr(),
++      web_contents->GetWeakPtr(),
++      gfx::PointF(static_cast<float>(in_x), static_cast<float>(in_y)),
++      in_duration.value_or(0.6), in_no_click.value_or(false),
++      in_visualize.value_or(false),
++      std::move(callback));
++}
++namespace {
++
++// Build a JS expression that returns [x, y] of the element's center, or null
++// if the element doesn't exist. selector is interpolated as a JSON string
++// literal so quotes/backslashes in the user's input are properly escaped.
++std::u16string BuildResolveSelectorScript(const std::string& selector) {
++  // Crude JSON-escape — good enough since selectors are short and ASCII-ish.
++  std::string escaped;
++  escaped.reserve(selector.size() + 8);
++  for (char c : selector) {
++    switch (c) {
++      case '\\': escaped += "\\\\"; break;
++      case '"':  escaped += "\\\""; break;
++      case '\n': escaped += "\\n";  break;
++      case '\r': escaped += "\\r";  break;
++      case '\t': escaped += "\\t";  break;
++      default:
++        if (static_cast<unsigned char>(c) < 0x20) {
++          char buf[8];
++          snprintf(buf, sizeof(buf), "\\u%04x", c);
++          escaped += buf;
++        } else {
++          escaped += c;
++        }
++    }
++  }
++  std::string js =
++      "(()=>{try{const e=document.querySelector(\"" + escaped +
++      "\");if(!e)return null;const r=e.getBoundingClientRect();"
++      "return [r.left+r.width/2, r.top+r.height/2];}catch(e){return null;}})()";
++  return std::u16string(js.begin(), js.end());
++}
++
++}  // namespace
++
++void BrowserHandler::HumanizedClickSelector(
++    const std::string& in_target_id,
++    const std::string& in_selector,
++    std::optional<double> in_duration,
++    std::optional<bool> in_no_click,
++    std::optional<bool> in_visualize,
++    std::unique_ptr<HumanizedClickSelectorCallback> callback) {
++  scoped_refptr<DevToolsAgentHost> host =
++      DevToolsAgentHost::GetForId(in_target_id);
++  if (!host) {
++    callback->sendFailure(
++        Response::InvalidParams("No target with given targetId"));
++    return;
++  }
++  WebContents* web_contents = host->GetWebContents();
++  if (!web_contents) {
++    callback->sendFailure(
++        Response::InvalidParams("Target has no WebContents"));
++    return;
++  }
++  RenderFrameHost* rfh = web_contents->GetPrimaryMainFrame();
++  if (!rfh) {
++    callback->sendFailure(Response::ServerError("No primary main frame"));
++    return;
++  }
++
++  // Capture the bits the callback needs. WebContents pointer is captured raw
++  // and re-validated through DevToolsAgentHost in the callback.
++  std::string target_id = in_target_id;
++  double duration = in_duration.value_or(0.6);
++  bool no_click = in_no_click.value_or(false);
++  bool visualize = in_visualize.value_or(false);
++  auto cb_shared = std::make_shared<
++      std::unique_ptr<HumanizedClickSelectorCallback>>(std::move(callback));
++
++  rfh->ExecuteJavaScriptInIsolatedWorld(
++      BuildResolveSelectorScript(in_selector),
++      base::BindOnce(
++          [](std::string target_id, double duration, bool no_click,
++             bool visualize,
++             std::shared_ptr<std::unique_ptr<HumanizedClickSelectorCallback>>
++                 cb_shared,
++             base::Value result) {
++            auto& cb = *cb_shared;
++            if (!cb) return;
++            if (!result.is_list() || result.GetList().size() != 2) {
++              cb->sendFailure(Response::ServerError(
++                  "Selector did not match an element"));
++              return;
++            }
++            double x = result.GetList()[0].GetDouble();
++            double y = result.GetList()[1].GetDouble();
++
++            // Re-resolve the target — page may have navigated between calls.
++            scoped_refptr<DevToolsAgentHost> host =
++                DevToolsAgentHost::GetForId(target_id);
++            WebContents* wc = host ? host->GetWebContents() : nullptr;
++            RenderWidgetHost* rwh =
++                wc && wc->GetRenderWidgetHostView()
++                    ? wc->GetRenderWidgetHostView()->GetRenderWidgetHost()
++                    : nullptr;
++            if (!rwh) {
++              cb->sendFailure(
++                  Response::ServerError("Target disappeared during resolve"));
++              return;
++            }
++
++            // Bridge: when the runner finishes its HumanizedClickCallback,
++            // surface the result as the Selector-specific callback with x/y.
++            class BridgeCallback
++                : public BrowserHandler::HumanizedClickCallback {
++             public:
++              BridgeCallback(
++                  std::unique_ptr<HumanizedClickSelectorCallback> sel_cb,
++                  double x, double y)
++                  : sel_cb_(std::move(sel_cb)), x_(x), y_(y) {}
++              void sendSuccess() override {
++                sel_cb_->sendSuccess(x_, y_);
++              }
++              void sendFailure(const ::content::protocol::DispatchResponse& r)
++                  override {
++                sel_cb_->sendFailure(r);
++              }
++              void fallThrough() override { sel_cb_->fallThrough(); }
++             private:
++              std::unique_ptr<HumanizedClickSelectorCallback> sel_cb_;
++              double x_, y_;
++            };
++            auto bridge =
++                std::make_unique<BridgeCallback>(std::move(cb), x, y);
++            HumanizedClickRunner::Start(
++                static_cast<RenderWidgetHostImpl*>(rwh)->GetWeakPtr(),
++                wc->GetWeakPtr(),
++                gfx::PointF(static_cast<float>(x), static_cast<float>(y)),
++                duration, no_click, visualize, std::move(bridge));
++          },
++          std::move(target_id), duration, no_click, visualize, cb_shared),
++      // Pick a world ID within the valid range (CONTENT_END..MAX = 1..11).
++      // 10 is high enough to avoid Chrome's internal worlds 2-5.
++      10);
++}
++
+ void BrowserHandler::AddPrivacySandboxCoordinatorKeyConfig(
+     const std::string& in_api,
+     const std::string& in_coordinator_origin,
+--- a/content/browser/devtools/protocol/browser_handler.h
++++ b/content/browser/devtools/protocol/browser_handler.h
+@@ -101,6 +101,22 @@
+   Response Crash() override;
+   Response CrashGpuProcess() override;
+ 
++  // Lightweight-fork: humanized click via internal WebMouseEvent dispatch.
++  void HumanizedClick(const std::string& in_target_id,
++                      double in_x,
++                      double in_y,
++                      std::optional<double> in_duration,
++                      std::optional<bool> in_no_click,
++                      std::optional<bool> in_visualize,
++                      std::unique_ptr<HumanizedClickCallback> callback) override;
++  void HumanizedClickSelector(
++      const std::string& in_target_id,
++      const std::string& in_selector,
++      std::optional<double> in_duration,
++      std::optional<bool> in_no_click,
++      std::optional<bool> in_visualize,
++      std::unique_ptr<HumanizedClickSelectorCallback> callback) override;
++
+   void AddPrivacySandboxCoordinatorKeyConfig(
+       const std::string& in_api,
+       const std::string& in_coordinator_origin,
+--- /dev/null
++++ b/content/browser/devtools/protocol/humanized_cursor_overlay_mac.h
+@@ -0,0 +1,37 @@
++// Copyright 2026 Lightweight-Fork Authors. All rights reserved.
++
++#ifndef CONTENT_BROWSER_DEVTOOLS_PROTOCOL_HUMANIZED_CURSOR_OVERLAY_MAC_H_
++#define CONTENT_BROWSER_DEVTOOLS_PROTOCOL_HUMANIZED_CURSOR_OVERLAY_MAC_H_
++
++#include "ui/gfx/native_ui_types.h"
++
++namespace content {
++namespace devtools {
++
++// Borderless child window of `parent_view`'s NSWindow that shows a red circle
++// at the given CG screen coordinates. It is an ordered child of the parent
++// window, so it hides when the parent is hidden or miniaturized, but it
++// deliberately stays visible when the app is not frontmost
++// (setHidesOnDeactivate:NO). Repeated Show calls move the same window.
++void ShowCursorOverlay(gfx::NativeView parent_view,
++                       int screen_x,
++                       int screen_y);
++void UpdateCursorOverlay(int screen_x, int screen_y);
++void HideCursorOverlay();
++
++// Draws a hollow highlight box around the element the agent is acting on. The
++// rect (x,y,w,h) is in the web-content view's OWN coordinate space (CSS/DIP,
++// top-left origin); it is converted to screen coords via AppKit so it is
++// correct on any display / scale factor / window position. HideRectOverlay()
++// removes it. Repeated Show calls move/resize the same window.
++void ShowRectOverlay(gfx::NativeView parent_view,
++                     int x,
++                     int y,
++                     int width,
++                     int height);
++void HideRectOverlay();
++
++}  // namespace devtools
++}  // namespace content
++
++#endif  // CONTENT_BROWSER_DEVTOOLS_PROTOCOL_HUMANIZED_CURSOR_OVERLAY_MAC_H_
+--- /dev/null
++++ b/content/browser/devtools/protocol/humanized_cursor_overlay_mac.mm
+@@ -0,0 +1,149 @@
++// Copyright 2026 Lightweight-Fork Authors. All rights reserved.
++
++#include "content/browser/devtools/protocol/humanized_cursor_overlay_mac.h"
++
++#import <AppKit/AppKit.h>
++#import <QuartzCore/QuartzCore.h>
++
++// The cursor dot and the element highlight box are rendered as borderless,
++// click-through CHILD VIEWS of the web-content NSView — not separate windows.
++// That keeps them INSIDE the browser content (clipped to it, composited with
++// the page, never floating over the toolbar or other apps), positions them in
++// the view's own coordinate space (correct on any display / scale factor /
++// window position — no primary-screen math), and avoids stealing key-window
++// focus the way a child NSWindow did. No drop shadows (no "glow").
++
++// A click-through child view that paints a CALayer. Declared at global scope —
++// Objective-C class declarations may not appear inside a C++ namespace.
++@interface CFOverlayView : NSView
++@end
++
++@implementation CFOverlayView
++- (NSView*)hitTest:(NSPoint)point {
++  return nil;  // click-through: the page, not the overlay, gets the event.
++}
++- (BOOL)isFlipped {
++  return YES;  // top-left origin, matching web-content coordinates.
++}
++@end
++
++namespace content {
++namespace devtools {
++namespace {
++
++constexpr CGFloat kDiameter = 44.0;
++constexpr CGFloat kRadius = kDiameter / 2.0;
++
++CFOverlayView* g_cursor = nil;
++CFOverlayView* g_rect = nil;
++
++CFOverlayView* EnsureCursor() {
++  if (g_cursor) {
++    return g_cursor;
++  }
++  g_cursor = [[CFOverlayView alloc]
++      initWithFrame:NSMakeRect(0, 0, kDiameter, kDiameter)];
++  g_cursor.wantsLayer = YES;
++  CALayer* layer = g_cursor.layer;
++  layer.backgroundColor =
++      [[NSColor colorWithRed:1.0 green:0.15 blue:0.15 alpha:0.80] CGColor];
++  layer.cornerRadius = kRadius;
++  layer.borderWidth = 1.5;
++  layer.borderColor = [[NSColor whiteColor] CGColor];
++  layer.masksToBounds = YES;  // no shadow / glow.
++  return g_cursor;
++}
++
++CFOverlayView* EnsureRect() {
++  if (g_rect) {
++    return g_rect;
++  }
++  g_rect = [[CFOverlayView alloc] initWithFrame:NSMakeRect(0, 0, 10, 10)];
++  g_rect.wantsLayer = YES;
++  CALayer* layer = g_rect.layer;
++  // Clean cyan outline, no fill wash and no shadow.
++  layer.backgroundColor = [[NSColor clearColor] CGColor];
++  layer.borderColor =
++      [[NSColor colorWithRed:0.0 green:0.82 blue:1.0 alpha:0.95] CGColor];
++  layer.borderWidth = 2.0;
++  layer.cornerRadius = 3.0;
++  layer.masksToBounds = YES;
++  return g_rect;
++}
++
++// Converts a top-left (y-down) y into the parent view's frame coordinate space.
++CGFloat OriginY(NSView* parent, CGFloat top_left_y, CGFloat height) {
++  if ([parent isFlipped]) {
++    return top_left_y;
++  }
++  return [parent bounds].size.height - top_left_y - height;
++}
++
++// (Re)attaches `overlay` as the frontmost child of `parent`.
++void AttachFrontmost(NSView* parent, NSView* overlay) {
++  if ([overlay superview]) {
++    [overlay removeFromSuperview];
++  }
++  [parent addSubview:overlay positioned:NSWindowAbove relativeTo:nil];
++}
++
++}  // namespace
++
++void ShowRectOverlay(gfx::NativeView parent_view,
++                     int x,
++                     int y,
++                     int width,
++                     int height) {
++  width = width < 2 ? 2 : width;
++  height = height < 2 ? 2 : height;
++  NSView* parent = parent_view.GetNativeNSView();
++  if (!parent) {
++    return;
++  }
++  CFOverlayView* v = EnsureRect();
++  // (x, y, w, h) is in the content view's own coordinate space (CSS/DIP,
++  // top-left). A subview frame lives in the parent's coordinate space.
++  v.frame = NSMakeRect(x, OriginY(parent, y, height), width, height);
++  AttachFrontmost(parent, v);
++}
++
++void HideRectOverlay() {
++  if (g_rect) {
++    [g_rect removeFromSuperview];
++  }
++}
++
++void ShowCursorOverlay(gfx::NativeView parent_view, int view_x, int view_y) {
++  NSView* parent = parent_view.GetNativeNSView();
++  if (!parent) {
++    return;
++  }
++  CFOverlayView* v = EnsureCursor();
++  const CGFloat tlx = view_x - kRadius;
++  const CGFloat tly = view_y - kRadius;
++  v.frame = NSMakeRect(tlx, OriginY(parent, tly, kDiameter), kDiameter, kDiameter);
++  AttachFrontmost(parent, v);
++}
++
++void UpdateCursorOverlay(int view_x, int view_y) {
++  if (!g_cursor) {
++    return;
++  }
++  NSView* parent = [g_cursor superview];
++  if (!parent) {
++    return;
++  }
++  const CGFloat tlx = view_x - kRadius;
++  const CGFloat tly = view_y - kRadius;
++  g_cursor.frame =
++      NSMakeRect(tlx, OriginY(parent, tly, kDiameter), kDiameter, kDiameter);
++}
++
++void HideCursorOverlay() {
++  if (g_cursor) {
++    [g_cursor removeFromSuperview];
++  }
++}
++
++}  // namespace devtools
++}  // namespace content
+--- a/content/browser/devtools/protocol/input_handler.cc
++++ b/content/browser/devtools/protocol/input_handler.cc
+@@ -48,6 +48,8 @@
+ #include "ui/base/clipboard/clipboard_constants.h"
+ #include "ui/base/dragdrop/mojom/drag_drop_types.mojom-shared.h"
+ #include "ui/events/base_event_utils.h"
++#include "base/rand_util.h"
++#include "content/browser/renderer_host/render_widget_host_impl.h"
+ #include "ui/events/blink/web_input_event_traits.h"
+ #include "ui/events/event_constants.h"
+ #include "ui/events/gesture_detection/gesture_provider_config_helper.h"
+@@ -1353,6 +1355,37 @@
+       std::move(closure));
+ }
+ 
++namespace {
++
++// Cubic bezier with control points biased perpendicular to the straight line.
++gfx::PointF HumanizeCubicBezier(gfx::PointF p0,
++                                gfx::PointF p1,
++                                gfx::PointF p2,
++                                gfx::PointF p3,
++                                double t) {
++  const double u = 1.0 - t;
++  return gfx::PointF(
++      u * u * u * p0.x() + 3 * u * u * t * p1.x() + 3 * u * t * t * p2.x() +
++          t * t * t * p3.x(),
++      u * u * u * p0.y() + 3 * u * u * t * p1.y() + 3 * u * t * t * p2.y() +
++          t * t * t * p3.y());
++}
++
++double HumanizeEaseInOut(double t) { return t * t * (3.0 - 2.0 * t); }
++
++double HumanizeGauss(double sigma, double clamp_abs) {
++  if (sigma <= 0) return 0.0;
++  const double u1 = std::max(1e-9, base::RandDouble());
++  const double u2 = base::RandDouble();
++  const double z = std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * 3.14159265358979323846 * u2);
++  return std::clamp(z * sigma, -clamp_abs, clamp_abs);
++}
++
++constexpr double kHumanizeDuration = 0.5;       // seconds
++constexpr int kHumanizeSamplesPerSec = 120;
++
++}  // namespace
++
+ void InputHandler::DispatchMouseEvent(
+     const std::string& event_type,
+     double x,
+@@ -1371,6 +1404,64 @@
+     std::optional<double> delta_y,
+     std::optional<std::string> pointer_type,
+     std::unique_ptr<DispatchMouseEventCallback> callback) {
++  // Lightweight-fork: when a mousePressed comes in, prepend a humanized
++  // bezier-curve motion from the last known cursor position to (x, y) before
++  // dispatching the press. Other event types pass through with cursor tracking.
++  const bool is_press = (event_type == "mousePressed");
++  const bool is_move = (event_type == "mouseMoved");
++  const gfx::PointF target(static_cast<float>(x), static_cast<float>(y));
++
++  if (is_press) {
++    const gfx::PointF start = last_cursor_position_;
++    const double dx = target.x() - start.x();
++    const double dy = target.y() - start.y();
++    const double dist = std::hypot(dx, dy);
++    if (dist >= 0.5) {
++      // Bow the path perpendicular to the straight line.
++      const double px = -dy / dist;
++      const double py = dx / dist;
++      const double bow1 = (base::RandDouble() * 0.30 - 0.15) * dist;
++      const double bow2 = (base::RandDouble() * 0.30 - 0.15) * dist;
++      const gfx::PointF cp1(start.x() + dx * 0.33 + px * bow1,
++                            start.y() + dy * 0.33 + py * bow1);
++      const gfx::PointF cp2(start.x() + dx * 0.66 + px * bow2,
++                            start.y() + dy * 0.66 + py * bow2);
++
++      const int steps = std::max(
++          8, static_cast<int>(kHumanizeDuration * kHumanizeSamplesPerSec));
++
++      // Pre-dispatch every move synchronously; we don't need timer-driven
++      // pacing for renderer event coalescing — the renderer treats them as
++      // ordered events. We DO need the press to fire after all moves so that
++      // pointerover/pointerenter resolve before pointerdown.
++      auto fire_move = [&](gfx::PointF p) {
++        auto mv = std::make_unique<blink::WebMouseEvent>(
++            blink::WebInputEvent::Type::kMouseMove,
++            blink::WebInputEvent::kNoModifiers, ui::EventTimeForNow());
++        mv->SetPositionInWidget(p.x(), p.y());
++        mv->SetPositionInScreen(p.x(), p.y());
++        mv->button = blink::WebMouseEvent::Button::kNoButton;
++        RenderWidgetHostImpl* widget_host =
++            host_ ? host_->GetRenderWidgetHost() : nullptr;
++        if (widget_host) {
++          widget_host->ForwardMouseEvent(*mv);
++        }
++      };
++      for (int i = 1; i <= steps; ++i) {
++        const double t = HumanizeEaseInOut(static_cast<double>(i) / steps);
++        gfx::PointF p = HumanizeCubicBezier(start, cp1, cp2, target, t);
++        p.set_x(static_cast<float>(p.x() + HumanizeGauss(0.4, 2.0)));
++        p.set_y(static_cast<float>(p.y() + HumanizeGauss(0.4, 2.0)));
++        fire_move(p);
++      }
++      // Exact landing without jitter so the press is at the requested coords.
++      fire_move(target);
++    }
++    last_cursor_position_ = target;
++  } else if (is_move) {
++    last_cursor_position_ = target;
++  }
++
+   base::expected<std::unique_ptr<blink::WebMouseEvent>, protocol::Response>
+       maybe_event = CreateWebMouseEvent(
+           event_type, x, y, ScaleFactor(), std::move(modifiers),
+--- a/content/browser/devtools/protocol/input_handler.h
++++ b/content/browser/devtools/protocol/input_handler.h
+@@ -16,6 +16,7 @@
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/raw_ref.h"
+ #include "base/memory/weak_ptr.h"
++#include "ui/gfx/geometry/point_f.h"
+ #include "content/browser/devtools/protocol/devtools_domain_handler.h"
+ #include "content/browser/devtools/protocol/input.h"
+ #include "content/browser/renderer_host/render_widget_host_view_base.h"
+@@ -356,6 +357,9 @@
+       injectors_;
+   int last_id_ = 0;
+   bool ignore_input_events_ = false;
++  // Lightweight-fork: per-session cursor state used to humanize the motion
++  // before each mousePressed event. Updated on every mouseMoved/mousePressed.
++  gfx::PointF last_cursor_position_;
+   std::optional<content::WebContents::ScopedIgnoreInputEvents>
+       scoped_ignore_input_events_;
+   bool intercept_drags_ = false;
+--- a/content/browser/devtools/protocol_config.json
++++ b/content/browser/devtools/protocol_config.json
+@@ -20,8 +20,8 @@
+             {
+                 "domain": "Browser",
+                 "include": ["getVersion", "getHistograms", "getHistogram", "getBrowserCommandLine", "grantPermissions", "setDownloadBehavior", "cancelDownload", "resetPermissions", "crash", "crashGpuProcess", "setPermission",
+-                "addPrivacySandboxCoordinatorKeyConfig"],
+-                "async": ["addPrivacySandboxCoordinatorKeyConfig", "grantPermissions", "resetPermissions", "setPermission"]
++                "addPrivacySandboxCoordinatorKeyConfig", "humanizedClick", "humanizedClickSelector"],
++                "async": ["addPrivacySandboxCoordinatorKeyConfig", "grantPermissions", "resetPermissions", "setPermission", "humanizedClick", "humanizedClickSelector"]
+             },
+             {
+                 "domain": "DOM",
+--- a/third_party/blink/public/devtools_protocol/domains/Browser.pdl
++++ b/third_party/blink/public/devtools_protocol/domains/Browser.pdl
+@@ -350,3 +350,46 @@
+       # BrowserContext to perform the action in. When omitted, default browser
+       # context is used.
+       optional BrowserContextID browserContextId
++
++  # Lightweight-fork: dispatch a humanized mouse click to a target.
++  #
++  # Moves the renderer's mouse cursor along a cubic-bezier path with timing
++  # jitter from the LAST KNOWN mouse position to (x, y) in CSS viewport coords,
++  # then issues mousePressed + mouseReleased. All events flow through the
++  # standard CDP input path, so receiving renderers see
++  # MouseEvent.isTrusted === true.
++  #
++  # The method is browser-level (no page debugger attach required) so
++  # navigator.webdriver stays false.
++  experimental command humanizedClick
++    parameters
++      # The target page to click on. Get via Target.getTargets.
++      string targetId
++      # CSS-pixel viewport coordinates within the target.
++      number x
++      number y
++      # Total travel time in seconds (default 0.6).
++      optional number duration
++      # If true, perform only the move (no press/release). Default false.
++      optional boolean noClick
++      # If true, draw a red overlay ring at every interpolated cursor
++      # position along the path so the user can see the trajectory.
++      # Mac-only (uses humanized_cursor_overlay_mac's borderless child
++      # NSWindow); silently ignored on other platforms. Default false.
++      optional boolean visualize
++
++  # Like humanizedClick, but resolves the element's center coords by CSS
++  # selector inside the page first. Browser-side resolution — caller doesn't
++  # need to compute bounds.
++  experimental command humanizedClickSelector
++    parameters
++      string targetId
++      # CSS selector. First matching element is used. Fails if no match.
++      string selector
++      optional number duration
++      optional boolean noClick
++      optional boolean visualize
++    returns
++      # Resolved CSS viewport coordinates the click landed on.
++      number x
++      number y

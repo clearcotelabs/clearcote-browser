@@ -1,0 +1,299 @@
+--- /dev/null
++++ b/components/ungoogled/persona_profile.cc
+@@ -0,0 +1,211 @@
++// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/ungoogled/persona_profile.h"
++
++#include <array>
++#include <cstddef>
++#include <mutex>
++#include <random>
++#include <string>
++
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
++#include "components/ungoogled/ungoogled_switches.h"
++
++namespace ungoogled {
++namespace {
++
++template <typename T>
++struct WeightedEntry {
++  T value;
++  double weight;
++};
++
++// Weighted picker over std::array<WeightedEntry<T>, N>.
++template <typename T, size_t N>
++const T& WeightedPick(std::mt19937_64& rng,
++                      const std::array<WeightedEntry<T>, N>& pool) {
++  std::array<double, N> weights;
++  for (size_t i = 0; i < N; ++i) {
++    weights[i] = pool[i].weight;
++  }
++  std::discrete_distribution<size_t> dist(weights.begin(), weights.end());
++  return pool[dist(rng)].value;
++}
++
++struct ChromeVer {
++  unsigned major;
++  const char* full;
++};
++struct ScreenSize {
++  int w;
++  int h;
++  int avail_h;  // height minus a realistic Windows taskbar
++};
++struct WebGLGPU {
++  const char* vendor;
++  const char* renderer;
++};
++
++// Chrome version pool — clearcote's 149 line (mirrors fingerprint_data.h).
++constexpr std::array<WeightedEntry<ChromeVer>, 4> kChromeVersions = {{
++    {{149, "149.0.7827.114"}, 0.55},
++    {{149, "149.0.7827.89"}, 0.20},
++    {{149, "149.0.7827.66"}, 0.15},
++    {{149, "149.0.7827.58"}, 0.10},
++}};
++
++// Windows desktop resolutions (StatCounter / Steam-survey weighted). avail_h is
++// the work area = height minus the taskbar (~40px) so screen.availHeight is
++// plausible rather than == height.
++constexpr std::array<WeightedEntry<ScreenSize>, 9> kScreens = {{
++    {{1920, 1080, 1040}, 0.34},
++    {{1920, 1080, 1080}, 0.06},  // auto-hide taskbar
++    {{1366, 768, 728}, 0.15},
++    {{1536, 864, 824}, 0.12},
++    {{1440, 900, 860}, 0.05},
++    {{2560, 1440, 1400}, 0.10},
++    {{1680, 1050, 1010}, 0.04},
++    {{1600, 900, 860}, 0.04},
++    {{3840, 2160, 2120}, 0.10},
++}};
++
++// Hardware tiers: pick a tier first, then draw cores + RAM from that tier's
++// constrained pools so the (cores, RAM) pair is one a real desktop ships. Flat
++// independent sampling produces off-distribution combos (e.g. 20 cores + 16 GB,
++// 4 cores + 32 GB) that anti-detect ML flags as tampered. Weights skew toward
++// entry/mainstream (incl. the cloud-Windows-VPS shape) per Steam Hardware
++// Survey aggregates.
++struct HwTier {
++  std::array<WeightedEntry<unsigned>, 3> hc;
++  std::array<WeightedEntry<float>, 2> mem;
++};
++constexpr std::array<WeightedEntry<HwTier>, 4> kHwTiers = {{
++    // Tier 1 — entry laptop / older desktop / cloud Win VPS.
++    {{{{{4u, 0.55}, {6u, 0.20}, {8u, 0.25}}}, {{{4.0f, 0.30}, {8.0f, 0.70}}}},
++     0.62},
++    // Tier 2 — mainstream desktop / gaming laptop.
++    {{{{{8u, 0.60}, {12u, 0.25}, {16u, 0.15}}}, {{{8.0f, 0.40}, {16.0f, 0.60}}}},
++     0.30},
++    // Tier 3 — high-end gaming desktop.
++    {{{{{12u, 0.30}, {16u, 0.55}, {20u, 0.15}}},
++      {{{16.0f, 0.55}, {32.0f, 0.45}}}},
++     0.06},
++    // Tier 4 — enthusiast / workstation (rare).
++    {{{{{16u, 0.30}, {20u, 0.40}, {24u, 0.30}}},
++      {{{32.0f, 0.65}, {64.0f, 0.35}}}},
++     0.02},
++}};
++
++// Color depth: Win11 desktops are overwhelmingly 24; HDR / multi-monitor can be
++// 30/32. Keep 24 dominant so a Windows persona never reports the rare value too
++// often (which is itself a tell).
++constexpr std::array<WeightedEntry<unsigned>, 3> kColorDepths = {{
++    {24u, 0.92},
++    {30u, 0.04},
++    {32u, 0.04},
++}};
++
++// Windows consumer GPU pool (ANGLE/D3D11 strings). Index 0 (Intel UHD 770) is
++// the coherent default for the SwiftShader backend: empirically a low-end IGP
++// claim scores far lower on VM/anti-detect classifiers than claiming a discrete
++// GPU whose pixel output software rendering cannot match. NVIDIA/AMD are kept
++// for future per-seed GPU selection; every persona currently uses index 0.
++constexpr std::array<WeightedEntry<WebGLGPU>, 3> kWebGLGPUs = {{
++    {{"Google Inc. (Intel)",
++      "ANGLE (Intel, Intel(R) UHD Graphics 770 (0xA780) Direct3D11 vs_5_0 "
++      "ps_5_0, D3D11)"},
++     0.50},
++    {{"Google Inc. (NVIDIA)",
++      "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"},
++     0.35},
++    {{"Google Inc. (AMD)",
++      "ANGLE (AMD, AMD Radeon(TM) Graphics (0x000015D8) Direct3D11 vs_5_0 "
++      "ps_5_0, D3D11)"},
++     0.15},
++}};
++
++// Parse the persona seed from the existing --fingerprint switch. Numeric values
++// are used directly; non-numeric values are FNV-1a hashed to a stable uint64
++// (matching the per-site seed parse used elsewhere, and stable across builds,
++// unlike std::hash) so the browser and every renderer derive the SAME persona.
++uint64_t SeedFromCommandLine() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  if (!cmd || !cmd->HasSwitch(switches::kFingerprint)) {
++    return 0;
++  }
++  const std::string raw = cmd->GetSwitchValueASCII(switches::kFingerprint);
++  uint64_t parsed = 0;
++  if (base::StringToUint64(raw, &parsed)) {
++    return parsed;
++  }
++  uint64_t h = 14695981039346656037ULL;  // FNV-1a offset basis
++  for (unsigned char c : raw) {
++    h ^= c;
++    h *= 1099511628211ULL;  // FNV prime
++  }
++  return h;
++}
++
++}  // namespace
++
++PersonaProfile DerivePersona(uint64_t seed) {
++  // SplitMix64 decorrelates weak seeds (1, 2, 3 otherwise produce visibly
++  // similar mt19937_64 streams).
++  uint64_t mixed = seed + 0x9E3779B97F4A7C15ull;
++  mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9ull;
++  mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EBull;
++  mixed = mixed ^ (mixed >> 31);
++
++  std::mt19937_64 rng(mixed);
++
++  PersonaProfile p;
++  p.persona_seed = mixed;
++
++  // Identity.
++  const ChromeVer& cv = WeightedPick(rng, kChromeVersions);
++  p.chrome_major_version = cv.major;
++  p.chrome_full_version = cv.full;
++
++  // Hardware: tier first, then correlated cores + RAM.
++  std::array<double, kHwTiers.size()> tier_weights;
++  for (size_t i = 0; i < kHwTiers.size(); ++i) {
++    tier_weights[i] = kHwTiers[i].weight;
++  }
++  std::discrete_distribution<size_t> tier_dist(tier_weights.begin(),
++                                               tier_weights.end());
++  const HwTier& tier = kHwTiers[tier_dist(rng)].value;
++  p.hardware_concurrency = WeightedPick(rng, tier.hc);
++  p.device_memory_gb = WeightedPick(rng, tier.mem);
++
++  // Screen.
++  const ScreenSize& sc = WeightedPick(rng, kScreens);
++  p.screen_width = sc.w;
++  p.screen_height = sc.h;
++  p.avail_screen_width = sc.w;
++  p.avail_screen_height = sc.avail_h;
++  p.color_depth = WeightedPick(rng, kColorDepths);
++  p.device_pixel_ratio = 1.0;
++
++  // WebGL identity (coherent Intel UHD 770 default; see kWebGLGPUs).
++  const WebGLGPU& gpu = kWebGLGPUs[0].value;
++  p.webgl_vendor = gpu.vendor;
++  p.webgl_renderer = gpu.renderer;
++
++  return p;
++}
++
++const PersonaProfile& CurrentPersona() {
++  // Intentionally leaked process-lifetime singleton (no exit-time destructor),
++  // lazily initialized once per process.
++  static PersonaProfile* profile = nullptr;
++  static std::once_flag once;
++  std::call_once(once, [] {
++    profile = new PersonaProfile(DerivePersona(SeedFromCommandLine()));
++  });
++  return *profile;
++}
++
++}  // namespace ungoogled
+--- /dev/null
++++ b/components/ungoogled/persona_profile.h
+@@ -0,0 +1,82 @@
++// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_UNGOOGLED_PERSONA_PROFILE_H_
++#define COMPONENTS_UNGOOGLED_PERSONA_PROFILE_H_
++
++#include <cstdint>
++#include <string>
++
++#include "base/component_export.h"
++
++namespace ungoogled {
++
++// A seed-derived, internally-COHERENT Windows browser persona.
++//
++// One uint64 seed (the existing --fingerprint switch) selects one believable
++// Windows machine: every field here is drawn TOGETHER so the combination is one
++// a real device actually shows -- e.g. hardware_concurrency and device_memory_gb
++// come from a single hardware tier (no 20-core CPU with 16 GB RAM), and the
++// WebGL renderer string matches the GPU vendor. Same seed => identical persona
++// across the browser process and every renderer in the session (the seed is
++// forwarded to all child processes), so no surface can contradict another.
++//
++// Windows-only by design: clearcote ships a Windows binary, so every persona
++// claims Windows. There is deliberately no OS-family switch.
++struct COMPONENT_EXPORT(UNGOOGLED) PersonaProfile {
++  // SplitMix64-mixed seed, kept so downstream per-seed routines can mix it in.
++  uint64_t persona_seed = 0;
++
++  // ---- Identity ----
++  unsigned chrome_major_version = 149;
++  std::string chrome_full_version;  // e.g. "149.0.7827.114"
++
++  // ---- Hardware (one tier: cores <-> RAM correlated) ----
++  unsigned hardware_concurrency = 8;  // logical cores (navigator.hardwareConcurrency)
++  // True system RAM in GB (4..64). NOTE: navigator.deviceMemory is spec-clamped
++  // to a max of 8, so the getter reports min(8, this); the full value is kept
++  // for future Sec-CH-Device-Memory / side-channel coherence work.
++  float device_memory_gb = 8.0f;
++
++  // ---- Screen / window ----
++  int screen_width = 1920;
++  int screen_height = 1080;
++  int avail_screen_width = 1920;
++  int avail_screen_height = 1040;  // minus a realistic Windows taskbar
++  unsigned color_depth = 24;
++  double device_pixel_ratio = 1.0;
++
++  // ---- WebGL (Windows + ANGLE/D3D11) ----
++  std::string webgl_vendor;    // e.g. "Google Inc. (Intel)"
++  std::string webgl_renderer;  // ANGLE renderer string
++  // Canonical Win11 + ANGLE parameter limits (for future getParameter wiring).
++  int webgl_max_texture_size = 16384;
++  int webgl_max_cube_map_texture_size = 16384;
++  int webgl_max_renderbuffer_size = 16384;
++  int webgl_max_viewport_dim = 32767;
++  int webgl_max_vertex_uniform_vectors = 4096;
++  int webgl_max_fragment_uniform_vectors = 1024;
++  int webgl_max_varying_vectors = 30;
++  int webgl_max_combined_texture_image_units = 32;
++
++  // ---- Audio (Windows WASAPI defaults) ----
++  float audio_sample_rate = 48000.0f;
++  double audio_base_latency = 0.01;
++  double audio_output_latency = 0.015;
++};
++
++// Derives a coherent Windows persona from a seed. Same seed => same persona.
++// Pools are weighted to common Chrome-on-Windows distributions; the hardware
++// tier keeps (cores, RAM) to combinations that exist in the wild.
++COMPONENT_EXPORT(UNGOOGLED) PersonaProfile DerivePersona(uint64_t seed);
++
++// Process-wide singleton persona for this session. The first call reads the
++// --fingerprint switch (numeric, or FNV-1a-hashed if non-numeric -- matching
++// the per-site seed parse so browser + renderers agree) and derives the
++// persona; later calls return the same one. Thread-safe (std::call_once).
++COMPONENT_EXPORT(UNGOOGLED) const PersonaProfile& CurrentPersona();
++
++}  // namespace ungoogled
++
++#endif  // COMPONENTS_UNGOOGLED_PERSONA_PROFILE_H_

@@ -363,7 +363,7 @@
  #endif  // THIRD_PARTY_BLINK_PUBLIC_COMMON_USER_AGENT_USER_AGENT_METADATA_H_
 --- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
 +++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
-@@ -4,10 +4,15 @@
+@@ -4,10 +4,16 @@
  
  #include "third_party/blink/renderer/core/execution_context/navigator_base.h"
  
@@ -372,6 +372,7 @@
  #include "base/feature_list.h"
 +#include "components/ungoogled/ungoogled_switches.h"
 +#include "components/ungoogled/farble_seed.h"
++#include "components/ungoogled/persona_profile.h"
  #include "build/build_config.h"
  #include "third_party/blink/public/common/features.h"
  #include "third_party/blink/renderer/core/execution_context/execution_context.h"
@@ -379,7 +380,7 @@
  #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
  #include "third_party/blink/renderer/core/probe/core_probes.h"
  #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
-@@ -24,6 +29,19 @@
+@@ -24,6 +30,19 @@
  namespace {
  
  String GetReducedNavigatorPlatform() {
@@ -399,7 +400,7 @@
  #if BUILDFLAG(IS_ANDROID)
    return "Linux armv81";
  #elif BUILDFLAG(IS_MAC)
-@@ -72,9 +90,46 @@
+@@ -72,9 +91,38 @@
  unsigned int NavigatorBase::hardwareConcurrency() const {
    if (base::FeatureList::IsEnabled(blink::features::kReducedSystemInfo))
      return 2;
@@ -428,19 +429,11 @@
 +  if (has_override) {
 +    hardware_concurrency = override_concurrency;
 +  } else if (command_line->HasSwitch(switches::kFingerprint)) {
-+    // Derive the value from a PER-SITE farbling seed: the global --fingerprint
-+    // seed mixed (inside GetFarbleSeed64) with the eTLD+1 of the current
-+    // security origin. Formula preserved from the original mixin:
-+    // ((seed % 13) + 4) * 2.
-+    std::string registrable_domain;
-+    if (ExecutionContext* execution_context = GetExecutionContext()) {
-+      if (const SecurityOrigin* origin =
-+              execution_context->GetSecurityOrigin()) {
-+        registrable_domain = origin->RegistrableDomain().Utf8();
-+      }
-+    }
-+    uint64_t seed = ungoogled::GetFarbleSeed64(registrable_domain);
-+    hardware_concurrency = static_cast<unsigned int>(((seed % 13) + 4) * 2);
++    // clearcote: hardwareConcurrency comes from the coherent session persona
++    // (correlated with deviceMemory via the HW tier) and is constant per
++    // session -- like real hardware, which never varies its core count per
++    // site. Replaces the earlier per-site ((seed % 13) + 4) * 2 formula.
++    hardware_concurrency = ungoogled::CurrentPersona().hardware_concurrency;
 +  }
 +
    probe::ApplyHardwareConcurrencyOverride(

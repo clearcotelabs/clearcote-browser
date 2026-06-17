@@ -1,12 +1,14 @@
 --- a/components/ungoogled/BUILD.gn
 +++ b/components/ungoogled/BUILD.gn
-@@ -4,6 +4,9 @@
+@@ -4,6 +4,11 @@
  
  component("ungoogled_switches") {
    sources = [
 +    "farble_seed.cc",
 +    "farble_seed.h",
 +    "fingerprint_data.h",
++    "persona_profile.cc",
++    "persona_profile.h",
      "ungoogled_switches.h",
      "ungoogled_switches.cc",
    ]

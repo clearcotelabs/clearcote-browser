@@ -1,0 +1,35 @@
+--- a/third_party/blink/renderer/modules/quota/storage_manager.cc
++++ b/third_party/blink/renderer/modules/quota/storage_manager.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/quota/storage_manager.h"
+ 
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "mojo/public/cpp/bindings/callback_helpers.h"
+ #include "third_party/blink/public/mojom/permissions/permission_status.mojom-blink.h"
+ #include "third_party/blink/public/mojom/quota/quota_types.mojom-blink.h"
+@@ -70,6 +72,23 @@
+ 
+   StorageEstimate* estimate = StorageEstimate::Create();
+   estimate->setUsage(usage_in_bytes);
++  // clearcoat: report a coherent, non-incognito storage quota when
++  // --fingerprint-storage-quota=<MB> is set. Chromium quota-caps ephemeral
++  // contexts (~a few GiB), which detectors (browserscan/FPJS) read as
++  // incognito; this overrides it with a realistic on-disk value.
++  {
++    const base::CommandLine* cc_cmd =
++        base::CommandLine::ForCurrentProcess();
++    if (cc_cmd->HasSwitch("fingerprint-storage-quota")) {
++      uint64_t cc_quota_mb = 0;
++      if (base::StringToUint64(
++              cc_cmd->GetSwitchValueASCII("fingerprint-storage-quota"),
++              &cc_quota_mb) &&
++          cc_quota_mb > 0) {
++        quota_in_bytes = static_cast<int64_t>(cc_quota_mb) * 1024 * 1024;
++      }
++    }
++  }
+   estimate->setQuota(quota_in_bytes);
+ 
+   // We only want to show usage details for systems that are used by the app,

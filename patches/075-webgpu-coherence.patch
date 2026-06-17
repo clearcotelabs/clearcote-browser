@@ -1,0 +1,41 @@
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/webgpu/gpu_adapter.h"
++#include "base/command_line.h"
+ 
+ #include "services/metrics/public/cpp/ukm_builders.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+@@ -103,6 +104,30 @@
+   }
+   description_ = String::FromUtf8(info.device);
+   driver_ = String::FromUtf8(info.description);
++
++  // clearcote: keep the WebGPU adapter identity coherent with the spoofed
++  // WebGL GPU. The SDK derives these from the same persona GPU and passes
++  // them as switches (read by literal name to avoid a //components/ungoogled
++  // dependency from this blink target).
++  {
++    const base::CommandLine* cc_cmd = base::CommandLine::ForCurrentProcess();
++    if (cc_cmd->HasSwitch("fingerprint-webgpu-vendor")) {
++      vendor_ = String::FromUtf8(
++          cc_cmd->GetSwitchValueASCII("fingerprint-webgpu-vendor"));
++    }
++    if (cc_cmd->HasSwitch("fingerprint-webgpu-architecture")) {
++      architecture_ = String::FromUtf8(
++          cc_cmd->GetSwitchValueASCII("fingerprint-webgpu-architecture"));
++    }
++    if (cc_cmd->HasSwitch("fingerprint-webgpu-device")) {
++      device_ = String::FromUtf8(
++          cc_cmd->GetSwitchValueASCII("fingerprint-webgpu-device"));
++    }
++    if (cc_cmd->HasSwitch("fingerprint-webgpu-description")) {
++      description_ = String::FromUtf8(
++          cc_cmd->GetSwitchValueASCII("fingerprint-webgpu-description"));
++    }
++  }
+   if (supportsPropertiesD3D) {
+     d3d_shader_model_ = d3dProperties.shaderModel;
+   }
