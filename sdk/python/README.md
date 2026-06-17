@@ -48,19 +48,21 @@ browser = launch(
     fingerprint="user-7423",
     proxy={"server": "http://host:8080", "username": "u", "password": "p"},  # standard Playwright option
     timezone="America/New_York",
-    webrtc_ip="203.0.113.10",       # make WebRTC report the proxy egress IP
+    webrtc_ip="203.0.113.10",       # make WebRTC report the proxy egress IP, not your host's
 )
 ```
 
+**WebRTC won't leak your real IP.** The engine *fabricates* the WebRTC server-reflexive (`srflx`) candidate at `webrtc_ip` and sends **no real STUN** from your host — so WebRTC reports the proxy IP and your real IP never leaks at the packet level. A plain candidate "relabel" doesn't stop the leak (the real STUN packet still goes out from your host); Clearcote sends none. Raw host candidates are suppressed, and the candidate set stays coherent (not empty/disabled).
+
 ### Auto geo-match (`geoip`)
 
-Set `geoip=True` and Clearcote resolves the **proxy's exit IP** (looked up *through* the proxy) and auto-fills any unset `timezone`, `accept_language`, and `location` so they match the proxy's region — no manual timezone/locale bookkeeping:
+Set `geoip=True` and Clearcote resolves the **proxy's exit IP** (looked up *through* the proxy) and auto-fills any unset `timezone`, `accept_language`, `location`, **and `webrtc_ip`** so the whole identity — clock, language, geo, and WebRTC IP — matches the proxy's region:
 
 ```python
 browser = launch(
     fingerprint="user-7423",
     proxy={"server": "http://host:8080", "username": "u", "password": "p"},
-    geoip=True,              # timezone + navigator.languages/Accept-Language auto-set from the proxy's geo
+    geoip=True,              # timezone, languages, location, AND WebRTC IP all auto-set to the proxy's geo
 )
 ```
 
@@ -98,9 +100,9 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `location` | `--fingerprint-location` | `"lat,lng"` (only when geo permission is granted). |
 | `timezone` | `--timezone` | IANA timezone, e.g. `"America/New_York"`. |
 | `accept_language` | `--accept-lang` | `navigator.languages` + `Accept-Language` header, e.g. `"en-US,en"`. |
-| `webrtc_ip` | `--webrtc-ip` | WebRTC egress IP to report (your proxy IP). |
+| `webrtc_ip` | `--webrtc-ip` | WebRTC IP to report. The engine **fabricates** the `srflx` candidate at this IP and sends **no real STUN** from the host, so the real IP never leaks (not merely relabeled). |
 | `disable_gpu_fingerprint` | `--disable-gpu-fingerprint` | Turn off GPU/WebGL spoofing. |
-| `geoip` | _(directive)_ | `True` → resolve the proxy's exit-IP geo and auto-fill timezone/accept_language/location. |
+| `geoip` | _(directive)_ | `True` → resolve the proxy's exit-IP geo and auto-fill timezone/accept_language/location/**webrtc_ip**. |
 
 ## API
 
