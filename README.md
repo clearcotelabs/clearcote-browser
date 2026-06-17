@@ -133,8 +133,9 @@ Same `--fingerprint=<seed>` ⇒ a stable identity across launches; a new seed �
 
 ## SDK
 
-The **Node / TypeScript SDK is published on npm** — a Playwright drop-in that auto-downloads and SHA-256-verifies the Clearcote binary on first use, then hands you a standard Playwright `Browser`:
+Clearcote ships **Playwright drop-in SDKs for Node and Python**, published on **npm** and **PyPI**. Each `launch()` returns a standard Playwright `Browser` and auto-downloads + SHA-256-verifies the Clearcote binary on first use, then caches it — no manual download.
 
+**Node / TypeScript** — [`sdk/node`](sdk/node) · [npm: clearcote](https://www.npmjs.com/package/clearcote)
 ```bash
 npm install clearcote
 ```
@@ -151,9 +152,20 @@ await page.goto("https://example.com");
 await browser.close();
 ```
 
-`launch()` returns a standard Playwright `Browser` — already using Playwright? It's a one-line import change, and the verified Windows binary is fetched + cached automatically (no manual download). Full options and source: [`sdk/node`](sdk/node).
+**Python** — [`sdk/python`](sdk/python) · [PyPI: clearcote](https://pypi.org/project/clearcote/)
+```bash
+pip install clearcote
+```
+```python
+from clearcote import launch
 
-A **Python SDK** is next — see the [Roadmap](ROADMAP.md).
+browser = launch(fingerprint="user-7423", platform="windows", timezone="America/New_York")
+page = browser.new_page()
+page.goto("https://example.com")
+browser.close()
+```
+
+Already using Playwright? It's a one-line import change — the returned object is a standard Playwright `Browser`, and the verified Windows binary is fetched + cached for you.
 
 ## Build it yourself
 

@@ -34,11 +34,11 @@ Engine-level control over the signals a browser exposes — designed to be *cons
 - [x] **Per-site coherence** (farbling-style): the same site sees a stable identity; different sites don't correlate
 - [ ] Sensible, documented defaults — privacy-respecting out of the box
 
-## Phase 3 — Automation SDK *(Node SDK shipped)*
+## Phase 3 — Automation SDK *(SDKs shipped)*
 
 Make it a true drop-in for the tools developers already use.
 
-- [ ] **Python + Node SDKs**, Playwright-first, Puppeteer supported *(Node/TypeScript SDK published to npm as `clearcote`; Python next)*
+- [x] **Python + Node SDKs**, Playwright-first, Puppeteer supported *(Node on [npm](https://www.npmjs.com/package/clearcote) + Python on [PyPI](https://pypi.org/project/clearcote/), both `clearcote` — Playwright drop-in; Puppeteer can point at the same binary)*
 - [x] `launch()` returns a standard Playwright object — one-line migration
 - [x] Auto-download + local cache of the verified binary
 - [ ] Recipes: persistent profiles, proxy configuration, headless on servers
