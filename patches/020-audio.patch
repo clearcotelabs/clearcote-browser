@@ -23,51 +23,63 @@
    for (unsigned i = 0; i < number_of_channels; ++i) {
      DOMFloat32Array* channel_data_array = CreateFloat32ArrayOrNull(
          length_, InitializationPolicy::kDontInitialize);
-@@ -221,6 +226,41 @@
+@@ -216,11 +221,45 @@
+   return getChannelData(channel_index);
+ }
+ 
++void AudioBuffer::FarbleChannelIfNeeded(unsigned channel_index) {
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  if (!command_line->HasSwitch(switches::kFingerprint)) {
++    return;
++  }
++  if (channel_index >= channels_.size() || channel_index >= 32u) {
++    return;
++  }
++  if (audio_farbled_mask_ & (1u << channel_index)) {
++    return;
++  }
++  DOMFloat32Array* array = channels_[channel_index].Get();
++  if (!array) {
++    return;
++  }
++  // Brave-style audio farbling: derive ONE deterministic factor very close
++  // to 1.0 from the per-eTLD+1 seed and scale every sample by it. Uniform
++  // scaling shifts the audio fingerprint per site while PRESERVING internal
++  // structure (equal samples stay equal), so detectors that count unique
++  // sample values do not see injected per-sample noise. Once per channel.
++  std::string seed_str = base::NumberToString(farble_seed_) + "audio";
++  uint64_t farb_h = std::hash<std::string>{}(seed_str);
++  double frac = static_cast<double>(farb_h & 0xFFFFFFFFull) / 4294967295.0;
++  double factor = 1.0 + (frac - 0.5) * 1.0e-3;  // ~[0.9995, 1.0005]
++  float* data = array->Data();
++  size_t len = array->length();
++  for (size_t i = 0; i < len; ++i) {
++    data[i] = static_cast<float>(static_cast<double>(data[i]) * factor);
++  }
++  audio_farbled_mask_ |= (1u << channel_index);
++}
++
+ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(unsigned channel_index) {
+   if (channel_index >= channels_.size()) {
      return NotShared<DOMFloat32Array>(nullptr);
    }
  
-+  // 应用幂等音频指纹噪声
-+  // 原理：
-+  // 1. 量化：将 data[i] 量化到 0.00001 精度（5位小数）
-+  // 2. 噪声：基于量化值计算确定性噪声 (±0.000005)
-+  // 3. 幂等：因为噪声 < 量化精度的一半，所以 (quantized + noise) 再量化还是 quantized
-+  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-+  if (command_line->HasSwitch(switches::kFingerprint)) {
-+    // Per-eTLD+1 farbling seed threaded in at buffer creation. 0 => stable
-+    // global-fallback seed (never a crash). The --fingerprint gate above is
-+    // preserved so noise is only applied when farbling is enabled.
-+    std::string fingerprint = base::NumberToString(farble_seed_);
-+    if (!fingerprint.empty()) {
-+      DOMFloat32Array* array = channels_[channel_index].Get();
-+      if (array) {
-+        float* data = array->Data();
-+        size_t len = array->length();
-+
-+        std::string seed_str = fingerprint + "audio";
-+        uint32_t base_seed = std::hash<std::string>{}(seed_str);
-+
-+        for (size_t i = 0; i < len; ++i) {
-+          // 量化到 0.00001 精度（5 位小数）
-+          float quantized = roundf(data[i] * 100000.0f) / 100000.0f;
-+
-+          // 基于量化值和索引计算确定性噪声
-+          uint32_t seed = base_seed ^ std::hash<float>{}(quantized) ^ static_cast<uint32_t>(i);
-+          seed = seed * 1664525 + 1013904223;  // LCG
-+          float noise = ((static_cast<float>(seed) / 4294967296.0f) - 0.5f) * 0.00001f;  // ±0.000005
-+
-+          data[i] = quantized + noise;
-+        }
-+      }
-+    }
-+  }
-+
++  FarbleChannelIfNeeded(channel_index);
    return NotShared<DOMFloat32Array>(channels_[channel_index].Get());
  }
  
+@@ -251,6 +290,7 @@
+     return;
+   }
+ 
++  FarbleChannelIfNeeded(static_cast<unsigned>(channel_number));
+   base::span<const float> src = channels_[channel_number].Get()->AsSpan();
+   base::span<float> dst = destination->AsSpan();
+ 
 --- a/third_party/blink/renderer/modules/webaudio/audio_buffer.h
 +++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.h
-@@ -115,6 +115,11 @@
+@@ -115,13 +115,28 @@
  
    std::unique_ptr<SharedAudioBuffer> CreateSharedAudioBuffer();
  
@@ -79,13 +91,20 @@
   private:
    bool CreatedSuccessfully(unsigned desired_number_of_channels) const;
  
-@@ -122,6 +127,9 @@
++  // Scale channel |channel_index| in place by one per-eTLD+1 factor (~1.0),
++  // once, for audio fingerprint farbling (uniform => preserves structure).
++  void FarbleChannelIfNeeded(unsigned channel_index);
++
+   float sample_rate_;
    uint32_t length_;
  
    HeapVector<Member<DOMFloat32Array>> channels_;
 +
 +  // Per-eTLD+1 farbling seed; 0 => stable global fallback (never a crash).
 +  uint64_t farble_seed_ = 0;
++  // Bitmask of channels already farbled (scaled once) so getChannelData()
++  // and copyFromChannel() stay consistent and idempotent across reads.
++  uint32_t audio_farbled_mask_ = 0;
  };
  
  // Shared data that audio threads can hold onto.
@@ -179,29 +198,22 @@
  OfflineAudioContext::OfflineAudioContext(LocalDOMWindow* window,
                                           unsigned number_of_channels,
                                           uint32_t number_of_frames,
-@@ -182,9 +225,20 @@
+@@ -182,9 +225,13 @@
      : BaseAudioContext(window,
                         ContextType::kOfflineContext,
                         render_quantum_frames),
 +      // total_render_frames_(number_of_frames + getNoiseData(number_of_frames)) {
        total_render_frames_(number_of_frames) {
-+  // 对 sample_rate 添加微小噪声（基于 per-eTLD+1 farbling seed）
-+  const SecurityOrigin* origin =
-+      window ? window->GetSecurityOrigin() : nullptr;
-+  std::string etld1 =
-+      origin ? origin->RegistrableDomain().Utf8() : std::string();
-+  uint64_t farble_seed = ungoogled::GetFarbleSeed64(etld1);
-+  std::string farble_seed_str = base::NumberToString(farble_seed);
-+  float adjusted_sample_rate =
-+      sample_rate + getSampleRateNoise(sample_rate, farble_seed_str);
-+
++  // clearcoat: do NOT farble the OfflineAudioContext sample rate. A non-standard
++  // rate (e.g. 44099.99 instead of 44100) is itself a detectable tell, and the
++  // audio fingerprint is already farbled per-eTLD+1 in AudioBuffer::getChannelData().
    destination_node_ = OfflineAudioDestinationNode::Create(
 -      this, number_of_channels, number_of_frames, sample_rate);
-+      this, number_of_channels, total_render_frames_, adjusted_sample_rate);
++      this, number_of_channels, total_render_frames_, sample_rate);
    Initialize();
  }
  
-@@ -248,6 +302,17 @@
+@@ -248,6 +295,17 @@
    AudioBuffer* render_target = AudioBuffer::CreateUninitialized(
        number_of_channels, total_render_frames_, sample_rate);
  
