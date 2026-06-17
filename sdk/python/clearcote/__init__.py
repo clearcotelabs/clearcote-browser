@@ -32,7 +32,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
