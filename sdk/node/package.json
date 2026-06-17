@@ -1,0 +1,57 @@
+{
+  "name": "clearcote",
+  "version": "0.1.0",
+  "description": "Playwright drop-in for the Clearcote anti-fingerprint Chromium build. launch() returns a standard Playwright Browser backed by the verified Clearcote binary, which is auto-downloaded and SHA-256 checked.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "dependencies": {
+    "extract-zip": "^2.0.1",
+    "playwright-core": "^1.49.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  },
+  "keywords": [
+    "clearcote",
+    "playwright",
+    "puppeteer",
+    "chromium",
+    "anti-detect",
+    "anti-fingerprint",
+    "fingerprint",
+    "farbling",
+    "automation",
+    "stealth",
+    "ungoogled"
+  ],
+  "license": "BSD-3-Clause",
+  "homepage": "https://github.com/clearcotelabs/clearcote-browser",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clearcotelabs/clearcote-browser.git",
+    "directory": "sdk/node"
+  },
+  "bugs": {
+    "url": "https://github.com/clearcotelabs/clearcote-browser/issues"
+  }
+}
