@@ -1,0 +1,24 @@
+# Build trees and outputs
+build/
+out/
+*.zip
+*.tar.xz
+*.7z
+*.exe
+*.dll
+
+# Download / toolchain caches
+download_cache/
+winsdk/
+wintoolchain/
+*.sha1.tmp
+
+# Checksums generated locally (published checksums live with releases)
+*.sha256
+
+# Editor / OS cruft
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/

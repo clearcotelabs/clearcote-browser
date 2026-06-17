@@ -1,0 +1,39 @@
+# Clearcote reference build configuration (Windows x64).
+#
+# This is the GN configuration used to build Clearcote. The de-Googling flags
+# (empty Google API keys, disabled telemetry/integration, etc.) come from the
+# ungoogled-chromium base applied before this file; the settings here pin the
+# build to a clang/lld toolchain, a release configuration, and Clearcote's
+# identity controls. Everything is plain and inspectable — no hidden flags.
+
+# --- Toolchain ---
+is_clang = true                  # build with Chromium's clang/lld
+target_os = "win"
+target_cpu = "x64"
+
+# --- Release configuration ---
+is_debug = false
+is_official_build = true          # production optimization profile
+is_component_build = false        # single, shippable binary
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+dcheck_always_on = false
+
+# --- Media / codecs (match a normal desktop browser) ---
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+enable_mse_mpeg2ts_stream_parser = true
+
+# --- Build hygiene ---
+enable_swiftshader = false
+use_sysroot = false
+enable_rust = true
+
+# --- PGO ---
+# Set to 0 to build without downloaded PGO profiles, or 2 to use them.
+chrome_pgo_phase = 0
+
+# Note: the full set of privacy/de-Google flags is provided by the
+# ungoogled-chromium base (google_api_key="", safe_browsing_mode=0,
+# enable_reporting=false, enable_mdns=false, etc.). See docs/BUILDING.md.

@@ -1,0 +1,32 @@
+# Clearcote Browser
+
+> An open-source, reproducible Chromium build with engine-level privacy and identity controls. De-Googled base (ungoogled-chromium) plus a transparent, readable patch set. Designed as a drop-in for Playwright/Puppeteer automation. Windows x64 first; buildable on Linux (native or cross-compile). 100% open — every change is a patch, every build is reproducible and checksummed.
+
+## Status
+Pre-release, building in the open. First tagged build, SDKs, and signed artifacts are planned — see /ROADMAP.md.
+
+## Principles
+- Open by default (no proprietary blobs; readable patches only)
+- Engine-level controls, not injected JavaScript
+- Coherent, per-site-consistent identity (farbling-style model)
+- Reproducible and verifiable (pinned upstream, checksums, planned attestation)
+- Lawful, responsible use
+
+## Key docs
+- /README.md — what it is, why, quickstart, credits
+- /ROADMAP.md — phased plan and future
+- /docs/BUILDING.md — build from source
+- /docs/VERIFY.md — verify a release (don't trust, verify)
+- /AGENTS.md — contributor & automation guide
+- /CREDITS.md — upstream attributions and licenses
+- /DISCLAIMER.md — responsible use and legal
+
+## Inspiration (all open source)
+- Chromium (BSD-3)
+- ungoogled-chromium (BSD-3) — de-Googled base
+- fingerprint-chromium by adryfish (BSD-3) — engine-level fingerprint controls
+- Brave — per-site deterministic "farbling" model
+- Camoufox — sibling open anti-detect browser (Firefox), design reference
+
+## Not
+Not affiliated with or derived from any commercial product. Ships no third-party proprietary code. Not a tool for unlawful activity.
