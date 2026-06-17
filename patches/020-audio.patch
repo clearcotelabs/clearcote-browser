@@ -1,0 +1,309 @@
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+@@ -28,10 +28,14 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/audio_buffer.h"
+ 
++#include <cmath>
+ #include <memory>
+ 
++#include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
++#include "components/ungoogled/ungoogled_switches.h"
++#include "base/strings/string_number_conversions.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_audio_buffer_options.h"
+ #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
+ #include "third_party/blink/renderer/platform/audio/audio_bus.h"
+@@ -188,6 +192,7 @@
+   // Copy audio data from the bus to the Float32Arrays we manage.
+   unsigned number_of_channels = bus->NumberOfChannels();
+   channels_.reserve(number_of_channels);
++
+   for (unsigned i = 0; i < number_of_channels; ++i) {
+     DOMFloat32Array* channel_data_array = CreateFloat32ArrayOrNull(
+         length_, InitializationPolicy::kDontInitialize);
+@@ -221,6 +226,41 @@
+     return NotShared<DOMFloat32Array>(nullptr);
+   }
+ 
++  // 应用幂等音频指纹噪声
++  // 原理：
++  // 1. 量化：将 data[i] 量化到 0.00001 精度（5位小数）
++  // 2. 噪声：基于量化值计算确定性噪声 (±0.000005)
++  // 3. 幂等：因为噪声 < 量化精度的一半，所以 (quantized + noise) 再量化还是 quantized
++  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(switches::kFingerprint)) {
++    // Per-eTLD+1 farbling seed threaded in at buffer creation. 0 => stable
++    // global-fallback seed (never a crash). The --fingerprint gate above is
++    // preserved so noise is only applied when farbling is enabled.
++    std::string fingerprint = base::NumberToString(farble_seed_);
++    if (!fingerprint.empty()) {
++      DOMFloat32Array* array = channels_[channel_index].Get();
++      if (array) {
++        float* data = array->Data();
++        size_t len = array->length();
++
++        std::string seed_str = fingerprint + "audio";
++        uint32_t base_seed = std::hash<std::string>{}(seed_str);
++
++        for (size_t i = 0; i < len; ++i) {
++          // 量化到 0.00001 精度（5 位小数）
++          float quantized = roundf(data[i] * 100000.0f) / 100000.0f;
++
++          // 基于量化值和索引计算确定性噪声
++          uint32_t seed = base_seed ^ std::hash<float>{}(quantized) ^ static_cast<uint32_t>(i);
++          seed = seed * 1664525 + 1013904223;  // LCG
++          float noise = ((static_cast<float>(seed) / 4294967296.0f) - 0.5f) * 0.00001f;  // ±0.000005
++
++          data[i] = quantized + noise;
++        }
++      }
++    }
++  }
++
+   return NotShared<DOMFloat32Array>(channels_[channel_index].Get());
+ }
+ 
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.h
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.h
+@@ -115,6 +115,11 @@
+ 
+   std::unique_ptr<SharedAudioBuffer> CreateSharedAudioBuffer();
+ 
++  // Per-eTLD+1 farbling seed for getChannelData() audio fingerprint noise.
++  // Defaults to 0 (stable global-fallback) when never set. Set by the
++  // AudioBuffer creator that holds an ExecutionContext/origin.
++  void SetFarbleSeed(uint64_t seed) { farble_seed_ = seed; }
++
+  private:
+   bool CreatedSuccessfully(unsigned desired_number_of_channels) const;
+ 
+@@ -122,6 +127,9 @@
+   uint32_t length_;
+ 
+   HeapVector<Member<DOMFloat32Array>> channels_;
++
++  // Per-eTLD+1 farbling seed; 0 => stable global fallback (never a crash).
++  uint64_t farble_seed_ = 0;
+ };
+ 
+ // Shared data that audio threads can hold onto.
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
+@@ -41,7 +41,10 @@
+ #include "third_party/blink/renderer/core/html/media/html_media_element.h"
+ #include "third_party/blink/renderer/core/inspector/console_message.h"
+ #include "third_party/blink/renderer/modules/webaudio/analyser_node.h"
++#include "base/strings/string_number_conversions.h"
++#include "components/ungoogled/farble_seed.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_buffer.h"
++#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_buffer_source_node.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_context.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
+@@ -305,6 +308,14 @@
+ 
+   // Only record the data if the creation succeeded.
+   if (buffer) {
++    // Thread the per-eTLD+1 farbling seed so getChannelData() noise is
++    // per-site stable. Opaque/IP origins yield "" => stable fallback seed
++    // (never a crash).
++    const SecurityOrigin* origin = GetSecurityOrigin();
++    std::string etld1 =
++        origin ? origin->RegistrableDomain().Utf8() : std::string();
++    buffer->SetFarbleSeed(ungoogled::GetFarbleSeed64(etld1));
++
+     base::UmaHistogramSparse("WebAudio.AudioBuffer.NumberOfChannels",
+                              number_of_channels);
+ 
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -25,9 +25,14 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/offline_audio_context.h"
+ 
++#include "base/command_line.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "media/base/audio_glitch_info.h"
++#include "components/ungoogled/ungoogled_switches.h"
++#include "base/strings/string_number_conversions.h"
++#include "components/ungoogled/farble_seed.h"
++#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_offline_audio_context_options.h"
+@@ -173,6 +178,44 @@
+                                    render_quantum_frames, exception_state);
+ }
+ 
++// 生成基于指纹的帧数调整值（1到noise_limit之间）
++uint32_t getNoiseData(uint32_t number_of_frames) {
++    // 获取命令行参数
++    const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++    if (command_line->HasSwitch(switches::kFingerprint)) {
++        std::string fingerprint_str = command_line->GetSwitchValueASCII(switches::kFingerprint);
++        if (!fingerprint_str.empty()) {
++            // 组合指纹字符串、帧数和常量"audio"
++            std::string combined = fingerprint_str + std::to_string(number_of_frames) + "audio";
++            uint32_t hash = std::hash<std::string>{}(combined);
++
++            // 计算1%的number_of_frames
++            uint32_t one_percent = number_of_frames / 100;
++            if (one_percent < 1) one_percent = 1;  // 确保至少为1
++
++            constexpr uint32_t MAX_NOISE = 1000;
++            uint32_t noise_limit = std::min(one_percent, MAX_NOISE);
++            return (hash % noise_limit) + 1;
++        }
++    }
++    return 0;
++}
++
++// 生成基于指纹的采样率噪声（范围 ±0.01）
++float getSampleRateNoise(float sample_rate, const std::string& fingerprint_str) {
++    const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++    if (command_line->HasSwitch(switches::kFingerprint)) {
++        if (!fingerprint_str.empty()) {
++            std::string combined = fingerprint_str + std::to_string(static_cast<int>(sample_rate)) + "samplerate";
++            uint32_t hash = std::hash<std::string>{}(combined);
++            // 生成 ±0.01 范围的噪声
++            float noise = ((static_cast<float>(hash % 10000) / 10000.0f) - 0.5f) * 0.02f;
++            return noise;
++        }
++    }
++    return 0.0f;
++}
++
+ OfflineAudioContext::OfflineAudioContext(LocalDOMWindow* window,
+                                          unsigned number_of_channels,
+                                          uint32_t number_of_frames,
+@@ -182,9 +225,20 @@
+     : BaseAudioContext(window,
+                        ContextType::kOfflineContext,
+                        render_quantum_frames),
++      // total_render_frames_(number_of_frames + getNoiseData(number_of_frames)) {
+       total_render_frames_(number_of_frames) {
++  // 对 sample_rate 添加微小噪声（基于 per-eTLD+1 farbling seed）
++  const SecurityOrigin* origin =
++      window ? window->GetSecurityOrigin() : nullptr;
++  std::string etld1 =
++      origin ? origin->RegistrableDomain().Utf8() : std::string();
++  uint64_t farble_seed = ungoogled::GetFarbleSeed64(etld1);
++  std::string farble_seed_str = base::NumberToString(farble_seed);
++  float adjusted_sample_rate =
++      sample_rate + getSampleRateNoise(sample_rate, farble_seed_str);
++
+   destination_node_ = OfflineAudioDestinationNode::Create(
+-      this, number_of_channels, number_of_frames, sample_rate);
++      this, number_of_channels, total_render_frames_, adjusted_sample_rate);
+   Initialize();
+ }
+ 
+@@ -248,6 +302,17 @@
+   AudioBuffer* render_target = AudioBuffer::CreateUninitialized(
+       number_of_channels, total_render_frames_, sample_rate);
+ 
++  if (render_target) {
++    // Thread the per-eTLD+1 farbling seed onto the rendered buffer so
++    // getChannelData() noise is per-site stable. Opaque/IP origins yield ""
++    // => stable fallback seed (never a crash).
++    const SecurityOrigin* render_origin = GetSecurityOrigin();
++    std::string render_etld1 =
++        render_origin ? render_origin->RegistrableDomain().Utf8()
++                      : std::string();
++    render_target->SetFarbleSeed(ungoogled::GetFarbleSeed64(render_etld1));
++  }
++
+   if (!render_target) {
+     exception_state.ThrowDOMException(
+         DOMExceptionCode::kNotSupportedError,
+--- a/third_party/blink/renderer/modules/webaudio/script_processor_node.cc
++++ b/third_party/blink/renderer/modules/webaudio/script_processor_node.cc
+@@ -36,7 +36,9 @@
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/inspector/console_message.h"
++#include "components/ungoogled/farble_seed.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_buffer.h"
++#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_node_input.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_node_output.h"
+@@ -96,6 +98,15 @@
+                                          uint32_t number_of_input_channels,
+                                          uint32_t number_of_output_channels)
+     : AudioNode(context), ActiveScriptWrappable<ScriptProcessorNode>({}) {
++  // Per-eTLD+1 farbling seed for the JS-exposed input/output AudioBuffers.
++  // Opaque/IP origins yield "" => stable fallback seed (never a crash).
++  {
++    const SecurityOrigin* origin = context.GetSecurityOrigin();
++    std::string etld1 =
++        origin ? origin->RegistrableDomain().Utf8() : std::string();
++    farble_seed_ = ungoogled::GetFarbleSeed64(etld1);
++  }
++
+   // Regardless of the allowed buffer sizes, we still need to process at the
+   // granularity of the AudioNode.
+   if (buffer_size < context.renderQuantumSize()) {
+@@ -116,6 +127,12 @@
+                                   sample_rate)
+             : nullptr;
+ 
++    if (input_buffer) {
++      input_buffer->SetFarbleSeed(farble_seed_);
++    }
++    if (output_buffer) {
++      output_buffer->SetFarbleSeed(farble_seed_);
++    }
+     input_buffers_.push_back(input_buffer);
+     output_buffers_.push_back(output_buffer);
+   }
+@@ -124,6 +141,12 @@
+       number_of_input_channels, buffer_size, sample_rate);
+   external_output_buffer_ = AudioBuffer::Create(
+       number_of_output_channels, buffer_size, sample_rate);
++  if (external_input_buffer_) {
++    external_input_buffer_->SetFarbleSeed(farble_seed_);
++  }
++  if (external_output_buffer_) {
++    external_output_buffer_->SetFarbleSeed(farble_seed_);
++  }
+ 
+   SetHandler(ScriptProcessorHandler::Create(
+       *this, sample_rate, buffer_size, number_of_input_channels,
+@@ -294,6 +317,9 @@
+             backing_input_buffer->numberOfChannels(),
+             backing_input_buffer->length(),
+             backing_input_buffer->sampleRate());
++        if (external_input_buffer_) {
++          external_input_buffer_->SetFarbleSeed(farble_seed_);
++        }
+       }
+ 
+       for (unsigned channel = 0;
+@@ -330,6 +356,9 @@
+             backing_output_buffer->numberOfChannels(),
+             backing_output_buffer->length(),
+             backing_output_buffer->sampleRate());
++        if (external_output_buffer_) {
++          external_output_buffer_->SetFarbleSeed(farble_seed_);
++        }
+       }
+ 
+       for (unsigned channel = 0;
+--- a/third_party/blink/renderer/modules/webaudio/script_processor_node.h
++++ b/third_party/blink/renderer/modules/webaudio/script_processor_node.h
+@@ -100,6 +100,11 @@
+   HeapVector<Member<AudioBuffer>> output_buffers_;
+   Member<AudioBuffer> external_input_buffer_;
+   Member<AudioBuffer> external_output_buffer_;
++
++  // Per-eTLD+1 farbling seed, computed once at construction from the owning
++  // context's origin and applied to every JS-exposed AudioBuffer this node
++  // creates (including buffers re-created on detach). 0 => stable fallback.
++  uint64_t farble_seed_ = 0;
+ };
+ 
+ }  // namespace blink

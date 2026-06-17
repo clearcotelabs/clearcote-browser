@@ -1,0 +1,132 @@
+--- a/third_party/blink/renderer/modules/peerconnection/peer_connection_dependency_factory.cc
++++ b/third_party/blink/renderer/modules/peerconnection/peer_connection_dependency_factory.cc
+@@ -3,6 +3,8 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/modules/peerconnection/peer_connection_dependency_factory.h"
++#include "base/command_line.h"
++#include "third_party/webrtc/p2p/base/port.h"
+ 
+ #include <stddef.h>
+ 
+@@ -1032,6 +1034,17 @@
+   DCHECK(web_frame);
+   EnsureInitialized();
+ 
++  // clearcoat: if --webrtc-ip=<ip> is present, mock the WebRTC server-reflexive
++  // candidate to that IP (the proxy egress IP) for this process.
++  {
++    const base::CommandLine* clearcoat_cmd =
++        base::CommandLine::ForCurrentProcess();
++    if (clearcoat_cmd->HasSwitch("webrtc-ip")) {
++      webrtc::SetForcedWebRtcSrflxIP(
++          clearcoat_cmd->GetSwitchValueASCII("webrtc-ip"));
++    }
++  }
++
+   // Copy the flag from Preference associated with this WebLocalFrame.
+   P2PPortAllocator::Config port_config;
+   uint16_t min_port = 0;
+--- a/third_party/webrtc/p2p/base/port.cc
++++ b/third_party/webrtc/p2p/base/port.cc
+@@ -9,6 +9,9 @@
+  */
+ 
+ #include "p2p/base/port.h"
++#include <optional>
++#include "rtc_base/ip_address.h"
++#include "rtc_base/synchronization/mutex.h"
+ 
+ #include <cstddef>
+ #include <cstdint>
+@@ -57,6 +60,34 @@
+ #include "rtc_base/weak_ptr.h"
+ 
+ namespace webrtc {
++
++// clearcoat: WebRTC IP mock storage (process-global; one proxy per process).
++namespace {
++Mutex& ClearcoatForcedIpMutex() {
++  static Mutex* m = new Mutex();
++  return *m;
++}
++std::optional<IPAddress>& ClearcoatForcedIpStore() {
++  static std::optional<IPAddress>* ip = new std::optional<IPAddress>();
++  return *ip;
++}
++}  // namespace
++
++void SetForcedWebRtcSrflxIP(absl::string_view ip) {
++  IPAddress parsed;
++  if (IPFromString(ip, &parsed)) {
++    MutexLock lock(&ClearcoatForcedIpMutex());
++    ClearcoatForcedIpStore() = parsed;
++  }
++}
++bool HasForcedWebRtcSrflxIP() {
++  MutexLock lock(&ClearcoatForcedIpMutex());
++  return ClearcoatForcedIpStore().has_value();
++}
++IPAddress ForcedWebRtcSrflxIP() {
++  MutexLock lock(&ClearcoatForcedIpMutex());
++  return ClearcoatForcedIpStore().value_or(IPAddress());
++}
+ namespace {
+ 
+ PacketInfoProtocolType ConvertProtocolTypeToPacketInfoProtocolType(
+@@ -223,6 +254,13 @@
+                       bool is_final) {
+   RTC_DCHECK_RUN_ON(thread_);
+ 
++  // clearcoat: when mocking the WebRTC IP to the proxy egress, never expose a
++  // real local host candidate (it would leak the LAN/real IP). Only the srflx
++  // candidate (rewritten in stun_port.cc) is emitted.
++  if (type == IceCandidateType::kHost && HasForcedWebRtcSrflxIP()) {
++    return;
++  }
++
+   // TODO(tommi): Set relay_protocol and optionally provide the base address
+   // to automatically compute the foundation in the ctor? It would be a good
+   // thing for the Candidate class to know the base address and keep it const.
+--- a/third_party/webrtc/p2p/base/port.h
++++ b/third_party/webrtc/p2p/base/port.h
+@@ -40,6 +40,7 @@
+ #include "rtc_base/async_packet_socket.h"
+ #include "rtc_base/callback_list.h"
+ #include "rtc_base/dscp.h"
++#include "rtc_base/ip_address.h"
+ #include "rtc_base/net_helper.h"
+ #include "rtc_base/network.h"
+ #include "rtc_base/network/received_packet.h"
+@@ -51,6 +52,14 @@
+ 
+ namespace webrtc {
+ 
++// clearcoat: WebRTC IP mock. Force the server-reflexive ICE candidate IP to a
++// configured value (the proxy egress IP). Set from the renderer side at port
++// allocator creation; read on the network thread during candidate gathering.
++// No-op until SetForcedWebRtcSrflxIP() is called with a parseable IP.
++RTC_EXPORT void SetForcedWebRtcSrflxIP(absl::string_view ip);
++RTC_EXPORT bool HasForcedWebRtcSrflxIP();
++RTC_EXPORT IPAddress ForcedWebRtcSrflxIP();
++
+ enum class MdnsNameRegistrationStatus {
+   // IP concealment with mDNS is not enabled or the name registration process is
+   // not started yet.
+--- a/third_party/webrtc/p2p/base/stun_port.cc
++++ b/third_party/webrtc/p2p/base/stun_port.cc
+@@ -574,7 +574,13 @@
+     StringBuilder url;
+     url << "stun:" << stun_server_addr.hostname() << ":"
+         << stun_server_addr.port();
+-    AddAddress(stun_reflected_addr, socket_->GetLocalAddress(), related_address,
++    // clearcoat: rewrite the server-reflexive candidate IP to the configured
++    // proxy egress IP so WebRTC reports the same public IP as HTTP traffic.
++    SocketAddress reflected_addr = stun_reflected_addr;
++    if (HasForcedWebRtcSrflxIP()) {
++      reflected_addr.SetIP(ForcedWebRtcSrflxIP());
++    }
++    AddAddress(reflected_addr, socket_->GetLocalAddress(), related_address,
+                UDP_PROTOCOL_NAME, "", "", IceCandidateType::kSrflx,
+                ICE_TYPE_PREFERENCE_SRFLX, 0, url.str(), false);
+   }

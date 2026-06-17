@@ -1,0 +1,257 @@
+--- a/third_party/blink/renderer/core/dom/document.cc
++++ b/third_party/blink/renderer/core/dom/document.cc
+@@ -35,6 +35,8 @@
+ #include <utility>
+ 
+ #include "base/auto_reset.h"
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/containers/adapters.h"
+ #include "base/debug/dump_without_crashing.h"
+ #include "base/i18n/time_formatting.h"
+@@ -48,6 +50,8 @@
+ #include "cc/animation/animation_timeline.h"
+ #include "cc/input/overscroll_behavior.h"
+ #include "cc/input/scroll_snap_data.h"
++#include "components/ungoogled/ungoogled_switches.h"
++#include "components/ungoogled/farble_seed.h"
+ #include "mojo/public/cpp/bindings/lib/wtf_hash_util.h"
+ #include "mojo/public/cpp/bindings/pending_remote.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+@@ -1045,11 +1049,9 @@
+       data_(MakeGarbageCollected<DocumentData>(GetExecutionContext())) {
+   TRACE_EVENT("blink", "Document::Document", perfetto::Flow::FromPointer(this));
+   DCHECK(agent_);
+-  if (RuntimeEnabledFeatures::FingerprintingClientRectsNoiseEnabled()) {
+-    // Precompute -0.0003% to 0.0003% noise factor for get*ClientRect*() fingerprinting
+-    noise_factor_x_ = 1 + (base::RandDouble() - 0.5) * 0.000003;
+-    noise_factor_y_ = 1 + (base::RandDouble() - 0.5) * 0.000003;
+-  }
++  // clientRects farbling: the per-site noise factors are computed lazily on
++  // first access (see GetNoiseFactorX/Y). They cannot be derived here because
++  // the document origin is not yet set at construction time.
+   if (base::FeatureList::IsEnabled(features::kDelayAsyncScriptExecution) &&
+       features::kDelayAsyncScriptExecutionDelayByDefaultParam.Get()) {
+     script_runner_delayer_->Activate();
+@@ -1183,11 +1185,51 @@
+   return Position::BeforeNode(*shadow_host);
+ }
+ 
++void Document::EnsureNoiseFactorsInitialized() {
++  if (noise_factor_initialized_)
++    return;
++  noise_factor_initialized_ = true;
++
++  // Gate on the global --fingerprint switch (preserved from the original
++  // adryfish patch). When absent, the noise factors keep their identity
++  // defaults (1) and clientRects are left unperturbed.
++  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++  if (!command_line->HasSwitch(switches::kFingerprint))
++    return;
++
++  // Derive the per-site (eTLD+1) farbling seed. The origin is available now
++  // because initialization is deferred until first getter access.
++  std::string registrable_domain;
++  if (ExecutionContext* context = GetExecutionContext()) {
++    if (const SecurityOrigin* origin = context->GetSecurityOrigin())
++      registrable_domain = origin->RegistrableDomain().Utf8();
++  }
++  uint64_t seed = ungoogled::GetFarbleSeed64(registrable_domain);
++  std::string seed_str = base::NumberToString(seed);
++
++  // Use different combined strings for x and y.
++  std::string combined_x = seed_str + "offset_x";
++  std::string combined_y = seed_str + "offset_y";
++
++  uint32_t hash_val_x = std::hash<std::string>{}(combined_x);
++  uint32_t hash_val_y = std::hash<std::string>{}(combined_y);
++
++  // Map to [-0.5, 0.5] range.
++  double norm_x = (hash_val_x & 0xFFFFFFFF) / 4294967295.0 - 0.5;
++  double norm_y = (hash_val_y & 0xFFFFFFFF) / 4294967295.0 - 0.5;
++
++  // Compute a very small offset: +/- 0.001 pixels.
++  noise_factor_x_ = norm_x * 0.002;
++  noise_factor_y_ = norm_y * 0.002;
++}
++
+ double Document::GetNoiseFactorX() {
++  EnsureNoiseFactorsInitialized();
+   return noise_factor_x_;
+ }
+ 
+ double Document::GetNoiseFactorY() {
++  EnsureNoiseFactorsInitialized();
+   return noise_factor_y_;
+ }
+ 
+--- a/third_party/blink/renderer/core/dom/document.h
++++ b/third_party/blink/renderer/core/dom/document.h
+@@ -577,6 +577,9 @@
+   // Values for get*ClientRect fingerprint deception
+   double GetNoiseFactorX();
+   double GetNoiseFactorY();
++  // Lazily computes the per-site (eTLD+1) clientRects noise factors on first
++  // access; safe to call repeatedly (guarded by noise_factor_initialized_).
++  void EnsureNoiseFactorsInitialized();
+ 
+   V8VisibilityState visibilityState() const;
+   String visibilityStateAsString() const;
+@@ -2897,6 +2900,7 @@
+ 
+   double noise_factor_x_ = 1;
+   double noise_factor_y_ = 1;
++  bool noise_factor_initialized_ = false;
+ 
+   // The script runner is used to run scripts of the following scheduling types:
+   // - ScriptSchedulingType::kAsync
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -32,9 +32,11 @@
+ #include <memory>
+ #include <utility>
+ 
++#include "base/command_line.h"
+ #include "base/containers/adapters.h"
+ #include "base/feature_list.h"
+ #include "cc/input/snap_selection_strategy.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/mojom/scroll/scroll_enums.mojom-blink.h"
+ #include "third_party/blink/public/mojom/scroll/scroll_into_view_params.mojom-blink.h"
+@@ -3428,6 +3430,28 @@
+   }
+ }
+ 
++bool Element::ShouldSkipClientRectsOffset() const {
++  if (!GetLayoutObject() || !GetLayoutObject()->Style()) {
++    return false;
++  }
++
++  const ComputedStyle& style = *GetLayoutObject()->Style();
++
++  // Only skip the offset for absolutely positioned elements.
++  if (style.GetPosition() != EPosition::kAbsolute) {
++    return false;
++  }
++
++  // Both top and left must be deterministic (Zero or Fixed) values.
++  const Length& top = style.Top();
++  const Length& left = style.Left();
++
++  bool top_is_deterministic = top.IsZero() || top.IsFixed();
++  bool left_is_deterministic = left.IsZero() || left.IsFixed();
++
++  return (top_is_deterministic && left_is_deterministic);
++}
++
+ DOMRectList* Element::getClientRects() {
+   Vector<gfx::RectF> rects = GetClientRectsNoAdjustment();
+   if (rects.empty()) {
+@@ -3455,9 +3479,13 @@
+     return {};
+   }
+   Vector<gfx::RectF> result;
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  bool fingerprint_offset = command_line->HasSwitch(switches::kFingerprint) &&
++                            !ShouldSkipClientRectsOffset();
+   for (auto& quad : quads) {
+-    if (RuntimeEnabledFeatures::FingerprintingClientRectsNoiseEnabled()) {
+-      quad.Scale(GetDocument().GetNoiseFactorX(), GetDocument().GetNoiseFactorY());
++    if (fingerprint_offset) {
++      quad.Offset(GetDocument().GetNoiseFactorX(), GetDocument().GetNoiseFactorY());
+     }
+     result.emplace_back(quad.BoundingBox());
+   }
+@@ -3488,8 +3516,11 @@
+   DCHECK(element_layout_object);
+   GetDocument().AdjustRectForScrollAndAbsoluteZoom(result,
+                                                    *element_layout_object);
+-  if (RuntimeEnabledFeatures::FingerprintingClientRectsNoiseEnabled()) {
+-    result.Scale(GetDocument().GetNoiseFactorX(), GetDocument().GetNoiseFactorY());
++  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(switches::kFingerprint)) {
++    if (!ShouldSkipClientRectsOffset()) {
++      result.Offset(GetDocument().GetNoiseFactorX(), GetDocument().GetNoiseFactorY());
++    }
+   }
+   return result;
+ }
+@@ -7744,6 +7775,11 @@
+   return root && root->GetMode() == ShadowRootMode::kOpen ? root : nullptr;
+ }
+ 
++ShadowRoot* Element::FakeShadowRoot() const {
++  ShadowRoot* root = GetShadowRoot();
++  return root;
++}
++
+ ShadowRoot* Element::ClosedShadowRoot() const {
+   ShadowRoot* root = GetShadowRoot();
+   if (!root) {
+--- a/third_party/blink/renderer/core/dom/element.h
++++ b/third_party/blink/renderer/core/dom/element.h
+@@ -619,6 +619,8 @@
+   // TODO(crbug.com/41417572): This method should replace the above method.
+   gfx::Rect VisibleBoundsRespectingClipsInLocalRoot() const;
+ 
++  bool ShouldSkipClientRectsOffset() const;
++
+   DOMRectList* getClientRects();
+   // Returns a list of clients Rects in zoomed pixel units.
+   Vector<gfx::RectF> GetClientRectsNoAdjustment();
+@@ -1074,6 +1076,7 @@
+     return HasShadowRoot() ? GetShadowRootInternal() : nullptr;
+   }
+   ShadowRoot* OpenShadowRoot() const;
++  ShadowRoot* FakeShadowRoot() const;
+   ShadowRoot* ClosedShadowRoot() const;
+   ShadowRoot* AuthorShadowRoot() const;
+   ShadowRoot* UserAgentShadowRoot() const;
+--- a/third_party/blink/renderer/core/dom/element.idl
++++ b/third_party/blink/renderer/core/dom/element.idl
+@@ -78,6 +78,7 @@
+ 
+     [RaisesException, MeasureAs=ElementAttachShadow] ShadowRoot attachShadow(ShadowRootInit shadowRootInitDict);
+     [PerWorldBindings, ImplementedAs=OpenShadowRoot] readonly attribute ShadowRoot? shadowRoot;
++    [PerWorldBindings, ImplementedAs=FakeShadowRoot] readonly attribute ShadowRoot? fakeShadowRoot;
+ 
+     [RaisesException] Element? closest(DOMString selectors);
+     [RaisesException] boolean matches(DOMString selectors);
+--- a/third_party/blink/renderer/core/dom/range.cc
++++ b/third_party/blink/renderer/core/dom/range.cc
+@@ -23,6 +23,8 @@
+  * Boston, MA 02110-1301, USA.
+  */
+ 
++#include "base/command_line.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "third_party/blink/renderer/core/dom/range.h"
+ 
+ #include "third_party/blink/renderer/core/display_lock/display_lock_document_state.h"
+@@ -1662,9 +1664,10 @@
+   Vector<gfx::QuadF> quads;
+   GetBorderAndTextQuads(quads);
+ 
+-  if (RuntimeEnabledFeatures::FingerprintingClientRectsNoiseEnabled()) {
++  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(switches::kFingerprint)) {
+     for (gfx::QuadF& quad : quads) {
+-      quad.Scale(owner_document_->GetNoiseFactorX(), owner_document_->GetNoiseFactorY());
++      quad.Offset(owner_document_->GetNoiseFactorX(), owner_document_->GetNoiseFactorY());
+     }
+   }
+ 
+@@ -1676,8 +1679,9 @@
+   // impact is understood.
+   SyncScrollAttemptHeuristic::DidAccessScrollOffset();
+   auto rect = BoundingRect();
+-  if (RuntimeEnabledFeatures::FingerprintingClientRectsNoiseEnabled()) {
+-    rect.Scale(owner_document_->GetNoiseFactorX(), owner_document_->GetNoiseFactorY());
++  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
++  if (command_line->HasSwitch(switches::kFingerprint)) {
++    rect.Offset(owner_document_->GetNoiseFactorX(), owner_document_->GetNoiseFactorY());
+   }
+   return DOMRect::FromRectF(rect);
+ }

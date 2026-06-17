@@ -1,0 +1,39 @@
+--- a/ui/gfx/geometry/quad_f.cc
++++ b/ui/gfx/geometry/quad_f.cc
+@@ -137,6 +137,22 @@
+   p4_.Scale(x_scale, y_scale);
+ }
+ 
++void QuadF::Offset(float x_offset, float y_offset) {
++  // 计算轴对齐边界框的宽高
++  const auto [min, max] = Extents();
++  float width = max.x() - min.x();
++  float height = max.y() - min.y();
++
++  if (WithinEpsilon(width, 0.0f) || WithinEpsilon(height, 0.0f)) {
++    return;
++  }
++
++  p1_.Offset(x_offset, y_offset);
++  p2_.Offset(x_offset, y_offset);
++  p3_.Offset(x_offset, y_offset);
++  p4_.Offset(x_offset, y_offset);
++}
++
+ void QuadF::operator+=(const Vector2dF& rhs) {
+   p1_ += rhs;
+   p2_ += rhs;
+--- a/ui/gfx/geometry/quad_f.h
++++ b/ui/gfx/geometry/quad_f.h
+@@ -106,6 +106,11 @@
+   // Scale each point in the quad by the scale factors along each axis.
+   void Scale(float x_scale, float y_scale);
+ 
++  // Offset each point in the quad by the offset values.
++  void Offset(float offset) { Offset(offset, offset); }
++  // Offset each point in the quad by the offset values along each axis.
++  void Offset(float x_offset, float y_offset);
++
+   // Tests whether any part of the rectangle intersects with this quad.
+   // This only works for convex quads.
+   // This intersection is edge-inclusive and will return true even if the

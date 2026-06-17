@@ -1,0 +1,15 @@
+000-fingerprint-switches.patch
+001-farble-seed-core.patch
+010-user-agent-and-webdriver.patch
+020-audio.patch
+030-hardware-concurrency.patch
+040-fonts.patch
+050-shadow-dom.patch
+060-canvas.patch
+070-webgl-gpu.patch
+080-client-rects.patch
+090-timezone.patch
+100-webrtc-leak.patch
+110-runtime-enable.patch
+120-headless.patch
+900-windows-build-fixes.patch

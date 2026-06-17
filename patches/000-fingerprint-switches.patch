@@ -1,0 +1,81 @@
+--- a/components/ungoogled/ungoogled_switches.cc
++++ b/components/ungoogled/ungoogled_switches.cc
+@@ -15,4 +15,37 @@
+ // Enable fingerprinting deception for Canvas image data
+ const char kFingerprintingCanvasImageDataNoise[] = "fingerprinting-canvas-image-data-noise";
+ 
++// Specify the fingerprint seed
++const char kFingerprint[] = "fingerprint";
++
++// Specify the browser brand
++const char kFingerprintBrand[] = "fingerprint-brand";
++
++// Specify the browser version
++const char kFingerprintBrandVersion[] = "fingerprint-brand-version";
++
++// Specify the GPU VENDOR
++const char kFingerprintGpuVendor[] = "fingerprint-gpu-vendor";
++
++// Specify the GPU RENDERER
++const char kFingerprintGpuRenderer[] = "fingerprint-gpu-renderer";
++
++// Specify the number of CPU cores
++const char kFingerprintHardwareConcurrency[] = "fingerprint-hardware-concurrency";
++
++// Specify the operating system type
++const char kFingerprintPlatform[] = "fingerprint-platform";
++
++// Specify the operating system version
++const char kFingerprintPlatformVersion[] = "fingerprint-platform-version";
++
++// Specify the location
++const char kFingerprintLocation[] = "fingerprint-location";
++
++// Specify the timezone
++const char kFingerprintTimezone[] = "timezone";
++
++// Disable GPU fingerprint spoofing
++const char kDisableGpuFingerprint[] = "disable-gpu-fingerprint";
++
+ }  // namespace switches
+--- a/components/ungoogled/ungoogled_switches.h
++++ b/components/ungoogled/ungoogled_switches.h
+@@ -15,6 +15,17 @@
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasMeasureTextNoise[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasImageDataNoise[];
+ 
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprint[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintBrand[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintBrandVersion[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintGpuVendor[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintGpuRenderer[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintHardwareConcurrency[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintPlatform[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintPlatformVersion[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintLocation[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintTimezone[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableGpuFingerprint[];
+ }
+ 
+ #endif  // THIRD_PARTY_UNGOOGLED_FINGERPRINTING_SWITCHES_H_
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -3868,6 +3868,18 @@
+       switches::kFingerprintingClientRectsNoise,
+       switches::kFingerprintingCanvasMeasureTextNoise,
+       switches::kFingerprintingCanvasImageDataNoise,
++      switches::kFingerprint,
++      switches::kFingerprintBrand,
++      switches::kFingerprintBrandVersion,
++      switches::kFingerprintGpuVendor,
++      switches::kFingerprintGpuRenderer,
++      switches::kFingerprintHardwareConcurrency,
++      "webrtc-ip",  // clearcoat: forward WebRTC IP mock switch to renderer
++      switches::kFingerprintPlatform,
++      switches::kFingerprintPlatformVersion,
++      switches::kFingerprintLocation,
++      switches::kFingerprintTimezone,
++      switches::kDisableGpuFingerprint,
+       switches::kForceDeviceScaleFactor,
+       switches::kForceDisplayColorProfile,
+       switches::kForceHighContrast,
