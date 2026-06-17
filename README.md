@@ -168,6 +168,18 @@ page.goto("https://example.com")
 browser.close()
 ```
 
+**Match a proxy automatically.** `geoip` resolves the proxy's exit IP — looked up in the offline [geoip-all-in-one](https://github.com/daijro/geoip-all-in-one) database — and sets a coherent **timezone + `navigator.languages` + `Accept-Language`** for that region:
+
+```javascript
+const browser = await launch({
+  fingerprint: "user-7423",
+  proxy: { server: "http://host:8080", username: "u", password: "p" },
+  geoip: true,                       // timezone + language auto-matched to the proxy's region
+});
+```
+
+(Python: `launch(fingerprint="user-7423", proxy={...}, geoip=True)`. Or set `acceptLanguage` / `accept_language` explicitly.) Full option list: [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python).
+
 Already using Playwright? It's a one-line import change — the returned object is a standard Playwright `Browser`, and the verified Windows binary is fetched + cached for you.
 
 ## Build it yourself
