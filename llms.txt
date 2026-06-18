@@ -9,6 +9,7 @@ Pre-release, building in the open. Latest signed browser build: v0.1.0-pre.6 (Ch
 - Open by default (no proprietary blobs; readable patches only)
 - Engine-level controls, not injected JavaScript
 - Coherent, per-site-consistent identity (farbling-style model)
+- Engine-level coherence pass: secondary surfaces (WebGL limits/unmasked GPU, getBattery, navigator.connection, keyboard layout, AudioContext, screen details) stay consistent with the persona and a real Chrome-on-Windows desktop
 - Reproducible and verifiable (pinned upstream, checksums, planned attestation)
 - Lawful, responsible use
 

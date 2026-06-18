@@ -38,6 +38,8 @@ Clearcote is an open-source [Chromium](https://www.chromium.org/) distribution w
 1. **A coherent, private browser identity.** A stock browser quietly exposes a unique, trackable fingerprint — canvas, WebGL, audio, fonts, locale, hardware, and more. Clearcote moves control of those signals **into the engine itself**, so a session presents one consistent, plausible identity instead of an accidental, hyper-unique one.
 2. **Radical verifiability.** Clearcote is built on [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium) (Google integration and telemetry removed) and a transparent stack of source patches. There is **no magic binary** — you can read every change, rebuild it yourself, and check that what you run matches what's published.
 
+The identity is also **coherent across secondary surfaces**, not just the obvious ones: WebGL `getParameter` limits report the canonical ANGLE/D3D11 values a real Windows GPU returns and the unmasked renderer/vendor stay **session-constant** (one GPU on every site, never a per-origin tell); `navigator.getBattery()`, `navigator.connection`, and `navigator.keyboard.getLayoutMap()` report a coherent desktop; AudioContext, `getScreenDetails()`, and CSS `(pointer: fine)` / `(hover: hover)` match a real Chrome-on-Windows machine. Validated on real Windows: **BrowserScan bot-detection "Normal"** and **CreepJS 0% headless / 0% stealth**.
+
 It's designed as a **drop-in for standard browser automation** ([Playwright](https://playwright.dev/) / [Puppeteer](https://pptr.dev/)): same APIs you already use, just pointed at the Clearcote binary.
 
 ## Why it exists
@@ -80,7 +82,7 @@ Nothing here is hidden: the de-Googling comes from ungoogled-chromium, the ident
 Every build is audited against [CreepJS](https://abrahamjuliot.github.io/creepjs/) with [`scripts/creepjs_audit.py`](scripts/creepjs_audit.py): it reads the signals the browser actually exposes, cross-checks them for internal consistency (e.g. **User-Agent vs. UA Client Hints**), confirms the WebRTC mock leaks no LAN address, and checks that CreepJS does not flag it as headless/automated. Latest build:
 
 <!-- CREEPJS_RESULTS:START -->
-**Build `149.0.7827.114` · audited 2026-06-17 · seed `demo` · platform `windows`**
+**Build `149.0.7827.114` · audited 2026-06-18 · seed `demo` · platform `windows`**
 
 | Signal | Value | Verdict |
 |---|---|---|
@@ -88,17 +90,18 @@ Every build is audited against [CreepJS](https://abrahamjuliot.github.io/creepjs
 | User-Agent | `Chrome/149` | ✅ |
 | UA-CH Chromium version | 149.0.7827.66 | ✅ matches UA |
 | UA-CH platform | Windows 19.0.0 | ✅ |
-| WebGL vendor / renderer | Google Inc. (NVIDIA) / ANGLE (NVIDIA, NVIDIA GeForce RTX 5080 (0x00002C02) Direct3D… | ✅ spoofed |
+| WebGL vendor / renderer | Google Inc. (Intel) / ANGLE (Intel, Intel(R) UHD Graphics 770 (0xA780) Direct3D11 … | ✅ spoofed |
 | Canvas 2D | `1ca291c12d74236f` (deterministic per seed) | ✅ noised |
-| hardwareConcurrency | 12 | ✅ |
+| hardwareConcurrency | 8 | ✅ |
 | deviceMemory | 8 | ✅ |
 | Timezone | America/New_York | ✅ |
 | WebRTC host (LAN) candidate | none | ✅ no LAN leak |
-| WebRTC srflx (public) | none gathered (STUN unreachable on this network) | — |
+| WebRTC srflx (public) | 203.0.113.45 | ✅ = mocked IP |
 | CreepJS headless (hard) | 0% | ✅ |
 | CreepJS stealth-detect | 0% | ✅ |
 
-_UA ↔ UA-CH version consistency: ✅ (UA major `149`, UA-CH major `149`). WebRTC srflx is mocked to the proxy/egress IP; real host candidates are suppressed. With a real proxy the public-IP row shows the proxy's egress IP._
+_UA ↔ UA-CH version consistency: ✅ (UA major `149`, UA-CH major `149`). WebRTC srflx mocked to the proxy/egress IP; real host candidates suppressed._
+_Regenerate with `py -3 creepjs_audit.py --readme clearcote-browser/README.md` on each release._
 <!-- CREEPJS_RESULTS:END -->
 
 > Regenerated on each release with `py -3 scripts/creepjs_audit.py --readme README.md`. Values are the **spoofed** per-seed identity (synthetic, not real machine data); a demo timezone and documentation WebRTC IP are used so no real PII appears here.
@@ -178,7 +181,20 @@ const browser = await launch({
 });
 ```
 
-(Python: `launch(fingerprint="user-7423", proxy={...}, geoip=True)`. Or set `acceptLanguage` / `accept_language` explicitly.) Full option list: [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python).
+(Python: `launch(fingerprint="user-7423", proxy={...}, geoip=True)`. Or set `acceptLanguage` / `accept_language` explicitly.)
+
+**Human-like input + a coherent WebRTC IP.** Set `humanize: true` to move the pointer along real, trusted bezier paths (engine-level `humanizedClick` — `navigator.webdriver` stays `false`), add `showCursor: true` to render the cursor for debugging, and `webrtcIp` to fabricate a coherent srflx candidate (no STUN leak; with `geoip` it tracks the proxy's exit IP automatically):
+
+```javascript
+const browser = await launch({
+  fingerprint: "user-7423",
+  humanize: true,                    // trusted bezier mouse movement; webdriver stays false
+  showCursor: true,                  // render the cursor (debugging)
+  webrtcIp: "203.0.113.7",           // fabricated srflx; no STUN/LAN leak
+});
+```
+
+(Python: `launch(fingerprint="user-7423", humanize=True, show_cursor=True, webrtc_ip="203.0.113.7")`.) Full option list: [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python).
 
 Already using Playwright? It's a one-line import change — the returned object is a standard Playwright `Browser`, and the verified Windows binary is fetched + cached for you.
 
