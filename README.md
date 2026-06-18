@@ -23,8 +23,8 @@ No opaque binaries. No phone-home. Every change is a readable patch, every build
 </div>
 
 > [!NOTE]
-> **Status: latest build is live — [v0.1.0-pre.5](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.5) (Chromium 149, Windows x64).**
-> A signed, checksummed pre-release build is available now on the [Releases page](https://github.com/clearcotelabs/clearcote-browser/releases) — download it, [verify it](docs/VERIFY.md), and run it. It's an early, experimental build (engine identity controls compiled in, **per-site per-eTLD+1 farbling**, passes a 6/6 CreepJS smoke check on real Windows but not yet fully stealth-validated); see the [Roadmap](ROADMAP.md) for what's next.
+> **Status: latest build is live — [v0.1.0-pre.6](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.6) (Chromium 149, Windows x64).**
+> A signed, checksummed pre-release build is available now on the [Releases page](https://github.com/clearcotelabs/clearcote-browser/releases) — download it, [verify it](docs/VERIFY.md), and run it. This build adds a **fingerprint-coherence pass** (coherent WebGL limits + session-constant GPU; `navigator` battery/connection/keyboard; audio & screen metadata; CSS pointer/hover) and **passes BrowserScan bot-detection ("Normal") + CreepJS (0% headless / 0% stealth)** on real Windows — still an experimental pre-release; see the [Roadmap](ROADMAP.md) for what's next.
 
 > [!IMPORTANT]
 > **Windows x64 only for now.** That's the single platform we're focused on today — the build, the binary, and the [npm/PyPI SDKs](#quickstart) are all Windows-first. macOS and Linux are on the [Roadmap](ROADMAP.md) but **not yet available**.
