@@ -35,8 +35,8 @@ interface GeoipOption {
   geoip?: boolean;
 }
 
-/** Options for {@link launch}: Playwright launch options + Clearcote fingerprint options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, GeoipOption, HumanizeOptions {}
+/** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + download options. */
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, GeoipOption, HumanizeOptions, DownloadOptions {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
@@ -44,7 +44,8 @@ export interface PersistentContextOptions
     BrowserContextOptions,
     FingerprintOptions,
     GeoipOption,
-    HumanizeOptions {}
+    HumanizeOptions,
+    DownloadOptions {}
 
 /** Fill unset timezone/acceptLanguage/location/webrtcIp on `fp` from the proxy's exit-IP geo. */
 async function applyGeoip(fp: FingerprintOptions, proxy: unknown): Promise<void> {
@@ -77,7 +78,7 @@ export async function executablePath(
 ): Promise<string> {
   if (options.executablePath) return options.executablePath;
   if (process.env.CLEARCOTE_BINARY) return process.env.CLEARCOTE_BINARY;
-  return ensureBinary({ cacheDir: options.cacheDir, quiet: options.quiet });
+  return ensureBinary({ cacheDir: options.cacheDir, quiet: options.quiet, autoUpdate: options.autoUpdate });
 }
 
 /** Pre-fetch + verify the Clearcote binary without launching it. Returns the chrome.exe path. */
@@ -87,10 +88,10 @@ export async function download(options: DownloadOptions = {}): Promise<string> {
 
 /** Launch Clearcote and return a standard Playwright {@link Browser}. */
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
-  const { executablePath: exeOption, args, geoip, humanize, showCursor, ...rest } = options;
+  const { executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = options;
   const { fingerprint, rest: pwOptions } = splitFingerprintOptions(rest);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
-  const exe = await executablePath({ executablePath: exeOption });
+  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
   const browser = await chromium.launch({
     ...(pwOptions as PlaywrightLaunchOptions),
@@ -109,10 +110,10 @@ export async function launchPersistentContext(
   userDataDir: string,
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
-  const { executablePath: exeOption, args, geoip, humanize, showCursor, ...rest } = options;
+  const { executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = options;
   const { fingerprint, rest: pwOptions } = splitFingerprintOptions(rest);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
-  const exe = await executablePath({ executablePath: exeOption });
+  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
   const context = await chromium.launchPersistentContext(userDataDir, {
     ...(pwOptions as PlaywrightLaunchOptions & BrowserContextOptions),

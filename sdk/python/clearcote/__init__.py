@@ -32,7 +32,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -59,26 +59,30 @@ def _playwright():
     return _pw
 
 
-def _resolve_binary(executable_path=None, cache_dir=None, quiet=False):
+def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_update=None):
     if executable_path:
         return executable_path
     env = os.environ.get("CLEARCOTE_BINARY")
     if env:
         return env
-    return ensure_binary(cache_dir=cache_dir, quiet=quiet)
+    return ensure_binary(cache_dir=cache_dir, quiet=quiet, auto_update=auto_update)
 
 
-def executable_path(executable_path=None, cache_dir=None, quiet=False):
+def executable_path(executable_path=None, cache_dir=None, quiet=False, auto_update=None):
     """Resolve the Clearcote chrome.exe path, downloading + verifying it if needed.
 
     Order: explicit ``executable_path`` > ``CLEARCOTE_BINARY`` env > auto-download.
+    Pass ``auto_update=True`` (or set ``CLEARCOTE_AUTO_UPDATE=1``) to fetch the latest release.
     """
-    return _resolve_binary(executable_path, cache_dir, quiet)
+    return _resolve_binary(executable_path, cache_dir, quiet, auto_update)
 
 
-def download(cache_dir=None, quiet=False):
-    """Pre-fetch + verify the Clearcote binary without launching. Returns the chrome.exe path."""
-    return ensure_binary(cache_dir=cache_dir, quiet=quiet)
+def download(cache_dir=None, quiet=False, auto_update=None):
+    """Pre-fetch + verify the Clearcote binary without launching. Returns the chrome.exe path.
+
+    Pass ``auto_update=True`` (or set ``CLEARCOTE_AUTO_UPDATE=1``) to fetch the latest release.
+    """
+    return ensure_binary(cache_dir=cache_dir, quiet=quiet, auto_update=auto_update)
 
 
 def _guard(exe):
@@ -99,6 +103,7 @@ def _prepare(kwargs):
     extra_args = kwargs.pop("args", None)
     cache_dir = kwargs.pop("cache_dir", None)
     quiet = kwargs.pop("quiet", False)
+    auto_update = kwargs.pop("auto_update", None)
     if geoip:
         # resolve the proxy's exit-IP geo and fill any UNSET timezone/accept_language/location/webrtc_ip
         geo = resolve_geo(kwargs.get("proxy"), quiet=quiet)
@@ -110,7 +115,7 @@ def _prepare(kwargs):
             # fabricates the srflx candidate at this IP; no real STUN leaves the host).
             if geo.get("ip") and fp.get("webrtc_ip") is None:
                 fp["webrtc_ip"] = geo["ip"]
-    exe = _resolve_binary(exe_path, cache_dir, quiet)
+    exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update)
     _guard(exe)
     args = fingerprint_args(fp) + list(extra_args or [])
     return exe, args, kwargs, humanize, show_cursor

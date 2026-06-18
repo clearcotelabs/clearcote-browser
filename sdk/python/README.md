@@ -131,6 +131,32 @@ A SHA-256 mismatch is a hard error — the SDK refuses to run an unverified bina
 independently confirm the published checksums and GPG signatures on the
 [release page](https://github.com/clearcotelabs/clearcote-browser/releases).
 
+### Stay on the latest build (`auto_update`)
+
+By default the SDK installs the **exact browser build pinned into this package** — reproducible,
+and the baked-in SHA-256 is the trust anchor. To follow new browser releases **without upgrading
+the package every time**, opt in:
+
+```python
+browser = launch(fingerprint="seed-123", auto_update=True)
+```
+
+or set the environment variable globally:
+
+```bash
+CLEARCOTE_AUTO_UPDATE=1
+```
+
+With `auto_update`, the SDK resolves the **newest GitHub release**, downloads its zip, and verifies
+it against that release's published `SHA256SUMS.txt`. When a **`gpg`** binary is available it
+additionally imports the release's public key, confirms its fingerprint equals the pinned
+`CA96F185 F96A693A EDB3AC1F CB00D851 B7A86B0F`, and verifies the signed checksum — so an
+auto-resolved build is cryptographically authenticated, not just downloaded. If GitHub is
+unreachable it falls back to the pinned release; if the latest release *is* the pinned one, the
+audited baked-in hashes are used. Each build is cached per tag, so this only downloads when a new
+version actually ships. (For locked-down/reproducible deployments, leave `auto_update` off and bump
+the package deliberately.)
+
 ## License
 
 BSD-3-Clause. See [LICENSE](../../LICENSE).

@@ -33,3 +33,12 @@ export const RELEASE: ReleaseInfo = {
   size: 242548712,
   os: "win32",
 };
+
+/** GitHub repo (owner/name) the releases come from — used by the opt-in auto-update resolver. */
+export const REPO = "clearcotelabs/clearcote-browser";
+
+/** Clearcote's release-signing key fingerprint, pinned out-of-band. This NEVER changes between
+ * releases, so it is the durable trust anchor for `autoUpdate`: when a `gpg` binary is available,
+ * an auto-resolved (un-pinned) release's `SHA256SUMS.txt.asc` is verified against THIS fingerprint
+ * before the binary is trusted. (Pinned mode trusts the baked-in sha256 instead.) */
+export const SIGNING_KEY_FPR = "CA96F185F96A693AEDB3AC1FCB00D851B7A86B0F";
