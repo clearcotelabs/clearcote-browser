@@ -32,6 +32,7 @@ Engine-level control over the signals a browser exposes — designed to be *cons
 - [x] Per-profile, deterministic identity seed (stable across sessions when you want it; fresh when you don't)
 - [ ] Engine-level controls for canvas, WebGL, audio, fonts, locale/timezone, navigator & hardware reporting, and WebRTC *(all done except WebRTC proxy-IP reporting, which is in progress)*
 - [x] **Per-site coherence** (farbling-style): the same site sees a stable identity; different sites don't correlate
+- [x] **Cross-surface coherence pass** *(v0.1.0-pre.6)*: coherent WebGL `getParameter` limits + session-constant GPU; `navigator` battery/connection/keyboard; audio & screen metadata; CSS pointer/hover; OS-coherent `URL` — validated on BrowserScan ("Normal") + CreepJS (0% headless / 0% stealth)
 - [ ] Sensible, documented defaults — privacy-respecting out of the box
 
 ## Phase 3 — Automation SDK *(SDKs shipped)*

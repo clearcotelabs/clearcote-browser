@@ -3,7 +3,7 @@
 > An open-source, reproducible Chromium build with engine-level privacy and identity controls. De-Googled base (ungoogled-chromium) plus a transparent, readable patch set. Designed as a drop-in for Playwright/Puppeteer automation. **Windows x64 only for now** — that is the single platform currently focused on (the Windows binary is cross-compiled on Linux); macOS and Linux targets are on the roadmap, not yet available. 100% open — every change is a patch, every build is reproducible and checksummed.
 
 ## Status
-Pre-release, building in the open. First tagged build, SDKs, and signed artifacts are planned — see /ROADMAP.md.
+Pre-release, building in the open. Latest signed browser build: v0.1.0-pre.6 (Chromium 149, Windows x64) on GitHub Releases. Python + Node SDKs published as `clearcote` (PyPI + npm). See /ROADMAP.md.
 
 ## Principles
 - Open by default (no proprietary blobs; readable patches only)
@@ -25,6 +25,7 @@ Pre-release, building in the open. First tagged build, SDKs, and signed artifact
 - Chromium (BSD-3)
 - ungoogled-chromium (BSD-3) — de-Googled base
 - fingerprint-chromium by adryfish (BSD-3) — engine-level fingerprint controls
+- chromiumfish by arman-bd — coherence-surface reference (battery, navigator.connection, keyboard, display, WebGL limits)
 - Brave — per-site deterministic "farbling" model
 - Camoufox — sibling open anti-detect browser (Firefox), design reference
 
