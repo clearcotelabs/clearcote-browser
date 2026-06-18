@@ -285,6 +285,16 @@ Amend notes after publishing: `& $gh release edit $tag --repo clearcotelabs/clea
 & $git -C $repo config user.email pim97@users.noreply.github.com
 ```
 
+### 11.0 Regenerate + commit the patch set (MANDATORY — the repo must build this exact binary)
+
+Every release MUST refresh `patches/` so a third party can rebuild the published binary from source. The committed set **drifts** — the build tree gets edited between releases without re-capturing — so **always regenerate; never assume `patches/` is current.** On the build host:
+
+```bash
+ssh "$BOX" 'cd ~/clearcoat && bash gen_patches.sh'   # diffs tree vs pristine baseline, groups, self-validates
+```
+
+`gen_patches.sh` reconstructs a pristine `149 → prune → ungoogled → windows-overlay` baseline, diffs the build tree against it (fetched toolchain **and** `*.cfbak*`/`*.bak`/`*.orig`/`*.rej` excluded), groups each changed file into exactly one concern-patch, writes `series`, then **self-validates that every patch re-applies with ZERO rejects** and leak-scans. **Acceptance:** `VALIDATION fail=0`, nothing left in `950-misc-REVIEW` (add a `group_for` mapping for any new file and re-run), and `leak scan clean`. Then copy `out_patches_full/*.patch` + `series` over `patches/`, update `patches/README.md`'s series table (new rows + revised descriptions), and commit them **in the same push** as the README banner below. Because each source file lives in exactly one patch, zero-reject per-patch equals a clean sequential apply — so applying the series to a fresh baseline reproduces this build's source tree.
+
 1. **Update the EXISTING README status banner in place** (README already carries a `> [!NOTE]` banner) — change the tag and release link to this release; do not add a second banner.
 2. Commit + push (one line, no backticks, `$tag` in the message, no `Co-Authored-By: Claude`):
 
@@ -376,6 +386,7 @@ Drop the `-pre.N` suffix and `--prerelease` only when **all** hold:
 [ ] commit identity is pim97 <pim97@users.noreply.github.com> (no personal email)
 [ ] main at intended commit (git rev-parse origin/main)
 [ ] gh release create (@splat args) --prerelease
+[ ] patches/ REGENERATED (gen_patches.sh: VALIDATION fail=0, no 950-misc-REVIEW, leak-clean) + patches/README.md series table updated + committed
 [ ] README banner updated in place + pushed; repo description/topics set
 [ ] 6 assets + prerelease=true confirmed via gh api
 [ ] clean-room user verify (fingerprint check, gpg --verify, sha256sum -c, inner exe hash)
