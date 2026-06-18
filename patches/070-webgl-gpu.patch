@@ -294,6 +294,109 @@
 +}  // namespace blink
 +
 +#endif  // THIRD_PARTY_BLINK_RENDERER_MODULES_WEBGL_GPU_INFO_H_
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+@@ -37,6 +37,8 @@
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ 
++#include "components/ungoogled/persona_profile.h"
++
+ // Populates all parameters for texImage2D, including width, height, depth (set
+ // to 1), and border. Many callers will need to zero-out border in order to
+ // preserve existing behavior (see https://crbug.com/1313604).
+@@ -4797,21 +4799,31 @@
+     case GL_FRAGMENT_SHADER_DERIVATIVE_HINT:
+       return GetUnsignedIntParameter(script_state, pname);
+     case GL_MAX_3D_TEXTURE_SIZE:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_3d_texture_size));
+     case GL_MAX_ARRAY_TEXTURE_LAYERS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_array_texture_layers));
+     case GC3D_MAX_CLIENT_WAIT_TIMEOUT_WEBGL:
+       return WebGLAny(script_state, kMaxClientWaitTimeout);
+     case GL_MAX_COLOR_ATTACHMENTS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_color_attachments));
+     case GL_MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS:
+       return GetInt64Parameter(script_state, pname);
+     case GL_MAX_COMBINED_UNIFORM_BLOCKS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_combined_uniform_blocks));
+     case GL_MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS:
+       return GetInt64Parameter(script_state, pname);
+     case GL_MAX_DRAW_BUFFERS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_draw_buffers));
+     case GL_MAX_ELEMENT_INDEX:
+       return GetInt64Parameter(script_state, pname);
+     case GL_MAX_ELEMENTS_INDICES:
+@@ -4821,17 +4833,25 @@
+     case GL_MAX_FRAGMENT_INPUT_COMPONENTS:
+       return GetIntParameter(script_state, pname);
+     case GL_MAX_FRAGMENT_UNIFORM_BLOCKS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_fragment_uniform_blocks));
+     case GL_MAX_FRAGMENT_UNIFORM_COMPONENTS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_fragment_uniform_components));
+     case GL_MAX_PROGRAM_TEXEL_OFFSET:
+       return GetIntParameter(script_state, pname);
+     case GL_MAX_SAMPLES:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_samples));
+     case GL_MAX_SERVER_WAIT_TIMEOUT:
+       return GetInt64Parameter(script_state, pname);
+     case GL_MAX_TEXTURE_LOD_BIAS:
+-      return GetFloatParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit (float), not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLfloat>(ungoogled::CurrentPersona().webgl_max_texture_lod_bias));
+     case GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS:
+       return GetIntParameter(script_state, pname);
+     case GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS:
+@@ -4841,15 +4861,21 @@
+     case GL_MAX_UNIFORM_BLOCK_SIZE:
+       return GetInt64Parameter(script_state, pname);
+     case GL_MAX_UNIFORM_BUFFER_BINDINGS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_uniform_buffer_bindings));
+     case GL_MAX_VARYING_COMPONENTS:
+       return GetIntParameter(script_state, pname);
+     case GL_MAX_VERTEX_OUTPUT_COMPONENTS:
+       return GetIntParameter(script_state, pname);
+     case GL_MAX_VERTEX_UNIFORM_BLOCKS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_vertex_uniform_blocks));
+     case GL_MAX_VERTEX_UNIFORM_COMPONENTS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_vertex_uniform_components));
+     case GL_MIN_PROGRAM_TEXEL_OFFSET:
+       return GetIntParameter(script_state, pname);
+     case GL_PACK_ROW_LENGTH:
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 @@ -30,6 +30,7 @@
@@ -304,16 +407,17 @@
  #include "base/compiler_specific.h"
  #include "base/feature_list.h"
  #include "base/memory/scoped_refptr.h"
-@@ -41,6 +42,8 @@
+@@ -41,6 +42,9 @@
  #include "base/task/single_thread_task_runner.h"
  #include "base/trace_event/trace_event.h"
  #include "build/build_config.h"
 +#include "components/ungoogled/farble_seed.h"
 +#include "components/ungoogled/ungoogled_switches.h"
++#include "components/ungoogled/persona_profile.h"
  #include "components/viz/common/gpu/raster_context_provider.h"
  #include "components/viz/common/resources/shared_image_format_utils.h"
  #include "device/vr/buildflags/buildflags.h"
-@@ -100,6 +103,7 @@
+@@ -100,6 +104,7 @@
  #include "third_party/blink/renderer/modules/webgl/ext_shader_texture_lod.h"
  #include "third_party/blink/renderer/modules/webgl/ext_texture_filter_anisotropic.h"
  #include "third_party/blink/renderer/modules/webgl/gl_string_query.h"
@@ -321,7 +425,7 @@
  #include "third_party/blink/renderer/modules/webgl/oes_element_index_uint.h"
  #include "third_party/blink/renderer/modules/webgl/oes_standard_derivatives.h"
  #include "third_party/blink/renderer/modules/webgl/oes_texture_float.h"
-@@ -154,6 +158,7 @@
+@@ -154,6 +159,7 @@
  #include "third_party/blink/renderer/platform/heap/member.h"
  #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
  #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
@@ -329,10 +433,72 @@
  #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
  #include "third_party/blink/renderer/platform/wtf/functional.h"
  #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
-@@ -4101,6 +4106,17 @@
+@@ -3971,25 +3977,43 @@
+     case GL_LINE_WIDTH:
+       return GetFloatParameter(script_state, pname);
+     case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_combined_texture_image_units));
+     case GL_MAX_CUBE_MAP_TEXTURE_SIZE:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_cube_map_texture_size));
+     case GL_MAX_FRAGMENT_UNIFORM_VECTORS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_fragment_uniform_vectors));
+     case GL_MAX_RENDERBUFFER_SIZE:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_renderbuffer_size));
+     case GL_MAX_TEXTURE_IMAGE_UNITS:
+       return GetIntParameter(script_state, pname);
+     case GL_MAX_TEXTURE_SIZE:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_texture_size));
+     case GL_MAX_VARYING_VECTORS:
+-      return GetIntParameter(script_state, pname);
++      // clearcote persona: report coherent GPU limit, not the real (SwiftShader) cap.
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_varying_vectors));
+     case GL_MAX_VERTEX_ATTRIBS:
+       return GetIntParameter(script_state, pname);
+     case GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS:
+       return GetIntParameter(script_state, pname);
+-    case GL_MAX_VERTEX_UNIFORM_VECTORS:
+-      return GetIntParameter(script_state, pname);
++    case GL_MAX_VERTEX_UNIFORM_VECTORS: {
++      // clearcote persona: coherent GPU limit. ANGLE's skipVSConstantRegisterZero
++      // workaround makes NVIDIA drivers report one fewer (4095), so match per-renderer.
++      int vuv = ungoogled::CurrentPersona().webgl_max_vertex_uniform_vectors;
++      if (ungoogled::CurrentPersona().webgl_vendor.find("NVIDIA") != std::string::npos)
++        vuv -= 1;
++      return WebGLAny(script_state, static_cast<GLint>(vuv));
++    }
+     case GL_MAX_VIEWPORT_DIMS:
+       return GetWebGLIntArrayParameter(script_state, pname);
+     case GL_PACK_ALIGNMENT:
+@@ -4101,6 +4125,27 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        // clearcote: session-constant persona GPU so the SAME coherent GPU is
++        // reported on EVERY origin (a real user has one GPU) and it matches the
++        // WebGL limits. The per-origin farble path below otherwise hands a
++        // different GPU model to each site -- a glaring spoofing tell.
++        {
++          const std::string& persona_renderer =
++              ungoogled::CurrentPersona().webgl_renderer;
++          if (!persona_renderer.empty())
++            return WebGLAny(script_state, String(persona_renderer));
++        }
 +        const SecurityOrigin* gpu_origin =
 +            GetExecutionContext() ? GetExecutionContext()->GetSecurityOrigin()
 +                                  : nullptr;
@@ -347,10 +513,17 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLRendererParam.Get()));
          return WebGLAny(script_state,
-@@ -4112,6 +4128,10 @@
+@@ -4112,6 +4157,17 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
++        // clearcote: session-constant persona GPU vendor (see renderer case).
++        {
++          const std::string& persona_vendor =
++              ungoogled::CurrentPersona().webgl_vendor;
++          if (!persona_vendor.empty())
++            return WebGLAny(script_state, String(persona_vendor));
++        }
 +        std::string fingerprint_vendor = GetGLVendorStringForFingerprint();
 +        if (!fingerprint_vendor.empty()) {
 +          return WebGLAny(script_state, String(fingerprint_vendor));
@@ -358,7 +531,7 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLVendorParam.Get()));
          return WebGLAny(script_state,
-@@ -5260,6 +5280,42 @@
+@@ -5260,6 +5316,42 @@
        return;
      }
      ContextGL()->ReadPixels(x, y, width, height, format, type, data);

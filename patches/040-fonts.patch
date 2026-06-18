@@ -1,6 +1,6 @@
 --- a/third_party/blink/renderer/platform/fonts/font_cache.cc
 +++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
-@@ -32,14 +32,17 @@
+@@ -32,14 +32,18 @@
  #include <limits>
  #include <memory>
  
@@ -10,6 +10,7 @@
  #include "base/notreached.h"
  #include "base/strings/escape.h"
 +#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
  #include "base/system/sys_info.h"
  #include "base/timer/elapsed_timer.h"
  #include "base/trace_event/process_memory_dump.h"
@@ -18,7 +19,7 @@
  #include "build/build_config.h"
  #include "skia/ext/font_utils.h"
  #include "third_party/blink/public/common/features.h"
-@@ -123,6 +126,120 @@
+@@ -123,6 +127,131 @@
  }
  #endif
  
@@ -135,11 +136,22 @@
 +  return basic_fonts.count(font_family) > 0;
 +}
 +
++// clearcote: case-insensitive membership test against a canonical font list (CSS font
++// family names are case-insensitive).
++static bool FontInListCaseInsensitive(const std::vector<std::string>& list,
++                                      const std::string& family) {
++  for (const std::string& f : list) {
++    if (base::EqualsCaseInsensitiveASCII(f, family))
++      return true;
++  }
++  return false;
++}
++
 +
  const FontPlatformData* FontCache::GetFontPlatformData(
      const FontDescription& font_description,
      const FontFaceCreationParams& creation_params,
-@@ -141,6 +258,72 @@
+@@ -141,6 +270,75 @@
    }
  #endif
  
@@ -200,9 +212,12 @@
 +        // 5%概率显示，继续默认流程
 +      }
 +    } else {
-+      // 系统相同，随机隐藏2%的字体以生成指纹
-+      float probability = static_cast<float>(hash) / static_cast<float>(std::numeric_limits<uint32_t>::max());
-+      if (probability < 0.02) {
++      // clearcote: enforce the canonical platform font set deterministically -- every
++      // persona reports the SAME fonts regardless of what is physically installed,
++      // instead of leaking the host's real font list (and instead of probabilistic
++      // hiding, which is itself a tell). Canonical fonts ship with the OS so they
++      // resolve normally; anything else is reported absent.
++      if (!FontInListCaseInsensitive(platform_fonts, requested_family)) {
 +        return nullptr;
 +      }
 +    }

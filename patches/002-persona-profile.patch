@@ -214,7 +214,7 @@
 +}  // namespace ungoogled
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.h
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,96 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -281,6 +281,20 @@
 +  float audio_sample_rate = 48000.0f;
 +  double audio_base_latency = 0.01;
 +  double audio_output_latency = 0.015;
++
++  // clearcote: WebGL2 getParameter limits (canonical ANGLE/D3D11, Win desktop).
++  int webgl_max_3d_texture_size = 2048;
++  int webgl_max_array_texture_layers = 2048;
++  int webgl_max_draw_buffers = 8;
++  int webgl_max_color_attachments = 8;
++  int webgl_max_samples = 8;
++  int webgl_max_vertex_uniform_blocks = 14;
++  int webgl_max_fragment_uniform_blocks = 14;
++  int webgl_max_combined_uniform_blocks = 24;
++  int webgl_max_uniform_buffer_bindings = 24;
++  float webgl_max_texture_lod_bias = 2.0f;
++  int webgl_max_vertex_uniform_components = 16384;
++  int webgl_max_fragment_uniform_components = 4096;
 +};
 +
 +// Derives a coherent Windows persona from a seed. Same seed => same persona.

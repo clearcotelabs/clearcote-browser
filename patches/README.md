@@ -31,12 +31,12 @@ crash the renderer.
 | `001-farble-seed-core` | The per-eTLD+1 seed engine (`farble_seed.{cc,h}`), the `fingerprint_data.h` tables, and its `BUILD.gn`. Every surface below reads from this. |
 | `002-persona-profile` | Coherent per-seed persona engine (`components/ungoogled/persona_profile.{cc,h}`) — derives an internally consistent identity so surfaces agree rather than contradict. |
 | `010-user-agent-and-webdriver` | UA / UA-CH (`navigator.userAgent`, `Sec-CH-UA*`), `navigator.platform` spoofing, and hiding `navigator.webdriver` / the automation + Headless tells. |
-| `020-audio` | AudioContext farbling (`AudioBuffer`, analyser, offline render) keyed to the per-site seed. |
+| `020-audio` | AudioContext farbling (`AudioBuffer`, analyser, offline render) keyed to the per-site seed, plus coherent `sampleRate`/`baseLatency`/`outputLatency` metadata from the persona. |
 | `030-hardware-concurrency` | `navigator.hardwareConcurrency` and `deviceMemory` (seed-derived, with the `--fingerprint-hardware-concurrency` override). |
 | `040-fonts` | Font enumeration via the engine allowlist (`font_cache.cc`). |
 | `050-shadow-dom` | Closed shadow-root semantics + related DOM (`document`, `element`, `range`). |
 | `060-canvas` | Canvas 2D farbling — `toDataURL`/`getImageData`/`toBlob`/`measureText` and the encoder/bitmap paths. |
-| `070-webgl-gpu` | WebGL `UNMASKED_VENDOR/RENDERER`, GPU info, and `readPixels` farbling (`gpu_fingerprint.{cc,h}`). |
+| `070-webgl-gpu` | WebGL `UNMASKED_VENDOR/RENDERER` (**session-constant** — the persona GPU, identical on every origin), the full `getParameter` limit table (WebGL1 + WebGL2 coherent ANGLE/D3D11 values, incl. the NVIDIA-specific `MAX_VERTEX_UNIFORM_VECTORS`), GPU info, and `readPixels` farbling (`gpu_fingerprint.{cc,h}`). |
 | `075-webgpu-coherence` | WebGPU `GPUAdapterInfo` (vendor/architecture/device/description) forced coherent with the WebGL persona GPU (`webgpu/gpu_adapter.cc`) so WebGPU can't contradict WebGL. |
 | `080-client-rects` | Sub-pixel jitter for client-rect geometry (`quad_f`). |
 | `090-timezone` | Native timezone pin (`timezone_controller.cc`, `--timezone`). |
@@ -44,8 +44,11 @@ crash the renderer.
 | `110-runtime-enable` | Suppresses the `Runtime.enable` CDP automation tell (`v8-runtime-agent-impl`). |
 | `120-headless` | Removes a headless-mode tell (`headless_browser_impl`). |
 | `130-humanized-input` | Human-like CDP input + cursor overlay (`devtools/protocol/input_handler`, `browser_handler`, `humanized_cursor_overlay`) so dispatched input isn't trivially bot-flagged. |
-| `140-screen` | `screen.*` object changes (`core/frame/screen.cc`). |
+| `140-screen` | Coherent display geometry from the persona: `screen.*` (`screen.cc`), multi-screen `getScreenDetails()` (`screen_detailed.cc`), and `window.outer*`/`screenX/Y`/`devicePixelRatio` (`local_dom_window.cc`) — never the real display. |
+| `141-media-queries` | CSS `@media` coherence — `(pointer: fine)` / `(hover: hover)` (and the `any-` forms) report a real desktop-with-mouse instead of a touchless/headless device (`media_values*`). |
 | `145-storage-quota` | `navigator.storage.estimate()` quota coherence (`quota/storage_manager.cc`). |
+| `150-device-sensors` | Coherent device APIs: `navigator.getBattery()` (desktop on AC — charging, 100%, no discharge), `navigator.connection` (residential 4g profile), and `navigator.keyboard.getLayoutMap()` (US-QWERTY, Writing-System keys only). |
+| `160-coherence-misc` | OS-coherence details: `new URL("C:/").protocol` → `"file:"` (`dom_url.cc`, the Windows behaviour) and exposing `navigator.share`/`canShare` on the Windows-persona build (`chrome_content_renderer_client.cc`). |
 | `900-windows-build-fixes` | Cross-build mechanics for the Windows target: the `rc.py` resource-compiler wrapper, the `.rc` branding conditionals, a missing UIA `CLSID`, and the `compiler_builtins` fix. Not fingerprint behavior — needed to link the Windows binary on Linux. |
 
 ## Re-generating / verifying

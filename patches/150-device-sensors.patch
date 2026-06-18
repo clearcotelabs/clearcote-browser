@@ -1,0 +1,300 @@
+--- a/third_party/blink/renderer/modules/battery/battery_manager.cc
++++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "third_party/blink/renderer/modules/battery/battery_manager.h"
+ 
++#include <limits>
++
+ #include "third_party/blink/public/mojom/frame/lifecycle.mojom-blink.h"
+ #include "third_party/blink/renderer/core/dom/dom_exception.h"
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+@@ -79,20 +81,28 @@
+   return battery_property_->Promise(script_state->World());
+ }
+ 
++// clearcote: BatteryManager getters pinned to the canonical "Windows 11
++// desktop on AC power, no battery" values regardless of the host's real
++// device state. Without this, navigator.getBattery() leaks the host's
++// actual battery (e.g. a laptop on battery: level<1.0, finite
++// dischargingTime) while the persona claims a Win11 desktop -- a direct
++// cross-surface contradiction and a fingerprinting tell. These are the
++// exact values real Chrome reports on a battery-less desktop. Fixed
++// constants (not seed-derived): every no-battery desktop reports the same.
+ bool BatteryManager::charging() {
+-  return battery_status_.Charging();
++  return true;
+ }
+ 
+ double BatteryManager::chargingTime() {
+-  return battery_status_.charging_time().InSecondsF();
++  return 0.0;
+ }
+ 
+ double BatteryManager::dischargingTime() {
+-  return battery_status_.discharging_time().InSecondsF();
++  return std::numeric_limits<double>::infinity();
+ }
+ 
+ double BatteryManager::level() {
+-  return battery_status_.Level();
++  return 1.0;
+ }
+ 
+ void BatteryManager::DidUpdateData() {
+--- a/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
++++ b/third_party/blink/renderer/modules/keyboard/keyboard_layout.cc
+@@ -24,17 +24,10 @@
+ constexpr char kKeyboardMapFrameDetachedErrorMsg[] =
+     "Current frame is detached.";
+ 
+-constexpr char kFeaturePolicyBlocked[] =
+-    "getLayoutMap() must be called from a top-level browsing context or "
+-    "allowed by the permission policy.";
+-
+-constexpr char kKeyboardMapRequestFailedErrorMsg[] =
+-    "getLayoutMap() request could not be completed.";
+-
+ }
+ 
+ KeyboardLayout::KeyboardLayout(ExecutionContext* context)
+-    : ExecutionContextClient(context), service_(context) {}
++    : ExecutionContextClient(context) {}
+ 
+ ScriptPromise<KeyboardLayoutMap> KeyboardLayout::GetKeyboardLayoutMap(
+     ScriptState* script_state,
+@@ -47,71 +40,47 @@
+     return EmptyPromise();
+   }
+ 
+-  if (!EnsureServiceConnected()) {
+-    exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
+-                                      kKeyboardMapRequestFailedErrorMsg);
+-    return EmptyPromise();
+-  }
+-
+-  if (!layout_map_property_) {
+-    layout_map_property_ = MakeGarbageCollected<LayoutMapProperty>(
+-        ExecutionContext::From(script_state));
+-  }
+-
+-  auto promise = layout_map_property_->Promise(script_state->World());
+-
+-  if (!is_request_pending_) {
+-    is_request_pending_ = true;
+-    service_->GetKeyboardLayoutMap(
+-        BindOnce(&KeyboardLayout::GotKeyboardLayoutMap, WrapPersistent(this)));
+-  }
+-  return promise;
++  // clearcote: return a CANONICAL US-QWERTY layout map regardless of the
++  // host OS / installed physical keyboard. The real per-OS map (Mac §, Win
++  // \\, German ß, French ², etc.) is a strong host-OS/locale fingerprint
++  // that contradicts our modal US-English Windows persona -- and on the
++  // cross-compiled build the platform service would return a Linux/X11 map,
++  // a direct build-host leak. Skip the IPC to the platform keyboard service
++  // entirely; resolve immediately with our fixed US-QWERTY map.
++  HashMap<String, String> canonical_layout = {
++      // Letter keys (KeyA..KeyZ)
++      {"KeyA", "a"}, {"KeyB", "b"}, {"KeyC", "c"}, {"KeyD", "d"},
++      {"KeyE", "e"}, {"KeyF", "f"}, {"KeyG", "g"}, {"KeyH", "h"},
++      {"KeyI", "i"}, {"KeyJ", "j"}, {"KeyK", "k"}, {"KeyL", "l"},
++      {"KeyM", "m"}, {"KeyN", "n"}, {"KeyO", "o"}, {"KeyP", "p"},
++      {"KeyQ", "q"}, {"KeyR", "r"}, {"KeyS", "s"}, {"KeyT", "t"},
++      {"KeyU", "u"}, {"KeyV", "v"}, {"KeyW", "w"}, {"KeyX", "x"},
++      {"KeyY", "y"}, {"KeyZ", "z"},
++      // Digit keys
++      {"Digit0", "0"}, {"Digit1", "1"}, {"Digit2", "2"}, {"Digit3", "3"},
++      {"Digit4", "4"}, {"Digit5", "5"}, {"Digit6", "6"}, {"Digit7", "7"},
++      {"Digit8", "8"}, {"Digit9", "9"},
++      // Common US punctuation
++      {"Backquote", "`"}, {"Minus", "-"}, {"Equal", "="},
++      {"BracketLeft", "["}, {"BracketRight", "]"}, {"Backslash", "\\"},
++      {"Semicolon", ";"}, {"Quote", "'"},
++      {"Comma", ","}, {"Period", "."}, {"Slash", "/"},
++      // (clearcote: NO Intl*/Numpad*/Space. getLayoutMap() enumerates only
++      // Writing-System keys; a real US-ANSI Chrome map is exactly the keys
++      // above. Numpad/Space/Intl entries would be an instant tell.)
++  };
++
++  auto* property = MakeGarbageCollected<LayoutMapProperty>(
++      ExecutionContext::From(script_state));
++  property->Resolve(MakeGarbageCollected<KeyboardLayoutMap>(canonical_layout));
++  return property->Promise(script_state->World());
+ }
+ 
+ bool KeyboardLayout::IsLocalFrameAttached() {
+   return DomWindow();
+ }
+ 
+-bool KeyboardLayout::EnsureServiceConnected() {
+-  if (!service_.is_bound()) {
+-    if (!DomWindow()) {
+-      return false;
+-    }
+-    DomWindow()->GetBrowserInterfaceBroker().GetInterface(
+-        service_.BindNewPipeAndPassReceiver(
+-            DomWindow()->GetTaskRunner(TaskType::kMiscPlatformAPI)));
+-    DCHECK(service_.is_bound());
+-  }
+-  return true;
+-}
+-
+-void KeyboardLayout::GotKeyboardLayoutMap(
+-    mojom::blink::GetKeyboardLayoutMapResultPtr result) {
+-  DCHECK(layout_map_property_);
+-  DCHECK(is_request_pending_);
+-  is_request_pending_ = false;
+-
+-  switch (result->status) {
+-    case mojom::blink::GetKeyboardLayoutMapStatus::kSuccess:
+-      layout_map_property_->Resolve(
+-          MakeGarbageCollected<KeyboardLayoutMap>(result->layout_map));
+-      break;
+-    case mojom::blink::GetKeyboardLayoutMapStatus::kFail:
+-      layout_map_property_->Reject(MakeGarbageCollected<DOMException>(
+-          DOMExceptionCode::kInvalidStateError,
+-          kKeyboardMapRequestFailedErrorMsg));
+-      break;
+-    case mojom::blink::GetKeyboardLayoutMapStatus::kDenied:
+-      layout_map_property_->Reject(MakeGarbageCollected<DOMException>(
+-          DOMExceptionCode::kSecurityError, kFeaturePolicyBlocked));
+-      break;
+-  }
+-  layout_map_property_ = nullptr;
+-}
+-
+ void KeyboardLayout::Trace(Visitor* visitor) const {
+-  visitor->Trace(layout_map_property_);
+-  visitor->Trace(service_);
+   ExecutionContextClient::Trace(visitor);
+ }
+ 
+--- a/third_party/blink/renderer/modules/keyboard/keyboard_layout.h
++++ b/third_party/blink/renderer/modules/keyboard/keyboard_layout.h
+@@ -37,18 +37,8 @@
+   // Returns true if the local frame is attached to the renderer.
+   bool IsLocalFrameAttached();
+ 
+-  // Returns true if |service_| is initialized and ready to be called.
+-  bool EnsureServiceConnected();
+-
+-  void GotKeyboardLayoutMap(mojom::blink::GetKeyboardLayoutMapResultPtr);
+-
+   using LayoutMapProperty =
+       ScriptPromiseProperty<KeyboardLayoutMap, DOMException>;
+-  Member<LayoutMapProperty> layout_map_property_;
+-
+-  bool is_request_pending_ = false;
+-
+-  HeapMojoRemote<mojom::blink::KeyboardLockService> service_;
+ };
+ 
+ }  // namespace blink
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -51,23 +51,6 @@
+   NOTREACHED();
+ }
+ 
+-V8EffectiveConnectionType::Enum EffectiveConnectionTypeToEnum(
+-    WebEffectiveConnectionType type) {
+-  switch (type) {
+-    case WebEffectiveConnectionType::kTypeSlow2G:
+-      return V8EffectiveConnectionType::Enum::kSlow2G;
+-    case WebEffectiveConnectionType::kType2G:
+-      return V8EffectiveConnectionType::Enum::k2G;
+-    case WebEffectiveConnectionType::kType3G:
+-      return V8EffectiveConnectionType::Enum::k3G;
+-    case WebEffectiveConnectionType::kTypeUnknown:
+-    case WebEffectiveConnectionType::kTypeOffline:
+-    case WebEffectiveConnectionType::kType4G:
+-      return V8EffectiveConnectionType::Enum::k4G;
+-  }
+-  NOTREACHED();
+-}
+-
+ String GetConsoleLogStringForWebHoldback() {
+   return "Network quality values are overridden using a holdback experiment, "
+          "and so may be inaccurate";
+@@ -111,63 +94,33 @@
+ }
+ 
+ V8EffectiveConnectionType NetworkInformation::effectiveType() {
+-  MaybeShowWebHoldbackConsoleMsg();
+-  std::optional<WebEffectiveConnectionType> override_ect =
+-      GetNetworkStateNotifier().GetWebHoldbackEffectiveType();
+-  if (override_ect) {
+-    return V8EffectiveConnectionType(
+-        EffectiveConnectionTypeToEnum(override_ect.value()));
+-  }
+-
+-  // effective_type_ is only updated when listening for events, so ask
+-  // networkStateNotifier if not listening (crbug.com/379841).
+-  if (!IsObserving()) {
+-    return V8EffectiveConnectionType(EffectiveConnectionTypeToEnum(
+-        GetNetworkStateNotifier().EffectiveType()));
+-  }
+-
+-  // If observing, return m_type which changes when the event fires, per spec.
+-  return V8EffectiveConnectionType(
+-      EffectiveConnectionTypeToEnum(effective_type_));
++  // clearcote: report a coherent residential-desktop effective connection
++  // type instead of the build/run host's real (datacenter) link, which would
++  // contradict the Windows desktop persona. "4g" is what the modal desktop
++  // reports. We intentionally bypass NetworkStateNotifier here.
++  return V8EffectiveConnectionType(V8EffectiveConnectionType::Enum::k4G);
+ }
+ 
+ uint32_t NetworkInformation::rtt() {
+-  MaybeShowWebHoldbackConsoleMsg();
+-  std::optional<base::TimeDelta> override_rtt =
+-      GetNetworkStateNotifier().GetWebHoldbackHttpRtt();
+-  if (override_rtt) {
+-    return GetNetworkStateNotifier().RoundRtt(Host(), override_rtt.value());
+-  }
+-
+-  if (!IsObserving()) {
+-    return GetNetworkStateNotifier().RoundRtt(
+-        Host(), GetNetworkStateNotifier().HttpRtt());
+-  }
+-
+-  return http_rtt_msec_;
++  // clearcote: fixed residential-desktop RTT. Always a multiple of 50ms in
++  // real Chrome (RoundRtt granularity); 50 is the modal value and avoids the
++  // ~0ms datacenter tell. Bypasses the host-derived NetworkStateNotifier.
++  return 50u;
+ }
+ 
+ double NetworkInformation::downlink() {
+-  MaybeShowWebHoldbackConsoleMsg();
+-  std::optional<double> override_downlink_mbps =
+-      GetNetworkStateNotifier().GetWebHoldbackDownlinkThroughputMbps();
+-  if (override_downlink_mbps) {
+-    return GetNetworkStateNotifier().RoundMbps(Host(),
+-                                               override_downlink_mbps.value());
+-  }
+-
+-  if (!IsObserving()) {
+-    return GetNetworkStateNotifier().RoundMbps(
+-        Host(), GetNetworkStateNotifier().DownlinkThroughputMbps());
+-  }
+-
+-  return downlink_mbps_;
++  // clearcote: fixed residential-desktop downlink in Mbps. Real Chrome caps
++  // downlink at 10.0 Mbps (RoundMbps kMaxDownlinkKbps), so any broadband link
++  // saturates this value -- it is the single most common reported number and
++  // maximally non-distinguishing. Bypasses the host-derived notifier.
++  return 10.0;
+ }
+ 
+ bool NetworkInformation::saveData() const {
+-  bool save_data =
+-      IsObserving() ? save_data_ : GetNetworkStateNotifier().SaveDataEnabled();
+-
++  // clearcote: Data Saver is off for the desktop persona, and we never want
++  // the host's setting to leak. Report false (modal desktop). Still run the
++  // devtools probe override so emulation keeps working in DevTools.
++  bool save_data = false;
+   probe::ApplyDataSaverOverride(probe::ToCoreProbeSink(GetExecutionContext()),
+                                 save_data);
+   return save_data;

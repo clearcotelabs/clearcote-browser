@@ -108,6 +108,60 @@
  };
  
  // Shared data that audio threads can hold onto.
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+@@ -36,6 +36,7 @@
+ #include "third_party/blink/renderer/core/html/media/html_media_element.h"
+ #include "third_party/blink/renderer/core/inspector/console_message.h"
+ #include "third_party/blink/renderer/core/page/page.h"
++#include "components/ungoogled/persona_profile.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/timing/dom_window_performance.h"
+ #include "third_party/blink/renderer/core/timing/window_performance.h"
+@@ -425,7 +426,11 @@
+       WebAudioLatencyHint::AudioContextLatencyCategory::kLastValue);
+ 
+   // This value can be `nullopt` when there's no user-provided options.
+-  std::optional<float> sample_rate;
++  // Coherence: when the page does not request an explicit rate, default to
++  // the persona's Windows WASAPI sample rate so the Linux build host's audio
++  // backend rate cannot leak. An explicitly requested rate is still honoured,
++  // matching real Chrome behaviour.
++  std::optional<float> sample_rate = ungoogled::CurrentPersona().audio_sample_rate;
+   if (context_options->hasSampleRate()) {
+     sample_rate = context_options->sampleRate();
+   }
+@@ -1144,17 +1149,26 @@
+   DCHECK_CALLED_ON_VALID_SEQUENCE(main_thread_sequence_checker_);
+   DCHECK(destination());
+ 
+-  return base_latency_;
++  // Coherence: real base_latency_ is derived from the host audio backend
++  // (frames-per-buffer / rate) and would expose the Linux build host. Report
++  // the persona's Windows WASAPI baseLatency instead.
++  return ungoogled::CurrentPersona().audio_base_latency;
+ }
+ 
+ double AudioContext::outputLatency() const {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(main_thread_sequence_checker_);
+   DCHECK(destination());
+ 
+-  DeferredTaskHandler::GraphAutoLocker locker(this);
+-
++  // Coherence: hardware_output_latency comes from the host audio service and
++  // would expose the Linux build host. Substitute the persona's Windows WASAPI
++  // outputLatency, but STILL pass it through the same permission-dependent
++  // quantizer real Chrome uses (8ms with no mic permission, 1ms when granted)
++  // so the reported value always lands on the grid genuine Chrome can produce.
++  // Returning the raw persona value would be off the 8ms grid in the common
++  // no-permission case (0.015 %% 0.008 != 0) and is itself a detectable tell.
+   double factor = GetOutputLatencyQuantizingFactor();
+-  return std::round(output_position_.hardware_output_latency / factor) * factor;
++  return std::round(ungoogled::CurrentPersona().audio_output_latency / factor) *
++         factor;
+ }
+ 
+ AudioPlaybackStats* AudioContext::playbackStats() {
 --- a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
 +++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
 @@ -41,7 +41,10 @@

@@ -1,3 +1,83 @@
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -31,6 +31,8 @@
+ #include <utility>
+ 
+ #include "base/command_line.h"
++#include "components/ungoogled/persona_profile.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/trace_event/trace_id_helper.h"
+@@ -1571,10 +1573,25 @@
+   return true;
+ }
+ 
++namespace {
++// clearcote: window-level screen geometry follows the coherent session persona when
++// --fingerprint is set, so window.outer*/screenX/Y/devicePixelRatio never leak the real display.
++bool PersonaWindowActive() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  return cmd && cmd->HasSwitch(::switches::kFingerprint);
++}
++}  // namespace
++
+ int LocalDOMWindow::outerHeight() const {
+   if (!GetFrame())
+     return 0;
+ 
++  if (PersonaWindowActive()) {
++    int ah = ungoogled::CurrentPersona().avail_screen_height;
++    int oh = innerHeight() + 88;  // realistic Chrome tab+url chrome height
++    return oh < ah ? oh : ah;
++  }
++
+   LocalFrame* frame = GetFrame();
+ 
+   // FencedFrames should return innerHeight to prevent passing
+@@ -1600,6 +1617,12 @@
+   if (!GetFrame())
+     return 0;
+ 
++  if (PersonaWindowActive()) {
++    int aw = ungoogled::CurrentPersona().avail_screen_width;
++    int iw = innerWidth();
++    return iw < aw ? iw : aw;
++  }
++
+   LocalFrame* frame = GetFrame();
+ 
+   // FencedFrames should return innerWidth to prevent passing
+@@ -1673,6 +1696,9 @@
+   if (!frame)
+     return 0;
+ 
++  if (PersonaWindowActive())
++    return 0;
++
+   Page* page = frame->GetPage();
+   if (!page)
+     return 0;
+@@ -1691,6 +1717,9 @@
+   if (!frame)
+     return 0;
+ 
++  if (PersonaWindowActive())
++    return 0;
++
+   Page* page = frame->GetPage();
+   if (!page)
+     return 0;
+@@ -1803,6 +1832,9 @@
+   if (!GetFrame())
+     return 0.0;
+ 
++  if (PersonaWindowActive())
++    return ungoogled::CurrentPersona().device_pixel_ratio;
++
+   return GetFrame()->DevicePixelRatio();
+ }
+ 
 --- a/third_party/blink/renderer/core/frame/screen.cc
 +++ b/third_party/blink/renderer/core/frame/screen.cc
 @@ -28,6 +28,10 @@
@@ -95,3 +175,88 @@
    auto* context = GetExecutionContext();
    if (!context->IsFeatureEnabled(
            network::mojom::PermissionsPolicyFeature::kWindowManagement)) {
+--- a/third_party/blink/renderer/modules/screen_details/screen_detailed.cc
++++ b/third_party/blink/renderer/modules/screen_details/screen_detailed.cc
+@@ -6,6 +6,10 @@
+ 
+ #include <cmath>
+ 
++#include "base/command_line.h"
++#include "components/ungoogled/persona_profile.h"
++#include "components/ungoogled/ungoogled_switches.h"
++
+ #include "base/numerics/safe_conversions.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+@@ -19,6 +23,16 @@
+ 
+ namespace blink {
+ 
++namespace {
++// clearcote: when --fingerprint is set, ScreenDetailed reports the coherent
++// single-monitor Windows persona instead of the host's real display geometry.
++// Mirrors the PersonaScreenActive() helper in core/frame/screen.cc.
++bool PersonaScreenActive() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  return cmd && cmd->HasSwitch(switches::kFingerprint);
++}
++}  // namespace
++
+ ScreenDetailed::ScreenDetailed(LocalDOMWindow* window, int64_t display_id)
+     : Screen(window, display_id) {}
+ 
+@@ -104,36 +118,54 @@
+ int ScreenDetailed::left() const {
+   if (!DomWindow())
+     return 0;
++  if (PersonaScreenActive())
++    return 0;  // persona: single primary screen at multi-screen origin
+   return GetRect(/*available=*/false).x();
+ }
+ 
+ int ScreenDetailed::top() const {
+   if (!DomWindow())
+     return 0;
++  if (PersonaScreenActive())
++    return 0;  // persona: single primary screen at multi-screen origin
+   return GetRect(/*available=*/false).y();
+ }
+ 
+ bool ScreenDetailed::isPrimary() const {
+   if (!DomWindow())
+     return false;
++  if (PersonaScreenActive())
++    return true;  // persona: the only screen is the primary screen
+   return GetScreenInfo().is_primary;
+ }
+ 
+ bool ScreenDetailed::isInternal() const {
+   if (!DomWindow())
+     return false;
++  if (PersonaScreenActive())
++    return false;  // persona: desktop with an external monitor (coherent
++                   // with DPR 1.0 / 1920x1080), not a laptop-internal panel
+   return GetScreenInfo().is_internal;
+ }
+ 
+ float ScreenDetailed::devicePixelRatio() const {
+   if (!DomWindow())
+     return 0.f;
++  if (PersonaScreenActive()) {
++    // persona: match window.devicePixelRatio and the media-values DPR so the
++    // per-screen DPR cannot contradict the rest of the page.
++    return static_cast<float>(ungoogled::CurrentPersona().device_pixel_ratio);
++  }
+   return GetScreenInfo().device_scale_factor;
+ }
+ 
+ String ScreenDetailed::label() const {
+   if (!DomWindow())
+     return String();
++  if (PersonaScreenActive())
++    return String();  // persona: empty label (real Chrome reports an empty
++                      // label absent window-management consent), hides the
++                      // host display's OS/connector name
+   return String::FromUtf8(GetScreenInfo().label);
+ }
+ 

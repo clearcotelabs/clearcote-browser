@@ -1,0 +1,59 @@
+--- a/chrome/renderer/chrome_content_renderer_client.cc
++++ b/chrome/renderer/chrome_content_renderer_client.cc
+@@ -1430,7 +1430,15 @@
+ // Web Share is conditionally enabled here in chrome/, to avoid it
+ // being made available in WebView or Linux.
+ #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN) || \
+-    BUILDFLAG(IS_MAC)
++    BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
++  // clearcote: add IS_LINUX so the Linux build (which spoofs a Windows
++  // desktop persona via UA + sec-ch-ua-platform) also exposes
++  // navigator.share / navigator.canShare. Real Win Chrome 149 always
++  // exposes the Web Share API surface (share() may reject with
++  // NotAllowedError on hosts with no share target -- a tell-free failure
++  // mode). Without this, our Linux build never defines navigator.share
++  // and any fingerprinter cross-checking it against UA="Windows NT 10.0"
++  // flags the inconsistency (CreepJS "Like Headless" heuristic).
+   blink::WebRuntimeFeatures::EnableWebShare(true);
+ #endif
+ 
+--- a/third_party/blink/renderer/core/url/dom_url.cc
++++ b/third_party/blink/renderer/core/url/dom_url.cc
+@@ -57,11 +57,36 @@
+                                       exception_state);
+ }
+ 
++namespace {
++
++// clearcote persona: mirror Chromium's WIN32-only url_util drive-letter handling
++// so `new URL("C:/").protocol` resolves to "file:" on this Linux-built binary too.
++// FingerprintJS Pro signal s205 reads new URL("C:/").protocol to detect host OS
++// (Windows => "file:", others => "c:"); the persona claims Windows, so match it.
++// Window is minimal (single ASCII letter, ':', then '/' or backslash 0x5C) so
++// legitimate single-letter scheme URLs (go:foo, ws:bar) are never rewritten.
++String MaybeRewriteDriveLetter(const String& url) {
++  if (url.length() < 3)
++    return url;
++  UChar c0 = url[0];
++  UChar c1 = url[1];
++  UChar c2 = url[2];
++  if (!((c0 >= 'A' && c0 <= 'Z') || (c0 >= 'a' && c0 <= 'z')))
++    return url;
++  if (c1 != ':')
++    return url;
++  if (c2 != '/' && c2 != 0x5C)
++    return url;
++  return "file:///" + url;
++}
++
++}  // namespace
++
+ DOMURL::DOMURL(PassKey,
+                const String& url,
+                const KURL& base,
+                ExceptionState& exception_state)
+-    : url_(base, url) {
++    : url_(base, MaybeRewriteDriveLetter(url)) {
+   if (!url_.IsValid())
+     exception_state.ThrowTypeError("Invalid URL");
+ }

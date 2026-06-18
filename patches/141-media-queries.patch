@@ -1,0 +1,67 @@
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -353,20 +353,23 @@
+     LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
+-  return frame->GetSettings()->GetPrimaryPointerType();
++  // clearcote persona: Win desktop has a mouse -> fine pointer (anti-headless).
++  return mojom::blink::PointerType::kPointerFineType;
+ }
+ 
+ int MediaValues::CalculateAvailablePointerTypes(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
+-  return frame->GetSettings()->GetAvailablePointerTypes();
++  // clearcote persona: non-touch desktop -> only the fine-pointer bit.
++  return static_cast<int>(mojom::blink::PointerType::kPointerFineType);
+ }
+ 
+ mojom::blink::HoverType MediaValues::CalculatePrimaryHoverType(
+     LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
+-  return frame->GetSettings()->GetPrimaryHoverType();
++  // clearcote persona: Win desktop with mouse hovers.
++  return mojom::blink::HoverType::kHoverHoverType;
+ }
+ 
+ mojom::blink::OutputDeviceUpdateAbilityType
+@@ -379,7 +382,8 @@
+ int MediaValues::CalculateAvailableHoverTypes(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetSettings());
+-  return frame->GetSettings()->GetAvailableHoverTypes();
++  // clearcote persona: desktop with mouse -> hover bit only.
++  return static_cast<int>(mojom::blink::HoverType::kHoverHoverType);
+ }
+ 
+ ColorSpaceGamut MediaValues::CalculateColorGamut(LocalFrame* frame) {
+--- a/third_party/blink/renderer/core/css/media_values_cached.h
++++ b/third_party/blink/renderer/core/css/media_values_cached.h
+@@ -44,17 +44,21 @@
+     int color_bits_per_component = 24;
+     int monochrome_bits_per_component = 0;
+     bool inverted_colors = false;
++    // clearcote persona: default-constructed (frameless) MediaValues must
++    // still describe a real Windows desktop with a mouse, not a headless
++    // touchless device. Keep these in sync with media_values.cc
++    // Calculate*PointerType/Hover statics (fine pointer + hover).
+     mojom::blink::PointerType primary_pointer_type =
+-        mojom::blink::PointerType::kPointerNone;
++        mojom::blink::PointerType::kPointerFineType;
+     // Bitmask of |ui::PointerType|
+-    int available_pointer_types = ui::POINTER_TYPE_NONE;
++    int available_pointer_types = ui::POINTER_TYPE_FINE;
+     mojom::blink::HoverType primary_hover_type =
+-        mojom::blink::HoverType::kHoverNone;
++        mojom::blink::HoverType::kHoverHoverType;
+     mojom::blink::OutputDeviceUpdateAbilityType
+         output_device_update_ability_type =
+             mojom::blink::OutputDeviceUpdateAbilityType::kFastType;
+     // Bitmask of |ui::HoverType|
+-    int available_hover_types = ui::HOVER_TYPE_NONE;
++    int available_hover_types = ui::HOVER_TYPE_HOVER;
+     float em_size = 16.f;
+     float ex_size = 8.f;
+     float ch_size = 8.f;
