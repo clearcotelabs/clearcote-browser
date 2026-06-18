@@ -36,6 +36,13 @@ export interface FingerprintOptions {
   webrtcIp?: string;
   /** Turn OFF GPU/WebGL fingerprint spoofing (advertise the real backend). */
   disableGpuFingerprint?: boolean;
+  /**
+   * Set `false` to turn OFF the per-eTLD+1 farbling NOISE (canvas/WebGL/audio/client-rects), so
+   * those surfaces return their natural, unperturbed values. Use when a site's anti-bot ML scores
+   * the noise pattern as "tampered". Identity spoofs (UA/screen/GPU/persona)
+   * stay on. Default (unset/`true`) keeps the noise.
+   */
+  fingerprintNoise?: boolean;
 }
 
 const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
@@ -52,6 +59,7 @@ const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "acceptLanguage",
   "webrtcIp",
   "disableGpuFingerprint",
+  "fingerprintNoise",
 ];
 
 /** Split an options object into its fingerprint half and the remaining (Playwright) half. */
@@ -92,7 +100,10 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   set("fingerprint", o.fingerprint);
   set("fingerprint-platform", o.platform);
   set("fingerprint-platform-version", o.platformVersion);
-  set("fingerprint-brand", o.brand);
+  // clearcote presents as Google Chrome (its UA says "Chrome/<v>"); default the UA-CH brand to
+  // "chrome" so navigator.userAgentData advertises "Google Chrome", not bare "Chromium" (a
+  // UA/UA-CH mismatch some bot detectors flag). Override via brand: "Edge" etc.
+  set("fingerprint-brand", o.brand ?? "chrome");
   set("fingerprint-brand-version", o.brandVersion);
   set("fingerprint-gpu-vendor", o.gpuVendor);
   set("fingerprint-gpu-renderer", o.gpuRenderer);
@@ -102,5 +113,9 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   if (o.acceptLanguage) args.push(`--accept-lang=${cleanAcceptLanguage(String(o.acceptLanguage))}`);
   set("webrtc-ip", o.webrtcIp);
   if (o.disableGpuFingerprint) args.push("--disable-gpu-fingerprint");
+  // fingerprintNoise=false turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects)
+  // so those surfaces return natural values — for sites whose ML flags the noise as "tampered".
+  // Identity spoofs (UA/screen/GPU/persona) stay on. Default keeps the noise.
+  if (o.fingerprintNoise === false) args.push("--disable-fingerprint-noise");
   return args;
 }

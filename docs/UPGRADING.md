@@ -137,7 +137,7 @@ A clean build is **necessary but not sufficient** — Skia Graphite can silently
 - [ ] **`validate_fp.py` → 6/6** — core fingerprint switches all firing.
 - [ ] **`validate_full.py`** — proxy egress + **WebRTC IP coherence** (srflx rewritten to proxy egress, host candidates suppressed — verify it reports the proxy IP coherently, never just "disabled").
 - [ ] **`release_verify.py`** — CreepJS + browserleaks + browserscan audit against the 150 binary.
-- [ ] **Turnstile spot-check** — real-world challenge passes.
+- [ ] **Interactive-challenge spot-check** — real-world challenge passes.
 - [ ] **Graphite-specific manual re-check:** canvas `toDataURL`/`getImageData`, WebGL `readPixels`, `UNMASKED_VENDOR/RENDERER`, and font enumeration each show per-eTLD+1 perturbation under the Graphite paint path. **If noise didn't fire, the patch compiled but the defense is dead — re-port against the Graphite path, do not ship.**
 - [ ] **UA/UA-CH coherence:** spoofed Chrome/Edge/Opera/Vivaldi versions are internally consistent and read **150** everywhere (cross-check the `fingerprint_data.h` bump landed).
 

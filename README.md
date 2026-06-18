@@ -23,8 +23,8 @@ No opaque binaries. No phone-home. Every change is a readable patch, every build
 </div>
 
 > [!NOTE]
-> **Status: latest build is live — [v0.1.0-pre.6](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.6) (Chromium 149, Windows x64).**
-> A signed, checksummed pre-release build is available now on the [Releases page](https://github.com/clearcotelabs/clearcote-browser/releases) — download it, [verify it](docs/VERIFY.md), and run it. This build adds a **fingerprint-coherence pass** (coherent WebGL limits + session-constant GPU; `navigator` battery/connection/keyboard; audio & screen metadata; CSS pointer/hover) and **passes BrowserScan bot-detection ("Normal") + CreepJS (0% headless / 0% stealth)** on real Windows — still an experimental pre-release; see the [Roadmap](ROADMAP.md) for what's next.
+> **Status: latest build is live — [v0.1.0-pre.7](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.7) (Chromium 149, Windows x64).**
+> A signed, checksummed pre-release build is available now on the [Releases page](https://github.com/clearcotelabs/clearcote-browser/releases) — download it, [verify it](docs/VERIFY.md), and run it. This build adds a **fingerprint-coherence pass** (coherent WebGL limits + session-constant GPU; `navigator` battery/connection/keyboard; audio & screen metadata; CSS pointer/hover) and **passes open-source fingerprint auditors** (`navigator.webdriver=false`, 0% headless / 0% stealth) on real Windows — still an experimental pre-release; see the [Roadmap](ROADMAP.md) for what's next.
 
 > [!IMPORTANT]
 > **Windows x64 only for now.** That's the single platform we're focused on today — the build, the binary, and the [npm/PyPI SDKs](#quickstart) are all Windows-first. macOS and Linux are on the [Roadmap](ROADMAP.md) but **not yet available**.
@@ -38,7 +38,7 @@ Clearcote is an open-source [Chromium](https://www.chromium.org/) distribution w
 1. **A coherent, private browser identity.** A stock browser quietly exposes a unique, trackable fingerprint — canvas, WebGL, audio, fonts, locale, hardware, and more. Clearcote moves control of those signals **into the engine itself**, so a session presents one consistent, plausible identity instead of an accidental, hyper-unique one.
 2. **Radical verifiability.** Clearcote is built on [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium) (Google integration and telemetry removed) and a transparent stack of source patches. There is **no magic binary** — you can read every change, rebuild it yourself, and check that what you run matches what's published.
 
-The identity is also **coherent across secondary surfaces**, not just the obvious ones: WebGL `getParameter` limits report the canonical ANGLE/D3D11 values a real Windows GPU returns and the unmasked renderer/vendor stay **session-constant** (one GPU on every site, never a per-origin tell); `navigator.getBattery()`, `navigator.connection`, and `navigator.keyboard.getLayoutMap()` report a coherent desktop; AudioContext, `getScreenDetails()`, and CSS `(pointer: fine)` / `(hover: hover)` match a real Chrome-on-Windows machine. Validated on real Windows: **BrowserScan bot-detection "Normal"** and **CreepJS 0% headless / 0% stealth**.
+The identity is also **coherent across secondary surfaces**, not just the obvious ones: WebGL `getParameter` limits report the canonical ANGLE/D3D11 values a real Windows GPU returns and the unmasked renderer/vendor stay **session-constant** (one GPU on every site, never a per-origin tell); `navigator.getBattery()`, `navigator.connection`, and `navigator.keyboard.getLayoutMap()` report a coherent desktop; AudioContext, `getScreenDetails()`, and CSS `(pointer: fine)` / `(hover: hover)` match a real Chrome-on-Windows machine. Validated on real Windows against open-source fingerprint auditors: `navigator.webdriver=false`, 0% headless / 0% stealth, stable per-seed surfaces.
 
 It's designed as a **drop-in for standard browser automation** ([Playwright](https://playwright.dev/) / [Puppeteer](https://pptr.dev/)): same APIs you already use, just pointed at the Clearcote binary.
 
@@ -79,7 +79,7 @@ Nothing here is hidden: the de-Googling comes from ungoogled-chromium, the ident
 
 ## 🧪 Fingerprint test results
 
-Every build is audited against [CreepJS](https://abrahamjuliot.github.io/creepjs/) with [`scripts/creepjs_audit.py`](scripts/creepjs_audit.py): it reads the signals the browser actually exposes, cross-checks them for internal consistency (e.g. **User-Agent vs. UA Client Hints**), confirms the WebRTC mock leaks no LAN address, and checks that CreepJS does not flag it as headless/automated. Latest build:
+Every build is audited with [`scripts/creepjs_audit.py`](scripts/creepjs_audit.py): it reads the signals the browser actually exposes, cross-checks them for internal consistency (e.g. **User-Agent vs. UA Client Hints**), confirms the WebRTC mock leaks no LAN address, and checks it isn't flagged as headless/automated. Latest build:
 
 <!-- CREEPJS_RESULTS:START -->
 **Build `149.0.7827.114` · audited 2026-06-18 · seed `demo` · platform `windows`**
@@ -97,8 +97,8 @@ Every build is audited against [CreepJS](https://abrahamjuliot.github.io/creepjs
 | Timezone | America/New_York | ✅ |
 | WebRTC host (LAN) candidate | none | ✅ no LAN leak |
 | WebRTC srflx (public) | 203.0.113.45 | ✅ = mocked IP |
-| CreepJS headless (hard) | 0% | ✅ |
-| CreepJS stealth-detect | 0% | ✅ |
+| Headless (hard) | 0% | ✅ |
+| Stealth-detect | 0% | ✅ |
 
 _UA ↔ UA-CH version consistency: ✅ (UA major `149`, UA-CH major `149`). WebRTC srflx mocked to the proxy/egress IP; real host candidates suppressed._
 _Regenerate with `py -3 creepjs_audit.py --readme clearcote-browser/README.md` on each release._

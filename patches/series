@@ -18,6 +18,7 @@
 140-screen.patch
 141-media-queries.patch
 145-storage-quota.patch
+146-perf-memory.patch
 150-device-sensors.patch
 160-coherence-misc.patch
 900-windows-build-fixes.patch

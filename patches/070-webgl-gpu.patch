@@ -531,7 +531,7 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLVendorParam.Get()));
          return WebGLAny(script_state,
-@@ -5260,6 +5316,42 @@
+@@ -5260,6 +5316,43 @@
        return;
      }
      ContextGL()->ReadPixels(x, y, width, height, format, type, data);
@@ -568,8 +568,9 @@
 +      uint64_t read_pixels_seed = ungoogled::GetFarbleSeed64(
 +          read_pixels_origin ? read_pixels_origin->RegistrableDomain().Utf8()
 +                             : std::string());
-+      StaticBitmapImage::ShuffleSubchannelColorData(data, image_info, 0, 0,
-+                                                    read_pixels_seed);
++      if (ungoogled::FingerprintNoiseEnabled())
++        StaticBitmapImage::ShuffleSubchannelColorData(data, image_info, 0, 0,
++                                                      read_pixels_seed);
 +    }
    }
  }

@@ -33,7 +33,7 @@
    if (base::FeatureList::IsEnabled(features::kDelayAsyncScriptExecution) &&
        features::kDelayAsyncScriptExecutionDelayByDefaultParam.Get()) {
      script_runner_delayer_->Activate();
-@@ -1183,11 +1185,51 @@
+@@ -1183,11 +1185,55 @@
    return Position::BeforeNode(*shadow_host);
  }
  
@@ -47,6 +47,10 @@
 +  // defaults (1) and clientRects are left unperturbed.
 +  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
 +  if (!command_line->HasSwitch(switches::kFingerprint))
++    return;
++
++  // clearcote: --disable-fingerprint-noise leaves clientRects unperturbed (factors stay 1).
++  if (!ungoogled::FingerprintNoiseEnabled())
 +    return;
 +
 +  // Derive the per-site (eTLD+1) farbling seed. The origin is available now

@@ -20,6 +20,7 @@ FINGERPRINT_KEYS = (
     "accept_language",
     "webrtc_ip",
     "disable_gpu_fingerprint",
+    "fingerprint_noise",
 )
 
 # kwarg -> switch name (without leading "--"). disable_gpu_fingerprint is a boolean flag,
@@ -54,9 +55,20 @@ def fingerprint_args(opts):
         value = opts.get(key)
         if value is not None and value != "":
             args.append(f"--{flag}={value}")
+    # clearcote presents as Google Chrome (its UA string says "Chrome/<v>"), so default the
+    # UA-CH brand to "chrome" — otherwise navigator.userAgentData advertises only "Chromium",
+    # a UA/UA-CH mismatch some bot detectors flag. Override via brand="edge" etc.
+    if not opts.get("brand"):
+        args.append("--fingerprint-brand=chrome")
     accept_language = opts.get("accept_language")
     if accept_language:
         args.append(f"--accept-lang={clean_accept_language(accept_language)}")
     if opts.get("disable_gpu_fingerprint"):
         args.append("--disable-gpu-fingerprint")
+    # fingerprint_noise=False turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/
+    # client-rects) so those surfaces return natural, unperturbed values — useful when a site's
+    # anti-bot ML scores the noise pattern as "tampered". Identity spoofs
+    # (UA/screen/GPU/persona) stay on. Default (unset/True) keeps the noise.
+    if opts.get("fingerprint_noise") is False:
+        args.append("--disable-fingerprint-noise")
     return args

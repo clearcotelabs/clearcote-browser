@@ -28,7 +28,7 @@ crash the renderer.
 | Patch | What it changes |
 |---|---|
 | `000-fingerprint-switches` | Defines the `--fingerprint*` command-line switches and forwards them from the browser to renderer/child processes. |
-| `001-farble-seed-core` | The per-eTLD+1 seed engine (`farble_seed.{cc,h}`), the `fingerprint_data.h` tables, and its `BUILD.gn`. Every surface below reads from this. |
+| `001-farble-seed-core` | The per-eTLD+1 seed engine (`farble_seed.{cc,h}`), the `fingerprint_data.h` tables, and its `BUILD.gn`. Every noise surface below reads from this. Also exposes `FingerprintNoiseEnabled()` — the master toggle behind `--disable-fingerprint-noise`, which turns the per-site canvas/WebGL/audio/client-rect noise OFF (surfaces return natural values; identity spoofs stay on). |
 | `002-persona-profile` | Coherent per-seed persona engine (`components/ungoogled/persona_profile.{cc,h}`) — derives an internally consistent identity so surfaces agree rather than contradict. |
 | `010-user-agent-and-webdriver` | UA / UA-CH (`navigator.userAgent`, `Sec-CH-UA*`), `navigator.platform` spoofing, and hiding `navigator.webdriver` / the automation + Headless tells. |
 | `020-audio` | AudioContext farbling (`AudioBuffer`, analyser, offline render) keyed to the per-site seed, plus coherent `sampleRate`/`baseLatency`/`outputLatency` metadata from the persona. |
@@ -47,7 +47,8 @@ crash the renderer.
 | `140-screen` | Coherent display geometry from the persona: `screen.*` (`screen.cc`), multi-screen `getScreenDetails()` (`screen_detailed.cc`), and `window.outer*`/`screenX/Y`/`devicePixelRatio` (`local_dom_window.cc`) — never the real display. |
 | `141-media-queries` | CSS `@media` coherence — `(pointer: fine)` / `(hover: hover)` (and the `any-` forms) report a real desktop-with-mouse instead of a touchless/headless device (`media_values*`). |
 | `145-storage-quota` | `navigator.storage.estimate()` quota coherence (`quota/storage_manager.cc`). |
-| `150-device-sensors` | Coherent device APIs: `navigator.getBattery()` (desktop on AC — charging, 100%, no discharge), `navigator.connection` (residential 4g profile), and `navigator.keyboard.getLayoutMap()` (US-QWERTY, Writing-System keys only). |
+| `146-perf-memory` | `performance.memory.jsHeapSizeLimit` pinned to the standard 4 GiB desktop value (`memory_info.cc`) so it doesn't vary by host RAM or contradict `deviceMemory`. |
+| `150-device-sensors` | Coherent device APIs: `navigator.getBattery()` (desktop on AC — charging, 100%, no discharge), `navigator.connection` (residential 4g profile), `navigator.keyboard.getLayoutMap()` (US-QWERTY, Writing-System keys only), and `navigator.maxTouchPoints`=0 (mouse-only desktop). |
 | `160-coherence-misc` | OS-coherence details: `new URL("C:/").protocol` → `"file:"` (`dom_url.cc`, the Windows behaviour) and exposing `navigator.share`/`canShare` on the Windows-persona build (`chrome_content_renderer_client.cc`). |
 | `900-windows-build-fixes` | Cross-build mechanics for the Windows target: the `rc.py` resource-compiler wrapper, the `.rc` branding conditionals, a missing UIA `CLSID`, and the `compiler_builtins` fix. Not fingerprint behavior — needed to link the Windows binary on Linux. |
 

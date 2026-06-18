@@ -1,6 +1,6 @@
 --- a/components/ungoogled/ungoogled_switches.cc
 +++ b/components/ungoogled/ungoogled_switches.cc
-@@ -15,4 +15,37 @@
+@@ -15,4 +15,38 @@
  // Enable fingerprinting deception for Canvas image data
  const char kFingerprintingCanvasImageDataNoise[] = "fingerprinting-canvas-image-data-noise";
  
@@ -36,11 +36,12 @@
 +
 +// Disable GPU fingerprint spoofing
 +const char kDisableGpuFingerprint[] = "disable-gpu-fingerprint";
++const char kDisableFingerprintNoise[] = "disable-fingerprint-noise";
 +
  }  // namespace switches
 --- a/components/ungoogled/ungoogled_switches.h
 +++ b/components/ungoogled/ungoogled_switches.h
-@@ -15,6 +15,17 @@
+@@ -15,6 +15,18 @@
  COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasMeasureTextNoise[];
  COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasImageDataNoise[];
  
@@ -55,12 +56,13 @@
 +COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintLocation[];
 +COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintTimezone[];
 +COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableGpuFingerprint[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableFingerprintNoise[];
  }
  
  #endif  // THIRD_PARTY_UNGOOGLED_FINGERPRINTING_SWITCHES_H_
 --- a/content/browser/renderer_host/render_process_host_impl.cc
 +++ b/content/browser/renderer_host/render_process_host_impl.cc
-@@ -3868,6 +3868,23 @@
+@@ -3868,6 +3868,24 @@
        switches::kFingerprintingClientRectsNoise,
        switches::kFingerprintingCanvasMeasureTextNoise,
        switches::kFingerprintingCanvasImageDataNoise,
@@ -81,6 +83,7 @@
 +      switches::kFingerprintTimezone,
 +      "fingerprint-storage-quota",  // clearcoat: forward storage-quota spoof
 +      switches::kDisableGpuFingerprint,
++      switches::kDisableFingerprintNoise,
        switches::kForceDeviceScaleFactor,
        switches::kForceDisplayColorProfile,
        switches::kForceHighContrast,

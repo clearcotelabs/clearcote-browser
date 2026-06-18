@@ -13,7 +13,7 @@
 +  // NotAllowedError on hosts with no share target -- a tell-free failure
 +  // mode). Without this, our Linux build never defines navigator.share
 +  // and any fingerprinter cross-checking it against UA="Windows NT 10.0"
-+  // flags the inconsistency (CreepJS "Like Headless" heuristic).
++  // flags the inconsistency as headless/automation.
    blink::WebRuntimeFeatures::EnableWebShare(true);
  #endif
  
@@ -27,7 +27,7 @@
 +
 +// clearcote persona: mirror Chromium's WIN32-only url_util drive-letter handling
 +// so `new URL("C:/").protocol` resolves to "file:" on this Linux-built binary too.
-+// FingerprintJS Pro signal s205 reads new URL("C:/").protocol to detect host OS
++// Some fingerprint scripts read new URL("C:/").protocol to detect the host OS
 +// (Windows => "file:", others => "c:"); the persona claims Windows, so match it.
 +// Window is minimal (single ASCII letter, ':', then '/' or backslash 0x5C) so
 +// legitimate single-letter scheme URLs (go:foo, ws:bar) are never rewritten.

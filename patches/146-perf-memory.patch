@@ -1,0 +1,22 @@
+--- a/third_party/blink/renderer/core/timing/memory_info.cc
++++ b/third_party/blink/renderer/core/timing/memory_info.cc
+@@ -51,7 +51,10 @@
+       heap_statistics.used_heap_size() + heap_statistics.external_memory();
+   info.total_js_heap_size =
+       heap_statistics.total_physical_size() + heap_statistics.external_memory();
+-  info.js_heap_size_limit = heap_statistics.heap_size_limit();
++  // clearcote: pin jsHeapSizeLimit to the standard 4 GiB cap real Chrome reports on
++  // 64-bit desktops. The raw V8 value is host-RAM-derived (non-standard, varies by
++  // machine, and contradicts the spoofed deviceMemory on low-RAM VMs) -- a fingerprinting tell.
++  info.js_heap_size_limit = 4294967296ULL;  // 4 GiB
+ }
+ 
+ class HeapSizeCache {
+@@ -100,6 +103,7 @@
+     info_.used_js_heap_size = QuantizeMemorySize(info_.used_js_heap_size);
+     info_.total_js_heap_size = QuantizeMemorySize(info_.total_js_heap_size);
+     info_.js_heap_size_limit = QuantizeMemorySize(info_.js_heap_size_limit);
++    info_.js_heap_size_limit = 4294967296ULL;  // clearcote: exact 4 GiB bucket
+   }
+ 
+   std::optional<base::TimeTicks> last_update_time_;

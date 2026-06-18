@@ -35,7 +35,7 @@ SeleniumBase · undetected-chromedriver.
 
 ## 2. The thesis everyone shares — and the insight most miss
 
-**Shared thesis:** spoof in the C++ engine, never in injected JS. JS shims leave tamper marks exactly where FingerprintJS/CreepJS look. adryfish (clearcote's base) already does this.
+**Shared thesis:** spoof in the C++ engine, never in injected JS. JS shims leave tamper marks exactly where fingerprinting auditors look. adryfish (clearcote's base) already does this.
 
 **The deeper insight, which only Brave got fully right:** a good fingerprint is not *random* and not *static* — it is **per-site deterministic and internally coherent**.
 
@@ -83,7 +83,7 @@ Evidence in `brave-core`: a dedicated `components/brave_shields/content/browser/
 ## 4. Where the field falls short → clearcote's opening
 
 1. **Global seed, not per-site.** CloakBrowser/ChromiumFish/adryfish use one seed for all sites → cross-site linkable. **Brave-style per-eTLD+1 farbling fixes this and nobody in the *stealth* niche has copied it.**
-2. **TLS mismatch on new bases.** Building on Chromium 149 while spoofing an older UA leaks at the TLS layer (149 adds ML-DSA sigalgs `0x904-0x906`; Cloudflare flags "UA 148 + TLS 149"). adryfish doesn't address this. ChromiumFish's patch is the fix.
+2. **TLS mismatch on new bases.** Building on Chromium 149 while spoofing an older UA leaks at the TLS layer (149 adds ML-DSA sigalgs `0x904-0x906`; a major anti-bot service flags "UA 148 + TLS 149"). adryfish doesn't address this. ChromiumFish's patch is the fix.
 3. **Network leaks around the proxy.** Most forks only mask WebRTC IP; QUIC/STUN still bypass SOCKS5. Only BotBrowser tunnels UDP-over-SOCKS5 — and it's closed/paid.
 4. **Not actually private.** ChromiumFish's *own* audit (in your local files) caught it phoning Google (component updater + GCM on :5228). A truly de-Googled build is a real, checkable differentiator for a "100% open" project.
 5. **Scale.** One process per identity is wasteful. BotBrowser's per-context fingerprint (shared GPU/net process, ms switching, ~29% memory saving) is the scalability frontier — and closed.
@@ -135,7 +135,7 @@ Evidence in `brave-core`: a dedicated `components/brave_shields/content/browser/
    6. Port protection.
 4. **SDK:** thin Python+JS wrapper over Playwright (`executablePath=…`), fetch/verify(SHA-256)/cache. Optional nodriver-style transport.
 5. **Stretch:** per-context fingerprints (BotBrowser model) for scale.
-6. **Validate** against CreepJS, BrowserScan, FingerprintJS, Pixelscan, Cloudflare/DataDome live, + a JA3/JA4 byte-diff vs real Chrome of the advertised version.
+6. **Validate** against CreepJS, BrowserScan, Pixelscan, live anti-bot services, + a JA3/JA4 byte-diff vs real Chrome of the advertised version.
 
 ---
 

@@ -15,7 +15,7 @@
    estimate->setUsage(usage_in_bytes);
 +  // clearcoat: report a coherent, non-incognito storage quota when
 +  // --fingerprint-storage-quota=<MB> is set. Chromium quota-caps ephemeral
-+  // contexts (~a few GiB), which detectors (browserscan/FPJS) read as
++  // contexts (~a few GiB), which some detectors read as
 +  // incognito; this overrides it with a realistic on-disk value.
 +  {
 +    const base::CommandLine* cc_cmd =

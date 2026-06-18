@@ -14,7 +14,7 @@
    ]
 --- /dev/null
 +++ b/components/ungoogled/farble_seed.cc
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,50 @@
 +#include "components/ungoogled/farble_seed.h"
 +
 +#include "base/command_line.h"
@@ -56,10 +56,18 @@
 +  return base::NumberToString(GetFarbleSeed64(registrable_domain));
 +}
 +
++bool FingerprintNoiseEnabled() {
++  static const bool enabled = [] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    return !(cmd && cmd->HasSwitch(switches::kDisableFingerprintNoise));
++  }();
++  return enabled;
++}
++
 +}  // namespace ungoogled
 --- /dev/null
 +++ b/components/ungoogled/farble_seed.h
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,33 @@
 +#ifndef COMPONENTS_UNGOOGLED_FARBLE_SEED_H_
 +#define COMPONENTS_UNGOOGLED_FARBLE_SEED_H_
 +
@@ -83,6 +91,12 @@
 +// seed into std::hash<std::string> per-pixel keys.
 +COMPONENT_EXPORT(UNGOOGLED)
 +std::string GetFarbleSeedString(std::string_view registrable_domain);
++
++// Whether per-eTLD+1 fingerprint NOISE (canvas/WebGL/audio/client-rect farbling) is active.
++// True by default; --disable-fingerprint-noise turns it OFF so those surfaces return their
++// natural unperturbed values. Identity spoofs (UA/screen/GPU strings) are unaffected.
++COMPONENT_EXPORT(UNGOOGLED)
++bool FingerprintNoiseEnabled();
 +
 +}  // namespace ungoogled
 +

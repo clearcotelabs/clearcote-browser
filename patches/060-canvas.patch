@@ -33,7 +33,7 @@
  #include "third_party/blink/renderer/core/frame/local_frame.h"
  #include "third_party/blink/renderer/core/frame/local_frame_client.h"
  #include "third_party/blink/renderer/core/frame/settings.h"
-@@ -1318,6 +1327,56 @@
+@@ -1318,6 +1327,57 @@
  
    scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
    if (image_bitmap) {
@@ -41,7 +41,8 @@
 +    // creating the ImageDataBuffer when the fingerprint switch is enabled.
 +    const base::CommandLine* command_line =
 +        base::CommandLine::ForCurrentProcess();
-+    if (command_line->HasSwitch(switches::kFingerprint)) {
++    if (command_line->HasSwitch(switches::kFingerprint) &&
++        ungoogled::FingerprintNoiseEnabled()) {
 +      // Per-site farbling: derive the seed from this canvas's eTLD+1.
 +      const SecurityOrigin* origin =
 +          GetExecutionContext() ? GetExecutionContext()->GetSecurityOrigin()
@@ -117,7 +118,7 @@
  
  namespace blink {
  
-@@ -535,8 +539,16 @@
+@@ -535,8 +539,17 @@
            snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
        DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
      }
@@ -125,7 +126,8 @@
 -      StaticBitmapImage::ShuffleSubchannelColorData(image_data_pixmap.addr(), image_data_pixmap.info(), sx, sy);
 +
 +    const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-+    if (read_pixels_successful && command_line->HasSwitch(switches::kFingerprint)) {
++    if (read_pixels_successful && command_line->HasSwitch(switches::kFingerprint) &&
++        ungoogled::FingerprintNoiseEnabled()) {
 +      // Per-site farbling: derive the seed from this context's eTLD+1.
 +      const SecurityOrigin* origin =
 +          GetTopExecutionContext() ? GetTopExecutionContext()->GetSecurityOrigin()
@@ -136,7 +138,7 @@
      }
    }
  
-@@ -1183,14 +1195,29 @@
+@@ -1183,14 +1196,29 @@
        host->GetPlainTextPainter());
  
    // Scale text metrics if enabled

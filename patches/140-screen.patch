@@ -35,40 +35,53 @@
    LocalFrame* frame = GetFrame();
  
    // FencedFrames should return innerHeight to prevent passing
-@@ -1600,6 +1617,12 @@
+@@ -1600,6 +1617,14 @@
    if (!GetFrame())
      return 0;
  
 +  if (PersonaWindowActive()) {
++    // clearcote: horizontal window-frame delta (like outerHeight's +88) so outerWidth
++    // != innerWidth -- a real Chrome window is wider than its viewport.
 +    int aw = ungoogled::CurrentPersona().avail_screen_width;
-+    int iw = innerWidth();
-+    return iw < aw ? iw : aw;
++    int ow = innerWidth() + 16;
++    return ow < aw ? ow : aw;
 +  }
 +
    LocalFrame* frame = GetFrame();
  
    // FencedFrames should return innerWidth to prevent passing
-@@ -1673,6 +1696,9 @@
+@@ -1673,6 +1698,15 @@
    if (!frame)
      return 0;
  
-+  if (PersonaWindowActive())
-+    return 0;
++  if (PersonaWindowActive()) {
++    // clearcote: realistic non-zero window position (a real WM never pins a sub-screen
++    // window at exactly 0,0). Deterministic per persona, clamped on-screen.
++    uint64_t s = ungoogled::CurrentPersona().persona_seed;
++    int room = ungoogled::CurrentPersona().avail_screen_width - outerWidth();
++    int off = 16 + static_cast<int>(s % 160);
++    return room <= 0 ? 0 : (off < room ? off : room / 2);
++  }
 +
    Page* page = frame->GetPage();
    if (!page)
      return 0;
-@@ -1691,6 +1717,9 @@
+@@ -1691,6 +1725,14 @@
    if (!frame)
      return 0;
  
-+  if (PersonaWindowActive())
-+    return 0;
++  if (PersonaWindowActive()) {
++    // clearcote: realistic non-zero window position (see screenX).
++    uint64_t s = ungoogled::CurrentPersona().persona_seed;
++    int room = ungoogled::CurrentPersona().avail_screen_height - outerHeight();
++    int off = 16 + static_cast<int>((s >> 16) % 120);
++    return room <= 0 ? 0 : (off < room ? off : room / 2);
++  }
 +
    Page* page = frame->GetPage();
    if (!page)
      return 0;
-@@ -1803,6 +1832,9 @@
+@@ -1803,6 +1845,9 @@
    if (!GetFrame())
      return 0.0;
  

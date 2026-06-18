@@ -73,7 +73,7 @@ All cloned to the box under `~/research/`.
 ## 3. The core thesis: engine-level + per-eTLD+1 coherence
 
 ### 3.1 Engine-level, never JavaScript
-Every serious fork agrees: spoof in the C++ engine, never via injected JS. JS shims (`playwright-stealth`, `puppeteer-extra`, `undetected-chromedriver`) leave tamper marks exactly where FingerprintJS/CreepJS look — and break on every Chrome update. adryfish (clearcote's base) already patches at the C++ level.
+Every serious fork agrees: spoof in the C++ engine, never via injected JS. JS shims (`playwright-stealth`, `puppeteer-extra`, `undetected-chromedriver`) leave tamper marks exactly where fingerprinting auditors look — and break on every Chrome update. adryfish (clearcote's base) already patches at the C++ level.
 
 ### 3.2 Per-eTLD+1 deterministic coherence (the key upgrade)
 Brave's **farbling** derives every semi-identifying value from a `(session_token × eTLD+1)` seed, so:
