@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.cc
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,334 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -251,6 +251,17 @@
 +      }
 +    }
 +  }
++  if (const base::DictValue* fonts = d.FindDict("fonts")) {
++    if (const base::ListValue* detected = fonts->FindList("detected")) {
++      if (!detected->empty()) {
++        p->fonts.clear();
++        for (const base::Value& item : *detected) {
++          if (const std::string* s = item.GetIfString())
++            p->fonts.push_back(*s);
++        }
++      }
++    }
++  }
 +}
 +
 +}  // namespace
@@ -326,7 +337,7 @@
 +}  // namespace ungoogled
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.h
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,113 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -420,6 +431,10 @@
 +    bool is_default = false;
 +  };
 +  std::vector<Voice> voices;
++
++  // measureText font enumeration: the family names reported present. Default-
++  // empty (the canonical platform set is used); an imported profile fills it.
++  std::vector<std::string> fonts;
 +};
 +
 +// Derives a coherent Windows persona from a seed. Same seed => same persona.
