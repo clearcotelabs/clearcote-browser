@@ -23,7 +23,12 @@ permissions:
   contents: read
 
 jobs:
+  # Gate: SDK unit tests + version-drift guard must pass before we build/publish.
+  ci:
+    uses: ./.github/workflows/sdk-ci.yml
+
   build:
+    needs: ci
     runs-on: ubuntu-latest
     defaults:
       run:

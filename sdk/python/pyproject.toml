@@ -26,6 +26,9 @@ dependencies = [
     "maxminddb>=2.2",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
 [project.urls]
 Homepage = "https://github.com/clearcotelabs/clearcote-browser"
 Repository = "https://github.com/clearcotelabs/clearcote-browser"

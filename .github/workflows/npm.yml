@@ -22,7 +22,12 @@ permissions:
   contents: read
 
 jobs:
+  # Gate: SDK unit tests + version-drift guard must pass before we publish.
+  ci:
+    uses: ./.github/workflows/sdk-ci.yml
+
   publish:
+    needs: ci
     runs-on: ubuntu-latest          # must be a cloud-hosted runner for OIDC + provenance
     environment: npm                # approval gate; OIDC sub = repo:clearcotelabs/clearcote-browser:environment:npm
     permissions:
