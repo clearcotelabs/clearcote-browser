@@ -73,6 +73,27 @@ def encode_profile(value):
     return base64.b64encode(gzip.compress(raw, 9)).decode("ascii")
 
 
+def _profile_accept_language(value):
+    """Best-effort: derive an Accept-Language from an imported profile's navigator.languages
+    (path / dict / JSON string), so an imported identity keeps the donor's language order."""
+    try:
+        if isinstance(value, dict):
+            obj = value
+        elif isinstance(value, (bytes, bytearray)):
+            obj = json.loads(value)
+        elif isinstance(value, str) and os.path.isfile(value):
+            with open(value, encoding="utf-8") as handle:
+                obj = json.load(handle)
+        else:
+            obj = json.loads(value)
+    except (ValueError, OSError):
+        return None
+    langs = (obj.get("navigator") or {}).get("languages") if isinstance(obj, dict) else None
+    if isinstance(langs, list) and langs:
+        return ",".join(str(tag) for tag in langs)
+    return None
+
+
 def fingerprint_args(opts):
     """Build the Chromium switches for a dict of fingerprint options."""
     args = []
@@ -86,8 +107,15 @@ def fingerprint_args(opts):
     if not opts.get("brand"):
         args.append("--fingerprint-brand=chrome")
     accept_language = opts.get("accept_language")
-    if accept_language:
-        args.append(f"--accept-lang={clean_accept_language(accept_language)}")
+    if not accept_language and opts.get("fingerprint_profile"):
+        accept_language = _profile_accept_language(opts["fingerprint_profile"])
+    if not accept_language:
+        # Always send a coherent Accept-Language. Without --accept-lang Chromium falls back to the
+        # build/OS locale, which can leak a language that mismatches the proxy's country/timezone
+        # (e.g. en-GB on a US IP) — a geo-inconsistency tell. en-US,en is the common Chrome default;
+        # set accept_language (or geoip) to match the proxy region.
+        accept_language = "en-US,en"
+    args.append(f"--accept-lang={clean_accept_language(accept_language)}")
     if opts.get("disable_gpu_fingerprint"):
         args.append("--disable-gpu-fingerprint")
     # fingerprint_noise=False turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/

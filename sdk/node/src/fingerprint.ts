@@ -116,6 +116,23 @@ export function encodeProfile(value: string | Record<string, unknown>): string {
   return gzipSync(raw, { level: 9 }).toString("base64");
 }
 
+/** Best-effort: derive an Accept-Language from an imported profile's navigator.languages
+ * (path / object / JSON string), so an imported identity keeps the donor's language order. */
+export function profileAcceptLanguage(value: string | Record<string, unknown>): string | undefined {
+  let obj: Record<string, unknown> | undefined;
+  try {
+    if (typeof value === "object") obj = value;
+    else if (existsSync(value)) obj = JSON.parse(readFileSync(value, "utf8"));
+    else obj = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  const nav = obj?.navigator as Record<string, unknown> | undefined;
+  const langs = nav?.languages;
+  if (Array.isArray(langs) && langs.length) return langs.map(String).join(",");
+  return undefined;
+}
+
 /** Build the Chromium switches for a set of fingerprint options. */
 export function fingerprintArgs(o: FingerprintOptions): string[] {
   const args: string[] = [];
@@ -137,7 +154,16 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   set("fingerprint-hardware-concurrency", o.hardwareConcurrency);
   set("fingerprint-location", o.location);
   set("timezone", o.timezone);
-  if (o.acceptLanguage) args.push(`--accept-lang=${cleanAcceptLanguage(String(o.acceptLanguage))}`);
+  // Always send a coherent Accept-Language. Without --accept-lang Chromium falls back to the
+  // build/OS locale, which can leak a language that mismatches the proxy's country/timezone
+  // (e.g. en-GB on a US IP) — a geo-inconsistency tell. Prefer an explicit value, then an imported
+  // profile's languages, then en-US,en (the common Chrome default; set acceptLanguage or geoip to
+  // match the proxy region).
+  const acceptLanguage =
+    o.acceptLanguage ||
+    (o.fingerprintProfile ? profileAcceptLanguage(o.fingerprintProfile) : undefined) ||
+    "en-US,en";
+  args.push(`--accept-lang=${cleanAcceptLanguage(String(acceptLanguage))}`);
   set("webrtc-ip", o.webrtcIp);
   if (o.disableGpuFingerprint) args.push("--disable-gpu-fingerprint");
   // fingerprintNoise=false turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects)
