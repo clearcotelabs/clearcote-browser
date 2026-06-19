@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.cc
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,296 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -13,9 +13,14 @@
 +#include <random>
 +#include <string>
 +
++#include "base/base64.h"
 +#include "base/command_line.h"
++#include "base/json/json_reader.h"
 +#include "base/strings/string_number_conversions.h"
++#include "base/values.h"
 +#include "components/ungoogled/ungoogled_switches.h"
++#include "third_party/zlib/google/compression_utils.h"
++#include <optional>
 +
 +namespace ungoogled {
 +namespace {
@@ -152,6 +157,85 @@
 +  return h;
 +}
 +
++// clearcote: when --fingerprint-profile=<gzip+base64 JSON> is set (a captured real
++// fingerprint), override the seed-derived persona fields with the imported values.
++// Absent fields keep their DerivePersona() value, so partial profiles stay coherent.
++void ApplyProfileOverride(PersonaProfile* p) {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  if (!cmd || !cmd->HasSwitch(switches::kFingerprintProfile))
++    return;
++  std::string gz;
++  if (!base::Base64Decode(cmd->GetSwitchValueASCII(switches::kFingerprintProfile), &gz))
++    return;
++  std::string json;
++  if (!compression::GzipUncompress(gz, &json))
++    return;
++  auto parsed = base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC);
++  if (!parsed)
++    return;
++  const base::DictValue& d = *parsed;
++  auto num = [](const base::DictValue& dd, const char* k) -> std::optional<double> {
++    if (auto v = dd.FindDouble(k)) return v;
++    if (auto v = dd.FindInt(k)) return static_cast<double>(*v);
++    return std::nullopt;
++  };
++  if (auto v = d.FindInt("hardware_concurrency")) p->hardware_concurrency = *v;
++  if (auto v = num(d, "device_memory")) p->device_memory_gb = static_cast<float>(*v);
++  if (const base::DictValue* s = d.FindDict("screen")) {
++    if (auto v = s->FindInt("width")) p->screen_width = *v;
++    if (auto v = s->FindInt("height")) p->screen_height = *v;
++    if (auto v = s->FindInt("avail_width")) p->avail_screen_width = *v;
++    if (auto v = s->FindInt("avail_height")) p->avail_screen_height = *v;
++    if (auto v = s->FindInt("color_depth")) p->color_depth = *v;
++    if (auto v = num(*s, "device_pixel_ratio")) p->device_pixel_ratio = *v;
++  }
++  if (const base::DictValue* w = d.FindDictByDottedPath("webgl.webgl1")) {
++    if (const base::DictValue* dbg = w->FindDict("debug")) {
++      if (const std::string* s = dbg->FindString("UNMASKED_VENDOR_WEBGL")) p->webgl_vendor = *s;
++      if (const std::string* s = dbg->FindString("UNMASKED_RENDERER_WEBGL")) p->webgl_renderer = *s;
++    }
++    if (const base::DictValue* pr = w->FindDict("parameters")) {
++      auto gi = [&](const char* k, int* dst) { if (auto v = pr->FindInt(k)) *dst = *v; };
++      gi("MAX_TEXTURE_SIZE", &p->webgl_max_texture_size);
++      gi("MAX_CUBE_MAP_TEXTURE_SIZE", &p->webgl_max_cube_map_texture_size);
++      gi("MAX_RENDERBUFFER_SIZE", &p->webgl_max_renderbuffer_size);
++      gi("MAX_VARYING_VECTORS", &p->webgl_max_varying_vectors);
++      gi("MAX_VERTEX_UNIFORM_VECTORS", &p->webgl_max_vertex_uniform_vectors);
++      gi("MAX_FRAGMENT_UNIFORM_VECTORS", &p->webgl_max_fragment_uniform_vectors);
++      gi("MAX_COMBINED_TEXTURE_IMAGE_UNITS", &p->webgl_max_combined_texture_image_units);
++    }
++  }
++  if (const base::DictValue* w2 = d.FindDictByDottedPath("webgl.webgl2")) {
++    if (const base::DictValue* pr = w2->FindDict("parameters")) {
++      auto gi = [&](const char* k, int* dst) { if (auto v = pr->FindInt(k)) *dst = *v; };
++      gi("MAX_3D_TEXTURE_SIZE", &p->webgl_max_3d_texture_size);
++      gi("MAX_ARRAY_TEXTURE_LAYERS", &p->webgl_max_array_texture_layers);
++      gi("MAX_DRAW_BUFFERS", &p->webgl_max_draw_buffers);
++      gi("MAX_COLOR_ATTACHMENTS", &p->webgl_max_color_attachments);
++      gi("MAX_SAMPLES", &p->webgl_max_samples);
++      gi("MAX_VERTEX_UNIFORM_BLOCKS", &p->webgl_max_vertex_uniform_blocks);
++      gi("MAX_FRAGMENT_UNIFORM_BLOCKS", &p->webgl_max_fragment_uniform_blocks);
++      gi("MAX_COMBINED_UNIFORM_BLOCKS", &p->webgl_max_combined_uniform_blocks);
++      gi("MAX_UNIFORM_BUFFER_BINDINGS", &p->webgl_max_uniform_buffer_bindings);
++      gi("MAX_VERTEX_UNIFORM_COMPONENTS", &p->webgl_max_vertex_uniform_components);
++      gi("MAX_FRAGMENT_UNIFORM_COMPONENTS", &p->webgl_max_fragment_uniform_components);
++      if (auto v = num(*pr, "MAX_TEXTURE_LOD_BIAS")) p->webgl_max_texture_lod_bias = static_cast<float>(*v);
++    }
++  }
++  if (const base::DictValue* a = d.FindDict("audio")) {
++    if (auto v = num(*a, "BaseAudioContextSampleRate")) p->audio_sample_rate = static_cast<float>(*v);
++    if (auto v = num(*a, "AudioContextBaseLatency")) p->audio_base_latency = *v;
++    if (auto v = num(*a, "AudioContextOutputLatency")) p->audio_output_latency = *v;
++  }
++  if (const std::string* uav = d.FindStringByDottedPath("navigator.uadata.high_entropy.uaFullVersion")) {
++    if (!uav->empty()) {
++      p->chrome_full_version = *uav;
++      int maj = 0; base::StringToInt(uav->substr(0, uav->find('.')), &maj);
++      if (maj > 0) p->chrome_major_version = static_cast<unsigned>(maj);
++    }
++  }
++}
++
 +}  // namespace
 +
 +PersonaProfile DerivePersona(uint64_t seed) {
@@ -197,6 +281,7 @@
 +  p.webgl_vendor = gpu.vendor;
 +  p.webgl_renderer = gpu.renderer;
 +
++  ApplyProfileOverride(&p);
 +  return p;
 +}
 +

@@ -37,9 +37,11 @@ The [chrome-fingerprints] dataset (10k real Windows Chrome records) maps cleanly
 - It **interns strings as integer refs** (`voice_uri: 24`, `fonts: [0,1,…]`, header/codec indices) — resolve them via its string table when importing.
 - Its `webgl.properties` (157 keys) and `audio` (108 keys) map onto our `webgl.*.parameters`/`shader_precision` and `audio` dicts; our dicts accept arbitrary keys, so no field is dropped.
 
-## How clearcote consumes a profile (engine, in progress)
-- **`--fingerprint-profile=<path>`** — the browser process reads + validates the JSON and forwards it to renderers; the persona becomes **profile-driven**: any field present in the profile overrides the seed-derived value, absent fields fall back to `DerivePersona(seed)` so partial profiles stay coherent.
-- **SDK**: `launch(fingerprint_profile="profile.json")` / `{ fingerprintProfile }`.
+## How clearcote consumes a profile (engine)
+- **`--fingerprint-profile=<gzip+base64 JSON>`** — the renderer base64-decodes + gunzips + parses the profile and the persona becomes **profile-driven**: any field present overrides the seed-derived value, absent fields fall back to `DerivePersona(seed)` so partial profiles stay coherent. (gzip keeps a full ~40 KB capture within the command-line length limit.)
+- **SDK** (does the gzip+base64 for you, from a path / object / JSON string): `launch(fingerprint_profile="profile.json")` (Python) / `{ fingerprintProfile: "profile.json" }` (Node).
+- **Implemented + verified (Phase 2):** the core identity — `hardwareConcurrency`, `deviceMemory`, screen geometry (w/h/avail/colorDepth/DPR), WebGL unmasked vendor+renderer and the GL/GL2 `MAX_*` limits, audio sample-rate/latency, and Chrome full/major version.
+- **Coming (Phase 3):** the long-tail surfaces — speech voices, font list, the full WebGL `getParameter` table, the Web Audio constant table, WebRTC codec capabilities, CSS media queries.
 - Render-dependent surfaces (canvas pixels, audio DSP output) are **not** statically replayed — they're handled by clearcote's farbling (or `--disable-fingerprint-noise` → real GPU). The profile stores their *metadata*, not a replay.
 
 [chrome-fingerprints]: https://github.com/Vinyzu/chrome-fingerprints

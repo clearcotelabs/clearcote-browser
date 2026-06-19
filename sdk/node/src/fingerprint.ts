@@ -1,6 +1,9 @@
 // Maps the SDK's fingerprint options to the Clearcote Chromium command-line switches.
 // Switch names mirror components/ungoogled/ungoogled_switches.cc (see patches/000-fingerprint-switches.patch).
 
+import { gzipSync } from "node:zlib";
+import { existsSync, readFileSync } from "node:fs";
+
 export interface FingerprintOptions {
   /**
    * Master fingerprint seed (the per-eTLD+1 farbling root). Same seed => the same stable
@@ -43,6 +46,14 @@ export interface FingerprintOptions {
    * stay on. Default (unset/`true`) keeps the noise.
    */
   fingerprintNoise?: boolean;
+  /**
+   * Import a real captured fingerprint so the browser presents *that machine's* identity instead
+   * of the synthetic seed-derived one. Accepts a path to a `.json` profile, a profile object, or a
+   * JSON string (capture one with `tools/fingerprint-collect`). Fields present in the profile
+   * override the seed-derived persona; absent fields fall back to the seed, so partial profiles
+   * stay coherent.
+   */
+  fingerprintProfile?: string | Record<string, unknown>;
 }
 
 const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
@@ -60,6 +71,7 @@ const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "webrtcIp",
   "disableGpuFingerprint",
   "fingerprintNoise",
+  "fingerprintProfile",
 ];
 
 /** Split an options object into its fingerprint half and the remaining (Playwright) half. */
@@ -87,6 +99,21 @@ export function cleanAcceptLanguage(v: string): string {
     .map((t) => t.split(";")[0].trim())
     .filter(Boolean)
     .join(",");
+}
+
+/** Encode a captured clearcote-profile for the `--fingerprint-profile` switch. `value` may be a
+ * path to a `.json` file, a profile object, or a JSON string. gzip+base64 keeps the full capture
+ * (~40 KB) within Chromium's command-line length limit (gzip ~6x); the engine gunzips + parses it. */
+export function encodeProfile(value: string | Record<string, unknown>): string {
+  let raw: Buffer;
+  if (typeof value === "object") {
+    raw = Buffer.from(JSON.stringify(value));
+  } else if (existsSync(value)) {
+    raw = readFileSync(value);
+  } else {
+    raw = Buffer.from(value); // assume a JSON string
+  }
+  return gzipSync(raw, { level: 9 }).toString("base64");
 }
 
 /** Build the Chromium switches for a set of fingerprint options. */
@@ -117,5 +144,9 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // so those surfaces return natural values — for sites whose ML flags the noise as "tampered".
   // Identity spoofs (UA/screen/GPU/persona) stay on. Default keeps the noise.
   if (o.fingerprintNoise === false) args.push("--disable-fingerprint-noise");
+  // fingerprintProfile imports a real captured fingerprint (path/object/JSON) — see
+  // tools/fingerprint-collect. Its fields override the seed-derived persona; absent fields fall
+  // back to the seed, so partial profiles stay coherent.
+  if (o.fingerprintProfile) args.push(`--fingerprint-profile=${encodeProfile(o.fingerprintProfile)}`);
   return args;
 }

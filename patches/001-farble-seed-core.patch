@@ -1,6 +1,6 @@
 --- a/components/ungoogled/BUILD.gn
 +++ b/components/ungoogled/BUILD.gn
-@@ -4,6 +4,11 @@
+@@ -4,11 +4,19 @@
  
  component("ungoogled_switches") {
    sources = [
@@ -12,6 +12,15 @@
      "ungoogled_switches.h",
      "ungoogled_switches.cc",
    ]
+ 
+   defines = [ "IS_UNGOOGLED_IMPL" ]
+ 
+-  deps = [ "//base" ]
++  deps = [
++    "//base",
++    "//third_party/zlib/google:compression_utils",
++  ]
+ }
 --- /dev/null
 +++ b/components/ungoogled/farble_seed.cc
 @@ -0,0 +1,50 @@
