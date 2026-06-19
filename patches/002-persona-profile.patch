@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.cc
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,378 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -227,6 +227,10 @@
 +    if (auto v = num(*a, "AudioContextBaseLatency")) p->audio_base_latency = *v;
 +    if (auto v = num(*a, "AudioContextOutputLatency")) p->audio_output_latency = *v;
 +  }
++  if (const base::DictValue* pm = d.FindDict("perf_memory")) {
++    if (auto v = num(*pm, "jsHeapSizeLimit"))
++      p->js_heap_size_limit = static_cast<uint64_t>(*v);
++  }
 +  if (const std::string* uav = d.FindStringByDottedPath("navigator.uadata.high_entropy.uaFullVersion")) {
 +    if (!uav->empty()) {
 +      p->chrome_full_version = *uav;
@@ -261,6 +265,46 @@
 +        }
 +      }
 +    }
++  }
++  if (const base::DictValue* w1 = d.FindDictByDottedPath("webgl.webgl1")) {
++    if (const base::DictValue* pr = w1->FindDict("parameters")) {
++      auto gi = [&](const char* k, int* dst) { if (auto v = pr->FindInt(k)) *dst = *v; };
++      gi("RED_BITS", &p->webgl_red_bits);
++      gi("GREEN_BITS", &p->webgl_green_bits);
++      gi("BLUE_BITS", &p->webgl_blue_bits);
++      gi("ALPHA_BITS", &p->webgl_alpha_bits);
++      gi("DEPTH_BITS", &p->webgl_depth_bits);
++      gi("STENCIL_BITS", &p->webgl_stencil_bits);
++      gi("SUBPIXEL_BITS", &p->webgl_subpixel_bits);
++      gi("SAMPLE_BUFFERS", &p->webgl_sample_buffers);
++      gi("SAMPLES", &p->webgl_samples);
++      if (auto v = pr->FindDouble("MAX_TEXTURE_MAX_ANISOTROPY_EXT"))
++        p->webgl_max_texture_max_anisotropy = static_cast<float>(*v);
++      auto garr = [&](const char* k, int* mn, int* mx) {
++        const base::ListValue* a = pr->FindList(k);
++        if (!a || a->size() < 2) return;
++        if (auto i0 = (*a)[0].GetIfInt()) *mn = *i0;
++        else if (auto d0 = (*a)[0].GetIfDouble()) *mn = static_cast<int>(*d0);
++        if (auto i1 = (*a)[1].GetIfInt()) *mx = *i1;
++        else if (auto d1 = (*a)[1].GetIfDouble()) *mx = static_cast<int>(*d1);
++      };
++      garr("ALIASED_LINE_WIDTH_RANGE", &p->webgl_aliased_line_width_range_min,
++           &p->webgl_aliased_line_width_range_max);
++      garr("ALIASED_POINT_SIZE_RANGE", &p->webgl_aliased_point_size_range_min,
++           &p->webgl_aliased_point_size_range_max);
++    }
++    if (const base::ListValue* ext = w1->FindList("extensions")) {
++      if (!ext->empty()) {
++        p->webgl_extensions.clear();
++        for (const base::Value& item : *ext)
++          if (const std::string* s = item.GetIfString()) p->webgl_extensions.push_back(*s);
++      }
++    }
++  }
++  if (const base::DictValue* css = d.FindDict("css")) {
++    if (auto v = css->FindBool("color-gamut:rec2020"); v && *v) p->css_color_gamut = "rec2020";
++    else if (auto v = css->FindBool("color-gamut:p3"); v && *v) p->css_color_gamut = "p3";
++    else if (auto v = css->FindBool("color-gamut:srgb"); v && *v) p->css_color_gamut = "srgb";
 +  }
 +}
 +
@@ -337,7 +381,7 @@
 +}  // namespace ungoogled
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.h
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,140 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -379,6 +423,11 @@
 +  // to a max of 8, so the getter reports min(8, this); the full value is kept
 +  // for future Sec-CH-Device-Memory / side-channel coherence work.
 +  float device_memory_gb = 8.0f;
++
++  // performance.memory.jsHeapSizeLimit. Real 64-bit desktop Chrome reports a
++  // fixed, non-round limit (~4192 MiB); an exact power of two looks synthetic.
++  // Constant on desktop (not host-RAM-scaled); overridable from a profile.
++  uint64_t js_heap_size_limit = 4395630592ULL;
 +
 +  // ---- Screen / window ----
 +  int screen_width = 1920;
@@ -435,6 +484,28 @@
 +  // measureText font enumeration: the family names reported present. Default-
 +  // empty (the canonical platform set is used); an imported profile fills it.
 +  std::vector<std::string> fonts;
++
++  // ---- WebGL full getParameter table (driver/GPU-dependent; defaults are
++  // common Intel-class desktop values; overridable from an imported profile) ----
++  int webgl_aliased_line_width_range_min = 1;
++  int webgl_aliased_line_width_range_max = 1;
++  int webgl_aliased_point_size_range_min = 1;
++  int webgl_aliased_point_size_range_max = 1024;
++  int webgl_red_bits = 8;
++  int webgl_green_bits = 8;
++  int webgl_blue_bits = 8;
++  int webgl_alpha_bits = 8;
++  int webgl_depth_bits = 24;
++  int webgl_stencil_bits = 8;
++  int webgl_subpixel_bits = 4;
++  int webgl_sample_buffers = 1;
++  int webgl_samples = 4;
++  float webgl_max_texture_max_anisotropy = 16.0f;
++  // getSupportedExtensions list (varies by driver); empty => report the real set.
++  std::vector<std::string> webgl_extensions;
++
++  // CSS @media color-gamut: "srgb" (default), "p3", or "rec2020".
++  std::string css_color_gamut = "srgb";
 +};
 +
 +// Derives a coherent Windows persona from a seed. Same seed => same persona.

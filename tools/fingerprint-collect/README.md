@@ -43,7 +43,8 @@ The [chrome-fingerprints] dataset (10k real Windows Chrome records) maps cleanly
 - **Implemented + verified (Phase 2):** the core identity — `hardwareConcurrency`, `deviceMemory`, screen geometry (w/h/avail/colorDepth/DPR), WebGL unmasked vendor+renderer and the GL/GL2 `MAX_*` limits, audio sample-rate/latency, Chrome full/major version.
 - **Implemented + verified (Phase 3a):** **speech voices** — `speechSynthesis.getVoices()` presents the persona's voices (a default Windows SAPI set, or the imported profile's exact `speech` list), closing the `getVoices()=0` headless tell.
 - **Implemented + verified (Phase 3b):** **font list** — `font_cache` reports exactly the profile's `fonts.detected` set as present (everything else hidden), so `measureText` font enumeration matches the donor machine.
-- **Coming:** the full WebGL `getParameter` table, the Web Audio constant table, WebRTC codec capabilities, CSS media queries — diminishing value, since the high-signal surfaces are now handled.
+- **Implemented + verified (Phase 3c):** the full WebGL `getParameter` table (bit depths, aliased ranges, anisotropy, `getSupportedExtensions`) and CSS `@media` display characteristics (`device-width/height`, `resolution`, color depth, `color-gamut`). CSS overrides are gated on `--fingerprint` so unfingerprinted runs keep the real screen.
+- **Spec-fixed — no spoof needed:** the Web Audio AudioParam constant table and WebRTC `getCapabilities()` codec lists are hardcoded / compile-time-fixed — identical in every Chrome of the same version — so clearcote already matches real Chrome. The collector still captures them for completeness.
 - Render-dependent surfaces (canvas pixels, audio DSP output) are **not** statically replayed — they're handled by clearcote's farbling (or `--disable-fingerprint-noise` → real GPU). The profile stores their *metadata*, not a replay.
 
 [chrome-fingerprints]: https://github.com/Vinyzu/chrome-fingerprints

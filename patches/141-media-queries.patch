@@ -1,6 +1,61 @@
 --- a/third_party/blink/renderer/core/css/media_values.cc
 +++ b/third_party/blink/renderer/core/css/media_values.cc
-@@ -353,20 +353,23 @@
+@@ -4,6 +4,9 @@
+ 
+ #include "third_party/blink/renderer/core/css/media_values.h"
+ 
++#include "base/command_line.h"
++#include "components/ungoogled/persona_profile.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "third_party/blink/public/common/css/scripting.h"
+ #include "third_party/blink/renderer/core/css/css_resolution_units.h"
+ #include "third_party/blink/renderer/core/css/css_to_length_conversion_data.h"
+@@ -164,6 +167,8 @@
+ 
+ int MediaValues::CalculateDeviceWidth(LocalFrame* frame) {
+   DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++    return ungoogled::CurrentPersona().screen_width;
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   int device_width = screen_info.rect.width();
+@@ -176,6 +181,8 @@
+ 
+ int MediaValues::CalculateDeviceHeight(LocalFrame* frame) {
+   DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++    return ungoogled::CurrentPersona().screen_height;
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   int device_height = screen_info.rect.height();
+@@ -193,6 +200,8 @@
+ }
+ 
+ float MediaValues::CalculateDevicePixelRatio(LocalFrame* frame) {
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++    return static_cast<float>(ungoogled::CurrentPersona().device_pixel_ratio);
+   return frame->DevicePixelRatio();
+ }
+ 
+@@ -208,6 +217,8 @@
+ int MediaValues::CalculateColorBitsPerComponent(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++    return static_cast<int>(ungoogled::CurrentPersona().color_depth / 3);
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   if (screen_info.is_monochrome) {
+@@ -219,6 +230,8 @@
+ int MediaValues::CalculateMonochromeBitsPerComponent(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++    return 0;  // clearcote persona is a color display
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+   if (!screen_info.is_monochrome) {
+@@ -353,20 +366,23 @@
      LocalFrame* frame) {
    DCHECK(frame);
    DCHECK(frame->GetSettings());
@@ -27,7 +82,7 @@
  }
  
  mojom::blink::OutputDeviceUpdateAbilityType
-@@ -379,7 +382,8 @@
+@@ -379,12 +395,19 @@
  int MediaValues::CalculateAvailableHoverTypes(LocalFrame* frame) {
    DCHECK(frame);
    DCHECK(frame->GetSettings());
@@ -37,6 +92,17 @@
  }
  
  ColorSpaceGamut MediaValues::CalculateColorGamut(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint)) {
++    const std::string& g = ungoogled::CurrentPersona().css_color_gamut;
++    if (g == "rec2020") return ColorSpaceGamut::BT2020;
++    if (g == "p3") return ColorSpaceGamut::P3;
++    return ColorSpaceGamut::SRGB;
++  }
+   const MediaFeatureOverrides* overrides =
+       frame->GetPage()->GetMediaFeatureOverrides();
+   std::optional<ColorSpaceGamut> override_value =
 --- a/third_party/blink/renderer/core/css/media_values_cached.h
 +++ b/third_party/blink/renderer/core/css/media_values_cached.h
 @@ -44,17 +44,21 @@

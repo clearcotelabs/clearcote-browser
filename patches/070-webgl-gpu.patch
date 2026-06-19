@@ -433,7 +433,66 @@
  #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
  #include "third_party/blink/renderer/platform/wtf/functional.h"
  #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
-@@ -3971,25 +3977,43 @@
+@@ -3896,14 +3902,23 @@
+   switch (pname) {
+     case GL_ACTIVE_TEXTURE:
+       return GetUnsignedIntParameter(script_state, pname);
+-    case GL_ALIASED_LINE_WIDTH_RANGE:
+-      return GetWebGLFloatArrayParameter(script_state, pname);
+-    case GL_ALIASED_POINT_SIZE_RANGE:
+-      return GetWebGLFloatArrayParameter(script_state, pname);
++    case GL_ALIASED_LINE_WIDTH_RANGE: {
++      const float vals[2] = {
++          static_cast<float>(ungoogled::CurrentPersona().webgl_aliased_line_width_range_min),
++          static_cast<float>(ungoogled::CurrentPersona().webgl_aliased_line_width_range_max)};
++      return WebGLAny(script_state, DOMFloat32Array::Create(base::span(vals)));
++    }
++    case GL_ALIASED_POINT_SIZE_RANGE: {
++      const float vals[2] = {
++          static_cast<float>(ungoogled::CurrentPersona().webgl_aliased_point_size_range_min),
++          static_cast<float>(ungoogled::CurrentPersona().webgl_aliased_point_size_range_max)};
++      return WebGLAny(script_state, DOMFloat32Array::Create(base::span(vals)));
++    }
+     case GL_ALPHA_BITS:
+       if (drawing_buffer_->RequiresAlphaChannelToBePreserved())
+         return WebGLAny(script_state, 0);
+-      return GetIntParameter(script_state, pname);
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_alpha_bits));
+     case GL_ARRAY_BUFFER_BINDING:
+       return WebGLAny(script_state, bound_array_buffer_.Get());
+     case GL_BLEND:
+@@ -3923,7 +3938,8 @@
+     case GL_BLEND_SRC_RGB:
+       return GetUnsignedIntParameter(script_state, pname);
+     case GL_BLUE_BITS:
+-      return GetIntParameter(script_state, pname);
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_blue_bits));
+     case GL_COLOR_CLEAR_VALUE:
+       return GetWebGLFloatArrayParameter(script_state, pname);
+     case GL_COLOR_WRITEMASK:
+@@ -3940,7 +3956,8 @@
+     case GL_DEPTH_BITS:
+       if (!framebuffer_binding_ && !CreationAttributes().depth)
+         return WebGLAny(script_state, kIntZero);
+-      return GetIntParameter(script_state, pname);
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_depth_bits));
+     case GL_DEPTH_CLEAR_VALUE:
+       return GetFloatParameter(script_state, pname);
+     case GL_DEPTH_FUNC:
+@@ -3963,7 +3980,8 @@
+     case GL_GENERATE_MIPMAP_HINT:
+       return GetUnsignedIntParameter(script_state, pname);
+     case GL_GREEN_BITS:
+-      return GetIntParameter(script_state, pname);
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_green_bits));
+     case GL_IMPLEMENTATION_COLOR_READ_FORMAT:
+       return GetIntParameter(script_state, pname);
+     case GL_IMPLEMENTATION_COLOR_READ_TYPE:
+@@ -3971,25 +3989,43 @@
      case GL_LINE_WIDTH:
        return GetFloatParameter(script_state, pname);
      case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
@@ -485,7 +544,57 @@
      case GL_MAX_VIEWPORT_DIMS:
        return GetWebGLIntArrayParameter(script_state, pname);
      case GL_PACK_ALIGNMENT:
-@@ -4101,6 +4125,27 @@
+@@ -4001,7 +4037,8 @@
+     case GL_POLYGON_OFFSET_UNITS:
+       return GetFloatParameter(script_state, pname);
+     case GL_RED_BITS:
+-      return GetIntParameter(script_state, pname);
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_red_bits));
+     case GL_RENDERBUFFER_BINDING:
+       return WebGLAny(script_state, renderbuffer_binding_.Get());
+     case GL_RENDERER:
+@@ -4009,7 +4046,8 @@
+     case GL_SAMPLE_ALPHA_TO_COVERAGE:
+       return GetBooleanParameter(script_state, pname);
+     case GL_SAMPLE_BUFFERS:
+-      return GetIntParameter(script_state, pname);
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_sample_buffers));
+     case GL_SAMPLE_COVERAGE:
+       return GetBooleanParameter(script_state, pname);
+     case GL_SAMPLE_COVERAGE_INVERT:
+@@ -4017,7 +4055,8 @@
+     case GL_SAMPLE_COVERAGE_VALUE:
+       return GetFloatParameter(script_state, pname);
+     case GL_SAMPLES:
+-      return GetIntParameter(script_state, pname);
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_samples));
+     case GL_SCISSOR_BOX:
+       return GetWebGLIntArrayParameter(script_state, pname);
+     case GL_SCISSOR_TEST:
+@@ -4045,7 +4084,8 @@
+     case GL_STENCIL_BITS:
+       if (!framebuffer_binding_ && !CreationAttributes().stencil)
+         return WebGLAny(script_state, kIntZero);
+-      return GetIntParameter(script_state, pname);
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_stencil_bits));
+     case GL_STENCIL_CLEAR_VALUE:
+       return GetIntParameter(script_state, pname);
+     case GL_STENCIL_FAIL:
+@@ -4065,7 +4105,8 @@
+     case GL_STENCIL_WRITEMASK:
+       return GetUnsignedIntParameter(script_state, pname);
+     case GL_SUBPIXEL_BITS:
+-      return GetIntParameter(script_state, pname);
++      return WebGLAny(script_state,
++                      static_cast<GLint>(ungoogled::CurrentPersona().webgl_subpixel_bits));
+     case GL_TEXTURE_BINDING_2D:
+       return WebGLAny(
+           script_state,
+@@ -4101,6 +4142,27 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
@@ -513,7 +622,7 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLRendererParam.Get()));
          return WebGLAny(script_state,
-@@ -4112,6 +4157,17 @@
+@@ -4112,6 +4174,17 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
@@ -531,7 +640,34 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLVendorParam.Get()));
          return WebGLAny(script_state,
-@@ -5260,6 +5316,43 @@
+@@ -4133,8 +4206,9 @@
+       return ScriptValue::CreateNull(script_state->GetIsolate());
+     case GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT:  // EXT_texture_filter_anisotropic
+       if (ExtensionEnabled(kEXTTextureFilterAnisotropicName)) {
+-        return GetFloatParameter(script_state,
+-                                 GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT);
++        return WebGLAny(
++            script_state,
++            ungoogled::CurrentPersona().webgl_max_texture_max_anisotropy);
+       }
+       SynthesizeGLError(
+           GL_INVALID_ENUM, "getParameter",
+@@ -4438,6 +4512,14 @@
+     }
+   }
+ 
++  // clearcote persona: present the imported GPU's extension list when available.
++  if (!ungoogled::CurrentPersona().webgl_extensions.empty()) {
++    Vector<String> persona;
++    for (const std::string& e : ungoogled::CurrentPersona().webgl_extensions)
++      persona.push_back(String::FromUtf8(e));
++    return persona;
++  }
++
+   return result;
+ }
+ 
+@@ -5260,6 +5342,43 @@
        return;
      }
      ContextGL()->ReadPixels(x, y, width, height, format, type, data);
