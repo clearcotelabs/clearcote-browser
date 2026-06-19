@@ -1,0 +1,78 @@
+# Builds + publishes the `clearcote` PyPI package from sdk/python via OIDC trusted publishing.
+# Register THIS filename (pypi.yml) + environment name (pypi) on pypi.org:
+#   project clearcote -> Publishing -> Add a GitHub Actions trusted publisher
+#   (or, if clearcote did not exist, add a PENDING publisher under Account -> Publishing).
+# No PyPI API token secret is needed. See docs/RELEASING-SDK.md.
+name: Publish PyPI SDK
+
+on:
+  push:
+    tags:
+      - 'sdk-v*'          # PRIMARY
+  workflow_dispatch:       # MANUAL fallback
+    inputs:
+      version:
+        description: 'SDK version being published (informational, e.g. 0.6.1). Source of truth is sdk/python/pyproject.toml.'
+        required: false
+
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Verify pyproject + __init__ versions match the sdk-v* tag (skip on manual dispatch)
+        if: github.event_name == 'push'
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#sdk-v}"
+          PY_VER="$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")"
+          INIT_VER="$(python -c "import re,pathlib;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"',pathlib.Path('clearcote/__init__.py').read_text()).group(1))")"
+          echo "pyproject=$PY_VER  __init__=$INIT_VER  tag=$TAG_VER"
+          if [ "$PY_VER" != "$TAG_VER" ] || [ "$INIT_VER" != "$TAG_VER" ]; then
+            echo "::error::version mismatch - pyproject=$PY_VER __init__=$INIT_VER tag=$TAG_VER (keep all three in sync)"
+            exit 1
+          fi
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: sdk/python/dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/clearcote
+    permissions:
+      id-token: write               # REQUIRED for OIDC trusted publishing (job-scoped)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI (OIDC; PEP 740 attestations auto-generated)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true        # tolerate the build/publish re-run split; PyPI 400s on real dups
