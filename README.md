@@ -49,6 +49,33 @@ It's designed as a **drop-in for standard browser automation** ([Playwright](htt
 - **Built for builders.** Clean repo layout, scriptable builds, and an [AGENTS.md](AGENTS.md) so humans *and* automated tooling can navigate and contribute.
 - **It's just Chromium.** Native Playwright/Puppeteer support, a real Chromium network/render stack, and the ecosystem you already know.
 
+## How Clearcote is different
+
+Most stealth / "anti-detect" browsers are **closed-source, paid products** that alter fingerprints with **injected JavaScript or CDP hooks** — an approach that's brittle, leaves detectable injection artifacts, and asks you to trust a binary you can't read. Clearcote is the opposite on every axis:
+
+| | **Clearcote** | Typical anti-detect browser |
+|---|---|---|
+| **Source** | 100% open — every change is a readable patch | Closed binary |
+| **Cost** | **Free** | Paid subscription |
+| **How signals are spoofed** | Compiled **into the C++ engine** | Injected JS / CDP hooks (self-revealing) |
+| **Layer coherence** | One seed → a whole consistent machine; the JS identity and the **real Chromium TLS/JA3/JA4 + HTTP/2** stack agree | Per-surface values that can disagree with each other — or with the network layer |
+| **Trust model** | Signed, checksummed, **reproducible from source** | "Trust us" |
+| **Automation** | **Drop-in Playwright / Puppeteer** (returns a standard `Browser`) | Proprietary API / GUI profiles |
+| **Real fingerprints** | Import a real machine (or the curated [profile library](https://github.com/clearcotelabs/clearcote-profiles)) and **verify it loaded** | Rare / unverifiable |
+| **Privacy** | De-Googled, **no telemetry or phone-home** | Varies |
+
+Because the controls live in the engine, the JavaScript a page sees and the network handshake underneath it come from **one real Chromium** — there's no spoofed-JS-over-real-TLS mismatch for a cross-check to catch. And when *noise itself* is the tell, `--disable-fingerprint-noise` (SDK `fingerprintNoise: false`) returns canvas / WebGL / audio to their natural, unperturbed values while keeping the identity spoof — your call, per session.
+
+**What you control** — from one `--fingerprint` seed *or* an imported real-machine profile, all kept coherent:
+
+- **Browser identity** — UA + UA-CH brand / platform / version (defaults to a real "Google Chrome" brand set, not bare "Chromium")
+- **GPU** — WebGL unmasked vendor/renderer, the full `getParameter` table (limits, bit depths, aliased ranges, anisotropy) + the supported-extension list; session-constant (never a per-origin tell)
+- **Rendering noise** — deterministic per-site canvas / WebGL / audio farbling, *or* off (`--disable-fingerprint-noise`)
+- **Hardware & screen** — `hardwareConcurrency`, `deviceMemory`, screen geometry / color depth / DPR, a realistic `jsHeapSizeLimit`, `maxTouchPoints=0`
+- **Locale & network** — timezone + `navigator.languages` + `Accept-Language` (auto-matched to your proxy via `geoip`), and a coherent WebRTC egress IP with no STUN/LAN leak
+- **Long-tail surfaces** — speech voices, installed fonts, CSS `@media` (pointer / hover / color-gamut / resolution), battery, connection, keyboard layout, `getScreenDetails()`
+- **Behavior** — humanized, *trusted* bezier mouse input (`humanize`) that keeps `navigator.webdriver = false`
+
 ## Principles
 
 | Principle | What it means in practice |
