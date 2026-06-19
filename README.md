@@ -196,13 +196,23 @@ const browser = await launch({
 
 (Python: `launch(fingerprint="user-7423", humanize=True, show_cursor=True, webrtc_ip="203.0.113.7")`.) Full option list: [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python).
 
-**Import a real machine's fingerprint.** Beyond the synthetic `--fingerprint` seed, Clearcote can adopt the *exact* identity of a real Chrome. Capture one with the [collector](tools/fingerprint-collect) (open `collect.html` on the donor machine and click **Capture**), or convert any record from the open [10k-profile dataset](https://github.com/Vinyzu/chrome-fingerprints) with [`convert_dataset.py`](tools/fingerprint-collect/convert_dataset.py), then pass it:
+**Import a real machine's fingerprint.** Beyond the synthetic `--fingerprint` seed, Clearcote can adopt the *exact* identity of a real Chrome. Get a profile three ways — grab a ready-made one from the curated **[clearcote-profiles](https://github.com/clearcotelabs/clearcote-profiles)** library, capture your own with the [collector](tools/fingerprint-collect) (open `collect.html` on the donor machine and click **Capture**), or convert any record from the open [10k-profile dataset](https://github.com/Vinyzu/chrome-fingerprints) with [`convert_dataset.py`](tools/fingerprint-collect/convert_dataset.py) — then pass it:
 
 ```javascript
 const browser = await launch({ fingerprint: "user-7423", fingerprintProfile: "./profile.json" });
 ```
 
 (Python: `launch(fingerprint="user-7423", fingerprint_profile="profile.json")`.) The SDK gzip+base64-encodes the profile for you (from a path, object, or JSON string). It drives the donor's GPU (WebGL vendor/renderer + the `getParameter` table + extensions), screen geometry, fonts, speech voices, audio, and CSS display metadata; any field not present falls back to the `--fingerprint` seed, so partial profiles stay coherent. See [`tools/fingerprint-collect`](tools/fingerprint-collect) for capture + dataset conversion.
+
+**Verify it loaded.** Confirm the browser is actually presenting the profile — [`verify_profile.py`](tools/fingerprint-collect/verify_profile.py) launches the binary with the profile, probes the live surfaces, and prints a PASS/FAIL table:
+
+```bash
+python tools/fingerprint-collect/verify_profile.py --executable /path/to/clearcote/chrome.exe profile.json
+#   surface                expected                       actual
+#   hardwareConcurrency    12                             12                  PASS
+#   glRenderer             ANGLE (Intel, Arc A770 …)      ANGLE (Intel, Arc … PASS
+#   …          VERIFIED: clearcote is loading the profile.
+```
 
 Already using Playwright? It's a one-line import change — the returned object is a standard Playwright `Browser`, and the verified Windows binary is fetched + cached for you.
 

@@ -3,10 +3,21 @@
 Capture an **exhaustive, importable** fingerprint profile from a real Chrome on any machine, so
 clearcote can present *that machine's* identity instead of a synthetic seed-derived one.
 
+## Three ways to get a profile
+1. **Ready-made** — the curated [**clearcote-profiles**](https://github.com/clearcotelabs/clearcote-profiles) library ships validated real-GPU desktop profiles you can use immediately (it consumes `convert_dataset.py` below and adds quality curation).
+2. **Capture your own** — open `collect.html` on the donor Chrome and click **Capture** (or paste `collect.js` + `snippet.js` in DevTools).
+3. **Convert the open dataset** — `pip install chrome-fingerprints && python convert_dataset.py --out ./profiles --count 100`.
+
 ## Files
 - **`collect.js`** — the collector library; `collectFingerprint()` returns a `Promise<profile>`.
 - **`collect.html`** — host this and open it in the donor's Chrome; click to capture + download (and optionally POST to a collector endpoint that attaches the network layer).
 - **`snippet.js`** — DevTools-console path: paste `collect.js`, then paste this; it downloads the JSON. No server needed.
+- **`convert_dataset.py`** — convert records from the open [chrome-fingerprints] dataset into clearcote-profiles. Also importable (`convert`, `load_tables`, `load_records`, `find_dataset`) and pip-installable from this subdirectory (see `pyproject.toml`), which is how the clearcote-profiles library reuses it.
+- **`verify_profile.py`** — **confirm a profile actually loads.** Launches the binary with the profile, probes the live surfaces (WebGL renderer + params, hardware, screen, voices, audio, color-gamut, fonts) and prints a PASS/FAIL table:
+  ```bash
+  pip install playwright
+  python verify_profile.py --executable /path/to/clearcote/chrome.exe profile.json
+  ```
 
 ## What it captures (the `clearcote-profile` schema)
 A **superset** of the [chrome-fingerprints] dataset — nothing JS-observable is left behind:
