@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.cc
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,323 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -234,6 +234,23 @@
 +      if (maj > 0) p->chrome_major_version = static_cast<unsigned>(maj);
 +    }
 +  }
++  if (const base::ListValue* voices = d.FindList("speech")) {
++    if (!voices->empty()) {
++      p->voices.clear();
++      for (const base::Value& item : *voices) {
++        const base::DictValue* vd = item.GetIfDict();
++        if (!vd)
++          continue;
++        PersonaProfile::Voice voice;
++        if (const std::string* s = vd->FindString("voice_uri")) voice.voice_uri = *s;
++        if (const std::string* s = vd->FindString("name")) voice.name = *s;
++        if (const std::string* s = vd->FindString("lang")) voice.lang = *s;
++        if (auto bv = vd->FindBool("local_service")) voice.local_service = *bv;
++        if (auto bv = vd->FindBool("default")) voice.is_default = *bv;
++        p->voices.push_back(std::move(voice));
++      }
++    }
++  }
 +}
 +
 +}  // namespace
@@ -281,6 +298,16 @@
 +  p.webgl_vendor = gpu.vendor;
 +  p.webgl_renderer = gpu.renderer;
 +
++  // Default Windows voice set (closes the getVoices()=0 tell); a profile overrides.
++  p.voices = {
++      {"Microsoft David Desktop - English (United States)",
++       "Microsoft David Desktop - English (United States)", "en-US", true, true},
++      {"Microsoft Zira Desktop - English (United States)",
++       "Microsoft Zira Desktop - English (United States)", "en-US", true, false},
++      {"Microsoft Mark - English (United States)",
++       "Microsoft Mark - English (United States)", "en-US", true, false},
++  };
++
 +  ApplyProfileOverride(&p);
 +  return p;
 +}
@@ -299,7 +326,7 @@
 +}  // namespace ungoogled
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.h
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,109 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -309,6 +336,7 @@
 +
 +#include <cstdint>
 +#include <string>
++#include <vector>
 +
 +#include "base/component_export.h"
 +
@@ -380,6 +408,18 @@
 +  float webgl_max_texture_lod_bias = 2.0f;
 +  int webgl_max_vertex_uniform_components = 16384;
 +  int webgl_max_fragment_uniform_components = 4096;
++
++  // speechSynthesis.getVoices(): a real Windows Chrome exposes SAPI voices;
++  // an empty list is a headless tell. Default-populated in DerivePersona,
++  // overridable from an imported profile.
++  struct Voice {
++    std::string voice_uri;
++    std::string name;
++    std::string lang;
++    bool local_service = true;
++    bool is_default = false;
++  };
++  std::vector<Voice> voices;
 +};
 +
 +// Derives a coherent Windows persona from a seed. Same seed => same persona.

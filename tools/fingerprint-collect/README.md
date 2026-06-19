@@ -40,8 +40,9 @@ The [chrome-fingerprints] dataset (10k real Windows Chrome records) maps cleanly
 ## How clearcote consumes a profile (engine)
 - **`--fingerprint-profile=<gzip+base64 JSON>`** — the renderer base64-decodes + gunzips + parses the profile and the persona becomes **profile-driven**: any field present overrides the seed-derived value, absent fields fall back to `DerivePersona(seed)` so partial profiles stay coherent. (gzip keeps a full ~40 KB capture within the command-line length limit.)
 - **SDK** (does the gzip+base64 for you, from a path / object / JSON string): `launch(fingerprint_profile="profile.json")` (Python) / `{ fingerprintProfile: "profile.json" }` (Node).
-- **Implemented + verified (Phase 2):** the core identity — `hardwareConcurrency`, `deviceMemory`, screen geometry (w/h/avail/colorDepth/DPR), WebGL unmasked vendor+renderer and the GL/GL2 `MAX_*` limits, audio sample-rate/latency, and Chrome full/major version.
-- **Coming (Phase 3):** the long-tail surfaces — speech voices, font list, the full WebGL `getParameter` table, the Web Audio constant table, WebRTC codec capabilities, CSS media queries.
+- **Implemented + verified (Phase 2):** the core identity — `hardwareConcurrency`, `deviceMemory`, screen geometry (w/h/avail/colorDepth/DPR), WebGL unmasked vendor+renderer and the GL/GL2 `MAX_*` limits, audio sample-rate/latency, Chrome full/major version.
+- **Implemented + verified (Phase 3a):** **speech voices** — `speechSynthesis.getVoices()` presents the persona's voices (a default Windows SAPI set, or the imported profile's exact `speech` list), closing the `getVoices()=0` headless tell.
+- **Coming (Phase 3b+):** font list, the full WebGL `getParameter` table, the Web Audio constant table, WebRTC codec capabilities, CSS media queries.
 - Render-dependent surfaces (canvas pixels, audio DSP output) are **not** statically replayed — they're handled by clearcote's farbling (or `--disable-fingerprint-noise` → real GPU). The profile stores their *metadata*, not a replay.
 
 [chrome-fingerprints]: https://github.com/Vinyzu/chrome-fingerprints

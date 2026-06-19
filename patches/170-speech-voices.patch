@@ -1,0 +1,33 @@
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -28,6 +28,9 @@
+ #include <tuple>
+ 
+ #include "build/build_config.h"
++#include "base/command_line.h"
++#include "components/ungoogled/persona_profile.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -95,6 +98,20 @@
+ const HeapVector<Member<SpeechSynthesisVoice>>& SpeechSynthesis::getVoices() {
+   // Kick off initialization here to ensure voice list gets populated.
+   std::ignore = TryEnsureMojomSynthesis();
++  // clearcote: a real Windows Chrome exposes SAPI voices; an empty list is a
++  // headless tell. When fingerprinting and the platform supplied none, present
++  // the persona voices (default Windows set, or an imported profile's voices).
++  if (voice_list_.empty()) {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (cmd && cmd->HasSwitch(switches::kFingerprint)) {
++      for (const auto& pv : ungoogled::CurrentPersona().voices) {
++        voice_list_.push_back(MakeGarbageCollected<SpeechSynthesisVoice>(
++            mojom::blink::SpeechSynthesisVoice::New(
++                String::FromUtf8(pv.voice_uri), String::FromUtf8(pv.name),
++                String::FromUtf8(pv.lang), pv.local_service, pv.is_default)));
++      }
++    }
++  }
+   return voice_list_;
+ }
+ 
