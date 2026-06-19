@@ -21,6 +21,7 @@ import os
 import re
 import runpy
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -76,6 +77,35 @@ def http(url: str, token: "str | None") -> str:
         return resp.read().decode("utf-8")
 
 
+def wait_for_release(repo: str, tag: str, asset: str, token: "str | None", budget_s: int) -> dict:
+    """Fetch the release JSON, retrying while it's missing or its assets aren't attached yet.
+
+    A release inherently races the pin bump: the runbook pushes the pin-bump commit (which
+    triggers this CI) and only *then* runs ``gh release create`` — so for a short window the
+    pinned tag legitimately 404s. Poll with backoff instead of failing on the first miss; a
+    genuinely-missing release still fails after the budget. On any normal push (the release
+    already exists) the first attempt succeeds, so there is no added latency.
+    Set RELEASE_PIN_WAIT_SECS=0 to require the release immediately (no polling)."""
+    url = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
+    deadline = time.monotonic() + max(budget_s, 0)
+    delay, note = 5, ""
+    while True:
+        try:
+            rel = json.loads(http(url, token))
+            names = {a.get("name") for a in rel.get("assets", [])}
+            if asset in names and "SHA256SUMS.txt" in names:
+                return rel
+            note = (f"release {tag} exists but expected assets aren't attached yet "
+                    f"(have: {sorted(n for n in names if n)})")
+        except Exception as exc:  # noqa: BLE001
+            note = f"GitHub release {tag} not found / unreachable: {exc}"
+        if time.monotonic() >= deadline:
+            fail(note)
+        print(f"::notice::{note} — retrying in {delay}s (waiting up to {budget_s}s for a fresh release to publish)")
+        time.sleep(delay)
+        delay = min(delay * 2, 30)
+
+
 def main() -> "None":
     py, nd = load_python(), load_node()
 
@@ -99,17 +129,11 @@ def main() -> "None":
     if r["url"] != expected_url:
         fail(f"url != {expected_url}")
 
-    # 3) release exists + asset present
+    # 3) release exists + asset present (polls briefly to absorb the push-before-release window)
     token = os.environ.get("GITHUB_TOKEN")
-    try:
-        rel = json.loads(http(f"https://api.github.com/repos/{r['repo']}/releases/tags/{r['tag']}", token))
-    except Exception as exc:  # noqa: BLE001
-        fail(f"GitHub release {r['tag']} not found / unreachable: {exc}")
+    budget = int(os.environ.get("RELEASE_PIN_WAIT_SECS", "180"))
+    rel = wait_for_release(r["repo"], r["tag"], r["asset"], token, budget)
     assets = {a["name"]: a for a in rel.get("assets", [])}
-    if r["asset"] not in assets:
-        fail(f"asset {r['asset']} not in release {r['tag']} (published: {sorted(assets)})")
-    if "SHA256SUMS.txt" not in assets:
-        fail(f"SHA256SUMS.txt not published on release {r['tag']}")
 
     # 4) checksums match the published SHA256SUMS.txt
     sums = http(assets["SHA256SUMS.txt"]["browser_download_url"], token)
