@@ -7,18 +7,18 @@ signatures live on the release page.
 """
 
 RELEASE = {
-    "tag": "v0.1.0-pre.7",
+    "tag": "v0.1.0-pre.8",
     "version": "149.0.7827.114",
     "asset": "clearcote-149.0.7827.114-windows-x64.zip",
     "url": (
         "https://github.com/clearcotelabs/clearcote-browser/releases/download/"
-        "v0.1.0-pre.7/clearcote-149.0.7827.114-windows-x64.zip"
+        "v0.1.0-pre.8/clearcote-149.0.7827.114-windows-x64.zip"
     ),
     # SHA-256 of the zip — verified after download; a mismatch is a hard failure.
-    "sha256": "85417dacb82d074a9f23ff326fb9837df3387e4c72b0c628c21d8d407d5f6f58",
+    "sha256": "3a232583dee201ac3a2a2cf6f49351bd444bebc205cc6112d01fef75be9b66f4",
     # SHA-256 of chrome.exe inside the zip — verified after extraction (defense in depth).
     "exe_sha256": "5743595256c89c6874804bf3315acce592fc7f1883760c8d380c010151a73b23",
-    "size": 242557010,
+    "size": 242559694,
     "os": "win32",
 }
 

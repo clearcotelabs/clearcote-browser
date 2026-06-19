@@ -81,6 +81,35 @@ const context = await launchPersistentContext("./profile-7423", {
 });
 ```
 
+### Capture or import a profile
+
+Make Clearcote present a **real machine's** identity instead of the synthetic seed-derived one. Pass
+a captured fingerprint as `fingerprintProfile` — a file path, a plain object, or a JSON string (the
+SDK gzip+base64-encodes it for the engine):
+
+```ts
+const browser = await launch({
+  fingerprint: "seed-1",                 // still the farbling root / fallback for absent fields
+  fingerprintProfile: "profile.json",    // a real machine's captured identity
+});
+```
+
+Get a profile two ways:
+
+- **Capture** from a donor Chrome — open
+  [`tools/fingerprint-collect/collect.html`](../../tools/fingerprint-collect/README.md) and click
+  Capture, or paste `collect.js` + `snippet.js` in DevTools. Either downloads the JSON.
+- **Convert** the open-source [chrome-fingerprints](https://github.com/Vinyzu/chrome-fingerprints)
+  dataset: `pip install chrome-fingerprints && python tools/fingerprint-collect/convert_dataset.py
+  --out ./profiles --count 100`.
+
+**Override / fallback semantics:** fields present in the profile **override** the `fingerprint`
+seed-derived persona; **absent** fields **fall back** to the seed, so partial profiles stay
+coherent. The SDK also derives `acceptLanguage` from the profile's `navigator.languages` when you
+don't set `acceptLanguage` explicitly. See the
+[collector README](../../tools/fingerprint-collect/README.md) for the full schema and what each
+field drives.
+
 ## Fingerprint options
 
 All optional. Anything not listed here is passed straight through to Playwright
@@ -102,6 +131,7 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `webrtcIp` | `--webrtc-ip` | WebRTC IP to report. The engine **fabricates** the `srflx` candidate at this IP and sends **no real STUN** from the host, so the real IP never leaks (not merely relabeled). |
 | `disableGpuFingerprint` | `--disable-gpu-fingerprint` | Turn off GPU/WebGL spoofing. |
 | `geoip` | _(directive)_ | `true` → resolve the proxy's exit-IP geo and auto-fill timezone/acceptLanguage/location/**webrtcIp**. |
+| `fingerprintProfile` | `--fingerprint-profile` | A real machine's captured fingerprint (file path / object / JSON string; the SDK gzip+base64-encodes it). Fields present override the seed-derived persona; absent fields fall back to `fingerprint`. |
 
 ## API
 

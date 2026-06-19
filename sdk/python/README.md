@@ -82,6 +82,35 @@ context = launch_persistent_context(
 )
 ```
 
+### Capture or import a profile
+
+Instead of the synthetic seed-derived identity, you can have Clearcote present a **real machine's
+fingerprint**. Pass it to `launch()` via `fingerprint_profile` — fields present in the profile
+**override** the seed-derived persona; **absent fields fall back** to the `fingerprint` seed, so
+partial profiles stay coherent.
+
+**1. Capture from a donor Chrome** — open `tools/fingerprint-collect/collect.html` and click
+**Capture** (downloads a JSON), or paste the collector script in DevTools. It records an exhaustive
+profile (navigator, screen, WebGL, audio, speech voices, fonts, codecs, CSS media, WebGPU, WebRTC).
+See the [collector README](../../tools/fingerprint-collect/README.md).
+
+**2. Or convert from the open-source 10k dataset** —
+[`chrome-fingerprints`](https://github.com/Vinyzu/chrome-fingerprints):
+
+```bash
+pip install chrome-fingerprints
+python tools/fingerprint-collect/convert_dataset.py --out ./profiles --count 100
+```
+
+**3. Launch with the profile:**
+
+```python
+browser = launch(
+    fingerprint="seed-1",                 # seeds any field the profile doesn't specify
+    fingerprint_profile="profile.json",   # path / dict / JSON string — SDK gzip+base64-encodes it
+)
+```
+
 ## Fingerprint options
 
 All optional. Anything not listed here is passed straight through to Playwright
@@ -103,6 +132,7 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `webrtc_ip` | `--webrtc-ip` | WebRTC IP to report. The engine **fabricates** the `srflx` candidate at this IP and sends **no real STUN** from the host, so the real IP never leaks (not merely relabeled). |
 | `disable_gpu_fingerprint` | `--disable-gpu-fingerprint` | Turn off GPU/WebGL spoofing. |
 | `geoip` | _(directive)_ | `True` → resolve the proxy's exit-IP geo and auto-fill timezone/accept_language/location/**webrtc_ip**. |
+| `fingerprint_profile` | _(directive → `--fingerprint-profile`)_ | A real captured machine profile (file path / dict / JSON string); the SDK gzip+base64-encodes it. Fields present **override** the seed-derived persona; absent fields fall back to `fingerprint`. Also derives `accept_language` from the profile's `navigator.languages` when none is set. |
 
 ## API
 

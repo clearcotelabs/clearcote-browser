@@ -32,10 +32,32 @@ Each profile carries `meta` (schema_version, captured_at, chrome_version, source
 1. **JS-observable** (everything above) — `collect.js`, runs in the page.
 2. **Network** (`network`) — HTTP header **order** + TLS JA4 / HTTP-2 SETTINGS. These cannot be read from JS; the optional collector endpoint records them from the incoming request and stitches them into the profile. *(Lower priority: clearcote's native TLS/HTTP-2 already matches the advertised Chrome.)*
 
-## Using an external dataset to bootstrap
-The [chrome-fingerprints] dataset (10k real Windows Chrome records) maps cleanly onto this schema and is a great library seed. Two notes for the converter (Phase 4):
-- It **interns strings as integer refs** (`voice_uri: 24`, `fonts: [0,1,…]`, header/codec indices) — resolve them via its string table when importing.
-- Its `webgl.properties` (157 keys) and `audio` (108 keys) map onto our `webgl.*.parameters`/`shader_precision` and `audio` dicts; our dicts accept arbitrary keys, so no field is dropped.
+## Bootstrap from the 10k-profile dataset — `convert_dataset.py`
+No donor machines? The open-source [chrome-fingerprints] dataset ships **10,000 real
+Windows-Chrome fingerprints**. `convert_dataset.py` turns any record into a clearcote-profile,
+resolving the dataset's string interning (it stores `voice_uri`/`fonts`/extension values as
+integer refs) and remapping its `webgl.properties` (157 keys, camelCase) + `audio` (108 keys)
+onto our schema:
+
+```bash
+pip install chrome-fingerprints                         # provides the dataset + tables
+python convert_dataset.py --out ./profiles --count 100  # convert the first 100 records
+python convert_dataset.py --index 0 --stdout            # inspect a single record
+```
+
+Then feed a profile to the browser like any other capture:
+
+```python
+from clearcote import launch
+launch(fingerprint="seed-1", fingerprint_profile="./profiles/profile-00000.json")
+```
+
+It imports the **version-independent hardware identity** — GPU (WebGL unmasked vendor/renderer +
+GL/GL2 `MAX_*` limits + bit depths/ranges), screen geometry, fonts, speech voices, Web Audio
+metadata, CPU/memory, keyboard layout. It deliberately **does not import the dataset's Chrome
+version** (the records are Chrome ~114/115; the clearcote binary is 149 — importing
+`uaFullVersion` would disagree with the real UA string, a coherence tell). Pass `--include-version`
+to override only if your binary's major version matches the dataset.
 
 ## How clearcote consumes a profile (engine)
 - **`--fingerprint-profile=<gzip+base64 JSON>`** — the renderer base64-decodes + gunzips + parses the profile and the persona becomes **profile-driven**: any field present overrides the seed-derived value, absent fields fall back to `DerivePersona(seed)` so partial profiles stay coherent. (gzip keeps a full ~40 KB capture within the command-line length limit.)
