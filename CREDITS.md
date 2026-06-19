@@ -15,6 +15,10 @@ Clearcote is built with deep gratitude to the open-source projects below. Each r
 - **[Brave](https://brave.com/privacy-updates/3-fingerprint-randomization/)** — Brave's "farbling" (per-session, per-site deterministic randomization) is the conceptual model behind Clearcote's *coherent identity* approach. Brave's fingerprinting-defense write-ups and open implementation are an invaluable public reference.
 - **[Camoufox](https://github.com/daijro/camoufox)** — a sibling open anti-detect browser (Firefox-based). Its breadth of signal coverage is a useful reference for completeness.
 
+## Optional tooling data sources
+
+- **[chrome-fingerprints](https://github.com/Vinyzu/chrome-fingerprints)** (Vinyzu, GPL-3.0) — an open dataset of ~10k real Windows-Chrome fingerprints. Clearcote's optional `tools/fingerprint-collect/convert_dataset.py` can convert records from this dataset into importable profiles. The dataset is **not bundled** with Clearcote — you install it yourself (`pip install chrome-fingerprints`) if you want it, and its GPL-3.0 terms apply to that dataset and to any profiles you derive from it. Clearcote's own code remains BSD-3-Clause.
+
 ## A note on independence
 
 Clearcote is an **independent project**. It is not affiliated with, sponsored by, or endorsed by Google, Brave, or any other organization, and it is not derived from any commercial/closed-source product. Where we name other projects, it is to credit open-source inspiration and to comply with license attribution — not to imply any association.

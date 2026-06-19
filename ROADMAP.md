@@ -30,9 +30,10 @@ The moment you can download something and check it yourself.
 Engine-level control over the signals a browser exposes — designed to be *consistent*, not random.
 
 - [x] Per-profile, deterministic identity seed (stable across sessions when you want it; fresh when you don't)
-- [ ] Engine-level controls for canvas, WebGL, audio, fonts, locale/timezone, navigator & hardware reporting, and WebRTC *(all done except WebRTC proxy-IP reporting, which is in progress)*
+- [x] Engine-level controls for canvas, WebGL, audio, fonts, locale/timezone, navigator & hardware reporting, and WebRTC *(fabricated srflx at `--webrtc-ip`, no real STUN/LAN leak)*
 - [x] **Per-site coherence** (farbling-style): the same site sees a stable identity; different sites don't correlate
 - [x] **Cross-surface coherence pass** *(v0.1.0-pre.6)*: coherent WebGL `getParameter` limits + session-constant GPU; `navigator` battery/connection/keyboard; audio, screen & `getScreenDetails()` metadata; CSS pointer/hover; OS-coherent `URL`; `navigator.share`/`canShare` — validated against open-source fingerprint auditors (0% headless / 0% stealth)
+- [x] **Fingerprint profile import** *(v0.1.0-pre.8)*: adopt a *real* machine's identity — capture it with the [collector](tools/fingerprint-collect), or convert a record from a 10k-profile open dataset, and apply it via `--fingerprint-profile` / the SDK's `fingerprint_profile` option. Drives the donor's GPU (WebGL vendor/renderer + the full `getParameter` table + extensions), screen, fonts, speech voices, audio, Chrome version, and CSS `@media`; fields absent from the profile fall back to the `--fingerprint` seed, so partial profiles stay coherent.
 - [ ] Sensible, documented defaults — privacy-respecting out of the box
 
 ## Phase 3 — Automation SDK *(SDKs shipped)*
