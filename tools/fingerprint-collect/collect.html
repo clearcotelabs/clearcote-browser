@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>clearcote fingerprint collector</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+  button { font-size: 16px; padding: 10px 18px; cursor: pointer; }
+  pre { background: #f4f4f4; padding: 12px; border-radius: 6px; overflow: auto; max-height: 320px; font-size: 12px; }
+  .ok { color: #0a7; } .err { color: #c00; }
+</style>
+</head>
+<body>
+<h1>clearcote fingerprint collector</h1>
+<p>Open this page in the <b>real Chrome</b> you want to clone, then click capture. It records an
+exhaustive JS-observable profile; if a collector endpoint is configured it also stitches in the
+HTTP-header order + TLS/HTTP-2 fingerprint of your request.</p>
+<p><button id="go">Capture fingerprint → download JSON</button>
+<label style="margin-left:12px"><input type="checkbox" id="post"> also POST to endpoint</label>
+<input id="endpoint" placeholder="https://collector.example/ingest" style="width:280px"></p>
+<p id="status"></p>
+<pre id="out" hidden></pre>
+<script src="collect.js"></script>
+<script>
+document.getElementById("go").addEventListener("click", async () => {
+  const st = document.getElementById("status");
+  st.textContent = "capturing…";
+  try {
+    const fp = await collectFingerprint();
+    // optional: POST so the server can attach the network layer (headers/TLS) it observes
+    if (document.getElementById("post").checked) {
+      const url = document.getElementById("endpoint").value.trim();
+      if (url) {
+        const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(fp) });
+        st.innerHTML = '<span class="ok">POSTed to endpoint (' + r.status + '). The server attaches header-order + TLS/HTTP2.</span>';
+      }
+    }
+    const json = JSON.stringify(fp, null, 1);
+    const blob = new Blob([json], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "clearcote-profile-" + (fp.meta.chrome_version || "unknown") + ".json";
+    a.click();
+    const o = document.getElementById("out"); o.hidden = false;
+    o.textContent = json.slice(0, 4000) + (json.length > 4000 ? "\n… (" + json.length + " bytes total)" : "");
+    if (!document.getElementById("post").checked) st.innerHTML = '<span class="ok">captured + downloaded (' + json.length + ' bytes).</span>';
+  } catch (e) {
+    st.innerHTML = '<span class="err">capture failed: ' + e + '</span>';
+  }
+});
+</script>
+</body>
+</html>
