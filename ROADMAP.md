@@ -34,6 +34,7 @@ Engine-level control over the signals a browser exposes — designed to be *cons
 - [x] **Per-site coherence** (farbling-style): the same site sees a stable identity; different sites don't correlate
 - [x] **Cross-surface coherence pass** *(v0.1.0-pre.6)*: coherent WebGL `getParameter` limits + session-constant GPU; `navigator` battery/connection/keyboard; audio, screen & `getScreenDetails()` metadata; CSS pointer/hover; OS-coherent `URL`; `navigator.share`/`canShare` — validated against open-source fingerprint auditors (0% headless / 0% stealth)
 - [x] **Fingerprint profile import** *(v0.1.0-pre.8)*: adopt a *real* machine's identity — capture it with the [collector](tools/fingerprint-collect), or convert a record from a 10k-profile open dataset, and apply it via `--fingerprint-profile` / the SDK's `fingerprint_profile` option. Drives the donor's GPU (WebGL vendor/renderer + the full `getParameter` table + extensions), screen, fonts, speech voices, audio, Chrome version, and CSS `@media`; fields absent from the profile fall back to the `--fingerprint` seed, so partial profiles stay coherent.
+- [x] **Cross-API coherence + audit pass** *(v0.1.0-pre.10)*: `navigator.gpu` (WebGPU adapter vendor/architecture + limits) made coherent with the WebGL persona GPU for **seed-only** personas (no host-GPU leak); UI/ICU locale pinned to the language (`--lang`) so `Intl` matches `navigator.language` on the main thread **and** workers; persona speech default-voice (no host-locale voice leak); UA-CH high-entropy `bitness`/`wow64`/`model`; `MediaCapabilities.decodingInfo()` + `enumerateDevices()` persona coherence; `storageQuota`. Adversarially audited against open fingerprint auditors — 0% headless / 0% stealth, no API-tampering lies.
 - [ ] Sensible, documented defaults — privacy-respecting out of the box
 
 ## Phase 3 — Automation SDK *(SDKs shipped)*
@@ -43,6 +44,7 @@ Make it a true drop-in for the tools developers already use.
 - [x] **Python + Node SDKs**, Playwright-first, Puppeteer supported *(Node on [npm](https://www.npmjs.com/package/clearcote) + Python on [PyPI](https://pypi.org/project/clearcote/), both `clearcote` — Playwright drop-in; Puppeteer can point at the same binary)*
 - [x] `launch()` returns a standard Playwright object — one-line migration
 - [x] Auto-download + local cache of the verified binary
+- [x] **In-browser AI agent** *(v0.1.0-pre.10)*: `launch_agent` / `run_agent_task` + the `clearcote-agent` CLI (one-shot `--goal` or `-i` REPL) — drive a page with natural-language goals via your own OpenAI-compatible / OpenRouter key. Opt-in (off by default); perceives the page, asks the LLM, and acts through Chrome's Actor framework with real trusted input.
 - [ ] Recipes: persistent profiles, proxy configuration, headless on servers
 
 ## Phase 4 — Trust & supply-chain
