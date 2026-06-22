@@ -1,0 +1,2801 @@
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -1087,6 +1087,28 @@
+   // The DevTools remote debugging pipe file descriptors need to be checked
+   // before any other files are opened, see https://crbug.com/40259890.
+   const bool is_browser = !command_line.HasSwitch(switches::kProcessType);
++
++  // clearcote: the in-browser AI agent (--agent-llm-url) drives Chrome's Actor framework, which
++  // is gated behind features::kGlicActor -- left off at runtime by this build's variations config.
++  // When the agent is configured, auto-enable the feature (merging into any existing
++  // --enable-features so a launcher's own features survive) and relax the actor safety checks, so
++  // callers never have to pass --enable-features=GlicActor --disable-actor-safety-checks by hand --
++  // and so it still works when an automation harness rewrites the --enable-features switch.
++  if (is_browser && command_line.HasSwitch("agent-llm-url")) {
++    base::CommandLine* mutable_command_line =
++        base::CommandLine::ForCurrentProcess();
++    std::string agent_features =
++        mutable_command_line->GetSwitchValueASCII(switches::kEnableFeatures);
++    if (!agent_features.empty()) {
++      agent_features += ",";
++    }
++    agent_features += "GlicActor";
++    mutable_command_line->AppendSwitchASCII(switches::kEnableFeatures,
++                                            agent_features);
++    if (!command_line.HasSwitch("disable-actor-safety-checks")) {
++      mutable_command_line->AppendSwitch("disable-actor-safety-checks");
++    }
++  }
+ #if BUILDFLAG(IS_WIN)
+   const bool pipes_are_specified_explicitly =
+       command_line.HasSwitch(::switches::kRemoteDebuggingIoPipes);
+--- /dev/null
++++ b/chrome/browser/ai_agent/BUILD.gn
+@@ -0,0 +1,42 @@
++# Copyright 2026 The ChromiumFish Authors
++# Use of this source code is governed by an MIT-style license.
++
++import("//build/config/features.gni")
++
++# Native in-browser AI agent layer: drives Chrome's Actor framework + AIPageContent
++# with a user-configured OpenAI-compatible LLM, exposed via Browser.agentRunTask.
++source_set("ai_agent") {
++  sources = [
++    "agent_controller.cc",
++    "agent_controller.h",
++    "agent_switches.cc",
++    "agent_switches.h",
++    "llm_client.cc",
++    "llm_client.h",
++    "page_serializer.cc",
++    "page_serializer.h",
++  ]
++
++  public_deps = [
++    "//base",
++
++    # Re-exports //chrome/common (action_result.h, task_id.h, actor_constants.h,
++    # actor.mojom), //components/actor/core, //components/optimization_guide/
++    # {content/browser,proto}, //components/tabs:public and //content/public/
++    # browser, so most of this component's includes resolve transitively.
++    "//chrome/browser/actor",
++    "//ui/gfx/geometry",
++  ]
++
++  deps = [
++    "//components/optimization_guide/content/browser",
++    "//components/optimization_guide/proto:optimization_guide_proto",
++    "//components/tabs:public",
++    "//content/public/browser",
++    "//net",
++    "//services/network/public/cpp",
++    "//third_party/blink/public/common",
++    "//ui/events",
++    "//url",
++  ]
++}
+--- /dev/null
++++ b/chrome/browser/ai_agent/agent_controller.cc
+@@ -0,0 +1,1244 @@
++// Copyright 2026 The ChromiumFish Authors
++// Use of this source code is governed by an MIT-style license.
++
++#include "chrome/browser/ai_agent/agent_controller.h"
++
++#include <utility>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/functional/callback_helpers.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "base/strings/stringprintf.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/actor/actor_keyed_service.h"
++#include "chrome/browser/actor/actor_task.h"
++#include "chrome/browser/actor/actor_task_metadata.h"
++#include "chrome/browser/actor/enterprise_policy_checker.h"
++#include "chrome/browser/actor/tools/click_tool_request.h"
++#include "chrome/browser/actor/tools/navigate_tool_request.h"
++#include "chrome/browser/actor/tools/scroll_tool_request.h"
++#include "chrome/browser/actor/tools/select_tool_request.h"
++#include "chrome/browser/actor/tools/tool_request.h"
++#include "chrome/browser/actor/tools/type_tool_request.h"
++#include "chrome/browser/actor/tools/wait_tool_request.h"
++#include "chrome/browser/ai_agent/agent_switches.h"
++#include "chrome/browser/ai_agent/page_serializer.h"
++#include "chrome/common/actor.mojom.h"
++#include "chrome/common/actor/actor_constants.h"
++#include "components/actor/core/shared_types.h"
++#include "components/actor/core/task_source_info.h"
++#include "components/optimization_guide/content/browser/page_content_proto_provider.h"
++#include "components/optimization_guide/proto/features/common_quality_data.pb.h"
++#include "components/tabs/public/tab_interface.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/humanized_click.h"
++#include "content/public/common/isolated_world_ids.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/storage_partition.h"
++#include "content/public/browser/web_contents.h"
++#include "ui/gfx/geometry/point.h"
++#include "ui/gfx/geometry/rect_conversions.h"
++#include "url/gurl.h"
++
++namespace ai_agent {
++
++namespace {
++
++// Max characters of serialized page text fed to the model per step.
++constexpr size_t kMaxPageChars = 24 * 1024;
++// Mouse-glide time per click. Kept human-ish but snappy for responsiveness.
++constexpr double kClickDurationSeconds = 0.18;
++
++// A permissive enterprise policy checker. ActorTask stores the checker as a
++// raw_ref and requires it to outlive the task, so this is a process singleton.
++class PermissivePolicyChecker : public actor::EnterprisePolicyChecker {
++ public:
++  UrlBlockReason Evaluate(const GURL& url) const override {
++    return UrlBlockReason::kNotBlocked;
++  }
++  void ValidateContentSentToRenderer(
++      content::RenderFrameHost* frame,
++      const std::string& content,
++      ContentValidationCallback callback) const override {
++    std::move(callback).Run(ContentValidationReason::kAllowed);
++  }
++};
++
++PermissivePolicyChecker* PolicyChecker() {
++  static base::NoDestructor<PermissivePolicyChecker> instance;
++  return instance.get();
++}
++
++constexpr char kSystemPrompt[] =
++    "You are an autonomous web-browsing agent operating directly inside the "
++    "browser. Each turn you receive the interactive elements currently visible "
++    "on the page, one per line:\n"
++    "  [<index>]<role>label\n"
++    "Roles: a (link), button, input, textarea, select, checkbox. Each input "
++    "shows its STATE in brackets: [EMPTY; placeholder hint \"...\"] = the field "
++    "is empty and the hint is NOT a value, you must type into it; [value: "
++    "\"...\"] = it already contains that text; [filled]/[empty] = a password "
++    "field; [checked]/[unchecked] = a checkbox; [selected: \"...\"]/[no "
++    "selection] = a select (its choices follow as opts:[value=text, ...] — use "
++    "one exact value). Disabled controls are marked (disabled).\n"
++    "You also get a one-line note saying whether the page changed since your "
++    "last action.\n\n"
++    "Respond with ONLY a JSON object (no prose, no markdown):\n"
++    "{\n"
++    "  \"thought\": \"brief reasoning\",\n"
++    "  \"actions\": [ <one or more action steps, run in order, in one shot> ]\n"
++    "}\n"
++    "Each step in \"actions\" is an object: {\"action\": "
++    "\"click|type|scroll|navigate|select|read|wait|done\", \"index\": <element "
++    "index>, \"text\": \"to type\", \"enter\": true (type: press Enter), "
++    "\"url\": \"https://...\" (navigate), \"value\": \"exact option value\" "
++    "(select), \"direction\": \"down|up|left|right\" (scroll), \"seconds\": 1 "
++    "(wait), \"success\": true & \"final\": \"summary\" (done)}.\n"
++    "Put MULTIPLE steps in the array to do them in ONE shot — strongly "
++    "preferred for speed. Whenever you know the values (e.g. given in the "
++    "task), fill ALL the form fields AND click submit in a single response, "
++    "e.g.:\n"
++    "  {\"thought\":\"...\",\"actions\":[ "
++    "{\"action\":\"type\",\"index\":9,\"text\":\"a@b.com\"}, "
++    "{\"action\":\"type\",\"index\":11,\"text\":\"secret\"}, "
++    "{\"action\":\"click\",\"index\":15} ]}\n"
++    "Use a single step only when the next step truly depends on this one's "
++    "result (e.g. you must see what a click reveals first). Finish with a "
++    "{\"action\":\"done\",\"success\":true|false,\"final\":\"...\"} step by "
++    "itself.\n\n"
++    "Rules:\n"
++    "- If a cookie/consent dialog or modal is open — its elements are marked "
++    "(modal), or you see text like \"Accept all\" / \"Reject all\" / "
++    "\"consent\" / \"Before you continue\" — DISMISS it FIRST by clicking its "
++    "accept/agree/continue button, before attempting anything else. Elements "
++    "behind a modal are still listed but are visually covered and cannot be "
++    "used until it is gone.\n"
++    "- Use only indices present in the CURRENT list; they are renumbered every "
++    "step.\n"
++    "- Link items (role a) show their destination URL after \" -> \". To report "
++    "or use a link's URL, READ it from the list — do NOT click or navigate to "
++    "the link just to find its address.\n"
++    "- The element list shows only INTERACTIVE controls, NOT the article/body "
++    "text. To read or summarize page CONTENT (an article, blog post, "
++    "paragraphs), issue {\"action\":\"read\"} by itself; the page's text "
++    "appears in your NEXT observation as PAGE TEXT — then answer from it.\n"
++    "- To submit a SEARCH, type the query with \"enter\": true in the SAME "
++    "action. Do NOT click a search button, and do NOT click an "
++    "autocomplete/suggestion item that appears under the box — that replaces "
++    "your query with the suggestion (e.g. 'apple' -> 'apple watch'). For other "
++    "forms, use \"enter\": true while typing or click submit/Continue. Typing "
++    "alone never submits.\n"
++    "- For a select, use action \"select\" with the exact value from its opts "
++    "list — never guess the value.\n"
++    "- After a click/navigate the page may still be loading; the change-note "
++    "tells you if it updated. Do NOT repeat the same click more than once in a "
++    "row. If nothing changed after a click, do something different next time "
++    "(set enter:true, pick another element, wait, or scroll).\n"
++    "- Multi-step wizards (e.g. checkout) advance in place without a URL change; "
++    "after Continue/Next the new step's fields appear in the list. Fill every "
++    "visible required field of a step before clicking Continue.\n"
++    "- To enable a disabled button, first satisfy its precondition (e.g. tick a "
++    "required checkbox).\n"
++    "- Finish with \"done\": success true when the goal is met, success false "
++    "only if it is genuinely impossible.";
++
++// Extracts the first balanced JSON object from a model response (tolerates
++// ```json fences and surrounding prose).
++std::optional<base::DictValue> ParseActionJson(const std::string& content) {
++  size_t start = content.find('{');
++  size_t end = content.rfind('}');
++  if (start == std::string::npos || end == std::string::npos || end <= start) {
++    return std::nullopt;
++  }
++  std::optional<base::Value> v = base::JSONReader::Read(
++      content.substr(start, end - start + 1), base::JSON_PARSE_RFC);
++  if (!v || !v->is_dict()) {
++    return std::nullopt;
++  }
++  return std::move(*v).TakeDict();
++}
++
++std::string GetString(const base::DictValue& d, const char* key) {
++  const std::string* s = d.FindString(key);
++  return s ? *s : std::string();
++}
++
++actor::ScrollToolRequest::Direction ParseDirection(const std::string& dir) {
++  if (dir == "up") {
++    return actor::ScrollToolRequest::Direction::kUp;
++  }
++  if (dir == "left") {
++    return actor::ScrollToolRequest::Direction::kLeft;
++  }
++  if (dir == "right") {
++    return actor::ScrollToolRequest::Direction::kRight;
++  }
++  return actor::ScrollToolRequest::Direction::kDown;
++}
++
++// How many recent action/result lines to feed back to the model each step.
++constexpr size_t kMaxHistoryLines = 10;
++
++// Compact one-line description of the action the model chose (for history).
++std::string DescribeAction(const base::DictValue& action) {
++  const std::string verb = GetString(action, "action");
++  std::string out = verb;
++  if (std::optional<int> idx = action.FindInt("index")) {
++    out += base::StrCat({" [", base::NumberToString(*idx), "]"});
++  }
++  if (verb == "type" && !GetString(action, "text").empty()) {
++    out += base::StrCat({" '", GetString(action, "text"), "'"});
++  } else if (verb == "navigate") {
++    out += base::StrCat({" ", GetString(action, "url")});
++  } else if (verb == "select") {
++    out += base::StrCat({" =", GetString(action, "value")});
++  } else if (verb == "scroll") {
++    out += base::StrCat({" ", GetString(action, "direction")});
++  }
++  return out;
++}
++
++// Summarizes an actor action-result vector into a short note for the model.
++std::string SummarizeResults(
++    const std::vector<actor::ActionResultWithLatencyInfo>& results) {
++  for (const auto& r : results) {
++    if (r.result && !actor::IsOk(r.result->code)) {
++      return base::StrCat({"action failed: ", r.result->message});
++    }
++  }
++  return "ok";
++}
++
++// ---- Flow replay: durable {role, name, ordinal} descriptor matching ----
++
++// Normalizes a semantic name for matching: collapsed whitespace + lowercase.
++std::string NormalizeName(const std::string& s) {
++  return base::ToLowerASCII(base::CollapseWhitespaceASCII(s, true));
++}
++
++// 0-based count of earlier elements sharing (role, normalized name) with the
++// element at `index`. Disambiguates repeated controls (e.g. two "Remove" links).
++int OrdinalOf(const SerializedPage& page, int index) {
++  const InteractiveElement* target = page.ElementByIndex(index);
++  if (!target) {
++    return 0;
++  }
++  const std::string n = NormalizeName(target->name);
++  int ord = 0;
++  for (const InteractiveElement& el : page.elements) {
++    if (el.index >= index) {
++      break;
++    }
++    if (el.role == target->role && NormalizeName(el.name) == n) {
++      ++ord;
++    }
++  }
++  return ord;
++}
++
++// Re-resolves a {role, name, ordinal} descriptor against `page`. Returns the
++// matching element, or nullptr if none (caller heals via the LLM). Prefers the
++// element at the recorded ordinal; falls back to the first same-role/name one.
++const InteractiveElement* MatchDescriptor(const SerializedPage& page,
++                                          const std::string& role,
++                                          const std::string& name,
++                                          int ordinal) {
++  const std::string n = NormalizeName(name);
++  std::vector<const InteractiveElement*> cands;
++  for (const InteractiveElement& el : page.elements) {
++    if (el.role == role && NormalizeName(el.name) == n) {
++      cands.push_back(&el);
++    }
++  }
++  if (cands.empty()) {
++    return nullptr;
++  }
++  if (ordinal >= 0 && ordinal < static_cast<int>(cands.size())) {
++    return cands[ordinal];
++  }
++  return cands.front();
++}
++
++// ---- In-page visual overlay (target highlight box) -----------------------
++//
++// Rendered INSIDE the page via an isolated-world script, not as an AppKit
++// window/subview over the screen: it composites with the page, is positioned in
++// exact CSS-viewport pixels (correct on any display / scale factor — no native
++// coordinate math), clips to the viewport, and is captured by
++// Page.captureScreenshot (so it is verifiable). pointer-events:none, no shadow.
++//
++// Agent visualization = the magic cursor (mouse effect) + a one-shot red click
++// ripple (click effect). A cyan target-outline box used to be drawn too, but it
++// read as unnatural (a real user gets no box around the field they type into),
++// so it was removed — the cursor + ripple are enough. The ripple fires AT click
++// time where the cursor lands: on the batch/Actor path via the magic cursor's
++// own click animation (actor_overlay/app.css), and on the humanized single-click
++// path via ShowClickRipple() in OnHumanizedClickDone().
++//
++// world_id must be in (ISOLATED_WORLD_ID_GLOBAL, ISOLATED_WORLD_ID_MAX] or
++// ExecuteJavaScriptInIsolatedWorld CHECK-fails. ISOLATED_WORLD_ID_MAX is the
++// top embedder slot; chrome's own worlds occupy CONTENT_END+1..+5, so it's free.
++constexpr int kOverlayWorldId = content::ISOLATED_WORLD_ID_MAX;
++
++bool OverlayFrameReady(content::WebContents* wc) {
++  return wc && wc->GetPrimaryMainFrame() &&
++         wc->GetPrimaryMainFrame()->IsRenderFrameLive();
++}
++
++// Fires a one-shot red "click ripple" at (cx,cy) CSS-viewport px: an isolated-
++// world div that expands and fades, then removes itself. Used on the humanized
++// single-click path (which has no Actor magic cursor); the batch/Actor path gets
++// its red ripple from the magic cursor's own click animation instead.
++void ShowClickRipple(content::WebContents* wc, int cx, int cy) {
++  if (!OverlayFrameReady(wc)) {
++    return;
++  }
++  // %% -> literal % (border-radius:50%, keyframe percents). All coords CSS px.
++  std::string js = base::StringPrintf(
++      "(function(){"
++      "if(!document.getElementById('__cf_rip_kf')){"
++      "var s=document.createElement('style');s.id='__cf_rip_kf';"
++      "s.textContent='@keyframes __cf_rip{0%%{opacity:.9;transform:scale(.35)}"
++      "100%%{opacity:0;transform:scale(2.6)}}';"
++      "(document.head||document.documentElement).appendChild(s);}"
++      "var r=document.createElement('div');"
++      "r.style.cssText='position:fixed;left:%dpx;top:%dpx;width:20px;"
++      "height:20px;margin:-10px 0 0 -10px;border-radius:50%%;"
++      "background:rgba(255,40,40,.82);border:1.5px solid #fff;"
++      "z-index:2147483647;pointer-events:none;"
++      "animation:__cf_rip .4s ease-out forwards';"
++      "(document.body||document.documentElement).appendChild(r);"
++      "setTimeout(function(){r.remove();},450);})()",
++      cx, cy);
++  wc->GetPrimaryMainFrame()->ExecuteJavaScriptInIsolatedWorld(
++      base::UTF8ToUTF16(js), base::DoNothing(), kOverlayWorldId);
++}
++
++// No-op: the cyan target-outline box was removed (it looked unnatural, esp.
++// around input fields a user just types into). The agent's visualization is now
++// just the magic cursor + the click ripple. Kept as a no-op so the act-site call
++// contract doesn't change at every call site.
++void MaybeShowOverlay(content::WebContents* /*wc*/,
++                      const SerializedPage& /*page*/,
++                      const InteractiveElement& /*el*/,
++                      const gfx::Rect& /*css_rect*/) {}
++
++void HideInPageOverlay(content::WebContents* wc) {
++  if (!OverlayFrameReady(wc)) {
++    return;
++  }
++  wc->GetPrimaryMainFrame()->ExecuteJavaScriptInIsolatedWorld(
++      u"(function(){var o=document.getElementById('__cf_agent_overlay');"
++      u"if(o)o.remove();})()",
++      base::DoNothing(), kOverlayWorldId);
++}
++
++// A batched click is dispatched through the Actor ClickTool, which resolves the
++// target DomNode to a widget point at time-of-use. If that point is below the
++// fold the renderer can't produce it and the browser process CHECK-crashes deep
++// in the Actor framework (page_tool's is_success_point assertion). Returns a
++// scroll that brings such a target on screen, or nullptr if it's already fully
++// visible (in which case behavior is byte-for-byte unchanged). Single clicks
++// take the humanized coordinate path and never reach this.
++//
++// Detection note (verified at runtime): AnnotatedPageContent clips
++// visible_bounding_box to the viewport, so a PARTIALLY visible element (top on
++// screen, body below the fold -- the only off-screen element the model can see
++// to click) reports a box whose BOTTOM sits exactly on the fold, while its true
++// click point is below it. The visible box's own center is therefore always on
++// screen and useless here; the reliable signal is "box bottom reaches the fold".
++// Units differ: el.bbox_device_px is DEVICE px, page.viewport_dip is DIP. We
++// test the clip in device px and emit the scroll in DIP (ScrollToolRequest
++// distance + coordinate target are DIP).
++// On return, *scrolled_css (when non-null) is set to the CSS-px distance the page
++// will scroll down, i.e. how far the target moves UP in the viewport — callers
++// use it to keep an element-anchored overlay aligned with the post-scroll click.
++std::unique_ptr<actor::ToolRequest> MaybeScrollToReveal(
++    const InteractiveElement& el,
++    const SerializedPage& page,
++    tabs::TabHandle tab_handle,
++    float dsf,
++    float* scrolled_css) {
++  const float vh_dip = page.viewport_dip.height();
++  if (vh_dip <= 0.0f || dsf <= 0.0f) {
++    return nullptr;  // No viewport info; don't risk an unwarranted scroll.
++  }
++  const int vh_dev = static_cast<int>(vh_dip * dsf);
++  // Not clipped at the fold -> the renderer can resolve the click point.
++  if (el.bbox_device_px.bottom() < vh_dev - 2) {
++    return nullptr;
++  }
++  // Pull the element's visible top up toward ~20% of the viewport (enough to
++  // bring a normal-height control fully on screen); never less than half a
++  // screen so tall controls are revealed too. ScrollToolRequest distance and
++  // the coordinate target are in DIP.
++  float dist_dip = el.bbox_device_px.y() / dsf - vh_dip * 0.2f;
++  if (dist_dip < vh_dip * 0.5f) {
++    dist_dip = vh_dip * 0.5f;
++  }
++  if (scrolled_css) {
++    *scrolled_css = dist_dip;
++  }
++  return std::make_unique<actor::ScrollToolRequest>(
++      tab_handle,
++      actor::PageTarget(gfx::Point(page.viewport_dip.width() / 2,
++                                   page.viewport_dip.height() / 2)),
++      actor::ScrollToolRequest::Direction::kDown, dist_dip);
++}
++
++// Builds one Actor ToolRequest from an action dict. Returns nullptr (+ *error)
++// on bad input. Used both for single Actor actions and for batched
++// PerformActions. Click here is the Actor click tool (for atomic batches);
++// a single click instead uses the humanized path (see DispatchAction).
++std::unique_ptr<actor::ToolRequest> BuildActorTool(
++    const base::DictValue& action,
++    const SerializedPage& page,
++    tabs::TabHandle tab_handle,
++    const std::string& doc_id,
++    std::string* error) {
++  const std::string verb = GetString(action, "action");
++  const InteractiveElement* el =
++      page.ElementByIndex(action.FindInt("index").value_or(0));
++  auto node_target = [&]() {
++    // Target the element's OWN frame document, not unconditionally the main
++    // frame: an element inside a same-origin iframe carries its child frame's
++    // identifier. (Fall back to the passed-in main-frame id when APC supplied
++    // no per-element id.) Cross-origin frame elements have an empty id and are
++    // routed to the coordinate click path before reaching here.
++    return actor::PageTarget(actor::DomNode{
++        .node_id = el->dom_node_id,
++        .document_identifier =
++            el->document_identifier.empty() ? doc_id : el->document_identifier});
++  };
++  if (verb == "navigate") {
++    GURL url(GetString(action, "url"));
++    if (!url.is_valid()) {
++      *error = "navigate requires a valid url";
++      return nullptr;
++    }
++    return std::make_unique<actor::NavigateToolRequest>(tab_handle, url);
++  }
++  if (verb == "type") {
++    if (!el) {
++      *error = "type requires a valid element index";
++      return nullptr;
++    }
++    const base::Value* enter = action.Find("enter");
++    return std::make_unique<actor::TypeToolRequest>(
++        tab_handle, node_target(), GetString(action, "text"),
++        enter && enter->is_bool() && enter->GetBool(),
++        actor::TypeToolRequest::Mode::kReplace);
++  }
++  if (verb == "select") {
++    if (!el) {
++      *error = "select requires a valid element index";
++      return nullptr;
++    }
++    return std::make_unique<actor::SelectToolRequest>(
++        tab_handle, node_target(), GetString(action, "value"));
++  }
++  if (verb == "click") {
++    if (!el) {
++      *error = "click requires a valid element index";
++      return nullptr;
++    }
++    return std::make_unique<actor::ClickToolRequest>(
++        tab_handle, node_target(), actor::mojom::ClickType::kLeft,
++        actor::mojom::ClickCount::kSingle);
++  }
++  if (verb == "scroll") {
++    actor::PageTarget target =
++        el ? node_target()
++           : actor::PageTarget(gfx::Point(
++                 page.viewport_dip.width() > 0 ? page.viewport_dip.width() / 2
++                                               : 400,
++                 page.viewport_dip.height() > 0 ? page.viewport_dip.height() / 2
++                                                : 400));
++    return std::make_unique<actor::ScrollToolRequest>(
++        tab_handle, target, ParseDirection(GetString(action, "direction")),
++        /*distance=*/600.0f);
++  }
++  if (verb == "wait") {
++    const int s = action.FindInt("seconds").value_or(1);
++    return std::make_unique<actor::WaitToolRequest>(
++        base::Seconds(s <= 0 ? 1 : s));
++  }
++  *error = base::StrCat({"unknown action: ", verb});
++  return nullptr;
++}
++
++}  // namespace
++
++// static
++void AgentController::Start(content::WebContents* web_contents,
++                            const std::string& goal,
++                            int max_steps,
++                            const std::string& model_override,
++                            const std::string& plan_json,
++                            ResultCallback callback) {
++  LlmConfig config = LlmConfig::FromCommandLine();
++  if (!config.IsComplete()) {
++    std::move(callback).Run(
++        false,
++        "agent LLM is not configured: pass --agent-llm-url/--agent-llm-key/"
++        "--agent-model",
++        "[]");
++    return;
++  }
++  if (!web_contents) {
++    std::move(callback).Run(false, "no target tab", "[]");
++    return;
++  }
++  // Self-owned.
++  auto* controller = new AgentController(web_contents, goal,
++                                         max_steps <= 0 ? 20 : max_steps,
++                                         model_override, plan_json,
++                                         std::move(callback));
++  controller->BeginTask();
++}
++
++AgentController::AgentController(content::WebContents* web_contents,
++                                 const std::string& goal,
++                                 int max_steps,
++                                 const std::string& model_override,
++                                 const std::string& plan_json,
++                                 ResultCallback callback)
++    : web_contents_(web_contents->GetWeakPtr()),
++      goal_(goal),
++      max_steps_(max_steps),
++      model_override_(model_override),
++      callback_(std::move(callback)) {
++  // A non-empty plan switches the loop into replay mode (see ReplayOrThink).
++  if (!plan_json.empty()) {
++    std::optional<base::Value> v =
++        base::JSONReader::Read(plan_json, base::JSON_PARSE_RFC);
++    if (v && v->is_list()) {
++      plan_ = std::move(*v).TakeList();
++      replaying_ = !plan_.empty();
++    }
++  }
++}
++
++AgentController::~AgentController() = default;
++
++void AgentController::BeginTask() {
++  content::BrowserContext* context = browser_context();
++  if (!context) {
++    Finish(false, "tab has no browser context");
++    return;
++  }
++  llm_ = std::make_unique<LlmClient>(
++      context->GetDefaultStoragePartition()
++          ->GetURLLoaderFactoryForBrowserProcess(),
++      LlmConfig::FromCommandLine());
++
++  actor::ActorKeyedService* aks = actor::ActorKeyedService::Get(context);
++  if (!aks) {
++    Finish(false, "Actor service unavailable (kGlicActor disabled?)");
++    return;
++  }
++  task_id_ = aks->CreateTask(
++      actor::TaskSourceInfo(actor::TaskSourceInfo::Client::kExperimentalActor,
++                            std::nullopt),
++      PolicyChecker());
++
++  transcript_path_ = base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++      switches::kAgentLogFile);
++
++  // Static preamble = system prompt only. The goal + a compact action history +
++  // the CURRENT observation are rebuilt into one user message each step (see
++  // Think), so the context stays small instead of accumulating page dumps.
++  base::DictValue system_msg;
++  system_msg.Set("role", "system");
++  system_msg.Set("content", kSystemPrompt);
++  messages_.Append(base::Value(std::move(system_msg)));
++
++  // Add the tab to the task so page-scoped Actor tools can operate, then loop.
++  tabs::TabInterface* tab =
++      tabs::TabInterface::MaybeGetFromContents(web_contents());
++  actor::ActorTask* task = aks->GetTask(task_id_);
++  if (!tab || !task) {
++    Finish(false, "could not bind task to tab");
++    return;
++  }
++  task->AddTab(tab->GetHandle(), /*stop_task_on_detach=*/false,
++               base::BindOnce(&AgentController::OnTabAdded,
++                              weak_factory_.GetWeakPtr()));
++}
++
++void AgentController::OnTabAdded(actor::mojom::ActionResultPtr result) {
++  if (result && !actor::IsOk(result->code)) {
++    Finish(false, base::StrCat({"could not attach tab to task: ",
++                                result->message}));
++    return;
++  }
++  Observe();
++}
++
++void AgentController::Observe() {
++  if (!web_contents()) {
++    Finish(false, "tab closed");
++    return;
++  }
++  LOG(ERROR) << "[ai_agent] observe_start step=" << (step_ + 1);
++  optimization_guide::GetAIPageContent(
++      web_contents(),
++      // on_critical_path=true: wait for fresh, post-action layout. false was
++      // faster but returned STALE content (a just-filled field still read as
++      // its placeholder), which misled the model. The real speed win is the
++      // model + trimmed waits, not this flag.
++      optimization_guide::ActionableAIPageContentOptions(
++          /*on_critical_path=*/true),
++      base::BindOnce(&AgentController::OnObserved, weak_factory_.GetWeakPtr()));
++}
++
++void AgentController::OnObserved(
++    base::expected<optimization_guide::AIPageContentResult, std::string>
++        result) {
++  LOG(ERROR) << "[ai_agent] observe_done step=" << (step_ + 1);
++  if (!result.has_value()) {
++    Finish(false, base::StrCat({"could not read page: ", result.error()}));
++    return;
++  }
++  auto page = std::make_unique<SerializedPage>(PageSerializer::Serialize(
++      result->proto, MainFrameDocumentIdentifier(), kMaxPageChars));
++  ReplayOrThink(std::move(page));
++}
++
++void AgentController::Think(std::unique_ptr<SerializedPage> page) {
++  if (!web_contents()) {
++    Finish(false, "tab closed");
++    return;
++  }
++  const std::string url = web_contents()->GetLastCommittedURL().spec();
++  const bool first = (step_ == 0);
++  std::string change_note;
++  if (!first) {
++    if (url != last_url_) {
++      change_note = base::StrCat({"(navigated to ", url, ")\n"});
++    } else if (page->text != last_page_text_) {
++      change_note = "(the visible elements changed since your last action)\n";
++    } else {
++      // Same serialized page. This does NOT mean nothing happened: input
++      // values aren't shown in the observation, so a prior type/autofill may
++      // have succeeded even though this looks identical. Don't nag the model
++      // to "do something different" — that caused it to redo working actions.
++      change_note =
++          "(same URL and elements as the previous step; note that filled "
++          "input values are not shown here, so a prior type/autofill may have "
++          "worked even if this looks unchanged)\n";
++    }
++  }
++  last_url_ = url;
++  last_page_text_ = page->text;
++
++  // Compact recent-action history (NOT full prior page dumps) keeps the context
++  // small and stable in size from step to step.
++  std::string history;
++  const size_t start = history_.size() > kMaxHistoryLines
++                           ? history_.size() - kMaxHistoryLines
++                           : 0;
++  for (size_t i = start; i < history_.size(); ++i) {
++    history += history_[i] + "\n";
++  }
++
++  std::string content = base::StrCat(
++      {"Goal: ", goal_, "\n\n",
++       history.empty() ? "" : base::StrCat({"Recent actions:\n", history, "\n"}),
++       "Step ", base::NumberToString(step_ + 1), "/",
++       base::NumberToString(max_steps_), " - URL: ", url, "\n",
++       change_note,
++       pending_observation_.empty()
++           ? ""
++           : base::StrCat({"Last result: ", pending_observation_, "\n"}),
++       pending_read_text_.empty()
++           ? ""
++           : base::StrCat({"PAGE TEXT (from your 'read' — use it to answer or "
++                           "summarize):\n", pending_read_text_, "\n\n"}),
++       "Interactive elements (", base::NumberToString(page->elements.size()),
++       "):\n", page->text,
++       "\nReply with JSON {\"thought\":..., \"actions\":[...]} — batch all "
++       "steps you can do now into the actions array."});
++  pending_observation_.clear();
++  pending_read_text_.clear();
++
++  // Request = system preamble + this one user message (no growing transcript).
++  base::ListValue request = messages_.Clone();
++  base::DictValue user_msg;
++  user_msg.Set("role", "user");
++  user_msg.Set("content", content);
++  request.Append(base::Value(std::move(user_msg)));
++
++  WriteTranscript("SENT", content);
++
++  llm_->CreateCompletion(
++      std::move(request), base::ListValue(), model_override_,
++      base::BindOnce(&AgentController::OnThought, weak_factory_.GetWeakPtr(),
++                     std::move(page)));
++}
++
++void AgentController::OnThought(std::unique_ptr<SerializedPage> page,
++                                LlmResponse resp) {
++  if (!resp.ok()) {
++    Finish(false, base::StrCat({"LLM error: ", resp.error}));
++    return;
++  }
++  WriteTranscript("RECV", resp.content);
++
++  std::optional<base::DictValue> action = ParseActionJson(resp.content);
++  if (!action) {
++    pending_action_desc_ = "(invalid JSON)";
++    StepDone("your last reply was not a single JSON object; reply with JSON "
++             "only");
++    return;
++  }
++  // A "read" action pulls the page's main text into the next observation so the
++  // model can summarize/extract body content (the element list is actionable
++  // only). Standalone + async — handle it before the normal dispatch.
++  {
++    auto is_read = [](const base::DictValue& a) {
++      return GetString(a, "action") == "read";
++    };
++    const base::ListValue* rb = action->FindList("actions");
++    const bool wants_read =
++        is_read(*action) ||
++        (rb && !rb->empty() && (*rb)[0].is_dict() && is_read((*rb)[0].GetDict()));
++    if (wants_read) {
++      if (!web_contents()) {
++        Finish(false, "tab closed");
++        return;
++      }
++      pending_action_desc_ = "read page text";
++      DoReadPageText();
++      return;
++    }
++  }
++  // One-shot batch: an "actions" array runs several steps as a single Actor
++  // PerformActions (e.g. fill a whole form + submit) -> far fewer LLM turns.
++  if (const base::ListValue* batch = action->FindList("actions")) {
++    if (!web_contents()) {
++      Finish(false, "tab closed");
++      return;
++    }
++    actor::ActorKeyedService* aks =
++        actor::ActorKeyedService::Get(browser_context());
++    tabs::TabInterface* tab =
++        tabs::TabInterface::MaybeGetFromContents(web_contents());
++    if (!aks || !tab) {
++      StepDone("agent batch: actor/tab unavailable");
++      return;
++    }
++    const tabs::TabHandle tab_handle = tab->GetHandle();
++    const std::string doc_id = MainFrameDocumentIdentifier();
++    std::vector<std::unique_ptr<actor::ToolRequest>> tools;
++    std::vector<std::string> descs;
++    bool done_seen = false;
++    bool done_ok = true;
++    std::string done_final;
++    for (size_t i = 0; i < batch->size(); ++i) {
++      if (!(*batch)[i].is_dict()) {
++        continue;
++      }
++      const base::DictValue& a = (*batch)[i].GetDict();
++      // A "done" step ends the task. We can't trust a done batched WITH actions
++      // (the model hasn't seen their effect yet), so record it but only honor
++      // it if it's the sole thing in the array.
++      if (GetString(a, "action") == "done") {
++        done_seen = true;
++        const base::Value* s = a.Find("success");
++        done_ok = s && s->is_bool() ? s->GetBool() : true;
++        done_final = GetString(a, "final");
++        continue;
++      }
++      const InteractiveElement* el =
++          page->ElementByIndex(a.FindInt("index").value_or(0));
++      // A click on a cross-origin (out-of-process) iframe element can't be
++      // node-targeted -- APC redacts the child frame's document id, and the
++      // Actor node click is renderer-scoped, so it would silently miss (the
++      // cause of the endless "click the same element" loop on e.g. an embedded
++      // CAPTCHA). Dispatch a browser-level humanized click at its viewport point
++      // instead: that path routes through the cross-process input router and so
++      // reaches OOPIFs. Any other actions queued this turn are re-proposed next.
++      if (el && GetString(a, "action") == "click" && el->in_frame &&
++          el->document_identifier.empty()) {
++        MaybeShowOverlay(web_contents(), *page, *el,
++                         gfx::ScaleToRoundedRect(
++                             el->bbox_device_px, 1.0f / device_scale_factor()));
++        pending_action_desc_ = DescribeAction(a);
++        RecordExecutedStep(a, *page, pending_status_);
++        std::string err;
++        if (!HumanizedClickElement(*el, &err)) {
++          StepDone(err.empty() ? "click could not be performed" : err);
++        }
++        return;
++      }
++      if (el) {
++        gfx::Rect css = gfx::ScaleToRoundedRect(
++            el->bbox_device_px, 1.0f / device_scale_factor());
++        // Reveal an off-screen click target before the Actor ClickTool runs,
++        // else the renderer can't resolve it to a point and the browser process
++        // crashes. Only batched clicks reach the Actor click tool (see above).
++        // The reveal scroll moves the target UP by `scrolled` CSS px, so shift
++        // the overlay the same amount: otherwise the box/dot stay where the
++        // element WAS while the Actor click lands where it now IS (a large,
++        // "very bad" dot-vs-click offset for every revealed target).
++        if (GetString(a, "action") == "click") {
++          float scrolled = 0.0f;
++          if (std::unique_ptr<actor::ToolRequest> reveal = MaybeScrollToReveal(
++                  *el, *page, tab_handle, device_scale_factor(), &scrolled)) {
++            css.Offset(0, -static_cast<int>(scrolled));
++            descs.push_back("scroll to reveal target");
++            tools.push_back(std::move(reveal));
++          }
++        }
++        MaybeShowOverlay(web_contents(), *page, *el, css);
++      }
++      std::string err;
++      std::unique_ptr<actor::ToolRequest> tool =
++          BuildActorTool(a, *page, tab_handle, doc_id, &err);
++      if (!tool) {
++        StepDone(base::StrCat({"batch action invalid: ", err}));
++        return;
++      }
++      descs.push_back(DescribeAction(a));
++      RecordExecutedStep(a, *page, pending_status_);
++      tools.push_back(std::move(tool));
++    }
++    if (tools.empty()) {
++      if (done_seen) {
++        base::DictValue d;
++        d.Set("action", "done");
++        d.Set("success", done_ok);
++        d.Set("final", done_final);
++        RecordExecutedStep(d, *page, pending_status_);
++        Finish(done_ok, done_final.empty() ? "task finished" : done_final);
++      } else {
++        StepDone("the actions array was empty");
++      }
++      return;
++    }
++    pending_action_desc_ =
++        base::StrCat({"batch[", base::JoinString(descs, ", "), "]"});
++    aks->PerformActions(
++        task_id_, std::move(tools), actor::ActorTaskMetadata(),
++        base::BindOnce(&AgentController::OnActorActed,
++                       weak_factory_.GetWeakPtr()));
++    return;
++  }
++
++  pending_action_desc_ = DescribeAction(*action);
++
++  const std::string verb = GetString(*action, "action");
++  if (verb == "done") {
++    const base::Value* success = action->Find("success");
++    const bool ok = success && success->is_bool() ? success->GetBool() : true;
++    std::string final = GetString(*action, "final");
++    if (final.empty()) {
++      final = GetString(*action, "thought");
++    }
++    RecordExecutedStep(*action, *page, pending_status_);
++    Finish(ok, final.empty() ? "task finished" : final);
++    return;
++  }
++
++  // Anti-loop guard: weaker/faster models tend to re-issue the exact same
++  // click/select they just did (e.g. clicking "Autofill" 5x). If the previous
++  // step was this identical action, refuse to repeat it and push the model to
++  // move on. (Scroll/type/wait are legitimately repeatable, so skip them.)
++  if ((verb == "click" || verb == "select") && !history_.empty() &&
++      history_.back().find(base::StrCat(
++          {": ", pending_action_desc_, " =>"})) != std::string::npos) {
++    StepDone(base::StrCat(
++        {"you already performed '", pending_action_desc_,
++         "' on the previous step; repeating the same click does not help - "
++         "pick a DIFFERENT element or a different action now"}));
++    return;
++  }
++
++  std::string error;
++  if (!DispatchAction(*action, *page, &error)) {
++    StepDone(error.empty() ? "action could not be performed" : error);
++  } else {
++    RecordExecutedStep(*action, *page, pending_status_);
++  }
++  // Successful dispatch reports back via OnHumanizedClickDone / OnActorActed.
++}
++
++void AgentController::ReplayOrThink(std::unique_ptr<SerializedPage> page) {
++  if (!web_contents()) {
++    Finish(false, "tab closed");
++    return;
++  }
++  // Drive with the LLM when there's no plan, it's exhausted, or the current
++  // entry is malformed -- and tag any steps the LLM produces as "recorded".
++  if (!replaying_ || plan_pos_ >= plan_.size() || !plan_[plan_pos_].is_dict()) {
++    consuming_plan_step_ = false;
++    pending_status_ = "recorded";
++    Think(std::move(page));
++    return;
++  }
++
++  const base::DictValue& step = plan_[plan_pos_].GetDict();
++  const std::string verb = GetString(step, "action");
++  if (verb == "done") {
++    const base::Value* s = step.Find("success");
++    const bool ok = s && s->is_bool() ? s->GetBool() : true;
++    RecordExecutedStep(step, *page, "replayed");
++    const std::string final = GetString(step, "final");
++    Finish(ok, final.empty() ? "task finished (replayed)" : final);
++    return;
++  }
++
++  bool matched = false;
++  base::DictValue act = SynthesizeFromPlan(step, *page, &matched);
++  if (matched) {
++    if (const InteractiveElement* hl =
++            page->ElementByIndex(act.FindInt("index").value_or(0))) {
++      MaybeShowOverlay(
++          web_contents(), *page, *hl,
++          gfx::ScaleToRoundedRect(hl->bbox_device_px,
++                                  1.0f / device_scale_factor()));
++    }
++    pending_action_desc_ = base::StrCat({DescribeAction(act), " (replay)"});
++    std::string err;
++    if (DispatchAction(act, *page, &err)) {
++      RecordExecutedStep(act, *page, "replayed");
++      consuming_plan_step_ = true;
++      return;
++    }
++    LOG(ERROR) << "[ai_agent] replay dispatch failed at plan step " << plan_pos_
++               << " (" << err << "); healing via LLM";
++  } else {
++    LOG(ERROR) << "[ai_agent] replay miss at plan step " << plan_pos_ << " ("
++               << verb << " '" << GetString(step, "name")
++               << "') not found on page; healing via LLM";
++  }
++  // Heal: spend one LLM turn on this plan slot, tag its output "healed", and
++  // continue replaying the remaining steps afterwards.
++  consuming_plan_step_ = true;
++  pending_status_ = "healed";
++  Think(std::move(page));
++}
++
++base::DictValue AgentController::SynthesizeFromPlan(const base::DictValue& step,
++                                                    const SerializedPage& page,
++                                                    bool* matched) {
++  base::DictValue act;
++  const std::string verb = GetString(step, "action");
++  act.Set("action", verb);
++  *matched = true;
++
++  if (verb == "navigate") {
++    const std::string url = GetString(step, "url");
++    act.Set("url", url);
++    *matched = GURL(url).is_valid();
++    return act;
++  }
++  if (verb == "wait") {
++    act.Set("seconds", step.FindInt("seconds").value_or(1));
++    return act;
++  }
++
++  const std::string role = GetString(step, "role");
++  const std::string name = GetString(step, "name");
++  const int ordinal = step.FindInt("ordinal").value_or(0);
++  const InteractiveElement* el =
++      role.empty() ? nullptr : MatchDescriptor(page, role, name, ordinal);
++
++  if (verb == "scroll") {
++    // Scroll can fall back to a viewport scroll, so it always "matches".
++    if (el) {
++      act.Set("index", el->index);
++    }
++    act.Set("direction", GetString(step, "direction"));
++    return act;
++  }
++  if (!el) {
++    *matched = false;
++    return act;
++  }
++  act.Set("index", el->index);
++  if (verb == "type") {
++    act.Set("text", GetString(step, "text"));
++    if (const base::Value* e = step.Find("enter"); e && e->is_bool()) {
++      act.Set("enter", e->GetBool());
++    }
++  } else if (verb == "select") {
++    act.Set("value", GetString(step, "value"));
++  }
++  return act;
++}
++
++void AgentController::RecordExecutedStep(const base::DictValue& action,
++                                         const SerializedPage& page,
++                                         const char* status) {
++  base::DictValue rec;
++  const std::string verb = GetString(action, "action");
++  rec.Set("action", verb);
++  // Durable target descriptor from the element the action referenced.
++  if (std::optional<int> idx = action.FindInt("index")) {
++    if (const InteractiveElement* el = page.ElementByIndex(*idx)) {
++      rec.Set("role", el->role);
++      rec.Set("name", el->name);
++      rec.Set("ordinal", OrdinalOf(page, *idx));
++    }
++  }
++  // Payload by verb.
++  if (verb == "type") {
++    rec.Set("text", GetString(action, "text"));
++    if (const base::Value* e = action.Find("enter"); e && e->is_bool()) {
++      rec.Set("enter", e->GetBool());
++    }
++  } else if (verb == "navigate") {
++    rec.Set("url", GetString(action, "url"));
++  } else if (verb == "select") {
++    rec.Set("value", GetString(action, "value"));
++  } else if (verb == "scroll") {
++    rec.Set("direction", GetString(action, "direction"));
++  } else if (verb == "wait") {
++    rec.Set("seconds", action.FindInt("seconds").value_or(1));
++  } else if (verb == "done") {
++    const base::Value* s = action.Find("success");
++    rec.Set("success", s && s->is_bool() ? s->GetBool() : true);
++    rec.Set("final", GetString(action, "final"));
++  }
++  rec.Set("status", status);
++  executed_steps_.Append(base::Value(std::move(rec)));
++}
++
++bool AgentController::DispatchAction(const base::DictValue& action,
++                                     const SerializedPage& page,
++                                     std::string* error_out) {
++  if (!web_contents()) {
++    *error_out = "tab closed";
++    return false;
++  }
++  // Visually highlight the element being acted on (in-page overlay box) so a
++  // human watching can see exactly what the agent is working on.
++  if (const InteractiveElement* hl =
++          page.ElementByIndex(action.FindInt("index").value_or(0))) {
++    MaybeShowOverlay(
++        web_contents(), page, *hl,
++        gfx::ScaleToRoundedRect(hl->bbox_device_px,
++                                1.0f / device_scale_factor()));
++  }
++  const std::string verb = GetString(action, "action");
++  const int index = action.FindInt("index").value_or(0);
++
++  // ---- Humanized click (the fork's signature input path) ----
++  if (verb == "click") {
++    const InteractiveElement* el = page.ElementByIndex(index);
++    if (!el) {
++      *error_out = base::StrCat({"no element with index ",
++                                 base::NumberToString(index)});
++      return false;
++    }
++    return HumanizedClickElement(*el, error_out);
++  }
++
++  // ---- Actor-framework tools ----
++  actor::ActorKeyedService* aks =
++      actor::ActorKeyedService::Get(browser_context());
++  if (!aks) {
++    *error_out = "Actor service unavailable";
++    return false;
++  }
++  tabs::TabInterface* tab =
++      tabs::TabInterface::MaybeGetFromContents(web_contents());
++  if (!tab) {
++    *error_out = "tab not available";
++    return false;
++  }
++  const tabs::TabHandle tab_handle = tab->GetHandle();
++  const std::string doc_id = MainFrameDocumentIdentifier();
++
++  std::unique_ptr<actor::ToolRequest> tool =
++      BuildActorTool(action, page, tab_handle, doc_id, error_out);
++  if (!tool) {
++    return false;  // *error_out set by BuildActorTool.
++  }
++  std::vector<std::unique_ptr<actor::ToolRequest>> actions;
++  actions.push_back(std::move(tool));
++  aks->PerformActions(
++      task_id_, std::move(actions), actor::ActorTaskMetadata(),
++      base::BindOnce(&AgentController::OnActorActed,
++                     weak_factory_.GetWeakPtr()));
++  return true;
++}
++
++bool AgentController::HumanizedClickElement(const InteractiveElement& el,
++                                            std::string* error_out) {
++  content::RenderWidgetHost* rwh = render_widget_host();
++  if (!rwh) {
++    *error_out = "no render widget host";
++    return false;
++  }
++  const float dsf = device_scale_factor();
++  // APC geometry is visual-viewport device pixels; humanized input wants DIP.
++  const gfx::PointF target(
++      (el.bbox_device_px.x() + el.bbox_device_px.width() / 2.0f) / dsf,
++      (el.bbox_device_px.y() + el.bbox_device_px.height() / 2.0f) / dsf);
++  LOG(ERROR) << "[ai_agent] CLICK <" << el.role
++             << "> bbox_devpx=" << el.bbox_device_px.ToString() << " dsf=" << dsf
++             << " in_frame=" << el.in_frame << " -> dip=" << target.ToString();
++  content::PerformHumanizedClick(
++      web_contents(), last_cursor_dip_, target,
++      base::Seconds(kClickDurationSeconds), /*move_only=*/false,
++      base::BindOnce(&AgentController::OnHumanizedClickDone,
++                     weak_factory_.GetWeakPtr()));
++  last_cursor_dip_ = target;
++  return true;
++}
++
++void AgentController::DoReadPageText() {
++  content::WebContents* wc = web_contents();
++  if (!wc || !wc->GetPrimaryMainFrame()) {
++    StepDone("read failed: no page");
++    return;
++  }
++  // Prefer a main article/content region; fall back to the whole body. Clip to
++  // keep the prompt bounded.
++  const std::u16string js = base::UTF8ToUTF16(std::string(
++      "(function(){var n=document.querySelector('article,main,[role=main]')"
++      "||document.body;var t=n?n.innerText:'';return t.slice(0,8000);})()"));
++  wc->GetPrimaryMainFrame()->ExecuteJavaScriptInIsolatedWorld(
++      js,
++      base::BindOnce(&AgentController::OnReadPageText,
++                     weak_factory_.GetWeakPtr()),
++      kOverlayWorldId);
++}
++
++void AgentController::OnReadPageText(base::Value result) {
++  const std::string text = result.is_string() ? result.GetString() : std::string();
++  pending_read_text_ = text;
++  StepDone(text.empty()
++               ? "read: no readable text found on the page"
++               : base::StrCat({"read page text (",
++                               base::NumberToString(text.size()),
++                               " chars) — shown below as PAGE TEXT"}));
++}
++
++void AgentController::OnHumanizedClickDone() {
++  // The humanized click has just landed (cursor arrived). Flash the red ripple
++  // where it landed -- last_cursor_dip_ is the click target in DIP == CSS px.
++  // (The batch/Actor path instead gets its ripple from the magic cursor's own
++  // click animation, so it is not rippled here.)
++  ShowClickRipple(web_contents(), static_cast<int>(last_cursor_dip_.x()),
++                  static_cast<int>(last_cursor_dip_.y()));
++  StepDone("ok");
++}
++
++void AgentController::OnActorActed(
++    std::vector<actor::ActionResultWithLatencyInfo> results) {
++  StepDone(SummarizeResults(results));
++}
++
++void AgentController::StepDone(const std::string& observation_note) {
++  // Record a compact "what I did -> what happened" line for the next prompt's
++  // history block (this is the memory we keep instead of full page dumps).
++  history_.push_back(base::StrCat({"step ", base::NumberToString(step_ + 1),
++                                   ": ", pending_action_desc_, " => ",
++                                   observation_note}));
++  LOG(ERROR) << "[ai_agent] " << history_.back();
++  pending_observation_ = observation_note;
++  // One in-flight action == one consumed plan slot (whether it was replayed or
++  // healed). Advance so the next observation resolves the following step.
++  if (consuming_plan_step_) {
++    ++plan_pos_;
++    consuming_plan_step_ = false;
++  }
++  if (++step_ >= max_steps_) {
++    Finish(false, base::StrCat({"reached step limit (",
++                                base::NumberToString(max_steps_),
++                                ") before completing the task"}));
++    return;
++  }
++  // Give navigation / client-side JS a moment to settle before re-observing,
++  // so the next observation reflects the action's effect (avoids the agent
++  // re-clicking because the page hadn't updated yet).
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE,
++      base::BindOnce(&AgentController::Observe, weak_factory_.GetWeakPtr()),
++      base::Milliseconds(400));
++}
++
++void AgentController::Finish(bool success, const std::string& final_text) {
++  HideInPageOverlay(web_contents());
++  if (!task_id_.is_null() && browser_context()) {
++    if (actor::ActorKeyedService* aks =
++            actor::ActorKeyedService::Get(browser_context())) {
++      aks->StopTask(task_id_, actor::ActorTask::StoppedReason::kTaskComplete);
++    }
++  }
++  if (callback_) {
++    std::string steps_json;
++    base::JSONWriter::Write(executed_steps_, &steps_json);
++    std::move(callback_).Run(success, final_text, steps_json);
++  }
++  delete this;
++}
++
++void AgentController::WriteTranscript(const std::string& label,
++                                      const std::string& text) {
++  LOG(ERROR) << "[ai_agent] " << label << " step=" << (step_ + 1) << ":\n"
++             << text;
++  if (!transcript_path_.empty()) {
++    const std::string block =
++        base::StrCat({"\n==== step ", base::NumberToString(step_ + 1), " ",
++                      label, " ====\n", text, "\n"});
++    base::AppendToFile(base::FilePath::FromUTF8Unsafe(transcript_path_), block);
++  }
++}
++
++content::WebContents* AgentController::web_contents() const {
++  return web_contents_.get();
++}
++
++content::RenderWidgetHost* AgentController::render_widget_host() const {
++  content::WebContents* wc = web_contents();
++  if (!wc || !wc->GetRenderWidgetHostView()) {
++    return nullptr;
++  }
++  return wc->GetRenderWidgetHostView()->GetRenderWidgetHost();
++}
++
++content::BrowserContext* AgentController::browser_context() const {
++  content::WebContents* wc = web_contents();
++  return wc ? wc->GetBrowserContext() : nullptr;
++}
++
++float AgentController::device_scale_factor() const {
++  content::WebContents* wc = web_contents();
++  if (wc && wc->GetRenderWidgetHostView()) {
++    const float dsf = wc->GetRenderWidgetHostView()->GetDeviceScaleFactor();
++    if (dsf > 0) {
++      return dsf;
++    }
++  }
++  return 1.0f;
++}
++
++std::string AgentController::MainFrameDocumentIdentifier() const {
++  content::WebContents* wc = web_contents();
++  if (!wc || !wc->GetPrimaryMainFrame()) {
++    return std::string();
++  }
++  return optimization_guide::DocumentIdentifierUserData::GetDocumentIdentifier(
++             wc->GetPrimaryMainFrame()->GetGlobalFrameToken())
++      .value_or(std::string());
++}
++
++}  // namespace ai_agent
+--- /dev/null
++++ b/chrome/browser/ai_agent/agent_controller.h
+@@ -0,0 +1,180 @@
++// Copyright 2026 The ChromiumFish Authors
++// Use of this source code is governed by an MIT-style license.
++//
++// AgentController is the native, browser-process "brain loop" for the AI agent
++// layer. For a given tab and a natural-language goal it repeatedly:
++//   1. OBSERVE  - optimization_guide::GetAIPageContent (ACTIONABLE_ELEMENTS).
++//   2. SERIALIZE- PageSerializer -> indexed interactive-element text + map.
++//   3. THINK    - LlmClient -> OpenAI-compatible /chat/completions -> JSON act.
++//   4. ACT      - clicks/moves via the fork's humanized mouse path; type/
++//                 scroll/select/navigate/wait via Chrome's Actor framework.
++// ...until the model emits `done` or max steps is hit.
++//
++// It is self-owned (Start() news it; it deletes itself after invoking the
++// completion callback exactly once). All work runs on the UI thread.
++
++#ifndef CHROME_BROWSER_AI_AGENT_AGENT_CONTROLLER_H_
++#define CHROME_BROWSER_AI_AGENT_AGENT_CONTROLLER_H_
++
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/types/expected.h"
++#include "base/values.h"
++#include "chrome/browser/ai_agent/llm_client.h"
++#include "chrome/common/actor/action_result.h"
++#include "chrome/common/actor/task_id.h"
++#include "ui/gfx/geometry/point_f.h"
++
++namespace content {
++class BrowserContext;
++class RenderWidgetHost;
++class WebContents;
++}  // namespace content
++
++namespace optimization_guide {
++struct AIPageContentResult;
++}  // namespace optimization_guide
++
++namespace ai_agent {
++
++class LlmClient;
++struct SerializedPage;
++struct InteractiveElement;
++
++class AgentController {
++ public:
++  // Reports task completion: `success`, a final human-readable message, and a
++  // JSON array of the resolved/executed steps (the flow plan, each step tagged
++  // recorded|replayed|healed) for the caller's flow cache.
++  using ResultCallback =
++      base::OnceCallback<void(bool success,
++                              const std::string& final_text,
++                              const std::string& steps_json)>;
++
++  // Starts an agent task against `web_contents`. Self-owned; runs `callback`
++  // once when finished. If the LLM config (--agent-llm-*) is incomplete or the
++  // tab is invalid, fails fast via `callback`.
++  //
++  // `plan_json` (optional, "" = none) is a JSON array of previously-recorded
++  // steps. When supplied, the agent REPLAYS: each step's target descriptor is
++  // re-resolved against the live page and dispatched without calling the LLM;
++  // a step whose target no longer matches is HEALED via the LLM and continues.
++  static void Start(content::WebContents* web_contents,
++                    const std::string& goal,
++                    int max_steps,
++                    const std::string& model_override,
++                    const std::string& plan_json,
++                    ResultCallback callback);
++
++  AgentController(const AgentController&) = delete;
++  AgentController& operator=(const AgentController&) = delete;
++
++ private:
++  AgentController(content::WebContents* web_contents,
++                  const std::string& goal,
++                  int max_steps,
++                  const std::string& model_override,
++                  const std::string& plan_json,
++                  ResultCallback callback);
++  ~AgentController();
++
++  // Loop phases.
++  void BeginTask();
++  void OnTabAdded(actor::mojom::ActionResultPtr result);
++  void Observe();
++  void OnObserved(
++      base::expected<optimization_guide::AIPageContentResult, std::string>
++          result);
++  void Think(std::unique_ptr<SerializedPage> page);
++  void OnThought(std::unique_ptr<SerializedPage> page, LlmResponse resp);
++
++  // Replay path: if a cached plan is active, resolve the next plan step against
++  // `page` (no LLM) and dispatch it; otherwise (no plan / exhausted / a step
++  // that no longer matches) fall through to Think() so the LLM drives/heals.
++  void ReplayOrThink(std::unique_ptr<SerializedPage> page);
++  // Synthesizes an action dict {action, index, text/value/url/...} from a plan
++  // step by re-resolving its {role,name,ordinal} descriptor against `page`.
++  // Sets *matched=false if the descriptor's target can't be located.
++  base::DictValue SynthesizeFromPlan(const base::DictValue& step,
++                                     const SerializedPage& page,
++                                     bool* matched);
++  // Appends a durable record of `action` (verb + {role,name,ordinal} target
++  // descriptor + payload + `status`) to executed_steps_ for the flow cache.
++  void RecordExecutedStep(const base::DictValue& action,
++                          const SerializedPage& page,
++                          const char* status);
++
++  // Action dispatch. Returns false if the action could not be started (the
++  // caller then advances with an error note).
++  bool DispatchAction(const base::DictValue& action,
++                      const SerializedPage& page,
++                      std::string* error_out);
++  // Browser-level humanized click at `el`'s viewport center. Routed through the
++  // cross-process input router, so unlike the Actor node-id click it reaches
++  // out-of-process (cross-origin) iframes. Used by DispatchAction and as the
++  // fallback for cross-origin-frame elements in the batch path.
++  bool HumanizedClickElement(const InteractiveElement& el,
++                             std::string* error_out);
++  void OnHumanizedClickDone();
++  // "read" action: pull the page's main readable text into the next observation
++  // so the model can summarize/extract body content (the element list is
++  // actionable-only). Async: runs JS, then OnReadPageText advances the loop.
++  void DoReadPageText();
++  void OnReadPageText(base::Value result);
++  void OnActorActed(std::vector<actor::ActionResultWithLatencyInfo> results);
++
++  // Advances to the next step (or finishes when steps are exhausted) after
++  // recording `observation_note` as the prior action's outcome for the model.
++  void StepDone(const std::string& observation_note);
++  void Finish(bool success, const std::string& final_text);
++
++  // Appends a SENT/RECV block to the transcript (--agent-log-file) + LOG.
++  void WriteTranscript(const std::string& label, const std::string& text);
++
++  // Live accessors derived from the (weak) WebContents; null when the tab is
++  // gone.
++  content::WebContents* web_contents() const;
++  content::RenderWidgetHost* render_widget_host() const;
++  content::BrowserContext* browser_context() const;
++  float device_scale_factor() const;
++  std::string MainFrameDocumentIdentifier() const;
++
++  base::WeakPtr<content::WebContents> web_contents_;
++  const std::string goal_;
++  const int max_steps_;
++  const std::string model_override_;
++  ResultCallback callback_;
++
++  std::unique_ptr<LlmClient> llm_;
++  actor::TaskId task_id_;
++  int step_ = 0;
++  gfx::PointF last_cursor_dip_;
++  base::ListValue messages_;          // Static preamble: [system] only.
++  std::vector<std::string> history_;  // Compact "step N: action => result" log.
++  std::string pending_action_desc_;   // Description of the action in flight.
++  std::string pending_observation_;   // outcome note for the next user turn.
++  std::string pending_read_text_;     // one-shot page text from a "read" action,
++                                      // injected into the NEXT prompt then cleared
++                                      // (kept out of history_ to avoid bloat).
++  std::string last_url_;              // for change detection across steps.
++  std::string last_page_text_;        // for change detection across steps.
++  std::string transcript_path_;       // --agent-log-file (empty = disabled).
++
++  // Flow cache: replay state + the resolved steps emitted back to the caller.
++  base::ListValue plan_;              // cached steps to replay ([] = none).
++  size_t plan_pos_ = 0;               // index of the next plan step to consume.
++  bool replaying_ = false;            // a non-empty plan was supplied.
++  bool consuming_plan_step_ = false;  // the in-flight action consumes plan_[pos].
++  const char* pending_status_ = "recorded";  // tag for the in-flight LLM step.
++  base::ListValue executed_steps_;    // resolved steps (recorded|replayed|healed).
++
++  base::WeakPtrFactory<AgentController> weak_factory_{this};
++};
++
++}  // namespace ai_agent
++
++#endif  // CHROME_BROWSER_AI_AGENT_AGENT_CONTROLLER_H_
+--- /dev/null
++++ b/chrome/browser/ai_agent/agent_switches.cc
+@@ -0,0 +1,28 @@
++// Copyright 2026 The ChromiumFish Authors
++// Use of this source code is governed by an MIT-style license.
++
++#include "chrome/browser/ai_agent/agent_switches.h"
++
++#include "base/command_line.h"
++
++namespace ai_agent {
++
++// static
++LlmConfig LlmConfig::FromCommandLine() {
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  LlmConfig config;
++  config.base_url = cmd->GetSwitchValueASCII(switches::kAgentLlmUrl);
++  config.api_key = cmd->GetSwitchValueASCII(switches::kAgentLlmKey);
++  config.model = cmd->GetSwitchValueASCII(switches::kAgentModel);
++  config.tool_mode = cmd->GetSwitchValueASCII(switches::kAgentToolMode);
++  if (config.tool_mode.empty()) {
++    config.tool_mode = "auto";
++  }
++  return config;
++}
++
++bool LlmConfig::IsComplete() const {
++  return !base_url.empty() && !api_key.empty() && !model.empty();
++}
++
++}  // namespace ai_agent
+--- /dev/null
++++ b/chrome/browser/ai_agent/agent_switches.h
+@@ -0,0 +1,58 @@
++// Copyright 2026 The ChromiumFish Authors
++// Use of this source code is governed by an MIT-style license.
++//
++// Command-line switches that configure the native in-browser AI agent layer.
++// These mirror the OpenAI-compatible environment contract (OPENAI_API_BASE /
++// OPENAI_API_KEY / OPENAI_API_MODEL) and are supplied to the browser process at
++// launch (e.g. by a launcher that reads .env). The agent layer reads them in
++// the browser process only; they are NOT forwarded to renderers.
++
++#ifndef CHROME_BROWSER_AI_AGENT_AGENT_SWITCHES_H_
++#define CHROME_BROWSER_AI_AGENT_AGENT_SWITCHES_H_
++
++#include <string>
++
++namespace ai_agent {
++namespace switches {
++
++// Base URL of an OpenAI-compatible chat-completions endpoint, e.g.
++// "https://openrouter.ai/api/v1/". Maps to OPENAI_API_BASE. A trailing
++// "/chat/completions" is appended by LlmClient if not already present.
++inline constexpr char kAgentLlmUrl[] = "agent-llm-url";
++
++// Bearer API key for the endpoint. Maps to OPENAI_API_KEY. Never logged.
++inline constexpr char kAgentLlmKey[] = "agent-llm-key";
++
++// Default model id (provider/model slug for OpenRouter), e.g.
++// "qwen/qwen3.7-plus". Maps to OPENAI_API_MODEL. Overridable per task via the
++// Browser.agentRunTask `model` parameter.
++inline constexpr char kAgentModel[] = "agent-model";
++
++// Optional: force tool-calling mode. One of "auto" (default), "on", "off".
++// "off" uses the JSON-in-content fallback for endpoints with weak tool-calling.
++inline constexpr char kAgentToolMode[] = "agent-tool-mode";
++
++// Optional: path to append a human-readable transcript of every LLM request
++// (SENT) and response (RECV) per step. Lets you tail what the agent sends/gets.
++inline constexpr char kAgentLogFile[] = "agent-log-file";
++
++}  // namespace switches
++
++// Resolved configuration for the agent's LLM client, read once from the
++// command line. Empty fields mean "unset".
++struct LlmConfig {
++  std::string base_url;
++  std::string api_key;
++  std::string model;
++  std::string tool_mode;  // "auto" | "on" | "off"
++
++  // Returns a config populated from the current process command line.
++  static LlmConfig FromCommandLine();
++
++  // True if base_url + api_key + model are all present.
++  bool IsComplete() const;
++};
++
++}  // namespace ai_agent
++
++#endif  // CHROME_BROWSER_AI_AGENT_AGENT_SWITCHES_H_
+--- /dev/null
++++ b/chrome/browser/ai_agent/llm_client.cc
+@@ -0,0 +1,193 @@
++// Copyright 2026 The ChromiumFish Authors
++// Use of this source code is governed by an MIT-style license.
++
++#include "chrome/browser/ai_agent/llm_client.h"
++
++#include <utility>
++
++#include "base/functional/bind.h"
++#include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
++#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
++#include "net/base/load_flags.h"
++#include "net/http/http_request_headers.h"
++#include "net/traffic_annotation/network_traffic_annotation.h"
++#include "services/network/public/cpp/resource_request.h"
++#include "services/network/public/cpp/shared_url_loader_factory.h"
++#include "services/network/public/cpp/simple_url_loader.h"
++#include "services/network/public/mojom/url_response_head.mojom.h"
++#include "url/gurl.h"
++
++namespace ai_agent {
++
++namespace {
++
++// Bounded cap for an LLM response body (5 MiB == kMaxBoundedStringDownloadSize).
++constexpr size_t kMaxResponseBytes = 5 * 1024 * 1024;
++
++constexpr net::NetworkTrafficAnnotationTag kAgentLlmAnnotation =
++    net::DefineNetworkTrafficAnnotation("chromiumfish_agent_llm", R"(
++      semantics {
++        sender: "Clearcote AI Agent"
++        description:
++          "Sends the current page observation and task goal to a "
++          "user-configured OpenAI-compatible chat-completions endpoint and "
++          "receives the next browser action to perform."
++        trigger:
++          "An in-browser agent task (Browser.agentRunTask) needs the model to "
++          "decide its next action."
++        data:
++          "A natural-language task goal, a serialized summary of the active "
++          "page's interactive elements, prior action results, and a bearer "
++          "API key in the Authorization header."
++        destination: OTHER
++        internal { contacts { email: "noreply@clearcotelabs.com" } }
++        user_data { type: USER_CONTENT }
++        last_reviewed: "2026-06-13"
++      }
++      policy {
++        cookies_allowed: NO
++        setting:
++          "Configured by the operator via the --agent-llm-url/--agent-llm-key/"
++          "--agent-model switches. No request is sent unless an agent task is "
++          "started and these are set."
++        policy_exception_justification:
++          "Not implemented; this is an operator-controlled developer feature."
++      })");
++
++// Appends "chat/completions" to a base URL like "https://host/api/v1/".
++GURL BuildEndpoint(const std::string& base_url) {
++  std::string url = base_url;
++  if (url.empty()) {
++    return GURL();
++  }
++  if (url.back() != '/') {
++    url.push_back('/');
++  }
++  url += "chat/completions";
++  return GURL(url);
++}
++
++}  // namespace
++
++LlmResponse::LlmResponse() = default;
++LlmResponse::LlmResponse(LlmResponse&&) = default;
++LlmResponse& LlmResponse::operator=(LlmResponse&&) = default;
++LlmResponse::~LlmResponse() = default;
++
++LlmClient::LlmClient(
++    scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
++    LlmConfig config)
++    : url_loader_factory_(std::move(url_loader_factory)),
++      config_(std::move(config)) {}
++
++LlmClient::~LlmClient() = default;
++
++void LlmClient::CreateCompletion(base::ListValue messages,
++                                 base::ListValue tools,
++                                 const std::string& model_override,
++                                 CompletionCallback callback) {
++  GURL endpoint = BuildEndpoint(config_.base_url);
++  if (!endpoint.is_valid()) {
++    LlmResponse response;
++    response.error = "agent: invalid or missing --agent-llm-url";
++    std::move(callback).Run(std::move(response));
++    return;
++  }
++
++  base::DictValue body;
++  body.Set("model", model_override.empty() ? config_.model : model_override);
++  body.Set("messages", base::Value(std::move(messages)));
++  body.Set("temperature", 0.0);
++  if (!tools.empty() && config_.tool_mode != "off") {
++    body.Set("tools", base::Value(std::move(tools)));
++    body.Set("tool_choice", "auto");
++  }
++
++  std::string json_body;
++  base::JSONWriter::Write(body, &json_body);
++
++  auto request = std::make_unique<network::ResourceRequest>();
++  request->url = endpoint;
++  request->method = "POST";
++  request->load_flags = net::LOAD_DISABLE_CACHE;
++  request->credentials_mode = network::mojom::CredentialsMode::kOmit;
++  request->headers.SetHeader(net::HttpRequestHeaders::kAuthorization,
++                             base::StrCat({"Bearer ", config_.api_key}));
++  // OpenRouter attribution headers (ignored by other providers).
++  request->headers.SetHeader("HTTP-Referer", "https://github.com/clearcotelabs/clearcote-browser");
++  request->headers.SetHeader("X-Title", "Clearcote Agent");
++
++  loader_ = network::SimpleURLLoader::Create(std::move(request),
++                                             kAgentLlmAnnotation);
++  loader_->SetAllowHttpErrorResults(true);  // read provider error JSON on 4xx/5xx
++  loader_->AttachStringForUpload(json_body, "application/json");
++  loader_->DownloadToString(
++      url_loader_factory_.get(),
++      base::BindOnce(&LlmClient::OnResponse, weak_factory_.GetWeakPtr(),
++                     std::move(callback)),
++      kMaxResponseBytes);
++}
++
++void LlmClient::OnResponse(CompletionCallback callback,
++                           std::optional<std::string> response_body) {
++  LlmResponse response;
++
++  int http_code = 0;
++  if (loader_ && loader_->ResponseInfo() && loader_->ResponseInfo()->headers) {
++    http_code = loader_->ResponseInfo()->headers->response_code();
++  }
++  const int net_error = loader_ ? loader_->NetError() : net::ERR_FAILED;
++  loader_.reset();  // single-use; release before invoking the callback.
++
++  if (net_error != net::OK || !response_body) {
++    response.error = base::StrCat({"agent: network error (net=",
++                                   base::NumberToString(net_error), ")"});
++    std::move(callback).Run(std::move(response));
++    return;
++  }
++
++  std::optional<base::Value> parsed =
++      base::JSONReader::Read(*response_body, base::JSON_PARSE_RFC);
++  if (!parsed || !parsed->is_dict()) {
++    response.error = "agent: non-JSON response from LLM endpoint";
++    std::move(callback).Run(std::move(response));
++    return;
++  }
++  const base::DictValue& root = parsed->GetDict();
++
++  // Provider-level error object?
++  if (const base::DictValue* err = root.FindDict("error")) {
++    const std::string* msg = err->FindString("message");
++    response.error = base::StrCat(
++        {"agent: LLM error: ", msg ? *msg : "unknown",
++         http_code != 200 ? base::StrCat({" (http ",
++                                          base::NumberToString(http_code), ")"})
++                          : ""});
++    std::move(callback).Run(std::move(response));
++    return;
++  }
++
++  const base::ListValue* choices = root.FindList("choices");
++  if (!choices || choices->empty() || !(*choices)[0].is_dict()) {
++    response.error = "agent: LLM response had no choices";
++    std::move(callback).Run(std::move(response));
++    return;
++  }
++  const base::DictValue* message = (*choices)[0].GetDict().FindDict("message");
++  if (!message) {
++    response.error = "agent: LLM choice had no message";
++    std::move(callback).Run(std::move(response));
++    return;
++  }
++  if (const std::string* content = message->FindString("content")) {
++    response.content = *content;
++  }
++  if (const base::ListValue* tool_calls = message->FindList("tool_calls")) {
++    response.tool_calls = tool_calls->Clone();
++  }
++  std::move(callback).Run(std::move(response));
++}
++
++}  // namespace ai_agent
+--- /dev/null
++++ b/chrome/browser/ai_agent/llm_client.h
+@@ -0,0 +1,83 @@
++// Copyright 2026 The ChromiumFish Authors
++// Use of this source code is governed by an MIT-style license.
++//
++// LlmClient: a browser-process client for an OpenAI-compatible
++// /chat/completions endpoint (OpenAI, OpenRouter, Together, Groq, vLLM, Ollama,
++// ...). It POSTs a JSON body via network::SimpleURLLoader and returns the
++// assistant message plus any tool_calls. One request in flight at a time.
++
++#ifndef CHROME_BROWSER_AI_AGENT_LLM_CLIENT_H_
++#define CHROME_BROWSER_AI_AGENT_LLM_CLIENT_H_
++
++#include <memory>
++#include <optional>
++#include <string>
++
++#include "base/functional/callback.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/values.h"
++#include "chrome/browser/ai_agent/agent_switches.h"
++
++namespace network {
++class SharedURLLoaderFactory;
++class SimpleURLLoader;
++}  // namespace network
++
++namespace ai_agent {
++
++// Parsed result of one chat-completion turn.
++struct LlmResponse {
++  LlmResponse();
++  LlmResponse(LlmResponse&&);
++  LlmResponse& operator=(LlmResponse&&);
++  ~LlmResponse();
++
++  // Assistant free-text content (may be empty when the model only emits
++  // tool_calls).
++  std::string content;
++  // OpenAI-style tool_calls array: list of dicts with id/type/function{name,
++  // arguments(JSON string)}. Empty when the model answered in content only.
++  base::ListValue tool_calls;
++  // Raw provider error message when the request failed (content/tool_calls
++  // empty in that case).
++  std::string error;
++
++  bool ok() const { return error.empty(); }
++};
++
++class LlmClient {
++ public:
++  using CompletionCallback = base::OnceCallback<void(LlmResponse)>;
++
++  LlmClient(scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
++            LlmConfig config);
++  LlmClient(const LlmClient&) = delete;
++  LlmClient& operator=(const LlmClient&) = delete;
++  ~LlmClient();
++
++  // Sends a chat-completions request. `messages` is a list of {role, content}
++  // dicts (system/user/assistant/tool). `tools` is the OpenAI tools spec list
++  // (may be empty to disable tool-calling). `model_override`, when non-empty,
++  // replaces the configured default model for this request. Invokes `callback`
++  // on the UI thread with the parsed result. Cancels any in-flight request.
++  void CreateCompletion(base::ListValue messages,
++                        base::ListValue tools,
++                        const std::string& model_override,
++                        CompletionCallback callback);
++
++  const LlmConfig& config() const { return config_; }
++
++ private:
++  void OnResponse(CompletionCallback callback,
++                  std::optional<std::string> response_body);
++
++  scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
++  const LlmConfig config_;
++  std::unique_ptr<network::SimpleURLLoader> loader_;  // single in-flight request
++  base::WeakPtrFactory<LlmClient> weak_factory_{this};
++};
++
++}  // namespace ai_agent
++
++#endif  // CHROME_BROWSER_AI_AGENT_LLM_CLIENT_H_
+--- /dev/null
++++ b/chrome/browser/ai_agent/page_serializer.cc
+@@ -0,0 +1,380 @@
++// Copyright 2026 The ChromiumFish Authors
++// Use of this source code is governed by an MIT-style license.
++
++#include "chrome/browser/ai_agent/page_serializer.h"
++
++#include <utility>
++
++#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_util.h"
++#include "components/optimization_guide/proto/features/common_quality_data.pb.h"
++
++namespace ai_agent {
++
++namespace proto = optimization_guide::proto;
++
++namespace {
++
++constexpr size_t kMaxLabelChars = 100;
++
++// Collapses whitespace and truncates a label for compact display.
++std::string CleanLabel(const std::string& raw) {
++  std::string s = base::CollapseWhitespaceASCII(raw, /*trim_sequences=*/true);
++  if (s.size() > kMaxLabelChars) {
++    s = s.substr(0, kMaxLabelChars) + "…";
++  }
++  return s;
++}
++
++// Maps a form control type to a short, specific tag (so the input's TYPE is
++// passed explicitly, e.g. input:email vs input:password).
++std::string FormControlTag(proto::FormControlType type) {
++  switch (type) {
++    case proto::FORM_CONTROL_TYPE_TEXT_AREA:
++      return "textarea";
++    case proto::FORM_CONTROL_TYPE_SELECT_ONE:
++      return "select";
++    case proto::FORM_CONTROL_TYPE_SELECT_MULTIPLE:
++      return "select-multiple";
++    case proto::FORM_CONTROL_TYPE_INPUT_CHECKBOX:
++      return "checkbox";
++    case proto::FORM_CONTROL_TYPE_INPUT_RADIO:
++      return "radio";
++    case proto::FORM_CONTROL_TYPE_BUTTON_SUBMIT:
++    case proto::FORM_CONTROL_TYPE_BUTTON_BUTTON:
++    case proto::FORM_CONTROL_TYPE_INPUT_BUTTON:
++      return "button";
++    case proto::FORM_CONTROL_TYPE_INPUT_EMAIL:
++      return "input:email";
++    case proto::FORM_CONTROL_TYPE_INPUT_PASSWORD:
++      return "input:password";
++    case proto::FORM_CONTROL_TYPE_INPUT_TELEPHONE:
++      return "input:tel";
++    case proto::FORM_CONTROL_TYPE_INPUT_NUMBER:
++      return "input:number";
++    case proto::FORM_CONTROL_TYPE_INPUT_SEARCH:
++      return "input:search";
++    case proto::FORM_CONTROL_TYPE_INPUT_URL:
++      return "input:url";
++    case proto::FORM_CONTROL_TYPE_INPUT_TEXT:
++    case proto::FORM_CONTROL_TYPE_CONTENT_EDITABLE:
++      return "input:text";
++    default:
++      return "input";
++  }
++}
++
++// Short tag/role for a node, from its attribute_type (+ form control type).
++std::string RoleForNode(const proto::ContentAttributes& attrs) {
++  switch (attrs.attribute_type()) {
++    case proto::CONTENT_ATTRIBUTE_ANCHOR:
++      return "a";
++    case proto::CONTENT_ATTRIBUTE_HEADING:
++      return "heading";
++    case proto::CONTENT_ATTRIBUTE_FORM_CONTROL:
++      return attrs.has_form_control_data()
++                 ? FormControlTag(attrs.form_control_data().form_control_type())
++                 : "input";
++    default:
++      // Fall back to the aria role / a generic clickable label.
++      return "button";
++  }
++}
++
++// True if the node is something the agent can usefully act on.
++bool IsInteractive(const proto::ContentAttributes& attrs) {
++  if (!attrs.has_common_ancestor_dom_node_id() || !attrs.has_geometry()) {
++    return false;
++  }
++  const proto::BoundingRect& vbb = attrs.geometry().visible_bounding_box();
++  if (vbb.width() <= 0 || vbb.height() <= 0) {
++    return false;  // offscreen / not immediately hit-testable.
++  }
++  if (attrs.attribute_type() == proto::CONTENT_ATTRIBUTE_FORM_CONTROL ||
++      attrs.attribute_type() == proto::CONTENT_ATTRIBUTE_ANCHOR) {
++    return true;
++  }
++  if (attrs.has_interaction_info()) {
++    const proto::InteractionInfo& ii = attrs.interaction_info();
++    if (ii.clickability_reasons_size() > 0 || ii.is_focusable() ||
++        ii.is_tabbable()) {
++      return true;
++    }
++  }
++  return false;
++}
++
++// Best descriptive label for a node.
++std::string LabelForNode(const proto::ContentAttributes& attrs) {
++  if (attrs.has_label() && !attrs.label().empty()) {
++    return CleanLabel(attrs.label());
++  }
++  // Form controls are rendered separately (see FormControlName/State) so an
++  // empty field showing only a placeholder hint is never confused for a value.
++  if (attrs.has_text_data() && !attrs.text_data().text_content().empty()) {
++    return CleanLabel(attrs.text_data().text_content());
++  }
++  if (attrs.has_anchor_data() && !attrs.anchor_data().url().empty()) {
++    return CleanLabel(attrs.anchor_data().url());
++  }
++  return std::string();
++}
++
++// Concatenates visible text from a node's descendants. Used to label clickable
++// containers (e.g. <button>Sign in</button>) whose text lives in child text
++// nodes rather than the node's own `label`/text.
++std::string CollectDescendantText(const proto::ContentNode& node, int budget) {
++  std::string out;
++  if (node.has_content_attributes()) {
++    const proto::ContentAttributes& a = node.content_attributes();
++    if (a.has_text_data() && !a.text_data().text_content().empty()) {
++      out = a.text_data().text_content();
++    }
++  }
++  for (const proto::ContentNode& child : node.children_nodes()) {
++    if (static_cast<int>(out.size()) >= budget) {
++      break;
++    }
++    std::string ct = CollectDescendantText(child, budget);
++    if (!ct.empty()) {
++      if (!out.empty()) {
++        out += " ";
++      }
++      out += ct;
++    }
++  }
++  return out;
++}
++
++// The control's purpose/name (label or field name) — never the value/placeholder.
++std::string FormControlName(const proto::ContentAttributes& attrs) {
++  if (attrs.has_label() && !attrs.label().empty()) {
++    return CleanLabel(attrs.label());
++  }
++  if (attrs.has_form_control_data() &&
++      !attrs.form_control_data().field_name().empty()) {
++    return CleanLabel(attrs.form_control_data().field_name());
++  }
++  return std::string();
++}
++
++// Explicit, unambiguous state so the model can tell an EMPTY field (showing only
++// a placeholder hint) from a FILLED one — the key fix for it skipping fills.
++std::string FormControlState(const proto::ContentAttributes& attrs) {
++  if (!attrs.has_form_control_data()) {
++    return "[empty]";
++  }
++  const proto::FormControlData& f = attrs.form_control_data();
++  const proto::FormControlType t = f.form_control_type();
++  const std::string req = f.is_required() ? " (required)" : "";
++
++  std::string core;
++  if (t == proto::FORM_CONTROL_TYPE_INPUT_CHECKBOX ||
++      t == proto::FORM_CONTROL_TYPE_INPUT_RADIO) {
++    core = f.is_checked() ? "[checked]" : "[unchecked]";
++  } else if (t == proto::FORM_CONTROL_TYPE_SELECT_ONE ||
++             t == proto::FORM_CONTROL_TYPE_SELECT_MULTIPLE) {
++    core = f.field_value().empty()
++               ? "[no selection]"
++               : base::StrCat({"[selected: \"", CleanLabel(f.field_value()),
++                               "\"]"});
++  } else if (t == proto::FORM_CONTROL_TYPE_INPUT_PASSWORD) {
++    // Password values are redacted (field_value is empty even when filled), so
++    // use the redaction decision: REDACTED_HAS_BEEN_PASSWORD => has content.
++    core = attrs.redaction_decision() ==
++                   proto::REDACTION_DECISION_REDACTED_HAS_BEEN_PASSWORD
++               ? "[filled]"
++               : (f.placeholder().empty()
++                      ? "[EMPTY]"
++                      : base::StrCat({"[EMPTY; placeholder hint \"",
++                                      CleanLabel(f.placeholder()), "\"]"}));
++  } else if (!f.field_value().empty()) {
++    core = t == proto::FORM_CONTROL_TYPE_INPUT_PASSWORD
++               ? "[filled]"
++               : base::StrCat({"[value: \"", CleanLabel(f.field_value()),
++                               "\"]"});
++  } else if (!f.placeholder().empty()) {
++    // Empty: say so explicitly; keep the placeholder as a labeled hint (useful
++    // context for what to type), never as a value.
++    core = base::StrCat(
++        {"[EMPTY; placeholder hint \"", CleanLabel(f.placeholder()), "\"]"});
++  } else {
++    core = "[EMPTY]";
++  }
++  return base::StrCat({core, req});
++}
++
++// Recursively walk the tree, collecting interactive elements in document order.
++// `in_modal` is true once an ancestor is a dialog/alertdialog: its descendants
++// belong to a modal overlay that visually covers the rest of the page.
++void Walk(const proto::ContentNode& node,
++          const std::string& doc_id,
++          bool in_modal,
++          bool in_frame,
++          SerializedPage* out) {
++  // Frame context propagated to this node's CHILDREN. An <iframe> subtree is a
++  // different document: its descendants must be node-targeted via THAT frame's
++  // identifier (DOM node ids are per-document). Same-origin frames expose
++  // frame_data.document_identifier; cross-origin frames are redacted (no id) ->
++  // empty, which signals the dispatcher to fall back to coordinate input, the
++  // only click path that reaches an out-of-process iframe.
++  std::string child_doc_id = doc_id;
++  bool child_in_frame = in_frame;
++  if (node.has_content_attributes()) {
++    const proto::ContentAttributes& attrs = node.content_attributes();
++    // A dialog/alertdialog subtree is a modal overlay. Elements behind it are
++    // still serialized (they have a viewport bbox) but are visually covered and
++    // not usable until it is dismissed, which the model can't tell from a flat
++    // list. Flag the modal's elements + the page so it dismisses it first (see
++    // kSystemPrompt). aria_role is populated in ACTIONABLE_ELEMENTS mode.
++    if (attrs.aria_role() == proto::AX_ROLE_DIALOG ||
++        attrs.aria_role() == proto::AX_ROLE_ALERTDIALOG) {
++      in_modal = true;
++      out->has_modal = true;
++    }
++    if (attrs.has_iframe_data()) {
++      child_in_frame = true;
++      child_doc_id =
++          (attrs.iframe_data().has_frame_data() &&
++           attrs.iframe_data().frame_data().has_document_identifier())
++              ? attrs.iframe_data()
++                    .frame_data()
++                    .document_identifier()
++                    .serialized_token()
++              : std::string();
++    }
++    if (IsInteractive(attrs)) {
++      InteractiveElement el;
++      el.index = static_cast<int>(out->elements.size()) + 1;
++      el.dom_node_id = attrs.common_ancestor_dom_node_id();
++      el.document_identifier = doc_id;
++      const proto::BoundingRect& vbb = attrs.geometry().visible_bounding_box();
++      el.bbox_device_px =
++          gfx::Rect(vbb.x(), vbb.y(), vbb.width(), vbb.height());
++      el.role = RoleForNode(attrs);
++      el.in_modal = in_modal;
++      el.in_frame = in_frame;
++
++      std::string label;
++      if (attrs.attribute_type() == proto::CONTENT_ATTRIBUTE_FORM_CONTROL &&
++          el.role != "button") {
++        // Real inputs/selects/checkboxes: name + explicit [state]. (Buttons are
++        // also FORM_CONTROL but must keep their TEXT label, not a fill state.)
++        const std::string name = FormControlName(attrs);
++        const std::string state = FormControlState(attrs);
++        label = name.empty() ? state : base::StrCat({name, " ", state});
++        // Replay locator: the field name only (state like [value:…] is volatile
++        // and must not be part of the durable descriptor).
++        el.name = name;
++      } else {
++        label = LabelForNode(attrs);
++        if (label.empty()) {
++          // Buttons/links/clickables carry their text in child text nodes;
++          // pull it up so the model can identify them.
++          label = CleanLabel(CollectDescendantText(node, /*budget=*/200));
++        }
++        el.name = label;
++      }
++      std::string line = base::StrCat({"[", base::NumberToString(el.index),
++                                       "]<", el.role, ">", label});
++      // For links, also surface the destination URL so the model can READ a
++      // result's URL straight from the list instead of clicking/navigating to
++      // it (and so it can report several links' URLs at once). Skip when the
++      // label already IS the URL (LabelForNode's no-text fallback).
++      if (el.role == "a" && attrs.has_anchor_data() &&
++          !attrs.anchor_data().url().empty()) {
++        std::string url = CleanLabel(attrs.anchor_data().url());
++        if (url.size() > 120) {
++          url = url.substr(0, 117) + "...";
++        }
++        if (!url.empty() && url != label) {
++          line += base::StrCat({" -> ", url});
++        }
++      }
++      // For <select>, list the option values so the model picks an exact one.
++      if (attrs.has_form_control_data() &&
++          attrs.form_control_data().select_options_size() > 0) {
++        line += " opts:[";
++        int shown = 0;
++        for (const proto::SelectOption& opt :
++             attrs.form_control_data().select_options()) {
++          if (shown >= 8) {
++            line += ", …";
++            break;
++          }
++          if (shown > 0) {
++            line += ", ";
++          }
++          line += opt.value();
++          if (!opt.text().empty() && opt.text() != opt.value()) {
++            line += base::StrCat({"=", CleanLabel(opt.text())});
++          }
++          ++shown;
++        }
++        line += "]";
++      }
++      // Annotate disabled controls so the model doesn't target them.
++      if (attrs.has_interaction_info() &&
++          attrs.interaction_info().is_disabled()) {
++        line += " (disabled)";
++      }
++      if (in_modal) {
++        line += " (modal)";
++      }
++      out->text += line;
++      out->text += "\n";
++      out->elements.push_back(std::move(el));
++    }
++  }
++  for (const proto::ContentNode& child : node.children_nodes()) {
++    Walk(child, child_doc_id, in_modal, child_in_frame, out);
++  }
++}
++
++}  // namespace
++
++SerializedPage::SerializedPage() = default;
++SerializedPage::SerializedPage(SerializedPage&&) = default;
++SerializedPage& SerializedPage::operator=(SerializedPage&&) = default;
++SerializedPage::~SerializedPage() = default;
++
++const InteractiveElement* SerializedPage::ElementByIndex(int index) const {
++  if (index < 1 || index > static_cast<int>(elements.size())) {
++    return nullptr;
++  }
++  return &elements[index - 1];
++}
++
++// static
++SerializedPage PageSerializer::Serialize(
++    const proto::AnnotatedPageContent& apc,
++    const std::string& default_document_identifier,
++    size_t max_chars) {
++  SerializedPage out;
++  if (apc.has_viewport_geometry()) {
++    const proto::BoundingRect& v = apc.viewport_geometry();
++    out.viewport_dip = gfx::Rect(v.x(), v.y(), v.width(), v.height());
++  }
++  if (apc.has_root_node()) {
++    Walk(apc.root_node(), default_document_identifier, /*in_modal=*/false,
++         /*in_frame=*/false, &out);
++  }
++  if (out.has_modal) {
++    // Prepend (so it survives the max_chars cap): the model must clear the
++    // modal before the elements behind it become usable.
++    out.text = base::StrCat(
++        {"NOTE: a modal dialog is open — handle it FIRST. Its elements are "
++         "marked (modal); click its accept/agree/continue button before "
++         "anything else. Items without (modal) are behind it and not usable "
++         "yet.\n",
++         out.text});
++  }
++  if (out.text.size() > max_chars) {
++    out.text = out.text.substr(0, max_chars) +
++               "\n…(truncated; consider scrolling or refining the task)";
++  }
++  return out;
++}
++
++}  // namespace ai_agent
+--- /dev/null
++++ b/chrome/browser/ai_agent/page_serializer.h
+@@ -0,0 +1,72 @@
++// Copyright 2026 The ChromiumFish Authors
++// Use of this source code is governed by an MIT-style license.
++//
++// PageSerializer turns an optimization_guide AnnotatedPageContent proto (from
++// optimization_guide::GetAIPageContent in ACTIONABLE_ELEMENTS mode) into a
++// compact, LLM-readable list of interactive elements with stable 1-based
++// indices, plus a parallel table mapping each index back to the DOM node id,
++// document identifier, and on-screen geometry needed to act on it.
++//
++// This is the native equivalent of browser-use's DOM serializer + selector
++// map, but sourced from the in-process APC tree instead of CDP.
++
++#ifndef CHROME_BROWSER_AI_AGENT_PAGE_SERIALIZER_H_
++#define CHROME_BROWSER_AI_AGENT_PAGE_SERIALIZER_H_
++
++#include <string>
++#include <vector>
++
++#include "ui/gfx/geometry/rect.h"
++
++namespace optimization_guide::proto {
++class AnnotatedPageContent;
++class ContentNode;
++}  // namespace optimization_guide::proto
++
++namespace ai_agent {
++
++// One actionable element the model may reference by `index`.
++struct InteractiveElement {
++  int index = 0;             // 1-based; what the LLM sees and returns.
++  int dom_node_id = 0;       // ContentAttributes.common_ancestor_dom_node_id.
++  std::string document_identifier;  // Owning frame's token; for ActionTarget/
++                             // DomNode. EMPTY for a cross-origin (out-of-process)
++                             // iframe element — APC redacts the child frame's id,
++                             // so it can't be node-targeted; click via coordinates.
++  gfx::Rect bbox_device_px;  // visible_bounding_box (visual-viewport device px).
++  std::string role;          // short tag/role label, e.g. "button", "a".
++  std::string name;          // stable semantic name (field name / label / text),
++                             // WITHOUT volatile state; used as a replay locator.
++  bool in_modal = false;     // inside a dialog/alertdialog subtree (see has_modal).
++  bool in_frame = false;     // inside an <iframe> subtree (same- or cross-origin).
++};
++
++// Result of serializing one observation.
++struct SerializedPage {
++  SerializedPage();
++  SerializedPage(SerializedPage&&);
++  SerializedPage& operator=(SerializedPage&&);
++  ~SerializedPage();
++
++  std::string text;  // "[i]<role> label" lines, one per interactive element.
++  std::vector<InteractiveElement> elements;  // elements[k].index == k+1.
++  gfx::Rect viewport_dip;  // AnnotatedPageContent.viewport_geometry (DIP).
++  bool has_modal = false;  // a role=dialog/alertdialog subtree is present.
++
++  // Returns the element with the given 1-based index, or nullptr.
++  const InteractiveElement* ElementByIndex(int index) const;
++};
++
++class PageSerializer {
++ public:
++  // `default_document_identifier` is applied to nodes whose frame isn't
++  // independently tracked (v1: main frame). `max_chars` caps the emitted text.
++  static SerializedPage Serialize(
++      const optimization_guide::proto::AnnotatedPageContent& apc,
++      const std::string& default_document_identifier,
++      size_t max_chars);
++};
++
++}  // namespace ai_agent
++
++#endif  // CHROME_BROWSER_AI_AGENT_PAGE_SERIALIZER_H_
+--- a/chrome/browser/resources/actor_overlay/app.css
++++ b/chrome/browser/resources/actor_overlay/app.css
+@@ -169,3 +169,42 @@
+ .clicking {
+   animation: cursor-click 400ms ease-out;
+ }
++
++/*
++ * Red CLICK RIPPLE. Emanates from the cursor's hotspot (the element origin,
++ * which is translated to the click point) the moment a click lands, so the red
++ * indicator is co-located with the cursor on arrival -- replacing the fork's
++ * old in-page red dot that was placed early and raced ahead of the glide.
++ */
++#clickRipple {
++  position: absolute;
++  left: 0;
++  top: 0;
++  width: 20px;
++  height: 20px;
++  margin: -10px 0 0 -10px;
++  border-radius: 50%;
++  background: rgba(255, 40, 40, 0.82);
++  border: 1.5px solid #fff;
++  opacity: 0;
++  pointer-events: none;
++  will-change: transform, opacity;
++}
++
++#magicCursor.clicking #clickRipple {
++  animation: cf-click-ripple 400ms ease-out;
++}
++
++@keyframes cf-click-ripple {
++  0% {
++    opacity: 0.9;
++    transform: scale(0.35);
++  }
++  60% {
++    opacity: 0.5;
++  }
++  100% {
++    opacity: 0;
++    transform: scale(2.6);
++  }
++}
+--- a/chrome/browser/resources/actor_overlay/app.html.ts
++++ b/chrome/browser/resources/actor_overlay/app.html.ts
+@@ -15,6 +15,7 @@
+ </div>
+ <div id="magicCursor">
+   <div id="cursorImage"></div>
++  <div id="clickRipple"></div>
+ </div>
+ <!--_html_template_end_-->`;
+   // clang-format on
+--- a/chrome/browser/ui/BUILD.gn
++++ b/chrome/browser/ui/BUILD.gn
+@@ -263,6 +263,7 @@
+     ":url_identity",
+     "//base",
+     "//base:i18n",
++    "//chrome/browser/ai_agent",
+     "//base/allocator:buildflags",
+     "//build:android_buildflags",
+     "//build:branding_buildflags",
+--- a/chrome/browser/ui/browser.cc
++++ b/chrome/browser/ui/browser.cc
+@@ -39,6 +39,7 @@
+ #include "chrome/browser/actor/actor_keyed_service.h"
+ #include "chrome/browser/actor/actor_util.h"
+ #include "chrome/browser/actor/execution_engine.h"
++#include "chrome/browser/ai_agent/agent_controller.h"
+ #include "chrome/browser/ai/ai_data_keyed_service.h"          // nogncheck
+ #include "chrome/browser/ai/ai_data_keyed_service_factory.h"  // nogncheck
+ #include "chrome/browser/app_mode/app_mode_utils.h"
+@@ -2844,6 +2845,20 @@
+       }).Then(std::move(callback)));
+ }
+ 
++void Browser::RunAgentTask(
++    content::WebContents* web_contents,
++    const std::string& goal,
++    int max_steps,
++    const std::string& model,
++    const std::string& plan_json,
++    base::OnceCallback<void(bool success,
++                            const std::string& final_text,
++                            const std::string& steps_json)>
++        callback) {
++  ai_agent::AgentController::Start(web_contents, goal, max_steps, model,
++                                   plan_json, std::move(callback));
++}
++
+ #if BUILDFLAG(ENABLE_PRINTING)
+ void Browser::PrintCrossProcessSubframe(
+     content::WebContents* web_contents,
+--- a/chrome/browser/ui/browser.h
++++ b/chrome/browser/ui/browser.h
+@@ -1001,6 +1001,16 @@
+       content::WebContents* web_contents,
+       bool include_actionable_elements,
+       base::OnceCallback<void(const std::string&)> callback) override;
++  void RunAgentTask(
++      content::WebContents* web_contents,
++      const std::string& goal,
++      int max_steps,
++      const std::string& model,
++      const std::string& plan_json,
++      base::OnceCallback<void(bool success,
++                              const std::string& final_text,
++                              const std::string& steps_json)>
++          callback) override;
+ 
+ #if BUILDFLAG(ENABLE_PRINTING)
+   void PrintCrossProcessSubframe(
+--- /dev/null
++++ b/content/browser/humanized_click.cc
+@@ -0,0 +1,237 @@
++// Copyright 2026 The ChromiumFish Authors
++// Use of this source code is governed by an MIT-style license.
++
++#include "content/public/browser/humanized_click.h"
++
++#include <algorithm>
++#include <cmath>
++#include <utility>
++#include <vector>
++
++#include "base/functional/bind.h"
++#include "base/functional/callback.h"
++#include "base/memory/weak_ptr.h"
++#include "base/rand_util.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/timer/timer.h"
++#include "build/build_config.h"
++#include "components/input/render_widget_host_input_event_router.h"
++#include "content/browser/renderer_host/render_widget_host_delegate.h"
++#include "content/browser/renderer_host/render_widget_host_impl.h"
++#include "content/browser/renderer_host/render_widget_host_view_base.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/web_contents.h"
++#include "third_party/blink/public/common/input/web_mouse_event.h"
++#include "ui/events/base_event_utils.h"
++#include "ui/gfx/geometry/point_f.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/latency/latency_info.h"
++
++#if BUILDFLAG(IS_MAC)
++#include "content/browser/devtools/protocol/humanized_cursor_overlay_mac.h"
++#endif
++
++namespace content {
++
++namespace {
++
++constexpr int kSamplesPerSecond = 120;
++constexpr double kMinDurationSeconds = 0.05;
++constexpr double kMaxDurationSeconds = 10.0;
++
++double Ease(double t) {
++  return t * t * (3.0 - 2.0 * t);
++}
++
++gfx::PointF Bezier(const gfx::PointF& p0,
++                   const gfx::PointF& p1,
++                   const gfx::PointF& p2,
++                   const gfx::PointF& p3,
++                   double t) {
++  const double u = 1.0 - t;
++  const double w0 = u * u * u;
++  const double w1 = 3.0 * u * u * t;
++  const double w2 = 3.0 * u * t * t;
++  const double w3 = t * t * t;
++  return gfx::PointF(
++      static_cast<float>(w0 * p0.x() + w1 * p1.x() + w2 * p2.x() + w3 * p3.x()),
++      static_cast<float>(w0 * p0.y() + w1 * p1.y() + w2 * p2.y() + w3 * p3.y()));
++}
++
++// Self-owned humanized mouse runner. Routes events through the cross-process
++// input router (same path as the fork's CDP humanizedClick), which is what
++// actually delivers a real click to the DOM -- a plain ForwardMouseEvent does
++// not hit-test/target correctly.
++class HumanizedClickRunner {
++ public:
++  static void Start(base::WeakPtr<WebContents> web_contents,
++                    gfx::PointF start,
++                    gfx::PointF target,
++                    base::TimeDelta duration,
++                    bool move_only,
++                    base::OnceClosure on_done) {
++    new HumanizedClickRunner(std::move(web_contents), start, target, duration,
++                             move_only, std::move(on_done));
++  }
++
++ private:
++  HumanizedClickRunner(base::WeakPtr<WebContents> web_contents,
++                       gfx::PointF start,
++                       gfx::PointF target,
++                       base::TimeDelta duration,
++                       bool move_only,
++                       base::OnceClosure on_done)
++      : web_contents_(std::move(web_contents)),
++        target_(target),
++        move_only_(move_only),
++        on_done_(std::move(on_done)) {
++    double seconds = std::clamp(duration.InSecondsF(), kMinDurationSeconds,
++                                kMaxDurationSeconds);
++    const int samples =
++        std::max(2, static_cast<int>(seconds * kSamplesPerSecond));
++    step_dt_ = base::Seconds(seconds / samples);
++
++    const gfx::PointF p0 = start;
++    const gfx::PointF p3 = target;
++    const double dx = p3.x() - p0.x();
++    const double dy = p3.y() - p0.y();
++    const double dist = std::hypot(dx, dy);
++    const double px = dist > 0 ? -dy / dist : 0.0;
++    const double py = dist > 0 ? dx / dist : 0.0;
++    const double bow = (base::RandDouble() - 0.5) * 0.30 * dist;
++    const gfx::PointF p1(static_cast<float>(p0.x() + dx * 0.33 + px * bow),
++                         static_cast<float>(p0.y() + dy * 0.33 + py * bow));
++    const gfx::PointF p2(static_cast<float>(p0.x() + dx * 0.66 + px * bow),
++                         static_cast<float>(p0.y() + dy * 0.66 + py * bow));
++
++    path_.reserve(samples + 1);
++    for (int i = 0; i <= samples; ++i) {
++      const double t = Ease(static_cast<double>(i) / samples);
++      gfx::PointF pt = Bezier(p0, p1, p2, p3, t);
++      if (i != samples) {
++        double jx = std::clamp(base::RandDouble() * 0.8 - 0.4, -2.0, 2.0);
++        double jy = std::clamp(base::RandDouble() * 0.8 - 0.4, -2.0, 2.0);
++        pt.Offset(static_cast<float>(jx), static_cast<float>(jy));
++      }
++      path_.push_back(pt);
++    }
++    path_.back() = target_;
++    Tick();
++  }
++
++  ~HumanizedClickRunner() = default;
++
++  RenderWidgetHostImpl* GetWidget() const {
++    if (!web_contents_ || !web_contents_->GetRenderWidgetHostView()) {
++      return nullptr;
++    }
++    return RenderWidgetHostImpl::From(
++        web_contents_->GetRenderWidgetHostView()->GetRenderWidgetHost());
++  }
++
++  void Tick() {
++    if (!GetWidget()) {
++      Finish();
++      return;
++    }
++    if (index_ < path_.size()) {
++      Dispatch(blink::WebInputEvent::Type::kMouseMove, path_[index_++]);
++      timer_.Start(
++          FROM_HERE, step_dt_,
++          base::BindOnce(&HumanizedClickRunner::Tick, base::Unretained(this)));
++      return;
++    }
++    if (move_only_) {
++      Finish();
++      return;
++    }
++    Dispatch(blink::WebInputEvent::Type::kMouseDown, target_);
++    Dispatch(blink::WebInputEvent::Type::kMouseUp, target_);
++    Finish();
++  }
++
++  void Dispatch(blink::WebInputEvent::Type type, gfx::PointF point) {
++    RenderWidgetHostImpl* rwh = GetWidget();
++    if (!rwh) {
++      return;
++    }
++    blink::WebMouseEvent event(type, blink::WebInputEvent::kNoModifiers,
++                               ui::EventTimeForNow());
++    event.SetPositionInWidget(point.x(), point.y());
++    event.SetPositionInScreen(point.x(), point.y());
++    event.button = blink::WebMouseEvent::Button::kLeft;
++    event.click_count = (type == blink::WebInputEvent::Type::kMouseDown ||
++                         type == blink::WebInputEvent::Type::kMouseUp)
++                            ? 1
++                            : 0;
++    // No kFromDebugger marker -- this should look like real input. Route via
++    // the cross-process input router so the point hit-tests to the correct
++    // (possibly OOPIF) renderer; fall back to direct forwarding if absent.
++    RenderWidgetHostViewBase* root_view =
++        rwh->GetView() ? static_cast<RenderWidgetHostViewBase*>(rwh->GetView())
++                       : nullptr;
++    input::RenderWidgetHostInputEventRouter* router =
++        rwh->delegate() ? rwh->delegate()->GetInputEventRouter() : nullptr;
++    if (root_view && router) {
++      ui::LatencyInfo latency_info;
++      latency_info.AddLatencyNumber(ui::INPUT_EVENT_LATENCY_UI_COMPONENT);
++      router->RouteMouseEvent(root_view, &event, latency_info);
++    } else {
++      rwh->ForwardMouseEvent(event);
++    }
++  }
++
++  void Finish() {
++    if (on_done_) {
++      std::move(on_done_).Run();
++    }
++    delete this;
++  }
++
++  base::WeakPtr<WebContents> web_contents_;
++  const gfx::PointF target_;
++  const bool move_only_;
++  std::vector<gfx::PointF> path_;
++  size_t index_ = 0;
++  base::TimeDelta step_dt_;
++  base::OneShotTimer timer_;
++  base::OnceClosure on_done_;
++};
++
++}  // namespace
++
++void PerformHumanizedClick(WebContents* web_contents,
++                           const gfx::PointF& start_css,
++                           const gfx::PointF& target_css,
++                           base::TimeDelta duration,
++                           bool move_only,
++                           base::OnceClosure on_done) {
++  if (!web_contents) {
++    if (on_done) {
++      std::move(on_done).Run();
++    }
++    return;
++  }
++  HumanizedClickRunner::Start(web_contents->GetWeakPtr(), start_css, target_css,
++                              duration, move_only, std::move(on_done));
++}
++
++void HighlightElement(WebContents* web_contents,
++                      const gfx::Rect& css_rect,
++                      base::TimeDelta duration) {
++#if BUILDFLAG(IS_MAC)
++  if (!web_contents || !web_contents->GetRenderWidgetHostView()) {
++    return;
++  }
++  RenderWidgetHostViewBase* view = static_cast<RenderWidgetHostViewBase*>(
++      web_contents->GetRenderWidgetHostView());
++  // Pass the element rect in the view's own (CSS/DIP, top-left) coordinate
++  // space; ShowRectOverlay converts to screen via AppKit (display/DPI aware).
++  devtools::ShowRectOverlay(view->GetNativeView(), css_rect.x(), css_rect.y(),
++                            css_rect.width(), css_rect.height());
++  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++      FROM_HERE, base::BindOnce(&devtools::HideRectOverlay), duration);
++#endif
++}
++
++}  // namespace content
+--- a/content/public/browser/BUILD.gn
++++ b/content/public/browser/BUILD.gn
+@@ -215,6 +215,7 @@
+     "hid_delegate.h",
+     "histogram_fetcher.h",
+     "host_zoom_map.h",
++    "humanized_click.h",
+     "installability_error.cc",
+     "installability_error.h",
+     "installed_payment_apps_finder.h",
+--- /dev/null
++++ b/content/public/browser/humanized_click.h
+@@ -0,0 +1,48 @@
++// Copyright 2026 The ChromiumFish Authors
++// Use of this source code is governed by an MIT-style license.
++
++#ifndef CONTENT_PUBLIC_BROWSER_HUMANIZED_CLICK_H_
++#define CONTENT_PUBLIC_BROWSER_HUMANIZED_CLICK_H_
++
++#include "base/functional/callback_forward.h"
++#include "base/time/time.h"
++#include "content/common/content_export.h"
++
++namespace gfx {
++class PointF;
++class Rect;
++}
++
++namespace content {
++class WebContents;
++
++// Dispatches a humanized mouse move (Bézier path + jitter, no kFromDebugger
++// marker) from `start_css` to `target_css` -- CSS/DIP viewport coordinates in
++// the main-frame widget of `web_contents` -- then, unless `move_only`, a left
++// mouse down/up at the target. Events are routed through the cross-process
++// input event router (RenderWidgetHostInputEventRouter), so they hit-test
++// correctly (including into OOPIFs) and are delivered to the DOM as real
++// user-like input. Self-owned: runs `on_done` exactly once when finished (or
++// when the tab/widget goes away).
++//
++// This is the browser-process entry point used by the native AI agent layer so
++// its clicks are indistinguishable from genuine user input. It lives in the
++// content layer because routed input requires content-internal plumbing that
++// chrome/ cannot reach.
++CONTENT_EXPORT void PerformHumanizedClick(WebContents* web_contents,
++                                          const gfx::PointF& start_css,
++                                          const gfx::PointF& target_css,
++                                          base::TimeDelta duration,
++                                          bool move_only,
++                                          base::OnceClosure on_done);
++
++// Draws a highlight box around `css_rect` (CSS/DIP viewport rect) of
++// `web_contents` for `duration`, then removes it. Lets a human watching see
++// which element the agent is acting on. macOS only; a no-op elsewhere.
++CONTENT_EXPORT void HighlightElement(WebContents* web_contents,
++                                     const gfx::Rect& css_rect,
++                                     base::TimeDelta duration);
++
++}  // namespace content
++
++#endif  // CONTENT_PUBLIC_BROWSER_HUMANIZED_CLICK_H_
+--- a/content/public/browser/web_contents_delegate.cc
++++ b/content/public/browser/web_contents_delegate.cc
+@@ -476,6 +476,19 @@
+   std::move(callback).Run(std::string());
+ }
+ 
++void WebContentsDelegate::RunAgentTask(
++    WebContents* web_contents,
++    const std::string& goal,
++    int max_steps,
++    const std::string& model,
++    const std::string& plan_json,
++    base::OnceCallback<void(bool success,
++                            const std::string& final_text,
++                            const std::string& steps_json)>
++        callback) {
++  std::move(callback).Run(false, "agent not supported by this delegate", "[]");
++}
++
+ bool WebContentsDelegate::IsWaitingForPointerLockPrompt(
+     WebContents* web_contents) {
+   return false;
+--- a/content/public/browser/web_contents_delegate.h
++++ b/content/public/browser/web_contents_delegate.h
+@@ -897,6 +897,22 @@
+       bool include_actionable_elements,
+       base::OnceCallback<void(const std::string&)> callback);
+ 
++  // ChromiumFish: runs a native, in-browser AI agent task against
++  // `web_contents` toward `goal` (natural language), driven by a configured
++  // OpenAI-compatible LLM. `callback` reports completion with a success flag
++  // and a final human-readable message. The default implementation reports
++  // "unsupported"; the chrome-layer delegate (Browser) implements it.
++  virtual void RunAgentTask(
++      WebContents* web_contents,
++      const std::string& goal,
++      int max_steps,
++      const std::string& model,
++      const std::string& plan_json,
++      base::OnceCallback<void(bool success,
++                              const std::string& final_text,
++                              const std::string& steps_json)>
++          callback);
++
+ #if BUILDFLAG(IS_ANDROID)
+   // Allow delegate to override how to take a snapshot of this WebContents into
+   // a HardwareBuffer. Return true if the delegate will execute callback with a

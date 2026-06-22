@@ -23,4 +23,5 @@
 160-coherence-misc.patch
 170-speech-voices.patch
 180-geolocation.patch
+200-agent-and-humanized-input.patch
 900-windows-build-fixes.patch
