@@ -37,7 +37,20 @@ export interface FingerprintOptions {
   acceptLanguage?: string;
   /** WebRTC egress IP to report (typically your proxy's public IP). */
   webrtcIp?: string;
-  /** Turn OFF GPU/WebGL fingerprint spoofing (advertise the real backend). */
+  /**
+   * Present the machine's **real GPU** instead of a spoofed one. WebGL `UNMASKED_VENDOR`/`RENDERER`,
+   * the `getParameter` table, and the canvas/WebGL render all report the genuine host backend. This
+   * is the most coherent setting against strict browser-tampering classifiers: the GPU string and
+   * the actually-rendered pixels match, so there is no GPU spoof to catch (the same reason a stock
+   * browser passes). Composes with `fingerprintProfile` — the profile still supplies
+   * screen/fonts/audio/hardware, but the **real host GPU is kept** instead of the profile's GPU
+   * (which the host cannot actually render, and would otherwise be a string-vs-render mismatch).
+   * Pair with `fingerprintNoise: false` so the canvas/WebGL readback isn't perturbed either.
+   *
+   * Trade-off: every persona on one physical machine then shares the same canvas/WebGL identity, so
+   * a tracker can link them by GPU hash. Best for single-identity / one-persona-per-host use; for
+   * multi-account-on-one-machine, keep this off and instead match the profile's GPU to the host.
+   */
   disableGpuFingerprint?: boolean;
   /**
    * Set `false` to turn OFF the per-eTLD+1 farbling NOISE (canvas/WebGL/audio/client-rects), so
@@ -54,6 +67,11 @@ export interface FingerprintOptions {
    * stay coherent.
    */
   fingerprintProfile?: string | Record<string, unknown>;
+  /**
+   * `navigator.storage.estimate().quota` in **megabytes**. A tiny/ephemeral quota reads as a test
+   * machine or incognito; set a realistic on-disk value (e.g. `250000` for ~244 GB).
+   */
+  storageQuota?: number;
 }
 
 const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
@@ -72,6 +90,7 @@ const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "disableGpuFingerprint",
   "fingerprintNoise",
   "fingerprintProfile",
+  "storageQuota",
 ];
 
 /** Split an options object into its fingerprint half and the remaining (Playwright) half. */
@@ -153,6 +172,7 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   set("fingerprint-gpu-renderer", o.gpuRenderer);
   set("fingerprint-hardware-concurrency", o.hardwareConcurrency);
   set("fingerprint-location", o.location);
+  set("fingerprint-storage-quota", o.storageQuota);
   set("timezone", o.timezone);
   // Always send a coherent Accept-Language. Without --accept-lang Chromium falls back to the
   // build/OS locale, which can leak a language that mismatches the proxy's country/timezone
@@ -163,7 +183,14 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
     o.acceptLanguage ||
     (o.fingerprintProfile ? profileAcceptLanguage(o.fingerprintProfile) : undefined) ||
     "en-US,en";
-  args.push(`--accept-lang=${cleanAcceptLanguage(String(acceptLanguage))}`);
+  const cleanLang = cleanAcceptLanguage(String(acceptLanguage));
+  args.push(`--accept-lang=${cleanLang}`);
+  // Also pin the UI/ICU locale to the PRIMARY Accept-Language tag, so Intl.DateTimeFormat /
+  // NumberFormat / Collator (main thread AND workers) resolve to the same locale as
+  // navigator.language. Without --lang, Chromium falls back to the build/OS locale (e.g. en-GB on an
+  // en-US persona) — a locale-incoherence tell auditors flag (navigator.language=en-US but Intl=en-GB).
+  const primaryLang = cleanLang.split(",")[0];
+  if (primaryLang) args.push(`--lang=${primaryLang}`);
   set("webrtc-ip", o.webrtcIp);
   if (o.disableGpuFingerprint) args.push("--disable-gpu-fingerprint");
   // fingerprintNoise=false turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects)

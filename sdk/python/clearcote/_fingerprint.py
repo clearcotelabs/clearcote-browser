@@ -27,6 +27,7 @@ FINGERPRINT_KEYS = (
     "disable_gpu_fingerprint",
     "fingerprint_noise",
     "fingerprint_profile",
+    "storage_quota",
 )
 
 # kwarg -> switch name (without leading "--"). disable_gpu_fingerprint is a boolean flag,
@@ -43,6 +44,9 @@ _FLAGS = {
     "location": "fingerprint-location",
     "timezone": "timezone",
     "webrtc_ip": "webrtc-ip",
+    # navigator.storage.estimate().quota in MEGABYTES (a tiny/ephemeral quota reads as a test
+    # machine / incognito; set a realistic on-disk value, e.g. 250000 for ~244 GB).
+    "storage_quota": "fingerprint-storage-quota",
 }
 
 
@@ -115,7 +119,23 @@ def fingerprint_args(opts):
         # (e.g. en-GB on a US IP) — a geo-inconsistency tell. en-US,en is the common Chrome default;
         # set accept_language (or geoip) to match the proxy region.
         accept_language = "en-US,en"
-    args.append(f"--accept-lang={clean_accept_language(accept_language)}")
+    clean_lang = clean_accept_language(accept_language)
+    args.append(f"--accept-lang={clean_lang}")
+    # Also pin the UI/ICU locale to the PRIMARY Accept-Language tag, so Intl.DateTimeFormat /
+    # NumberFormat / Collator (main thread AND workers) resolve to the same locale as
+    # navigator.language. Without --lang, Chromium falls back to the build/OS locale (e.g. en-GB on an
+    # en-US persona) -- a locale-incoherence tell (navigator.language=en-US but Intl=en-GB).
+    primary_lang = clean_lang.split(",")[0]
+    if primary_lang:
+        args.append(f"--lang={primary_lang}")
+    # disable_gpu_fingerprint=True presents the machine's REAL GPU instead of a spoofed one: WebGL
+    # UNMASKED_VENDOR/RENDERER, the getParameter table, and the canvas/WebGL render all report the
+    # genuine host backend. The most coherent setting vs strict tampering classifiers — the GPU
+    # string and the rendered pixels match, so there's no GPU spoof to catch. Composes with
+    # fingerprint_profile (the profile still supplies screen/fonts/audio/hardware, but the real host
+    # GPU is kept, not the profile's GPU which the host can't render); pair with fingerprint_noise=
+    # False so the readback isn't perturbed. Trade-off: personas on one machine share the GPU/canvas
+    # identity (linkable) — best for single-identity/per-host use.
     if opts.get("disable_gpu_fingerprint"):
         args.append("--disable-gpu-fingerprint")
     # fingerprint_noise=False turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/

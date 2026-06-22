@@ -13,8 +13,19 @@ from clearcote._fingerprint import (
 def test_default_brand_is_chrome():
     # clearcote presents as Google Chrome; the default brand prevents a UA/UA-CH mismatch.
     # A coherent Accept-Language is also always emitted (defaults to en-US,en) so the language
-    # never falls back to the build/OS locale and mismatches the proxy geo.
-    assert fingerprint_args({}) == ["--fingerprint-brand=chrome", "--accept-lang=en-US,en"]
+    # never falls back to the build/OS locale and mismatches the proxy geo. --lang pins the UI/ICU
+    # locale to the primary tag so Intl (main thread + workers) matches navigator.language.
+    assert fingerprint_args({}) == [
+        "--fingerprint-brand=chrome",
+        "--accept-lang=en-US,en",
+        "--lang=en-US",
+    ]
+
+
+def test_lang_derived_from_primary_accept_language():
+    # Intl/locale coherence: --lang = the primary Accept-Language tag.
+    assert "--lang=fr-FR" in fingerprint_args({"accept_language": "fr-FR,fr"})
+    assert "--lang=de-DE" in fingerprint_args({"accept_language": "de-DE,de;q=0.7,en;q=0.3"})
 
 
 def test_maps_every_option():

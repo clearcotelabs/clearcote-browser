@@ -8,11 +8,21 @@ import {
 } from "../src/fingerprint.js";
 
 describe("fingerprintArgs", () => {
-  it("defaults the UA-CH brand to chrome and emits a coherent Accept-Language", () => {
+  it("defaults the UA-CH brand to chrome and emits a coherent Accept-Language + UI locale", () => {
     // clearcote presents as Google Chrome; the default brand prevents a UA/UA-CH mismatch.
     // A coherent Accept-Language is also always emitted (defaults to en-US,en) so the language
-    // never falls back to the build/OS locale and mismatches the proxy geo.
-    expect(fingerprintArgs({})).toEqual(["--fingerprint-brand=chrome", "--accept-lang=en-US,en"]);
+    // never falls back to the build/OS locale and mismatches the proxy geo. --lang pins the UI/ICU
+    // locale to the primary tag so Intl (main thread + workers) matches navigator.language.
+    expect(fingerprintArgs({})).toEqual([
+      "--fingerprint-brand=chrome",
+      "--accept-lang=en-US,en",
+      "--lang=en-US",
+    ]);
+  });
+
+  it("derives --lang from the primary Accept-Language tag (Intl/locale coherence)", () => {
+    expect(fingerprintArgs({ acceptLanguage: "fr-FR,fr" })).toContain("--lang=fr-FR");
+    expect(fingerprintArgs({ acceptLanguage: "de-DE,de;q=0.7,en;q=0.3" })).toContain("--lang=de-DE");
   });
 
   it("maps every fingerprint option to its Chromium switch", () => {
