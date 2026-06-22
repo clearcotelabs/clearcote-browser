@@ -29,6 +29,21 @@
  #if BUILDFLAG(IS_WIN)
    const bool pipes_are_specified_explicitly =
        command_line.HasSwitch(::switches::kRemoteDebuggingIoPipes);
+--- a/chrome/browser/actor/actor_keyed_service_factory.cc
++++ b/chrome/browser/actor/actor_keyed_service_factory.cc
+@@ -29,8 +29,11 @@
+ 
+ ActorKeyedServiceFactory::ActorKeyedServiceFactory(
+     base::PassKey<ActorKeyedServiceFactory>)
++    // clearcote: also serve the Actor service in incognito profiles. Playwright's
++    // chromium.launch() (the SDK default) puts pages in a non-persistent => off-the-record
++    // profile; without this the AI agent's ActorKeyedService::Get() returns null there.
+     : ProfileKeyedServiceFactory("ActorKeyedService",
+-                                 ProfileSelections::BuildForRegularProfile()) {
++                                 ProfileSelections::BuildForRegularAndIncognito()) {
+   DependsOn(IdentityManagerFactory::GetInstance());
+ }
+ 
 --- /dev/null
 +++ b/chrome/browser/ai_agent/BUILD.gn
 @@ -0,0 +1,42 @@

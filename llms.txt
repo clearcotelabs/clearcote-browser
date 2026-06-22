@@ -10,6 +10,7 @@ Pre-release, building in the open. Latest signed browser build: v0.1.0-pre.6 (Ch
 - Engine-level controls, not injected JavaScript
 - Coherent, per-site-consistent identity (farbling-style model)
 - Engine-level coherence pass: secondary surfaces (WebGL limits/unmasked GPU, getBattery, navigator.connection, keyboard layout, AudioContext, screen details) stay consistent with the persona and a real Chrome-on-Windows desktop
+- In-browser AI agent: a native, in-process agent (perceive the page -> ask an LLM -> act via Chrome's Actor framework with real trusted input, not injected JS), usable with OpenRouter or any OpenAI-compatible endpoint; switch models with a single slug. SDK: launch_agent()/launchAgent() + run_agent_task()/runAgentTask()
 - Reproducible and verifiable (pinned upstream, checksums, planned attestation)
 - Lawful, responsible use
 
@@ -26,7 +27,7 @@ Pre-release, building in the open. Latest signed browser build: v0.1.0-pre.6 (Ch
 - Chromium (BSD-3)
 - ungoogled-chromium (BSD-3) — de-Googled base
 - fingerprint-chromium by adryfish (BSD-3) — engine-level fingerprint controls
-- chromiumfish by arman-bd — coherence-surface reference (battery, navigator.connection, keyboard, display, WebGL limits)
+- chromiumfish by arman-bd (MIT) — coherence-surface reference (battery, navigator.connection, keyboard, display, WebGL limits) and the in-browser AI-agent layer Clearcote ports + adapts to OpenRouter
 - Brave — per-site deterministic "farbling" model
 - Camoufox — sibling open anti-detect browser (Firefox), design reference
 

@@ -11,6 +11,9 @@
 // as engine switches.
 
 import { chromium } from "playwright-core";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type {
   Browser,
   BrowserContext,
@@ -21,12 +24,22 @@ import { ensureBinary, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
 import { resolveGeo, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
+import { agentArgs, splitAgentOptions, type AgentOptions } from "./agent.js";
 import { RELEASE } from "./release.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
 export { resolveGeo, type Geo } from "./geoip.js";
 export type { HumanizeOptions } from "./humanize.js";
+export {
+  runAgentTask,
+  agentArgs,
+  OPENROUTER_BASE_URL,
+  type AgentOptions,
+  type AgentTaskOptions,
+  type AgentTaskResult,
+  type AgentStep,
+} from "./agent.js";
 export { RELEASE } from "./release.js";
 
 /** When true (and a proxy is set), resolve the proxy's exit-IP geo and auto-fill any unset
@@ -35,14 +48,15 @@ interface GeoipOption {
   geoip?: boolean;
 }
 
-/** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, GeoipOption, HumanizeOptions, DownloadOptions {}
+/** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, HumanizeOptions, DownloadOptions {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
   extends PlaywrightLaunchOptions,
     BrowserContextOptions,
     FingerprintOptions,
+    AgentOptions,
     GeoipOption,
     HumanizeOptions,
     DownloadOptions {}
@@ -89,14 +103,15 @@ export async function download(options: DownloadOptions = {}): Promise<string> {
 /** Launch Clearcote and return a standard Playwright {@link Browser}. */
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   const { executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = options;
-  const { fingerprint, rest: pwOptions } = splitFingerprintOptions(rest);
+  const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
+  const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
   const browser = await chromium.launch({
     ...(pwOptions as PlaywrightLaunchOptions),
     executablePath: exe,
-    args: [...fingerprintArgs(fingerprint), ...(args ?? [])],
+    args: [...fingerprintArgs(fingerprint), ...agentArgs(agent), ...(args ?? [])],
   });
   installHumanize(browser, { humanize, showCursor });
   return browser;
@@ -111,17 +126,48 @@ export async function launchPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const { executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = options;
-  const { fingerprint, rest: pwOptions } = splitFingerprintOptions(rest);
+  const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
+  const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
   const context = await chromium.launchPersistentContext(userDataDir, {
     ...(pwOptions as PlaywrightLaunchOptions & BrowserContextOptions),
     executablePath: exe,
-    args: [...fingerprintArgs(fingerprint), ...(args ?? [])],
+    args: [...fingerprintArgs(fingerprint), ...agentArgs(agent), ...(args ?? [])],
   });
   installHumanizeOnContext(context, { humanize, showCursor });
   return context;
 }
 
-export default { launch, launchPersistentContext, executablePath, download, RELEASE };
+/** Options for {@link launchAgent}: persistent-context options + an optional `userDataDir`. */
+export interface LaunchAgentOptions extends PersistentContextOptions {
+  /** Profile directory to persist (cookies/storage/logins). Defaults to a fresh temp dir. */
+  userDataDir?: string;
+}
+
+/**
+ * Launch Clearcote ready for the in-browser AI agent and return a Playwright {@link BrowserContext}.
+ *
+ * The agent drives Chrome's Actor framework, which only attaches to a **regular profile** — not
+ * incognito — so this uses a *persistent* context (a fresh temp `userDataDir` unless you pass one).
+ * Set `agentLlmKey` (+ optional `agentModel`), then drive a page with {@link runAgentTask}:
+ *
+ * ```ts
+ * const ctx = await launchAgent({ agentLlmKey: process.env.OPENROUTER_API_KEY, agentModel: "openai/gpt-4o-mini" });
+ * const page = ctx.pages()[0] ?? (await ctx.newPage());
+ * await page.goto("https://example.com");
+ * const result = await runAgentTask(page, "Click the 'More information...' link.");
+ * ```
+ *
+ * Use this (or {@link launchPersistentContext}) for the agent — plain {@link launch} is incognito,
+ * where the Actor framework can't attach the tab.
+ */
+export async function launchAgent(options: LaunchAgentOptions = {}): Promise<BrowserContext> {
+  const { userDataDir, ...rest } = options;
+  const dir = userDataDir ?? mkdtempSync(join(tmpdir(), "clearcote-agent-"));
+  return launchPersistentContext(dir, rest);
+}
+
+import { runAgentTask } from "./agent.js";
+export default { launch, launchPersistentContext, launchAgent, executablePath, download, runAgentTask, RELEASE };

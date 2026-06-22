@@ -243,6 +243,38 @@ python tools/fingerprint-collect/verify_profile.py --executable /path/to/clearco
 
 Already using Playwright? It's a one-line import change — the returned object is a standard Playwright `Browser`, and the verified Windows binary is fetched + cached for you.
 
+### Drive a page with an AI agent (OpenRouter)
+
+Clearcote ships an **in-browser AI agent**: it runs *inside* the browser process, perceives the live page, asks an LLM what to do, and executes the steps as **real, trusted input** through Chrome's native Actor framework — not a synthetic-event shim. Point it at **[OpenRouter](https://openrouter.ai)** (the default) and switch between any model — GPT, Claude, Gemini, Llama — with a single slug.
+
+```javascript
+import { launchAgent, runAgentTask } from "clearcote";
+
+const ctx = await launchAgent({
+  agentLlmKey: process.env.OPENROUTER_API_KEY,   // turns the agent on
+  agentModel: "openai/gpt-4o-mini",              // any OpenRouter provider/model slug
+});
+const page = ctx.pages()[0] ?? (await ctx.newPage());
+await page.goto("https://news.ycombinator.com");
+
+const result = await runAgentTask(page, "Open the top story and summarize it.", { maxSteps: 12 });
+console.log(result.success, result.finalText, result.steps);
+await ctx.close();
+```
+
+```python
+from clearcote import launch_agent, run_agent_task
+
+ctx = launch_agent(agent_llm_key=OPENROUTER_API_KEY, agent_model="anthropic/claude-3.5-sonnet")
+page = ctx.pages[0] if ctx.pages else ctx.new_page()
+page.goto("https://news.ycombinator.com")
+result = run_agent_task(page, "Open the top story and summarize it.", max_steps=12)
+print(result["success"], result["finalText"], result["steps"])
+ctx.close()
+```
+
+Set `agentLlmKey`/`agent_llm_key` and you're done — the engine **auto-enables** the Actor framework, so no extra Chromium flags are needed. Switch backend by setting `agentLlmUrl`/`agent_llm_url` to any OpenAI-compatible endpoint, or override the model per task with `runAgentTask(page, goal, { model })`. The agent needs a **regular profile**, so launch it with `launchAgent` / `launchPersistentContext` (not the incognito `launch()`). It combines naturally with the fingerprint spoofing and `humanize` input above — an agent that *looks* human while it works.
+
 ## Build it yourself
 
 You never have to take our word for what's inside. Clearcote cross-compiles the Windows binary on a Linux box — one command on a capable host:

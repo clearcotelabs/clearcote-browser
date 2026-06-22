@@ -81,6 +81,32 @@ const context = await launchPersistentContext("./profile-7423", {
 });
 ```
 
+### AI agent (OpenRouter)
+
+Drive a page with an **in-browser AI agent** — it perceives the live page, asks an LLM what to do,
+and executes the steps as real, trusted input through Chrome's Actor framework. Defaults to
+[OpenRouter](https://openrouter.ai); switch models with a single slug.
+
+```ts
+import { launchAgent, runAgentTask } from "clearcote";
+
+const ctx = await launchAgent({
+  agentLlmKey: process.env.OPENROUTER_API_KEY,   // turns the agent on
+  agentModel: "openai/gpt-4o-mini",              // any provider/model slug
+});
+const page = ctx.pages()[0] ?? (await ctx.newPage());
+await page.goto("https://example.com");
+
+const result = await runAgentTask(page, "Click the 'More information...' link.", { maxSteps: 8 });
+console.log(result.success, result.finalText, result.steps);
+await ctx.close();
+```
+
+- `agentLlmKey` is all you need — the engine auto-enables Chrome's Actor framework (no extra flags).
+- `agentLlmUrl` points at any OpenAI-compatible endpoint (default OpenRouter); `agentToolMode` is `"tools"` (function-calling) or `"json"`.
+- Override the model per task: `runAgentTask(page, goal, { model: "anthropic/claude-3.5-sonnet" })`.
+- The agent needs a **regular profile** — use `launchAgent` / `launchPersistentContext`, not the incognito `launch()`.
+
 ### Capture or import a profile
 
 Make Clearcote present a **real machine's** identity instead of the synthetic seed-derived one. Pass

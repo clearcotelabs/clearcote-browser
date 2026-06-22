@@ -17,6 +17,7 @@ import atexit
 import os
 import sys
 
+from ._agent import AGENT_KEYS, OPENROUTER_BASE_URL, agent_args, run_agent_task
 from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args
 from ._humanize import install_humanize, install_humanize_on_context
 from .download import ensure_binary
@@ -26,9 +27,12 @@ from .release import RELEASE
 __all__ = [
     "launch",
     "launch_persistent_context",
+    "launch_agent",
     "executable_path",
     "download",
+    "run_agent_task",
     "resolve_geo",
+    "OPENROUTER_BASE_URL",
     "RELEASE",
     "__version__",
 ]
@@ -99,6 +103,7 @@ def _prepare(kwargs):
     humanize = kwargs.pop("humanize", False)
     show_cursor = kwargs.pop("show_cursor", False)
     fp = {k: kwargs.pop(k) for k in list(kwargs) if k in FINGERPRINT_KEYS}
+    agent = {k: kwargs.pop(k) for k in list(kwargs) if k in AGENT_KEYS}
     exe_path = kwargs.pop("executable_path", None)
     extra_args = kwargs.pop("args", None)
     cache_dir = kwargs.pop("cache_dir", None)
@@ -117,7 +122,7 @@ def _prepare(kwargs):
                 fp["webrtc_ip"] = geo["ip"]
     exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update)
     _guard(exe)
-    args = fingerprint_args(fp) + list(extra_args or [])
+    args = fingerprint_args(fp) + agent_args(agent) + list(extra_args or [])
     return exe, args, kwargs, humanize, show_cursor
 
 
@@ -145,3 +150,18 @@ def launch_persistent_context(user_data_dir, **kwargs):
     )
     install_humanize_on_context(context, humanize, show_cursor)
     return context
+
+
+def launch_agent(user_data_dir=None, **kwargs):
+    """Launch Clearcote ready for the in-browser AI agent; returns a Playwright ``BrowserContext``.
+
+    The agent drives Chrome's Actor framework, which only attaches to a REGULAR profile (not
+    incognito), so this uses a persistent context (a fresh temp ``user_data_dir`` unless you pass
+    one). Set ``agent_llm_key`` (+ optional ``agent_model``), then drive a page with
+    ``run_agent_task()``. Use this (or ``launch_persistent_context``) for the agent -- plain
+    ``launch()`` is incognito, where the Actor framework can't attach the tab."""
+    import tempfile
+
+    if user_data_dir is None:
+        user_data_dir = tempfile.mkdtemp(prefix="clearcote-agent-")
+    return launch_persistent_context(user_data_dir, **kwargs)

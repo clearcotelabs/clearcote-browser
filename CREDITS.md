@@ -9,6 +9,7 @@ Clearcote is built with deep gratitude to the open-source projects below. Each r
 | [Chromium](https://www.chromium.org/) | The browser engine | BSD-3-Clause |
 | [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium) | De-Googled base + patch/build tooling | BSD-3-Clause |
 | [fingerprint-chromium](https://github.com/adryfish/fingerprint-chromium) (adryfish) | Pioneering engine-level fingerprint controls on an ungoogled base | BSD-3-Clause |
+| [chromiumfish](https://github.com/arman-bd/chromiumfish) (arman-bd) | Reference for the in-browser AI-agent layer (native Actor-framework agent), which Clearcote ports and adapts to OpenRouter | MIT |
 
 ## Design inspiration
 
