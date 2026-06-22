@@ -22,4 +22,5 @@
 150-device-sensors.patch
 160-coherence-misc.patch
 170-speech-voices.patch
+180-geolocation.patch
 900-windows-build-fixes.patch

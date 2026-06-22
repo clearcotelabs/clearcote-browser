@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.cc
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,386 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -364,6 +364,14 @@
 +  };
 +
 +  ApplyProfileOverride(&p);
++
++  // clearcote: an explicit --fingerprint-gpu-vendor/-renderer overrides the seed-/profile-
++  // derived GPU (precedence: switch > imported profile > seed); WebGL getParameter reads these.
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  if (cmd->HasSwitch(switches::kFingerprintGpuVendor))
++    p.webgl_vendor = cmd->GetSwitchValueASCII(switches::kFingerprintGpuVendor);
++  if (cmd->HasSwitch(switches::kFingerprintGpuRenderer))
++    p.webgl_renderer = cmd->GetSwitchValueASCII(switches::kFingerprintGpuRenderer);
 +  return p;
 +}
 +
