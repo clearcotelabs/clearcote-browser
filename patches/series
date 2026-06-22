@@ -19,6 +19,8 @@
 141-media-queries.patch
 145-storage-quota.patch
 146-perf-memory.patch
+147-media-capabilities.patch
+148-media-devices.patch
 150-device-sensors.patch
 160-coherence-misc.patch
 170-speech-voices.patch

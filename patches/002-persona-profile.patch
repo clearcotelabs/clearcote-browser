@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.cc
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,585 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -301,6 +301,102 @@
 +      }
 +    }
 +  }
++  // clearcote: imported profile WebGPU adapter identity (webgpu.vendor /
++  // webgpu.architecture) overrides the seed-derived values.
++  if (const std::string* v = d.FindStringByDottedPath("webgpu.vendor"))
++    p->webgpu_vendor = *v;
++  if (const std::string* a = d.FindStringByDottedPath("webgpu.architecture"))
++    p->webgpu_architecture = *a;
++  // clearcote: imported profile WebGPU limits (webgpu.limits dict) override the
++  // default desktop table key-by-key. Big values (>INT_MAX) arrive as JSON
++  // doubles, so fall back to FindDouble / numeric string.
++  if (const base::DictValue* wl = d.FindDictByDottedPath("webgpu.limits")) {
++    auto gl = [&](const char* k) {
++      if (auto v = wl->FindInt(k))
++        p->webgpu_limits[k] = static_cast<uint64_t>(*v);
++      else if (auto v2 = wl->FindDouble(k))
++        p->webgpu_limits[k] = static_cast<uint64_t>(*v2);
++      else if (const std::string* s = wl->FindString(k)) {
++        uint64_t out = 0;
++        if (base::StringToUint64(*s, &out)) p->webgpu_limits[k] = out;
++      }
++    };
++    gl("maxTextureDimension1D");
++    gl("maxTextureDimension2D");
++    gl("maxTextureDimension3D");
++    gl("maxTextureArrayLayers");
++    gl("maxBindGroups");
++    gl("maxBindGroupsPlusVertexBuffers");
++    gl("maxBindingsPerBindGroup");
++    gl("maxDynamicUniformBuffersPerPipelineLayout");
++    gl("maxDynamicStorageBuffersPerPipelineLayout");
++    gl("maxSampledTexturesPerShaderStage");
++    gl("maxSamplersPerShaderStage");
++    gl("maxStorageBuffersPerShaderStage");
++    gl("maxStorageTexturesPerShaderStage");
++    gl("maxUniformBuffersPerShaderStage");
++    gl("maxUniformBufferBindingSize");
++    gl("maxStorageBufferBindingSize");
++    gl("minUniformBufferOffsetAlignment");
++    gl("minStorageBufferOffsetAlignment");
++    gl("maxVertexBuffers");
++    gl("maxBufferSize");
++    gl("maxVertexAttributes");
++    gl("maxVertexBufferArrayStride");
++    gl("maxInterStageShaderVariables");
++    gl("maxColorAttachments");
++    gl("maxColorAttachmentBytesPerSample");
++    gl("maxComputeWorkgroupStorageSize");
++    gl("maxComputeInvocationsPerWorkgroup");
++    gl("maxComputeWorkgroupSizeX");
++    gl("maxComputeWorkgroupSizeY");
++    gl("maxComputeWorkgroupSizeZ");
++    gl("maxComputeWorkgroupsPerDimension");
++    gl("maxStorageBuffersInFragmentStage");
++    gl("maxStorageTexturesInFragmentStage");
++    gl("maxStorageBuffersInVertexStage");
++    gl("maxStorageTexturesInVertexStage");
++  }
++  // clearcote: imported-profile media-codec support. Container key may be
++  // "mediaCapabilities" or "codecs"; each codec family maps to a dict
++  // {supported, smooth, powerEfficient}. Missing bools keep the derived default.
++  const base::DictValue* mc = d.FindDict("mediaCapabilities");
++  if (!mc) mc = d.FindDict("codecs");
++  if (mc) {
++    auto mcset = [&](const char* key) {
++      const base::DictValue* c = mc->FindDict(key);
++      if (!c) return;
++      PersonaProfile::MediaCodecSupport e = p->media_codecs[key];
++      if (auto v = c->FindBool("supported")) e.supported = *v;
++      if (auto v = c->FindBool("smooth")) e.smooth = *v;
++      if (auto v = c->FindBool("powerEfficient")) e.power_efficient = *v;
++      p->media_codecs[key] = e;
++    };
++    mcset("h264");
++    mcset("vp8");
++    mcset("vp9");
++    mcset("av1");
++    mcset("hevc");
++  }
++  // clearcote: imported-profile device list (mediaDevices: array of
++  // {kind,label,device_id,group_id}). A non-empty list replaces the derived
++  // roster wholesale (mirrors the voices parser); absent/empty keeps the default.
++  if (const base::ListValue* devs = d.FindList("mediaDevices")) {
++    if (!devs->empty()) {
++      p->media_devices.clear();
++      for (const base::Value& item : *devs) {
++        const base::DictValue* dd = item.GetIfDict();
++        if (!dd)
++          continue;
++        PersonaProfile::MediaDevice dev;
++        if (const std::string* s = dd->FindString("kind")) dev.kind = *s;
++        if (const std::string* s = dd->FindString("label")) dev.label = *s;
++        if (const std::string* s = dd->FindString("device_id")) dev.device_id = *s;
++        if (const std::string* s = dd->FindString("group_id")) dev.group_id = *s;
++        p->media_devices.push_back(std::move(dev));
++      }
++    }
++  }
 +  if (const base::DictValue* css = d.FindDict("css")) {
 +    if (auto v = css->FindBool("color-gamut:rec2020"); v && *v) p->css_color_gamut = "rec2020";
 +    else if (auto v = css->FindBool("color-gamut:p3"); v && *v) p->css_color_gamut = "p3";
@@ -355,13 +451,93 @@
 +
 +  // Default Windows voice set (closes the getVoices()=0 tell); a profile overrides.
 +  p.voices = {
-+      {"Microsoft David Desktop - English (United States)",
-+       "Microsoft David Desktop - English (United States)", "en-US", true, true},
-+      {"Microsoft Zira Desktop - English (United States)",
-+       "Microsoft Zira Desktop - English (United States)", "en-US", true, false},
++      {"Microsoft David - English (United States)",
++       "Microsoft David - English (United States)", "en-US", true, true},
++      {"Microsoft Zira - English (United States)",
++       "Microsoft Zira - English (United States)", "en-US", true, false},
 +      {"Microsoft Mark - English (United States)",
 +       "Microsoft Mark - English (United States)", "en-US", true, false},
 +  };
++
++  // clearcote: canonical desktop WebGPU adapter limits -- the spec-tier
++  // maximums shared by modern desktop GPUs (a real capture), so they read as
++  // genuine hardware and stay coherent with the spoofed WebGL GPU regardless
++  // of the host's actual GPU. An imported profile's webgpu.limits overrides
++  // individual entries (see ApplyProfileOverride).
++  p.webgpu_limits = {
++      {"maxTextureDimension1D", 16384ull},
++      {"maxTextureDimension2D", 16384ull},
++      {"maxTextureDimension3D", 2048ull},
++      {"maxTextureArrayLayers", 2048ull},
++      {"maxBindGroups", 4ull},
++      {"maxBindGroupsPlusVertexBuffers", 24ull},
++      {"maxBindingsPerBindGroup", 1000ull},
++      {"maxDynamicUniformBuffersPerPipelineLayout", 10ull},
++      {"maxDynamicStorageBuffersPerPipelineLayout", 8ull},
++      {"maxSampledTexturesPerShaderStage", 48ull},
++      {"maxSamplersPerShaderStage", 16ull},
++      {"maxStorageBuffersPerShaderStage", 16ull},
++      {"maxStorageTexturesPerShaderStage", 8ull},
++      {"maxUniformBuffersPerShaderStage", 12ull},
++      {"maxUniformBufferBindingSize", 65536ull},
++      {"maxStorageBufferBindingSize", 2147483644ull},
++      {"minUniformBufferOffsetAlignment", 256ull},
++      {"minStorageBufferOffsetAlignment", 256ull},
++      {"maxVertexBuffers", 8ull},
++      {"maxBufferSize", 2147483648ull},
++      {"maxVertexAttributes", 30ull},
++      {"maxVertexBufferArrayStride", 2048ull},
++      {"maxInterStageShaderVariables", 28ull},
++      {"maxColorAttachments", 8ull},
++      {"maxColorAttachmentBytesPerSample", 128ull},
++      {"maxComputeWorkgroupStorageSize", 32768ull},
++      {"maxComputeInvocationsPerWorkgroup", 1024ull},
++      {"maxComputeWorkgroupSizeX", 1024ull},
++      {"maxComputeWorkgroupSizeY", 1024ull},
++      {"maxComputeWorkgroupSizeZ", 64ull},
++      {"maxComputeWorkgroupsPerDimension", 65535ull},
++      {"maxStorageBuffersInFragmentStage", 16ull},
++      {"maxStorageTexturesInFragmentStage", 8ull},
++      {"maxStorageBuffersInVertexStage", 16ull},
++      {"maxStorageTexturesInVertexStage", 8ull},
++  };
++
++  // clearcote: canonical desktop media-codec support -- a modern Windows Chrome
++  // on the default Intel UHD 770 iGPU (HW decode for H.264/VP8/VP9/AV1/HEVC).
++  // {supported, smooth, powerEfficient}. Overrides the host's real
++  // MediaCapabilities answers so they stay coherent with the spoofed GPU
++  // regardless of the build box's actual hardware. An imported profile's
++  // mediaCapabilities/codecs dict overrides individual entries.
++  p.media_codecs = {
++      {"h264", {true, true, true}},
++      {"vp8", {true, true, true}},
++      {"vp9", {true, true, true}},
++      {"av1", {true, true, true}},
++      {"hevc", {true, true, true}},
++  };
++
++  // clearcote: enumerateDevices() persona device set -- a coherent real Windows
++  // desktop with one onboard Realtek audio codec and no webcam (the most common,
++  // lowest-entropy config). One shared group_id (one physical codec). Raw ids are
++  // seed-derived so different --fingerprint seeds differ; the per-origin HMAC
++  // (TranslateMediaDeviceInfo) hashes them per site and blanks labels pre-grant.
++  // The literal "default"/"communications" ids pass through unhashed. An imported
++  // profile's mediaDevices list overrides this (see ApplyProfileOverride).
++  {
++    const std::string raw_mic = "cc-mic-" + base::NumberToString(rng());
++    const std::string raw_spk = "cc-spk-" + base::NumberToString(rng());
++    const std::string raw_grp = "cc-grp-" + base::NumberToString(rng());
++    p.media_devices = {
++        {"audioinput", "Default - Microphone (Realtek(R) Audio)", "default", raw_grp},
++        {"audioinput", "Communications - Microphone (Realtek(R) Audio)",
++         "communications", raw_grp},
++        {"audioinput", "Microphone (Realtek(R) Audio)", raw_mic, raw_grp},
++        {"audiooutput", "Default - Speakers (Realtek(R) Audio)", "default", raw_grp},
++        {"audiooutput", "Communications - Speakers (Realtek(R) Audio)",
++         "communications", raw_grp},
++        {"audiooutput", "Speakers (Realtek(R) Audio)", raw_spk, raw_grp},
++    };
++  }
 +
 +  ApplyProfileOverride(&p);
 +
@@ -372,6 +548,29 @@
 +    p.webgl_vendor = cmd->GetSwitchValueASCII(switches::kFingerprintGpuVendor);
 +  if (cmd->HasSwitch(switches::kFingerprintGpuRenderer))
 +    p.webgl_renderer = cmd->GetSwitchValueASCII(switches::kFingerprintGpuRenderer);
++  // clearcote: explicit --fingerprint-webgpu-vendor/-architecture overrides the
++  // profile-/seed-derived WebGPU identity (precedence: switch > profile > seed).
++  if (cmd->HasSwitch("fingerprint-webgpu-vendor"))
++    p.webgpu_vendor = cmd->GetSwitchValueASCII("fingerprint-webgpu-vendor");
++  if (cmd->HasSwitch("fingerprint-webgpu-architecture"))
++    p.webgpu_architecture = cmd->GetSwitchValueASCII("fingerprint-webgpu-architecture");
++  // If neither a profile nor a switch set the WebGPU identity, derive it from the
++  // FINAL WebGL GPU (after the gpu-vendor switch/profile) so navigator.gpu always
++  // matches the WebGL UNMASKED vendor: lowercase WebGPU vendor + canonical arch.
++  if (p.webgpu_vendor.empty() || p.webgpu_architecture.empty()) {
++    std::string cc_v, cc_a;
++    if (p.webgl_vendor.find("NVIDIA") != std::string::npos) {
++      cc_v = "nvidia"; cc_a = "ampere";
++    } else if (p.webgl_vendor.find("AMD") != std::string::npos ||
++               p.webgl_vendor.find("ATI") != std::string::npos ||
++               p.webgl_vendor.find("Radeon") != std::string::npos) {
++      cc_v = "amd"; cc_a = "rdna2";
++    } else {
++      cc_v = "intel"; cc_a = "gen-12-lp";
++    }
++    if (p.webgpu_vendor.empty()) p.webgpu_vendor = cc_v;
++    if (p.webgpu_architecture.empty()) p.webgpu_architecture = cc_a;
++  }
 +  return p;
 +}
 +
@@ -389,7 +588,7 @@
 +}  // namespace ungoogled
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.h
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,185 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -398,6 +597,7 @@
 +#define COMPONENTS_UNGOOGLED_PERSONA_PROFILE_H_
 +
 +#include <cstdint>
++#include <map>
 +#include <string>
 +#include <vector>
 +
@@ -514,6 +714,50 @@
 +
 +  // CSS @media color-gamut: "srgb" (default), "p3", or "rec2020".
 +  std::string css_color_gamut = "srgb";
++
++  // ---- WebGPU adapter.limits (GPUSupportedLimits). Keys are the JS limit
++  // names (e.g. "maxTextureDimension2D"); values override the host GPU's
++  // reported limits so they stay coherent with the spoofed WebGL GPU. Filled
++  // with a canonical desktop table by DerivePersona; an imported profile's
++  // webgpu.limits overrides individual entries.
++  std::map<std::string, uint64_t> webgpu_limits;
++
++  // ---- WebGPU adapter identity (GPUAdapterInfo.vendor / .architecture),
++  // kept coherent with the spoofed WebGL GPU so navigator.gpu can't contradict
++  // the WebGL UNMASKED vendor. Lowercase per the WebGPU spec ("intel"/"nvidia"/
++  // "amd"; "gen-12-lp"/"ampere"/"rdna2"). Derived from the final webgl_vendor in
++  // DerivePersona; an imported profile (webgpu.vendor/.architecture) or
++  // --fingerprint-webgpu-vendor/-architecture overrides.
++  std::string webgpu_vendor;
++  std::string webgpu_architecture;
++
++  // ---- MediaCapabilities.decodingInfo() per codec family. Key is the codec
++  // family ("h264","vp8","vp9","av1","hevc"); the triple overrides the host's
++  // real {supported, smooth, powerEfficient} so playback support reads coherently
++  // with the spoofed WebGL/WebGPU GPU tier regardless of the build host's actual
++  // decode hardware. Default-populated by DerivePersona; an imported profile's
++  // mediaCapabilities/codecs dict overrides individual entries.
++  struct MediaCodecSupport {
++    bool supported = true;
++    bool smooth = true;
++    bool power_efficient = true;
++  };
++  std::map<std::string, MediaCodecSupport> media_codecs;
++
++  // ---- enumerateDevices() persona device list. Real Windows always exposes
++  // at least one audioinput + audiooutput (empty id/label pre-permission); an
++  // empty list reads as a headless server -- a tell. Each entry carries a RAW
++  // device_id/group_id (stable, seed-derived); the browser-process per-origin
++  // HMAC salt (TranslateMediaDeviceInfo) hashes them per site and blanks labels
++  // pre-grant, so we store raw strings + plain labels here. The literal
++  // "default"/"communications" ids pass through unhashed (Chrome's convention).
++  struct MediaDevice {
++    std::string kind;  // "audioinput" | "audiooutput" | "videoinput"
++    std::string label;
++    std::string device_id;
++    std::string group_id;
++  };
++  std::vector<MediaDevice> media_devices;
 +};
 +
 +// Derives a coherent Windows persona from a seed. Same seed => same persona.

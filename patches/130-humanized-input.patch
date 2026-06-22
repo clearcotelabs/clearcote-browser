@@ -8,7 +8,15 @@
      "devtools/protocol/device_access_handler.cc",
      "devtools/protocol/device_access_handler.h",
      "devtools/protocol/device_orientation_handler.cc",
-@@ -2866,6 +2867,8 @@
+@@ -1197,6 +1198,7 @@
+     "host_zoom_level_context.h",
+     "host_zoom_map_impl.cc",
+     "host_zoom_map_impl.h",
++    "humanized_click.cc",
+     "idle/idle_manager_impl.cc",
+     "idle/idle_manager_impl.h",
+     "image_capture/image_capture_impl.cc",
+@@ -2866,6 +2868,8 @@
          [ "file_system_access/file_path_watcher/file_path_watcher_stub.cc" ]
  
      sources += [
@@ -41,7 +49,7 @@
  #include "content/browser/gpu/gpu_process_host.h"
  #include "content/browser/interest_group/interest_group_manager_impl.h"
  #include "content/browser/permissions/permission_controller_impl.h"
-@@ -704,6 +719,446 @@
+@@ -704,6 +719,484 @@
    return Response::Success();
  }
  
@@ -485,12 +493,50 @@
 +      10);
 +}
 +
++void BrowserHandler::AgentRunTask(
++    const std::string& in_target_id,
++    const std::string& in_goal,
++    std::optional<int> in_max_steps,
++    std::optional<std::string> in_model,
++    std::optional<std::string> in_plan_json,
++    std::unique_ptr<AgentRunTaskCallback> callback) {
++  scoped_refptr<DevToolsAgentHost> host =
++      DevToolsAgentHost::GetForId(in_target_id);
++  if (!host) {
++    callback->sendFailure(
++        Response::InvalidParams("No target with given targetId"));
++    return;
++  }
++  WebContents* web_contents = host->GetWebContents();
++  if (!web_contents) {
++    callback->sendFailure(Response::InvalidParams("Target has no WebContents"));
++    return;
++  }
++  WebContentsDelegate* delegate = web_contents->GetDelegate();
++  if (!delegate) {
++    callback->sendFailure(Response::ServerError("Target has no delegate"));
++    return;
++  }
++  // The agent loop is owned by the chrome layer (Browser, via the delegate);
++  // content/ cannot depend on chrome/. Forward and answer the async callback
++  // when the task completes.
++  delegate->RunAgentTask(
++      web_contents, in_goal, in_max_steps.value_or(20),
++      in_model.value_or(std::string()), in_plan_json.value_or(std::string()),
++      base::BindOnce(
++          [](std::unique_ptr<AgentRunTaskCallback> cb, bool success,
++             const std::string& final_text, const std::string& steps_json) {
++            cb->sendSuccess(success, final_text, steps_json);
++          },
++          std::move(callback)));
++}
++
  void BrowserHandler::AddPrivacySandboxCoordinatorKeyConfig(
      const std::string& in_api,
      const std::string& in_coordinator_origin,
 --- a/content/browser/devtools/protocol/browser_handler.h
 +++ b/content/browser/devtools/protocol/browser_handler.h
-@@ -101,6 +101,22 @@
+@@ -101,6 +101,29 @@
    Response Crash() override;
    Response CrashGpuProcess() override;
  
@@ -509,6 +555,13 @@
 +      std::optional<bool> in_no_click,
 +      std::optional<bool> in_visualize,
 +      std::unique_ptr<HumanizedClickSelectorCallback> callback) override;
++  // clearcote: native in-browser AI agent task (see Browser.agentRunTask).
++  void AgentRunTask(const std::string& in_target_id,
++                    const std::string& in_goal,
++                    std::optional<int> in_max_steps,
++                    std::optional<std::string> in_model,
++                    std::optional<std::string> in_plan_json,
++                    std::unique_ptr<AgentRunTaskCallback> callback) override;
 +
    void AddPrivacySandboxCoordinatorKeyConfig(
        const std::string& in_api,
@@ -847,14 +900,14 @@
                  "include": ["getVersion", "getHistograms", "getHistogram", "getBrowserCommandLine", "grantPermissions", "setDownloadBehavior", "cancelDownload", "resetPermissions", "crash", "crashGpuProcess", "setPermission",
 -                "addPrivacySandboxCoordinatorKeyConfig"],
 -                "async": ["addPrivacySandboxCoordinatorKeyConfig", "grantPermissions", "resetPermissions", "setPermission"]
-+                "addPrivacySandboxCoordinatorKeyConfig", "humanizedClick", "humanizedClickSelector"],
-+                "async": ["addPrivacySandboxCoordinatorKeyConfig", "grantPermissions", "resetPermissions", "setPermission", "humanizedClick", "humanizedClickSelector"]
++                "addPrivacySandboxCoordinatorKeyConfig", "humanizedClick", "humanizedClickSelector", "agentRunTask"],
++                "async": ["addPrivacySandboxCoordinatorKeyConfig", "grantPermissions", "resetPermissions", "setPermission", "humanizedClick", "humanizedClickSelector", "agentRunTask"]
              },
              {
                  "domain": "DOM",
 --- a/third_party/blink/public/devtools_protocol/domains/Browser.pdl
 +++ b/third_party/blink/public/devtools_protocol/domains/Browser.pdl
-@@ -350,3 +350,46 @@
+@@ -350,3 +350,71 @@
        # BrowserContext to perform the action in. When omitted, default browser
        # context is used.
        optional BrowserContextID browserContextId
@@ -901,3 +954,28 @@
 +      # Resolved CSS viewport coordinates the click landed on.
 +      number x
 +      number y
++
++  # clearcote: run a native in-browser AI agent task. Drives Chrome's Actor
++  # framework + AIPageContent with a user-configured OpenAI-compatible LLM
++  # (e.g. OpenRouter -- see --agent-llm-url / --agent-llm-key / --agent-model).
++  # Async: resolves when the task completes or the step budget is exhausted.
++  experimental command agentRunTask
++    parameters
++      # The target page to run the agent on. Get via Target.getTargets.
++      string targetId
++      # Natural-language task goal.
++      string goal
++      # Max think/act steps before giving up (default 20).
++      optional integer maxSteps
++      # Override the configured default model (e.g. an OpenRouter slug).
++      optional string model
++      # Optional JSON array of previously-recorded steps to REPLAY (the flow
++      # cache); a step that no longer matches is healed via the LLM. Omit to run fresh.
++      optional string planJson
++    returns
++      # Whether the agent reported the task as successfully completed.
++      boolean success
++      # Final human-readable message from the agent.
++      string finalText
++      # JSON array of the resolved/executed steps (recorded|replayed|healed).
++      string stepsJson

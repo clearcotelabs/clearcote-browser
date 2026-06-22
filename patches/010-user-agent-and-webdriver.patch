@@ -184,7 +184,7 @@
  }  // namespace
  
  UserAgentBrandVersion::UserAgentBrandVersion(const std::string& ua_brand,
-@@ -232,4 +305,187 @@
+@@ -232,4 +305,196 @@
           a.ua_metadata_override == b.ua_metadata_override;
  }
  
@@ -316,14 +316,23 @@
 +      metadata->platform = kWindowsPlatform;
 +      metadata->platform_version = GetPlatformVersion("windows");
 +      metadata->architecture = kX86Architecture;
++      metadata->bitness = "64";
++      metadata->wow64 = false;
++      metadata->model = "";
 +    } else if (platform_value == "linux") {
 +      metadata->platform = kLinuxPlatform;
 +      metadata->platform_version = GetPlatformVersion("linux");
 +      metadata->architecture = kX86Architecture;
++      metadata->bitness = "64";
++      metadata->wow64 = false;
++      metadata->model = "";
 +    } else if (platform_value == "macos") {
 +      metadata->platform = kMacOSPlatform;
 +      metadata->platform_version = GetPlatformVersion("macos");
 +      metadata->architecture = kArmArchitecture;
++      metadata->bitness = "64";
++      metadata->wow64 = false;
++      metadata->model = "";
 +    }
 +  }
 +}

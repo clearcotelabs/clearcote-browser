@@ -1,3 +1,46 @@
+--- a/content/browser/speech/speech_synthesis_impl.cc
++++ b/content/browser/speech/speech_synthesis_impl.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "content/browser/speech/speech_synthesis_impl.h"
+ 
++#include "base/command_line.h"
++#include "components/ungoogled/persona_profile.h"
+ #include "content/browser/media/audio_stream_monitor.h"
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
+ #include "content/browser/speech/tts_utterance_impl.h"
+@@ -91,6 +93,31 @@
+ void SendVoiceListToObserver(
+     blink::mojom::SpeechSynthesisVoiceListObserver* observer,
+     const std::vector<VoiceData>& voices) {
++  // clearcote: when fingerprinting, present the deterministic persona voice set
++  // (coherent with the persona locale -- an en-US default voice, no en-GB) in
++  // place of the build host's real SAPI voices, whose default voice + ordering
++  // otherwise leak the host locale (an en-GB default under an en-US persona is a
++  // cross-API tell). The persona carries is_default per voice.
++  const base::CommandLine* cc_cmd = base::CommandLine::ForCurrentProcess();
++  if (cc_cmd->HasSwitch("fingerprint")) {
++    const auto& cc_voices = ungoogled::CurrentPersona().voices;
++    if (!cc_voices.empty()) {
++      std::vector<blink::mojom::SpeechSynthesisVoicePtr> cc_out;
++      cc_out.reserve(cc_voices.size());
++      for (const auto& cc_v : cc_voices) {
++        blink::mojom::SpeechSynthesisVoicePtr ov =
++            blink::mojom::SpeechSynthesisVoice::New();
++        ov->voice_uri = cc_v.voice_uri;
++        ov->name = cc_v.name;
++        ov->lang = cc_v.lang;
++        ov->is_local_service = cc_v.local_service;
++        ov->is_default = cc_v.is_default;
++        cc_out.push_back(std::move(ov));
++      }
++      observer->OnSetVoiceList(std::move(cc_out));
++      return;
++    }
++  }
+   std::vector<blink::mojom::SpeechSynthesisVoicePtr> out_voices;
+   out_voices.resize(voices.size());
+   for (size_t i = 0; i < voices.size(); ++i) {
 --- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
 +++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
 @@ -28,6 +28,9 @@

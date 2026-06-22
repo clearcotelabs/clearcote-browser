@@ -1,0 +1,47 @@
+--- a/content/browser/renderer_host/media/media_devices_manager.cc
++++ b/content/browser/renderer_host/media/media_devices_manager.cc
+@@ -36,6 +36,7 @@
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/common/content_features.h"
++#include "components/ungoogled/persona_profile.h"
+ #include "media/audio/audio_device_description.h"
+ #include "media/audio/audio_system.h"
+ #include "media/base/media_switches.h"
+@@ -1493,10 +1494,34 @@
+     const blink::WebMediaDeviceInfoArray& snapshot) {
+   DCHECK_CURRENTLY_ON(BrowserThread::IO);
+   DCHECK(blink::IsValidMediaDeviceType(type));
+-  UpdateSnapshot(type, snapshot);
++
++  // clearcote: substitute a deterministic persona device roster for the real
++  // OS devices BEFORE anonymization, so a headless/server host neither leaks
++  // nor under-reports its devices. The persona list then flows through the
++  // existing downstream pipeline unchanged (rank -> group-id -> per-origin HMAC
++  // salt + label gate in TranslateMediaDeviceInfo): per-origin-stable hashed
++  // deviceIds, empty labels pre-permission, all for free. Gated on
++  // !use_fake_devices_ so the --use-fake-device-for-media-stream path is intact.
++  blink::WebMediaDeviceInfoArray cc_persona_snapshot;
++  const auto& cc_devices = ungoogled::CurrentPersona().media_devices;
++  if (!use_fake_devices_ && !cc_devices.empty()) {
++    const char* cc_want =
++        type == MediaDeviceType::kMediaAudioInput   ? "audioinput"
++        : type == MediaDeviceType::kMediaVideoInput ? "videoinput"
++                                                    : "audiooutput";
++    for (const auto& d : cc_devices) {
++      if (d.kind == cc_want)
++        cc_persona_snapshot.emplace_back(d.device_id, d.label, d.group_id);
++    }
++  }
++  const blink::WebMediaDeviceInfoArray& effective =
++      (!use_fake_devices_ && !cc_devices.empty()) ? cc_persona_snapshot
++                                                  : snapshot;
++
++  UpdateSnapshot(type, effective);
+   cache_infos_[static_cast<size_t>(type)].UpdateCompleted();
+   cache_is_populated_[static_cast<size_t>(type)] = true;
+-  SendLogMessage(GetDevicesEnumeratedLogString(request_id, type, snapshot));
++  SendLogMessage(GetDevicesEnumeratedLogString(request_id, type, effective));
+ 
+   if (cache_policies_[static_cast<size_t>(type)] == CachePolicy::NO_CACHE) {
+     for (auto& request : client_requests_) {

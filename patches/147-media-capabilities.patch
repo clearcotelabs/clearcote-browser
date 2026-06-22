@@ -1,0 +1,148 @@
+--- a/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
++++ b/third_party/blink/renderer/modules/media_capabilities/media_capabilities.cc
+@@ -17,7 +17,9 @@
+ #include "media/base/media_switches.h"
+ #include "media/base/media_util.h"
+ #include "media/base/mime_util.h"
++#include "components/ungoogled/persona_profile.h"
+ #include "media/base/supported_types.h"
++#include "media/base/video_codecs.h"
+ #include "media/base/supported_video_decoder_config.h"
+ #include "media/base/video_decoder_config.h"
+ #include "media/filters/stream_parser_factory.h"
+@@ -108,6 +110,28 @@
+       kWebrtcEncodeSmoothIfPowerEfficientDefault);
+ }
+ 
++// clearcote: look up the persona MediaCapabilities triple for a video codec.
++// Returns false for unmapped/unknown codecs so the real (host) value is kept --
++// only the five spoofed families are overridden, never over-claiming obscure
++// codecs (VC1/MPEG2/Theora/...).
++bool CcPersonaCodec(media::VideoCodec c,
++                    ungoogled::PersonaProfile::MediaCodecSupport* out) {
++  const char* key = nullptr;
++  switch (c) {
++    case media::VideoCodec::kH264: key = "h264"; break;
++    case media::VideoCodec::kVP8: key = "vp8"; break;
++    case media::VideoCodec::kVP9: key = "vp9"; break;
++    case media::VideoCodec::kAV1: key = "av1"; break;
++    case media::VideoCodec::kHEVC: key = "hevc"; break;
++    default: return false;
++  }
++  const auto& m = ungoogled::CurrentPersona().media_codecs;
++  auto it = m.find(key);
++  if (it == m.end()) return false;
++  *out = it->second;
++  return true;
++}
++
+ // static
+ bool UseGpuFactoriesForPowerEfficient(
+     ExecutionContext* execution_context,
+@@ -1367,6 +1391,9 @@
+       callback_id,
+       MakeGarbageCollected<MediaCapabilities::PendingCallbackState>(
+           resolver, access, request_time));
++  // clearcote: plumb the codec so ResolveCallbackIfReady can key the persona
++  // MediaCapabilities override (smooth / DB-branch powerEfficient) by codec.
++  pending_cb_map_.at(callback_id)->video_codec = video_codec;
+ 
+   media::mojom::blink::PredictionFeaturesPtr features =
+       media::mojom::blink::PredictionFeatures::New(
+@@ -1497,11 +1524,26 @@
+       info->setSupported(false);
+     }
+   } else {
+-    info->setPowerEfficient(*pending_cb->db_is_power_efficient);
++    // clearcote: EME / worker DB branch (no gpu_factories) -- pin powerEfficient
++    // to the persona so it matches the GPU branch; unmapped codecs keep real.
++    ungoogled::PersonaProfile::MediaCodecSupport cc;
++    if (CcPersonaCodec(pending_cb->video_codec, &cc))
++      info->setPowerEfficient(cc.power_efficient);
++    else
++      info->setPowerEfficient(*pending_cb->db_is_power_efficient);
++  }
++
++  // clearcote: pin smooth to the persona (codec-keyed via the plumbed
++  // video_codec) so it never leaks the per-machine VideoDecodePerfHistory;
++  // unmapped codecs keep the real DB value.
++  {
++    ungoogled::PersonaProfile::MediaCodecSupport cc;
++    if (CcPersonaCodec(pending_cb->video_codec, &cc))
++      info->setSmooth(cc.smooth);
++    else
++      info->setSmooth(*pending_cb->db_is_smooth);
+   }
+ 
+-  info->setSmooth(*pending_cb->db_is_smooth);
+-
+   const base::TimeDelta process_time =
+       base::TimeTicks::Now() - pending_cb->request_time;
+   UMA_HISTOGRAM_TIMES("Media.Capabilities.DecodingInfo.Time.Video",
+@@ -1542,6 +1584,16 @@
+   DCHECK(pending_cb_map_.Contains(callback_id));
+   PendingCallbackState* pending_cb = pending_cb_map_.at(callback_id);
+ 
++  // clearcote: neutralize the real-GPU HW-decode leak at the last codec-aware
++  // point. is_gpu_factories_supported drives the GPU-branch powerEfficient in
++  // ResolveCallbackIfReady; for the five persona codecs reflect the persona,
++  // not the host GPU. Unmapped codecs keep the real value. is_builtin stays
++  // real so the supported-downgrade behaves coherently.
++  {
++    ungoogled::PersonaProfile::MediaCodecSupport cc;
++    if (CcPersonaCodec(video_codec, &cc))
++      is_supported = cc.power_efficient;
++  }
+   pending_cb->is_gpu_factories_supported = is_supported;
+   pending_cb->is_builtin_video_codec =
+       media::IsDecoderBuiltInVideoCodec(video_codec);
+@@ -1559,6 +1611,36 @@
+   DCHECK(pending_cb_map_.Contains(callback_id));
+   PendingCallbackState* pending_cb = pending_cb_map_.at(callback_id);
+ 
++  // clearcote: WebRTC is an independent resolution sink (it never reaches
++  // ResolveCallbackIfReady). For the five spoofed codecs, emit the persona
++  // triple directly and resolve here -- bypassing both the fast-path
++  // smooth=supported coupling and the slow-path per-machine WebRTC perf-
++  // history DB, so {supported,smooth,powerEfficient} is exact and host-
++  // independent. smooth/powerEfficient are AND-ed with supported so the trio
++  // stays coherent. Audio (video_pixels==0) and unmapped codecs fall through
++  // to stock handling.
++  {
++    ungoogled::PersonaProfile::MediaCodecSupport cc;
++    if (features->video_pixels != 0 &&
++        CcPersonaCodec(media::VideoCodecProfileToVideoCodec(features->profile),
++                       &cc)) {
++      MediaCapabilitiesDecodingInfo* info =
++          MediaCapabilitiesDecodingInfo::Create();
++      info->setSupported(cc.supported);
++      info->setSmooth(cc.supported && cc.smooth);
++      info->setPowerEfficient(cc.supported && cc.power_efficient);
++      if (type == OperationType::kEncoding) {
++        pending_cb->resolver->DowncastTo<MediaCapabilitiesInfo>()->Resolve(
++            info);
++      } else {
++        pending_cb->resolver->DowncastTo<MediaCapabilitiesDecodingInfo>()
++            ->Resolve(info);
++      }
++      pending_cb_map_.erase(callback_id);
++      return;
++    }
++  }
++
+   // Special treatment if the config is not supported, or if only audio was
+   // specified which is indicated by the fact that `video_pixels` equals 0,
+   // or if we fail to access the WebrtcPerfHistoryService.
+--- a/third_party/blink/renderer/modules/media_capabilities/media_capabilities.h
++++ b/third_party/blink/renderer/modules/media_capabilities/media_capabilities.h
+@@ -83,6 +83,10 @@
+     std::optional<bool> db_is_power_efficient;
+     std::optional<bool> is_gpu_factories_supported;
+     std::optional<bool> is_builtin_video_codec;
++    // clearcote: codec plumbed from GetPerfInfo so ResolveCallbackIfReady can
++    // key the persona MediaCapabilities override (smooth / DB-branch
++    // powerEfficient) by codec.
++    media::VideoCodec video_codec = media::VideoCodec::kUnknown;
+     base::TimeTicks request_time;
+   };
+ 

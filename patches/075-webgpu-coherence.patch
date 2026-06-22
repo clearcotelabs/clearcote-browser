@@ -1,31 +1,37 @@
 --- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
 +++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
-@@ -3,6 +3,7 @@
+@@ -3,6 +3,8 @@
  // found in the LICENSE file.
  
  #include "third_party/blink/renderer/modules/webgpu/gpu_adapter.h"
 +#include "base/command_line.h"
++#include "components/ungoogled/persona_profile.h"
  
  #include "services/metrics/public/cpp/ukm_builders.h"
  #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
-@@ -103,6 +104,30 @@
+@@ -103,6 +105,35 @@
    }
    description_ = String::FromUtf8(info.device);
    driver_ = String::FromUtf8(info.description);
 +
-+  // clearcote: keep the WebGPU adapter identity coherent with the spoofed
-+  // WebGL GPU. The SDK derives these from the same persona GPU and passes
-+  // them as switches (read by literal name to avoid a //components/ungoogled
-+  // dependency from this blink target).
++  // clearcote: keep the WebGPU adapter identity coherent with the spoofed WebGL
++  // GPU. An explicit --fingerprint-webgpu-* switch wins; otherwise fall back to
++  // the seed-/profile-derived persona (CurrentPersona), so a seed-only persona is
++  // coherent too and navigator.gpu can't contradict the WebGL UNMASKED vendor.
 +  {
 +    const base::CommandLine* cc_cmd = base::CommandLine::ForCurrentProcess();
++    const auto& cc_persona = ungoogled::CurrentPersona();
 +    if (cc_cmd->HasSwitch("fingerprint-webgpu-vendor")) {
 +      vendor_ = String::FromUtf8(
 +          cc_cmd->GetSwitchValueASCII("fingerprint-webgpu-vendor"));
++    } else if (!cc_persona.webgpu_vendor.empty()) {
++      vendor_ = String::FromUtf8(cc_persona.webgpu_vendor);
 +    }
 +    if (cc_cmd->HasSwitch("fingerprint-webgpu-architecture")) {
 +      architecture_ = String::FromUtf8(
 +          cc_cmd->GetSwitchValueASCII("fingerprint-webgpu-architecture"));
++    } else if (!cc_persona.webgpu_architecture.empty()) {
++      architecture_ = String::FromUtf8(cc_persona.webgpu_architecture);
 +    }
 +    if (cc_cmd->HasSwitch("fingerprint-webgpu-device")) {
 +      device_ = String::FromUtf8(
@@ -39,3 +45,62 @@
    if (supportsPropertiesD3D) {
      d3d_shader_model_ = d3dProperties.shaderModel;
    }
+@@ -117,6 +148,58 @@
+ 
+   GPUSupportedLimits::ComboLimits limits;
+   GetHandle().GetLimits(limits.GetLinked());
++
++  // clearcote: override the reported WebGPU adapter limits with the persona
++  // table so they stay coherent with the spoofed WebGL GPU and don't leak the
++  // host GPU's real capabilities (an integrated/software backend under a
++  // spoofed discrete GPU). Keys absent from the table keep the real value; the
++  // uint64_t source covers both the 32- and 64-bit limit fields. Mirrors the
++  // always-on WebGL getParameter spoof (an imported profile can override).
++  {
++    const auto& cc_pl = ungoogled::CurrentPersona().webgpu_limits;
++#define CC_WGPU_SET(field)                                               \
++  do {                                                                   \
++    auto cc_it = cc_pl.find(#field);                                     \
++    if (cc_it != cc_pl.end())                                            \
++      limits.field = static_cast<decltype(limits.field)>(cc_it->second); \
++  } while (0)
++    CC_WGPU_SET(maxTextureDimension1D);
++    CC_WGPU_SET(maxTextureDimension2D);
++    CC_WGPU_SET(maxTextureDimension3D);
++    CC_WGPU_SET(maxTextureArrayLayers);
++    CC_WGPU_SET(maxBindGroups);
++    CC_WGPU_SET(maxBindGroupsPlusVertexBuffers);
++    CC_WGPU_SET(maxBindingsPerBindGroup);
++    CC_WGPU_SET(maxDynamicUniformBuffersPerPipelineLayout);
++    CC_WGPU_SET(maxDynamicStorageBuffersPerPipelineLayout);
++    CC_WGPU_SET(maxSampledTexturesPerShaderStage);
++    CC_WGPU_SET(maxSamplersPerShaderStage);
++    CC_WGPU_SET(maxStorageBuffersPerShaderStage);
++    CC_WGPU_SET(maxStorageTexturesPerShaderStage);
++    CC_WGPU_SET(maxUniformBuffersPerShaderStage);
++    CC_WGPU_SET(maxUniformBufferBindingSize);
++    CC_WGPU_SET(maxStorageBufferBindingSize);
++    CC_WGPU_SET(minUniformBufferOffsetAlignment);
++    CC_WGPU_SET(minStorageBufferOffsetAlignment);
++    CC_WGPU_SET(maxVertexBuffers);
++    CC_WGPU_SET(maxBufferSize);
++    CC_WGPU_SET(maxVertexAttributes);
++    CC_WGPU_SET(maxVertexBufferArrayStride);
++    CC_WGPU_SET(maxInterStageShaderVariables);
++    CC_WGPU_SET(maxColorAttachments);
++    CC_WGPU_SET(maxColorAttachmentBytesPerSample);
++    CC_WGPU_SET(maxComputeWorkgroupStorageSize);
++    CC_WGPU_SET(maxComputeInvocationsPerWorkgroup);
++    CC_WGPU_SET(maxComputeWorkgroupSizeX);
++    CC_WGPU_SET(maxComputeWorkgroupSizeY);
++    CC_WGPU_SET(maxComputeWorkgroupSizeZ);
++    CC_WGPU_SET(maxComputeWorkgroupsPerDimension);
++    CC_WGPU_SET(maxStorageBuffersInFragmentStage);
++    CC_WGPU_SET(maxStorageTexturesInFragmentStage);
++    CC_WGPU_SET(maxStorageBuffersInVertexStage);
++    CC_WGPU_SET(maxStorageTexturesInVertexStage);
++#undef CC_WGPU_SET
++  }
+   limits_ = MakeGarbageCollected<GPUSupportedLimits>(limits);
+ 
+   info_ = CreateAdapterInfoForAdapter();
