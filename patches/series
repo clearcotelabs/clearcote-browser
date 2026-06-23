@@ -7,6 +7,7 @@
 040-fonts.patch
 050-shadow-dom.patch
 060-canvas.patch
+065-canvas-bridge.patch
 070-webgl-gpu.patch
 075-webgpu-coherence.patch
 080-client-rects.patch

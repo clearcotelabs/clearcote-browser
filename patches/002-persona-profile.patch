@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.cc
-@@ -0,0 +1,585 @@
+@@ -0,0 +1,592 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -548,6 +548,13 @@
 +    p.webgl_vendor = cmd->GetSwitchValueASCII(switches::kFingerprintGpuVendor);
 +  if (cmd->HasSwitch(switches::kFingerprintGpuRenderer))
 +    p.webgl_renderer = cmd->GetSwitchValueASCII(switches::kFingerprintGpuRenderer);
++  // clearcote: --disable-gpu-fingerprint presents the REAL backend. WebGL getParameter checks
++  // webgl_real and routes the GPU strings/params/extensions to the stock getters, and the
++  // readback noise is skipped -- so the reported GPU matches the rendered pixels (no spoof to
++  // cross-check). Top precedence over seed/profile/gpu-switch; webgl_vendor stays intact so the
++  // WebGPU identity below remains coherent.
++  if (cmd->HasSwitch(switches::kDisableGpuFingerprint))
++    p.webgl_real = true;
 +  // clearcote: explicit --fingerprint-webgpu-vendor/-architecture overrides the
 +  // profile-/seed-derived WebGPU identity (precedence: switch > profile > seed).
 +  if (cmd->HasSwitch("fingerprint-webgpu-vendor"))
@@ -588,7 +595,7 @@
 +}  // namespace ungoogled
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.h
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,189 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -648,6 +655,10 @@
 +  // ---- WebGL (Windows + ANGLE/D3D11) ----
 +  std::string webgl_vendor;    // e.g. "Google Inc. (Intel)"
 +  std::string webgl_renderer;  // ANGLE renderer string
++  // --disable-gpu-fingerprint: present the machine's REAL GPU (renderer/vendor strings, the
++  // getParameter table, and the supported-extension list) instead of this persona GPU, and
++  // skip the WebGL readback noise -- so the GPU identity matches the actually-rendered pixels.
++  bool webgl_real = false;
 +  // Canonical Win11 + ANGLE parameter limits (for future getParameter wiring).
 +  int webgl_max_texture_size = 16384;
 +  int webgl_max_cube_map_texture_size = 16384;

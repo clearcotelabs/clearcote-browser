@@ -1,0 +1,1047 @@
+--- a/third_party/blink/renderer/controller/blink_initializer.cc
++++ b/third_party/blink/renderer/controller/blink_initializer.cc
+@@ -52,6 +52,7 @@
+ #include "third_party/blink/renderer/controller/memory_coordinator/v8_heap_memory_signal_generator.h"
+ #include "third_party/blink/renderer/controller/memory_saver_controller.h"
+ #include "third_party/blink/renderer/controller/performance_manager/renderer_resource_coordinator_impl.h"
++#include "third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_client.h"
+ #include "third_party/blink/renderer/controller/performance_manager/v8_detailed_memory_reporter_impl.h"
+ #include "third_party/blink/renderer/core/animation/animation_clock.h"
+ #include "third_party/blink/renderer/core/annotation/annotation_agent_container_impl.h"
+@@ -169,6 +170,10 @@
+   // Initialize performance manager.
+   RendererResourceCoordinatorImpl::MaybeInitialize();
+ 
++  // clearcote canvas bridge: warm up the optional remote-render client so the
++  // connection is established before the first canvas readback.
++  blink::canvas_bridge::CanvasBridgeClient::Get();
++
+   // The ArrayBuffer partition is placed inside V8's virtual memory cage if it
+   // is enabled. For that reason, the partition can only be initialized after V8
+   // has been initialized.
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -1788,6 +1788,7 @@
+     "//third_party/blink/public/mojom:color_scheme_mojo_bindings",
+     "//third_party/blink/public/mojom:embedded_frame_sink_mojo_bindings_blink",
+     "//third_party/blink/renderer/platform/blob",
++    "//third_party/blink/renderer/platform/canvas_bridge",
+     "//third_party/blink/renderer/platform/heap",
+     "//third_party/blink/renderer/platform/image-decoders:image_decoders",
+     "//third_party/blink/renderer/platform/instrumentation",
+--- /dev/null
++++ b/third_party/blink/renderer/platform/canvas_bridge/BUILD.gn
+@@ -0,0 +1,18 @@
++# Copyright 2026 The Clearcote Authors. All rights reserved.
++# Use of this source code is governed by a BSD-style license.
++
++source_set("canvas_bridge") {
++  sources = [
++    "canvas_bridge_client.cc",
++    "canvas_bridge_client.h",
++    "canvas_bridge_codec.cc",
++    "canvas_bridge_codec.h",
++  ]
++  deps = [
++    "//base",
++    "//components/ungoogled:ungoogled_switches",
++  ]
++  if (is_win) {
++    libs = [ "ws2_32.lib" ]
++  }
++}
+--- /dev/null
++++ b/third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_client.cc
+@@ -0,0 +1,439 @@
++// Copyright 2026 The Clearcote Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license.
++
++#include "build/build_config.h"
++
++#if BUILDFLAG(IS_WIN)
++#include <winsock2.h>
++#include <ws2tcpip.h>
++#else
++#include <netdb.h>
++#include <sys/socket.h>
++#include <sys/types.h>
++#include <unistd.h>
++#endif
++
++#include "third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_client.h"
++
++#include <cstring>
++#include <string_view>
++
++#include "base/base64.h"
++#include "base/command_line.h"
++#include "base/logging.h"
++#include "base/rand_util.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/time/time.h"
++#include "components/ungoogled/persona_profile.h"
++#include "components/ungoogled/ungoogled_switches.h"
++#include "third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_codec.h"
++
++namespace blink::canvas_bridge {
++namespace {
++
++constexpr uintptr_t kInvalidSocket = static_cast<uintptr_t>(-1);
++
++#if BUILDFLAG(IS_WIN)
++void EnsureWinsock() {
++  static const bool started = [] {
++    WSADATA data;
++    return ::WSAStartup(MAKEWORD(2, 2), &data) == 0;
++  }();
++  (void)started;
++}
++#endif
++
++void CloseSocketHandle(uintptr_t s) {
++  if (s == kInvalidSocket)
++    return;
++#if BUILDFLAG(IS_WIN)
++  ::closesocket(static_cast<SOCKET>(s));
++#else
++  ::close(static_cast<int>(s));
++#endif
++}
++
++// Parses "ws://host:port/path" (wss:// accepted but treated as plaintext for
++// now — tunnel via Tailscale/SSH). Returns false on a malformed URL.
++bool ParseUrl(const std::string& url,
++              std::string* host,
++              int* port,
++              std::string* path) {
++  std::string_view v(url);
++  if (v.substr(0, 6) == "wss://") {
++    v.remove_prefix(6);
++  } else if (v.substr(0, 5) == "ws://") {
++    v.remove_prefix(5);
++  } else {
++    return false;
++  }
++  size_t slash = v.find('/');
++  std::string_view authority = v.substr(0, slash);
++  *path = slash == std::string_view::npos ? "/" : std::string(v.substr(slash));
++  size_t colon = authority.find(':');
++  if (colon == std::string_view::npos) {
++    *host = std::string(authority);
++    *port = 80;
++  } else {
++    *host = std::string(authority.substr(0, colon));
++    int p = 0;
++    if (!base::StringToInt(authority.substr(colon + 1), &p) || p <= 0)
++      return false;
++    *port = p;
++  }
++  return !host->empty();
++}
++
++}  // namespace
++
++// static
++CanvasBridgeClient* CanvasBridgeClient::Get() {
++  static CanvasBridgeClient* instance = []() -> CanvasBridgeClient* {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd->HasSwitch(switches::kCanvasBridgeUrl))
++      return nullptr;
++    std::string url = cmd->GetSwitchValueASCII(switches::kCanvasBridgeUrl);
++    std::string host, path;
++    int port = 0;
++    if (!ParseUrl(url, &host, &port, &path)) {
++      LOG(ERROR) << "canvas-bridge: malformed --canvas-bridge-url";
++      return nullptr;
++    }
++    std::string auth = cmd->GetSwitchValueASCII(switches::kCanvasBridgeAuth);
++    return new CanvasBridgeClient(std::move(host), port, std::move(path),
++                                  std::move(auth));
++  }();
++  return instance;
++}
++
++CanvasBridgeClient::CanvasBridgeClient(std::string host,
++                                       int port,
++                                       std::string path,
++                                       std::string auth)
++    : host_(std::move(host)),
++      port_(port),
++      path_(std::move(path)),
++      auth_(std::move(auth)) {
++  // Dedicated, detached I/O thread runs connect + read loop for the process
++  // lifetime. The singleton is intentionally leaked, so the thread is never
++  // joined.
++  base::PlatformThread::CreateNonJoinable(0, this);
++}
++
++CanvasBridgeClient::~CanvasBridgeClient() = default;
++
++bool CanvasBridgeClient::Connected() {
++  base::AutoLock lock(state_lock_);
++  return connected_;
++}
++
++uint32_t CanvasBridgeClient::AllocateCanvasId() {
++  base::AutoLock lock(id_lock_);
++  return next_canvas_id_++;
++}
++
++void CanvasBridgeClient::ThreadMain() {
++  base::PlatformThread::SetName("CanvasBridge");
++  if (!Connect()) {
++    LOG(ERROR) << "canvas-bridge: connect failed; rendering stays local";
++    return;
++  }
++  {
++    base::AutoLock lock(state_lock_);
++    connected_ = true;
++  }
++  VLOG(1) << "canvas-bridge: connected to " << host_ << ":" << port_;
++  ReadLoop();
++  {
++    base::AutoLock lock(state_lock_);
++    connected_ = false;
++  }
++}
++
++bool CanvasBridgeClient::Connect() {
++#if BUILDFLAG(IS_WIN)
++  EnsureWinsock();
++#endif
++  addrinfo hints = {};
++  hints.ai_family = AF_UNSPEC;
++  hints.ai_socktype = SOCK_STREAM;
++  addrinfo* result = nullptr;
++  std::string port_str = base::NumberToString(port_);
++  if (::getaddrinfo(host_.c_str(), port_str.c_str(), &hints, &result) != 0)
++    return false;
++
++  uintptr_t sock = kInvalidSocket;
++  for (addrinfo* ai = result; ai; ai = ai->ai_next) {
++    uintptr_t s = static_cast<uintptr_t>(
++        ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
++    if (s == kInvalidSocket)
++      continue;
++    if (::connect(static_cast<
++#if BUILDFLAG(IS_WIN)
++                      SOCKET
++#else
++                      int
++#endif
++                      >(s),
++                  ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0) {
++      sock = s;
++      break;
++    }
++    CloseSocketHandle(s);
++  }
++  ::freeaddrinfo(result);
++  if (sock == kInvalidSocket)
++    return false;
++  socket_ = sock;
++
++  // RFC 6455 client handshake.
++  uint8_t key_bytes[16];
++  base::RandBytes(key_bytes);
++  std::string key = base::Base64Encode(key_bytes);
++  std::string req =
++      "GET " + path_ + " HTTP/1.1\r\n" + "Host: " + host_ + ":" +
++      port_str + "\r\n" + "Upgrade: websocket\r\n" +
++      "Connection: Upgrade\r\n" + "Sec-WebSocket-Version: 13\r\n" +
++      "Sec-WebSocket-Key: " + key + "\r\n";
++  if (!auth_.empty()) {
++    req += "Authorization: Basic " + base::Base64Encode(base::as_byte_span(auth_)) +
++           "\r\n";
++  }
++  req += "\r\n";
++  if (!WriteExact(req.data(), req.size())) {
++    CloseSocket();
++    return false;
++  }
++
++  std::string resp;
++  char c = 0;
++  while (resp.size() < 8192) {
++    if (!ReadExact(&c, 1)) {
++      CloseSocket();
++      return false;
++    }
++    resp.push_back(c);
++    if (resp.size() >= 4 &&
++        resp.compare(resp.size() - 4, 4, "\r\n\r\n") == 0)
++      break;
++  }
++  if (resp.find(" 101 ") == std::string::npos) {
++    CloseSocket();
++    return false;
++  }
++
++  HelloMessage hello;
++  hello.persona_seed = ungoogled::CurrentPersona().persona_seed;
++  hello.client_version = "clearcote-canvas-bridge/1";
++  return WriteWebSocketFrame(Encode(hello));
++}
++
++void CanvasBridgeClient::ReadLoop() {
++  std::vector<uint8_t> frame;
++  while (ReadWebSocketFrame(&frame))
++    Dispatch(frame);
++  CloseSocket();
++}
++
++void CanvasBridgeClient::Dispatch(base::span<const uint8_t> frame) {
++  switch (PeekType(frame)) {
++    case MessageType::kImageData: {
++      std::optional<ImageDataMessage> msg = DecodeImageData(frame);
++      if (!msg)
++        return;
++      base::AutoLock lock(pending_lock_);
++      auto it = pending_.find(msg->canvas_id);
++      if (it != pending_.end()) {
++        it->second->pixels = std::move(msg->pixels);
++        it->second->event.Signal();
++      }
++      return;
++    }
++    case MessageType::kWelcome: {
++      std::optional<WelcomeMessage> msg = DecodeWelcome(frame);
++      if (msg)
++        VLOG(1) << "canvas-bridge: server gpu=" << msg->gpu_renderer;
++      return;
++    }
++    default:
++      return;
++  }
++}
++
++std::optional<std::vector<uint8_t>> CanvasBridgeClient::RequestImageData(
++    uint32_t canvas_id,
++    int32_t x,
++    int32_t y,
++    uint32_t width,
++    uint32_t height) {
++  if (!Connected())
++    return std::nullopt;
++
++  PendingReadback pending;
++  {
++    base::AutoLock lock(pending_lock_);
++    pending_[canvas_id] = &pending;
++  }
++
++  GetImageDataMessage req;
++  req.canvas_id = canvas_id;
++  req.x = x;
++  req.y = y;
++  req.width = width;
++  req.height = height;
++  Send(Encode(req));
++
++  pending.event.TimedWait(base::Seconds(5));
++
++  std::optional<std::vector<uint8_t>> result;
++  {
++    base::AutoLock lock(pending_lock_);
++    pending_.erase(canvas_id);
++    result = std::move(pending.pixels);
++  }
++  return result;
++}
++
++std::optional<std::vector<uint8_t>> CanvasBridgeClient::RequestTextMetrics(
++    uint32_t canvas_id, const std::string& text) {
++  if (!Connected())
++    return std::nullopt;
++  PendingReadback pending;
++  {
++    base::AutoLock lock(pending_lock_);
++    pending_[canvas_id] = &pending;
++  }
++  MeasureTextMessage req;
++  req.canvas_id = canvas_id;
++  req.text = text;
++  Send(Encode(req));
++  pending.event.TimedWait(base::Seconds(5));
++  std::optional<std::vector<uint8_t>> result;
++  {
++    base::AutoLock lock(pending_lock_);
++    pending_.erase(canvas_id);
++    result = std::move(pending.pixels);
++  }
++  return result;
++}
++
++bool CanvasBridgeClient::Send(base::span<const uint8_t> frame) {
++  if (!Connected())
++    return false;
++  return WriteWebSocketFrame(frame);
++}
++
++bool CanvasBridgeClient::WriteWebSocketFrame(base::span<const uint8_t> payload) {
++  std::vector<uint8_t> header;
++  header.push_back(0x82);  // FIN + binary opcode.
++  const size_t len = payload.size();
++  if (len < 126) {
++    header.push_back(static_cast<uint8_t>(0x80 | len));
++  } else if (len < 65536) {
++    header.push_back(0x80 | 126);
++    header.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
++    header.push_back(static_cast<uint8_t>(len & 0xFF));
++  } else {
++    header.push_back(0x80 | 127);
++    for (int i = 7; i >= 0; --i)
++      header.push_back(static_cast<uint8_t>((len >> (8 * i)) & 0xFF));
++  }
++  uint8_t mask[4];
++  base::RandBytes(mask);
++  header.insert(header.end(), mask, mask + 4);
++
++  std::vector<uint8_t> masked(payload.begin(), payload.end());
++  for (size_t i = 0; i < masked.size(); ++i)
++    masked[i] ^= mask[i % 4];
++
++  base::AutoLock lock(write_lock_);
++  return WriteExact(header.data(), header.size()) &&
++         WriteExact(masked.data(), masked.size());
++}
++
++bool CanvasBridgeClient::ReadWebSocketFrame(std::vector<uint8_t>* out) {
++  for (;;) {
++    uint8_t h[2];
++    if (!ReadExact(h, 2))
++      return false;
++    const uint8_t opcode = h[0] & 0x0F;
++    const bool masked = (h[1] & 0x80) != 0;
++    uint64_t len = h[1] & 0x7F;
++    if (len == 126) {
++      uint8_t e[2];
++      if (!ReadExact(e, 2))
++        return false;
++      len = (uint64_t{e[0]} << 8) | e[1];
++    } else if (len == 127) {
++      uint8_t e[8];
++      if (!ReadExact(e, 8))
++        return false;
++      len = 0;
++      for (int i = 0; i < 8; ++i)
++        len = (len << 8) | e[i];
++    }
++    uint8_t mask[4] = {0, 0, 0, 0};
++    if (masked && !ReadExact(mask, 4))
++      return false;
++
++    std::vector<uint8_t> payload(len);
++    if (len && !ReadExact(payload.data(), payload.size()))
++      return false;
++    if (masked) {
++      for (size_t i = 0; i < payload.size(); ++i)
++        payload[i] ^= mask[i % 4];
++    }
++
++    if (opcode == 0x8)  // close
++      return false;
++    if (opcode == 0x9 || opcode == 0xA)  // ping/pong: ignore
++      continue;
++    *out = std::move(payload);
++    return true;
++  }
++}
++
++bool CanvasBridgeClient::ReadExact(void* buf, size_t n) {
++  uint8_t* p = static_cast<uint8_t*>(buf);
++  size_t got = 0;
++  while (got < n) {
++#if BUILDFLAG(IS_WIN)
++    int r = ::recv(static_cast<SOCKET>(socket_),
++                   reinterpret_cast<char*>(p + got),
++                   static_cast<int>(n - got), 0);
++#else
++    ssize_t r = ::recv(static_cast<int>(socket_), p + got, n - got, 0);
++#endif
++    if (r <= 0)
++      return false;
++    got += static_cast<size_t>(r);
++  }
++  return true;
++}
++
++bool CanvasBridgeClient::WriteExact(const void* buf, size_t n) {
++  const uint8_t* p = static_cast<const uint8_t*>(buf);
++  size_t sent = 0;
++  while (sent < n) {
++#if BUILDFLAG(IS_WIN)
++    int r = ::send(static_cast<SOCKET>(socket_),
++                   reinterpret_cast<const char*>(p + sent),
++                   static_cast<int>(n - sent), 0);
++#else
++    ssize_t r = ::send(static_cast<int>(socket_), p + sent, n - sent, 0);
++#endif
++    if (r <= 0)
++      return false;
++    sent += static_cast<size_t>(r);
++  }
++  return true;
++}
++
++void CanvasBridgeClient::CloseSocket() {
++  if (socket_ == kInvalidSocket)
++    return;
++  CloseSocketHandle(socket_);
++  socket_ = kInvalidSocket;
++}
++
++}  // namespace blink::canvas_bridge
+--- /dev/null
++++ b/third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_client.h
+@@ -0,0 +1,110 @@
++// Copyright 2026 The Clearcote Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license.
++//
++// CanvasBridgeClient — a renderer-process singleton that forwards canvas/WebGL
++// readbacks to a remote real-GPU render host and returns its authentic pixels,
++// so a spoofed GPU persona stays coherent with what the page actually hashes.
++//
++// Active only when --canvas-bridge-url is set; otherwise Get() returns nullptr
++// and all rendering stays fully local. The connection is a raw TCP + RFC 6455
++// WebSocket on a dedicated thread, so the renderer must run unsandboxed
++// (--no-sandbox) — the documented requirement for the bridge.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_CANVAS_BRIDGE_CANVAS_BRIDGE_CLIENT_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_CANVAS_BRIDGE_CANVAS_BRIDGE_CLIENT_H_
++
++#include <cstdint>
++#include <map>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/containers/span.h"
++#include "base/synchronization/lock.h"
++#include "base/synchronization/waitable_event.h"
++#include "base/threading/platform_thread.h"
++
++namespace blink::canvas_bridge {
++
++class CanvasBridgeClient : public base::PlatformThread::Delegate {
++ public:
++  // Lazily creates the singleton on first call; returns nullptr when the bridge
++  // is not configured (--canvas-bridge-url unset). The instance is leaked for
++  // the process lifetime (never destroyed).
++  static CanvasBridgeClient* Get();
++
++  CanvasBridgeClient(const CanvasBridgeClient&) = delete;
++  CanvasBridgeClient& operator=(const CanvasBridgeClient&) = delete;
++
++  bool Connected();
++
++  // Monotonic, renderer-local id for a server-side canvas surface.
++  uint32_t AllocateCanvasId();
++
++  // Sends an already-encoded message frame to the server (callable from any
++  // thread). Returns false if not connected.
++  bool Send(base::span<const uint8_t> frame);
++
++  // Blocking: sends a GetImageData request and waits up to 5s for the reply.
++  // Returns the RGBA8 pixel buffer (width*height*4) or nullopt on
++  // timeout/error, in which case the caller falls back to local rendering.
++  std::optional<std::vector<uint8_t>> RequestImageData(uint32_t canvas_id,
++                                                       int32_t x,
++                                                       int32_t y,
++                                                       uint32_t width,
++                                                       uint32_t height);
++
++  // Blocking: sends a MeasureText request and waits up to 5s; returns the 9
++  // metric doubles packed as bytes (or nullopt on timeout).
++  std::optional<std::vector<uint8_t>> RequestTextMetrics(
++      uint32_t canvas_id, const std::string& text);
++
++ private:
++  CanvasBridgeClient(std::string host,
++                     int port,
++                     std::string path,
++                     std::string auth);
++  ~CanvasBridgeClient() override;
++
++  // base::PlatformThread::Delegate: connect + handshake + read loop.
++  void ThreadMain() override;
++
++  bool Connect();
++  void ReadLoop();
++  void Dispatch(base::span<const uint8_t> frame);
++
++  bool WriteWebSocketFrame(base::span<const uint8_t> payload);
++  bool ReadWebSocketFrame(std::vector<uint8_t>* out);
++  bool ReadExact(void* buf, size_t n);
++  bool WriteExact(const void* buf, size_t n);
++  void CloseSocket();
++
++  const std::string host_;
++  const int port_;
++  const std::string path_;
++  const std::string auth_;
++
++  // Raw socket handle stored width-agnostically (POSIX int fd or Windows
++  // SOCKET both fit a uintptr_t; the invalid sentinel is (uintptr_t)-1).
++  uintptr_t socket_ = static_cast<uintptr_t>(-1);
++
++  base::Lock write_lock_;  // serializes socket writes across threads
++
++  base::Lock state_lock_;
++  bool connected_ = false;  // guarded by state_lock_
++
++  base::Lock id_lock_;
++  uint32_t next_canvas_id_ = 1;  // guarded by id_lock_
++
++  struct PendingReadback {
++    base::WaitableEvent event{base::WaitableEvent::ResetPolicy::MANUAL,
++                              base::WaitableEvent::InitialState::NOT_SIGNALED};
++    std::optional<std::vector<uint8_t>> pixels;
++  };
++  base::Lock pending_lock_;
++  std::map<uint32_t, PendingReadback*> pending_;  // keyed by canvas_id
++};
++
++}  // namespace blink::canvas_bridge
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_CANVAS_BRIDGE_CANVAS_BRIDGE_CLIENT_H_
+--- /dev/null
++++ b/third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_codec.cc
+@@ -0,0 +1,271 @@
++// Copyright 2026 The Clearcote Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license.
++
++#include "third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_codec.h"
++
++namespace blink::canvas_bridge {
++namespace {
++
++// Little-endian, append-only writer.
++class Writer {
++ public:
++  void U32(uint32_t v) {
++    for (int i = 0; i < 4; ++i)
++      buf_.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xFF));
++  }
++  void I32(int32_t v) { U32(static_cast<uint32_t>(v)); }
++  void U64(uint64_t v) {
++    for (int i = 0; i < 8; ++i)
++      buf_.push_back(static_cast<uint8_t>((v >> (8 * i)) & 0xFF));
++  }
++  void F64(double v) {
++    uint64_t u = 0;
++    __builtin_memcpy(&u, &v, sizeof(u));
++    U64(u);
++  }
++  void Bool(bool v) { buf_.push_back(v ? 1 : 0); }
++  void Str(const std::string& s) {
++    U32(static_cast<uint32_t>(s.size()));
++    for (char c : s)
++      buf_.push_back(static_cast<uint8_t>(c));
++  }
++  void Bytes(base::span<const uint8_t> b) {
++    U32(static_cast<uint32_t>(b.size()));
++    buf_.insert(buf_.end(), b.begin(), b.end());
++  }
++  std::vector<uint8_t> Take() { return std::move(buf_); }
++
++ private:
++  std::vector<uint8_t> buf_;
++};
++
++// Bounds-checked little-endian reader; any underflow latches ok_ = false.
++class Reader {
++ public:
++  explicit Reader(base::span<const uint8_t> data) : data_(data) {}
++  uint32_t U32() {
++    uint32_t v = 0;
++    if (Avail(4)) {
++      for (int i = 0; i < 4; ++i)
++        v |= static_cast<uint32_t>(data_[pos_++]) << (8 * i);
++    }
++    return v;
++  }
++  int32_t I32() { return static_cast<int32_t>(U32()); }
++  uint64_t U64() {
++    uint64_t v = 0;
++    if (Avail(8)) {
++      for (int i = 0; i < 8; ++i)
++        v |= static_cast<uint64_t>(data_[pos_++]) << (8 * i);
++    }
++    return v;
++  }
++  double F64() {
++    uint64_t u = U64();
++    double v = 0;
++    __builtin_memcpy(&v, &u, sizeof(v));
++    return v;
++  }
++  bool Bool() { return Avail(1) ? data_[pos_++] != 0 : false; }
++  std::string Str() {
++    uint32_t n = U32();
++    if (!Avail(n))
++      return std::string();
++    std::string s(reinterpret_cast<const char*>(data_.data() + pos_), n);
++    pos_ += n;
++    return s;
++  }
++  std::vector<uint8_t> Bytes() {
++    uint32_t n = U32();
++    if (!Avail(n))
++      return {};
++    std::vector<uint8_t> b(data_.begin() + pos_, data_.begin() + pos_ + n);
++    pos_ += n;
++    return b;
++  }
++  bool ok() const { return ok_; }
++
++ private:
++  bool Avail(size_t n) {
++    if (pos_ + n > data_.size()) {
++      ok_ = false;
++      return false;
++    }
++    return true;
++  }
++  base::span<const uint8_t> data_;
++  size_t pos_ = 0;
++  bool ok_ = true;
++};
++
++}  // namespace
++
++MessageType PeekType(base::span<const uint8_t> frame) {
++  Reader r(frame);
++  uint32_t t = r.U32();
++  return r.ok() ? static_cast<MessageType>(t) : MessageType::kUnknown;
++}
++
++std::vector<uint8_t> Encode(const HelloMessage& m) {
++  Writer w;
++  w.U32(static_cast<uint32_t>(MessageType::kHello));
++  w.U32(m.protocol_version);
++  w.U64(m.persona_seed);
++  w.Str(m.client_version);
++  return w.Take();
++}
++
++std::vector<uint8_t> Encode(const WelcomeMessage& m) {
++  Writer w;
++  w.U32(static_cast<uint32_t>(MessageType::kWelcome));
++  w.U32(m.protocol_version);
++  w.Str(m.server_version);
++  w.Str(m.os);
++  w.Str(m.gpu_vendor);
++  w.Str(m.gpu_renderer);
++  return w.Take();
++}
++
++std::vector<uint8_t> Encode(const CreateCanvas2DMessage& m) {
++  Writer w;
++  w.U32(static_cast<uint32_t>(MessageType::kCreateCanvas2D));
++  w.U32(m.canvas_id);
++  w.U32(m.width);
++  w.U32(m.height);
++  w.Bool(m.opaque);
++  return w.Take();
++}
++
++std::vector<uint8_t> Encode(const Canvas2DOpMessage& m) {
++  Writer w;
++  w.U32(static_cast<uint32_t>(MessageType::kCanvas2DOp));
++  w.U32(m.canvas_id);
++  w.U32(m.op);
++  w.Str(m.str_arg);
++  w.U32(static_cast<uint32_t>(m.args.size()));
++  for (double a : m.args)
++    w.F64(a);
++  return w.Take();
++}
++
++std::vector<uint8_t> Encode(const MeasureTextMessage& m) {
++  Writer w;
++  w.U32(static_cast<uint32_t>(MessageType::kMeasureText));
++  w.U32(m.canvas_id);
++  w.Str(m.text);
++  return w.Take();
++}
++
++std::vector<uint8_t> Encode(const GetImageDataMessage& m) {
++  Writer w;
++  w.U32(static_cast<uint32_t>(MessageType::kCanvas2DGetImageData));
++  w.U32(m.canvas_id);
++  w.I32(m.x);
++  w.I32(m.y);
++  w.U32(m.width);
++  w.U32(m.height);
++  return w.Take();
++}
++
++std::vector<uint8_t> Encode(const ImageDataMessage& m) {
++  Writer w;
++  w.U32(static_cast<uint32_t>(MessageType::kImageData));
++  w.U32(m.canvas_id);
++  w.U32(m.width);
++  w.U32(m.height);
++  w.Bytes(m.pixels);
++  return w.Take();
++}
++
++std::optional<HelloMessage> DecodeHello(base::span<const uint8_t> f) {
++  Reader r(f);
++  if (static_cast<MessageType>(r.U32()) != MessageType::kHello)
++    return std::nullopt;
++  HelloMessage m;
++  m.protocol_version = r.U32();
++  m.persona_seed = r.U64();
++  m.client_version = r.Str();
++  return r.ok() ? std::optional<HelloMessage>(std::move(m)) : std::nullopt;
++}
++
++std::optional<WelcomeMessage> DecodeWelcome(base::span<const uint8_t> f) {
++  Reader r(f);
++  if (static_cast<MessageType>(r.U32()) != MessageType::kWelcome)
++    return std::nullopt;
++  WelcomeMessage m;
++  m.protocol_version = r.U32();
++  m.server_version = r.Str();
++  m.os = r.Str();
++  m.gpu_vendor = r.Str();
++  m.gpu_renderer = r.Str();
++  return r.ok() ? std::optional<WelcomeMessage>(std::move(m)) : std::nullopt;
++}
++
++std::optional<CreateCanvas2DMessage> DecodeCreateCanvas2D(
++    base::span<const uint8_t> f) {
++  Reader r(f);
++  if (static_cast<MessageType>(r.U32()) != MessageType::kCreateCanvas2D)
++    return std::nullopt;
++  CreateCanvas2DMessage m;
++  m.canvas_id = r.U32();
++  m.width = r.U32();
++  m.height = r.U32();
++  m.opaque = r.Bool();
++  return r.ok() ? std::optional<CreateCanvas2DMessage>(m) : std::nullopt;
++}
++
++std::optional<Canvas2DOpMessage> DecodeCanvas2DOp(base::span<const uint8_t> f) {
++  Reader r(f);
++  if (static_cast<MessageType>(r.U32()) != MessageType::kCanvas2DOp)
++    return std::nullopt;
++  Canvas2DOpMessage m;
++  m.canvas_id = r.U32();
++  m.op = r.U32();
++  m.str_arg = r.Str();
++  uint32_t n = r.U32();
++  if (!r.ok())
++    return std::nullopt;
++  m.args.reserve(n);
++  for (uint32_t i = 0; i < n; ++i)
++    m.args.push_back(r.F64());
++  return r.ok() ? std::optional<Canvas2DOpMessage>(std::move(m)) : std::nullopt;
++}
++
++std::optional<MeasureTextMessage> DecodeMeasureText(
++    base::span<const uint8_t> f) {
++  Reader r(f);
++  if (static_cast<MessageType>(r.U32()) != MessageType::kMeasureText)
++    return std::nullopt;
++  MeasureTextMessage m;
++  m.canvas_id = r.U32();
++  m.text = r.Str();
++  return r.ok() ? std::optional<MeasureTextMessage>(std::move(m)) : std::nullopt;
++}
++
++std::optional<GetImageDataMessage> DecodeGetImageData(
++    base::span<const uint8_t> f) {
++  Reader r(f);
++  if (static_cast<MessageType>(r.U32()) != MessageType::kCanvas2DGetImageData)
++    return std::nullopt;
++  GetImageDataMessage m;
++  m.canvas_id = r.U32();
++  m.x = r.I32();
++  m.y = r.I32();
++  m.width = r.U32();
++  m.height = r.U32();
++  return r.ok() ? std::optional<GetImageDataMessage>(m) : std::nullopt;
++}
++
++std::optional<ImageDataMessage> DecodeImageData(base::span<const uint8_t> f) {
++  Reader r(f);
++  if (static_cast<MessageType>(r.U32()) != MessageType::kImageData)
++    return std::nullopt;
++  ImageDataMessage m;
++  m.canvas_id = r.U32();
++  m.width = r.U32();
++  m.height = r.U32();
++  m.pixels = r.Bytes();
++  return r.ok() ? std::optional<ImageDataMessage>(std::move(m)) : std::nullopt;
++}
++
++}  // namespace blink::canvas_bridge
+--- /dev/null
++++ b/third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_codec.h
+@@ -0,0 +1,163 @@
++// Copyright 2026 The Clearcote Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license.
++//
++// Canvas bridge wire codec. Both bridge endpoints are clearcote builds, so the
++// wire format is a plain little-endian binary encoding (no cross-language
++// interop is required). Every message is one self-contained frame:
++//   [u32 type][fields...]
++// Strings and byte blobs are length-prefixed (u32). Decoders return
++// std::nullopt on any truncation or type mismatch.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_CANVAS_BRIDGE_CANVAS_BRIDGE_CODEC_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_CANVAS_BRIDGE_CANVAS_BRIDGE_CODEC_H_
++
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/containers/span.h"
++
++namespace blink::canvas_bridge {
++
++enum class MessageType : uint32_t {
++  kUnknown = 0,
++  kHello = 1,                 // client -> server
++  kWelcome = 2,               // server -> client
++  kCreateCanvas2D = 3,        // client -> server
++  kCanvas2DGetImageData = 4,  // client -> server (request)
++  kImageData = 5,             // server -> client (reply; also WebGL readPixels)
++  kCanvas2DOp = 6,            // client -> server (one recorded 2D draw op)
++  kMeasureText = 7,           // client -> server (request; reply reuses kImageData
++                              // with the 9 metric doubles packed into pixels)
++};
++
++// Canvas2D operation ids — must match the server's dispatcher. A single generic
++// op message (string arg + float args) carries all of them.
++enum class Canvas2DOp : uint32_t {
++  kUnknown = 0,
++  // State stack / path.
++  kSave = 1,
++  kRestore = 2,
++  kBeginPath = 3,
++  kClosePath = 4,
++  kFill = 5,
++  kStroke = 6,
++  kClip = 7,
++  // Rects.
++  kFillRect = 10,
++  kStrokeRect = 11,
++  kClearRect = 12,
++  // Text (str_arg = text).
++  kFillText = 20,
++  kStrokeText = 21,
++  // Path building.
++  kMoveTo = 30,
++  kLineTo = 31,
++  kRect = 32,
++  kArc = 33,
++  kArcTo = 34,
++  kQuadraticCurveTo = 35,
++  kBezierCurveTo = 36,
++  kEllipse = 37,
++  // Transforms.
++  kSetTransform = 40,
++  kTransform = 41,
++  kTranslate = 42,
++  kRotate = 43,
++  kScale = 44,
++  kResetTransform = 45,
++  // State setters (str_arg = color/font/keyword where applicable).
++  kSetFillStyle = 50,
++  kSetStrokeStyle = 51,
++  kSetLineWidth = 52,
++  kSetFont = 53,
++  kSetTextAlign = 54,
++  kSetTextBaseline = 55,
++  kSetGlobalAlpha = 56,
++  kSetGlobalCompositeOperation = 57,
++  kSetLineCap = 58,
++  kSetLineJoin = 59,
++  kSetMiterLimit = 60,
++  kSetLineDashOffset = 61,
++  kSetShadowColor = 62,
++  kSetShadowBlur = 63,
++  kSetShadowOffsetX = 64,
++  kSetShadowOffsetY = 65,
++  kSetDirection = 66,
++  kSetTextRendering = 67,
++  kSetLetterSpacing = 68,
++  kSetWordSpacing = 69,
++  kSetImageSmoothingEnabled = 70,
++};
++
++struct HelloMessage {
++  uint32_t protocol_version = 1;
++  uint64_t persona_seed = 0;
++  std::string client_version;
++};
++
++struct WelcomeMessage {
++  uint32_t protocol_version = 0;
++  std::string server_version;
++  std::string os;
++  std::string gpu_vendor;
++  std::string gpu_renderer;
++};
++
++struct CreateCanvas2DMessage {
++  uint32_t canvas_id = 0;
++  uint32_t width = 0;
++  uint32_t height = 0;
++  bool opaque = false;
++};
++
++struct Canvas2DOpMessage {
++  uint32_t canvas_id = 0;
++  uint32_t op = 0;            // Canvas2DOp
++  std::string str_arg;       // text / color / font / keyword (empty if unused)
++  std::vector<double> args;  // numeric arguments
++};
++
++struct MeasureTextMessage {
++  uint32_t canvas_id = 0;
++  std::string text;
++};
++
++struct GetImageDataMessage {
++  uint32_t canvas_id = 0;
++  int32_t x = 0;
++  int32_t y = 0;
++  uint32_t width = 0;
++  uint32_t height = 0;
++};
++
++struct ImageDataMessage {
++  uint32_t canvas_id = 0;
++  uint32_t width = 0;
++  uint32_t height = 0;
++  std::vector<uint8_t> pixels;  // RGBA8, width*height*4 bytes
++};
++
++// Leading message type, or kUnknown if the frame is too short.
++MessageType PeekType(base::span<const uint8_t> frame);
++
++std::vector<uint8_t> Encode(const HelloMessage&);
++std::vector<uint8_t> Encode(const WelcomeMessage&);
++std::vector<uint8_t> Encode(const CreateCanvas2DMessage&);
++std::vector<uint8_t> Encode(const Canvas2DOpMessage&);
++std::vector<uint8_t> Encode(const MeasureTextMessage&);
++std::vector<uint8_t> Encode(const GetImageDataMessage&);
++std::vector<uint8_t> Encode(const ImageDataMessage&);
++
++std::optional<HelloMessage> DecodeHello(base::span<const uint8_t>);
++std::optional<WelcomeMessage> DecodeWelcome(base::span<const uint8_t>);
++std::optional<CreateCanvas2DMessage> DecodeCreateCanvas2D(base::span<const uint8_t>);
++std::optional<Canvas2DOpMessage> DecodeCanvas2DOp(base::span<const uint8_t>);
++std::optional<MeasureTextMessage> DecodeMeasureText(base::span<const uint8_t>);
++std::optional<GetImageDataMessage> DecodeGetImageData(base::span<const uint8_t>);
++std::optional<ImageDataMessage> DecodeImageData(base::span<const uint8_t>);
++
++}  // namespace blink::canvas_bridge
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_CANVAS_BRIDGE_CANVAS_BRIDGE_CODEC_H_

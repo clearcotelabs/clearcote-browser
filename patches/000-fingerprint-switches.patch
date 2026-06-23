@@ -1,6 +1,6 @@
 --- a/components/ungoogled/ungoogled_switches.cc
 +++ b/components/ungoogled/ungoogled_switches.cc
-@@ -15,4 +15,39 @@
+@@ -15,4 +15,45 @@
  // Enable fingerprinting deception for Canvas image data
  const char kFingerprintingCanvasImageDataNoise[] = "fingerprinting-canvas-image-data-noise";
  
@@ -39,10 +39,16 @@
 +const char kDisableFingerprintNoise[] = "disable-fingerprint-noise";
 +const char kFingerprintProfile[] = "fingerprint-profile";
 +
++// Canvas bridge: forward canvas/WebGL ops to a remote real-GPU render host
++// ("ws://host:port/path"). When unset, rendering stays fully local.
++const char kCanvasBridgeUrl[] = "canvas-bridge-url";
++// Canvas bridge HTTP Basic credentials, "user:secret".
++const char kCanvasBridgeAuth[] = "canvas-bridge-auth";
++
  }  // namespace switches
 --- a/components/ungoogled/ungoogled_switches.h
 +++ b/components/ungoogled/ungoogled_switches.h
-@@ -15,6 +15,19 @@
+@@ -15,6 +15,21 @@
  COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasMeasureTextNoise[];
  COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasImageDataNoise[];
  
@@ -59,12 +65,14 @@
 +COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableGpuFingerprint[];
 +COMPONENT_EXPORT(UNGOOGLED) extern const char kDisableFingerprintNoise[];
 +COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintProfile[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeUrl[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeAuth[];
  }
  
  #endif  // THIRD_PARTY_UNGOOGLED_FINGERPRINTING_SWITCHES_H_
 --- a/content/browser/renderer_host/render_process_host_impl.cc
 +++ b/content/browser/renderer_host/render_process_host_impl.cc
-@@ -3868,6 +3868,25 @@
+@@ -3868,6 +3868,27 @@
        switches::kFingerprintingClientRectsNoise,
        switches::kFingerprintingCanvasMeasureTextNoise,
        switches::kFingerprintingCanvasImageDataNoise,
@@ -87,6 +95,8 @@
 +      switches::kDisableGpuFingerprint,
 +      switches::kDisableFingerprintNoise,
 +      switches::kFingerprintProfile,
++      switches::kCanvasBridgeUrl,
++      switches::kCanvasBridgeAuth,
        switches::kForceDeviceScaleFactor,
        switches::kForceDisplayColorProfile,
        switches::kForceHighContrast,

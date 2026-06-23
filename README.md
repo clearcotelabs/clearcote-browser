@@ -20,7 +20,7 @@
 
 </div>
 
-> **Status:** [**v0.1.0-pre.10**](https://github.com/clearcotelabs/clearcote-browser/releases) is live — Chromium 149, Windows x64, signed + checksummed ([verify it](docs/VERIFY.md)). **Windows x64 only for now**; macOS/Linux are on the [Roadmap](ROADMAP.md). An experimental pre-release.
+> **Status:** [**v0.1.0-pre.11**](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.11) is live — Chromium 149, Windows x64, signed + checksummed ([verify it](docs/VERIFY.md)). Adds the opt-in **[canvas bridge](docs/CANVAS-BRIDGE.md)** (render canvas/WebGL on a real remote GPU so readbacks stay coherent with the GPU you present), `--disable-gpu-fingerprint` real-GPU WebGL coherence, and a `measureText` width fix. **Windows x64 only for now**; macOS/Linux are on the [Roadmap](ROADMAP.md). An experimental pre-release.
 
 ---
 

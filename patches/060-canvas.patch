@@ -1,3 +1,18 @@
+--- a/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
++++ b/third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h
+@@ -184,6 +184,12 @@
+   virtual void PageVisibilityChanged() = 0;
+   virtual void SizeChanged() {}
+   virtual bool isContextLost() const { return true; }
++  // canvas-bridge: fill |out| with the remote-rendered RGBA8 pixels for the
++  // whole surface when the bridge is active; default no-op.
++  virtual bool ReadBridgePixels(std::vector<uint8_t>* out, int width,
++                                int height) {
++    return false;
++  }
+   bool IsContextBeingRestored() const { return is_context_being_restored_; }
+   // TODO(fserb): remove AsV8RenderingContext and AsV8OffscreenRenderingContext.
+   virtual V8RenderingContext* AsV8RenderingContext() { NOTREACHED(); }
 --- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 +++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
 @@ -32,7 +32,9 @@
@@ -33,15 +48,41 @@
  #include "third_party/blink/renderer/core/frame/local_frame.h"
  #include "third_party/blink/renderer/core/frame/local_frame_client.h"
  #include "third_party/blink/renderer/core/frame/settings.h"
-@@ -1318,6 +1327,57 @@
+@@ -1317,7 +1326,83 @@
+           mime_type, ImageEncoderUtils::kEncodeReasonToDataURL);
  
    scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
++  // canvas-bridge: replace the local snapshot with the remote render (skips
++  // the local farble below; the bridge pixels are ground truth).
++  bool from_bridge = false;
    if (image_bitmap) {
++    std::vector<uint8_t> bridge_px;
++    if (CanvasRenderingContext* ctx = RenderingContext();
++        ctx && ctx->ReadBridgePixels(&bridge_px, image_bitmap->width(),
++                                     image_bitmap->height())) {
++      SkImageInfo bi = SkImageInfo::Make(
++          image_bitmap->width(), image_bitmap->height(),
++          kRGBA_8888_SkColorType, kUnpremul_SkAlphaType);
++      sk_sp<SkData> bd =
++          SkData::MakeWithCopy(bridge_px.data(), bridge_px.size());
++      if (sk_sp<SkImage> bimg =
++              SkImages::RasterFromData(bi, bd, bi.minRowBytes())) {
++        image_bitmap = StaticBitmapImage::Create(
++            PaintImageBuilder::WithDefault()
++                .set_id(PaintImage::GetNextId())
++                .set_image(bimg, PaintImage::GetNextContentId())
++                .TakePaintImage(),
++            image_bitmap->Orientation());
++        from_bridge = true;
++      }
++    }
++  }
++  if (image_bitmap) {
 +    // Fingerprint protection: modify a copy of the pixel data before
 +    // creating the ImageDataBuffer when the fingerprint switch is enabled.
 +    const base::CommandLine* command_line =
 +        base::CommandLine::ForCurrentProcess();
-+    if (command_line->HasSwitch(switches::kFingerprint) &&
++    if (!from_bridge && command_line->HasSwitch(switches::kFingerprint) &&
 +        ungoogled::FingerprintNoiseEnabled()) {
 +      // Per-site farbling: derive the seed from this canvas's eTLD+1.
 +      const SecurityOrigin* origin =
@@ -91,6 +132,30 @@
      std::unique_ptr<ImageDataBuffer> data_buffer =
          ImageDataBuffer::Create(image_bitmap);
      if (!data_buffer)
+--- a/third_party/blink/renderer/core/html/canvas/text_metrics.h
++++ b/third_party/blink/renderer/core/html/canvas/text_metrics.h
+@@ -112,6 +112,21 @@
+ 
+   void Shuffle(const double factor);
+ 
++  // canvas-bridge: replace the computed metrics with a remote host's values.
++  void OverrideFromBridge(double w, double abbl, double abbr, double fbba,
++                          double fbbd, double abba, double abbd, double emha,
++                          double emhd) {
++    width_ = w;
++    actual_bounding_box_left_ = abbl;
++    actual_bounding_box_right_ = abbr;
++    font_bounding_box_ascent_ = fbba;
++    font_bounding_box_descent_ = fbbd;
++    actual_bounding_box_ascent_ = abba;
++    actual_bounding_box_descent_ = abbd;
++    em_height_ascent_ = emha;
++    em_height_descent_ = emhd;
++  }
++
+  private:
+   void Update(const Font*,
+               const TextDirection& direction,
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
 @@ -13,6 +13,7 @@
@@ -101,16 +166,19 @@
  #include "base/location.h"
  #include "base/memory/scoped_refptr.h"
  #include "base/memory/weak_ptr.h"
-@@ -26,6 +27,8 @@
+@@ -26,6 +27,11 @@
  #include "cc/paint/paint_flags.h"
  #include "cc/paint/paint_image.h"
  #include "cc/paint/record_paint_canvas.h"
 +#include "components/ungoogled/ungoogled_switches.h"
 +#include "components/ungoogled/farble_seed.h"
++#include <cstring>
++#include "third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_client.h"
++#include "third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_codec.h"
  #include "components/viz/common/resources/shared_image_format_utils.h"
  #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
  #include "third_party/blink/public/common/metrics/document_update_reason.h"
-@@ -110,6 +113,7 @@
+@@ -110,6 +116,7 @@
  
  #include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
  #include "third_party/blink/renderer/core/frame/local_dom_window.h"
@@ -118,7 +186,84 @@
  
  namespace blink {
  
-@@ -535,8 +539,17 @@
+@@ -374,6 +381,52 @@
+ }
+ perfetto::EventContext GetEventContext();
+ 
++namespace {
++
++// canvas-bridge: lazily create the server-side surface for this 2D context and
++// return its stable id, so recorded ops and the readback target one canvas.
++uint32_t EnsureBridgeCanvas(blink::canvas_bridge::CanvasBridgeClient* bridge,
++                            uint32_t& id, int width, int height) {
++  if (id == 0) {
++    id = bridge->AllocateCanvasId();
++    blink::canvas_bridge::CreateCanvas2DMessage create;
++    create.canvas_id = id;
++    create.width = static_cast<uint32_t>(width < 0 ? 0 : width);
++    create.height = static_cast<uint32_t>(height < 0 ? 0 : height);
++    create.opaque = false;
++    bridge->Send(blink::canvas_bridge::Encode(create));
++  }
++  return id;
++}
++
++}  // namespace
++
++void BaseRenderingContext2D::RecordBridgeOp(
++    uint32_t op, const std::string& str, const std::vector<double>& args) {
++  auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
++  if (!cb || !cb->Connected())
++    return;
++  blink::canvas_bridge::Canvas2DOpMessage m;
++  m.canvas_id = EnsureBridgeCanvas(cb, bridge_canvas_id_, Width(), Height());
++  m.op = op;
++  m.str_arg = str;
++  m.args = args;
++  cb->Send(blink::canvas_bridge::Encode(m));
++}
++
++bool BaseRenderingContext2D::ReadBridgePixels(std::vector<uint8_t>* out,
++                                              int width, int height) {
++  auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
++  if (!cb || !cb->Connected() || bridge_canvas_id_ == 0)
++    return false;
++  std::optional<std::vector<uint8_t>> px =
++      cb->RequestImageData(bridge_canvas_id_, 0, 0, width, height);
++  if (!px || px->size() != static_cast<size_t>(width) * height * 4)
++    return false;
++  *out = std::move(*px);
++  return true;
++}
++
+ ImageData* BaseRenderingContext2D::getImageDataInternal(
+     int sx,
+     int sy,
+@@ -515,6 +568,23 @@
+   if (!image_data)
+     return nullptr;
+ 
++  // clearcote canvas bridge: when a remote real-GPU host is connected, return
++  // its authentic pixels for this region instead of the local render (and skip
++  // the local farble below; the bridge pixels are ground truth).
++  if (auto* bridge = blink::canvas_bridge::CanvasBridgeClient::Get();
++      bridge && bridge->Connected()) {
++    SkPixmap bridge_pixmap = image_data->GetSkPixmap();
++    const size_t expected = bridge_pixmap.computeByteSize();
++    std::optional<std::vector<uint8_t>> bridge_pixels =
++        bridge->RequestImageData(
++            EnsureBridgeCanvas(bridge, bridge_canvas_id_, Width(), Height()),
++            sx, sy, sw, sh);
++    if (bridge_pixels && bridge_pixels->size() == expected) {
++      memcpy(bridge_pixmap.writable_addr(), bridge_pixels->data(), expected);
++      return image_data;
++    }
++  }
++
+   // Read pixels into |image_data|.
+   if (snapshot) {
+     gfx::Rect snapshot_rect{snapshot->Size()};
+@@ -535,8 +605,17 @@
            snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
        DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
      }
@@ -138,9 +283,81 @@
      }
    }
  
-@@ -1183,14 +1196,29 @@
+@@ -688,6 +767,9 @@
+ }
+ 
+ void BaseRenderingContext2D::setTextAlign(const V8CanvasTextAlign align) {
++  RecordBridgeOp(
++      static_cast<uint32_t>(blink::canvas_bridge::Canvas2DOp::kSetTextAlign),
++      std::string(align.AsCStr()), {});
+   GetState().SetTextAlign(align.AsEnum());
+ }
+ 
+@@ -697,6 +779,9 @@
+ 
+ void BaseRenderingContext2D::setTextBaseline(
+     const V8CanvasTextBaseline baseline) {
++  RecordBridgeOp(
++      static_cast<uint32_t>(blink::canvas_bridge::Canvas2DOp::kSetTextBaseline),
++      std::string(baseline.AsCStr()), {});
+   GetState().SetTextBaseline(baseline.AsEnum());
+ }
+ 
+@@ -837,6 +922,10 @@
+     return;
+   }
+ 
++  RecordBridgeOp(
++      static_cast<uint32_t>(blink::canvas_bridge::Canvas2DOp::kSetFont),
++      new_font.Utf8(), {});
++
+   CanvasRenderingContext2DState& state = GetState();
+   if (new_font == state.UnparsedFont() && CurrentFontResolvedAndUpToDate()) {
+     return;
+@@ -894,6 +983,9 @@
+ }
+ 
+ void BaseRenderingContext2D::fillText(const String& text, double x, double y) {
++  RecordBridgeOp(
++      static_cast<uint32_t>(blink::canvas_bridge::Canvas2DOp::kFillText),
++      text.Utf8(), {x, y});
+   CanvasRenderingContext2DState& state = GetState();
+   DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kFillPaintType,
+                    state.GetTextAlign(), state.GetTextBaseline(), 0,
+@@ -950,6 +1042,7 @@
+ void BaseRenderingContext2D::strokeText(const String& text,
+                                         double x,
+                                         double y) {
++  RecordBridgeOp(21u, text.Utf8(), {x, y});
+   CanvasRenderingContext2DState& state = GetState();
+   DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kStrokePaintType,
+                    state.GetTextAlign(), state.GetTextBaseline(), 0,
+@@ -960,6 +1053,7 @@
+                                         double x,
+                                         double y,
+                                         double max_width) {
++  RecordBridgeOp(21u, text.Utf8(), {x, y});
+   CanvasRenderingContext2DState& state = GetState();
+   DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kStrokePaintType,
+                    state.GetTextAlign(), state.GetTextBaseline(), 0,
+@@ -1182,15 +1276,44 @@
+       font, direction, state.GetTextBaseline(), state.GetTextAlign(), text,
        host->GetPlainTextPainter());
  
++  // canvas-bridge: override the metrics with the remote render host's values.
++  if (auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
++      cb && cb->Connected() && bridge_canvas_id_ != 0) {
++    std::optional<std::vector<uint8_t>> mb =
++        cb->RequestTextMetrics(bridge_canvas_id_, text.Utf8());
++    if (mb && mb->size() == 9 * sizeof(double)) {
++      double d[9];
++      __builtin_memcpy(d, mb->data(), sizeof(d));
++      text_metrics->OverrideFromBridge(d[0], d[1], d[2], d[3], d[4], d[5],
++                                       d[6], d[7], d[8]);
++      return text_metrics;
++    }
++  }
++
    // Scale text metrics if enabled
 -  if (RuntimeEnabledFeatures::FingerprintingCanvasMeasureTextNoiseEnabled()) {
 +  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
@@ -163,16 +380,296 @@
 -        if (window->GetFrame() && window->GetFrame()->GetDocument())
 -          text_metrics->Shuffle(window->GetFrame()->GetDocument()->GetNoiseFactorX());
 +        if (window->GetFrame() && window->GetFrame()->GetDocument() && text.length() > 0) {
-+          text_metrics->Shuffle(noise_x);
++          text_metrics->Shuffle(1.0 + noise_x);
 +        }
        }
 -    } else if (canvas) {
 -      text_metrics->Shuffle(canvas->GetDocument().GetNoiseFactorX());
 +    } else if (canvas && text.length() > 0) {
-+      text_metrics->Shuffle(noise_x);
++      text_metrics->Shuffle(1.0 + noise_x);
      }
    }
    return text_metrics;
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
+@@ -360,6 +360,12 @@
+   void WillUseCurrentFont() const;
+ 
+   int num_readbacks_performed_ = 0;
++  // canvas-bridge: stable server-side surface id for this 2D context (0 = none yet).
++  uint32_t bridge_canvas_id_ = 0;
++  void RecordBridgeOp(uint32_t op, const std::string& str,
++                      const std::vector<double>& args) override;
++  bool ReadBridgePixels(std::vector<uint8_t>* out, int width,
++                        int height) override;
+   unsigned read_count_ = 0;
+   Member<GPUTexture> webgpu_access_texture_ = nullptr;
+   std::unique_ptr<Canvas2DResourceProviderSharedImage>
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_2d_recorder_context.cc
+@@ -396,6 +396,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::save() {
++  RecordBridgeOp(1u /* Canvas2DOp::kSave */, std::string(), {});
+   if (isContextLost()) [[unlikely]] {
+     return;
+   }
+@@ -421,6 +422,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::restore(ExceptionState& exception_state) {
++  RecordBridgeOp(2u /* Canvas2DOp::kRestore */, std::string(), {});
+   if (isContextLost()) [[unlikely]] {
+     return;
+   }
+@@ -925,6 +927,8 @@
+   // from the string is expensive) so we keep a map of string to color.
+   if (value->IsString()) {
+     v8::Local<v8::String> v8_string = value.As<v8::String>();
++    RecordBridgeOp(51u /* Canvas2DOp::kSetStrokeStyle */,
++                   ToCoreString(isolate, v8_string).Utf8(), {});
+     if (state.IsUnparsedStrokeColor(v8_string)) {
+       return;
+     }
+@@ -1048,6 +1052,8 @@
+   // details on this.
+   if (value->IsString()) {
+     v8::Local<v8::String> v8_string = value.As<v8::String>();
++    RecordBridgeOp(50u /* Canvas2DOp::kSetFillStyle */,
++                   ToCoreString(isolate, v8_string).Utf8(), {});
+     if (state.IsUnparsedFillColor(v8_string)) {
+       return;
+     }
+@@ -1105,6 +1111,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::setLineWidth(double width) {
++  RecordBridgeOp(52u /* Canvas2DOp::kSetLineWidth */, std::string(), {width});
+   if (!std::isfinite(width) || width <= 0) {
+     return;
+   }
+@@ -1120,6 +1127,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::setLineCap(const String& s) {
++  RecordBridgeOp(58u /* Canvas2DOp::kSetLineCap */, s.Utf8(), {});
+   LineCap cap;
+   if (!ParseLineCap(s, cap)) {
+     return;
+@@ -1136,6 +1144,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::setLineJoin(const String& s) {
++  RecordBridgeOp(59u /* Canvas2DOp::kSetLineJoin */, s.Utf8(), {});
+   LineJoin join;
+   if (!ParseLineJoin(s, join)) {
+     return;
+@@ -1267,6 +1276,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::setGlobalAlpha(double alpha) {
++  RecordBridgeOp(56u /* Canvas2DOp::kSetGlobalAlpha */, std::string(), {alpha});
+   if (!(alpha >= 0 && alpha <= 1)) {
+     return;
+   }
+@@ -1296,6 +1306,7 @@
+ 
+ void Canvas2DRecorderContext::setGlobalCompositeOperation(
+     const String& operation) {
++  RecordBridgeOp(57u /* Canvas2DOp::kSetGlobalCompositeOperation */, operation.Utf8(), {});
+   CompositeOperator op = kCompositeSourceOver;
+   BlendMode blend_mode = BlendMode::kNormal;
+   if (!ParseCanvasCompositeAndBlendMode(operation, op, blend_mode)) {
+@@ -1356,6 +1367,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::scale(double sx, double sy) {
++  RecordBridgeOp(44u /* Canvas2DOp::kScale */, std::string(), {sx, sy});
+   // TODO(crbug.com/40153853): Investigate the performance impact of simply
+   // calling the 3d version of this function
+   cc::PaintCanvas* c = GetOrCreatePaintCanvas();
+@@ -1386,6 +1398,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::rotate(double angle_in_radians) {
++  RecordBridgeOp(43u /* Canvas2DOp::kRotate */, std::string(), {angle_in_radians});
+   cc::PaintCanvas* c = GetOrCreatePaintCanvas();
+   if (!c) {
+     return;
+@@ -1412,6 +1425,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::translate(double tx, double ty) {
++  RecordBridgeOp(42u /* Canvas2DOp::kTranslate */, std::string(), {tx, ty});
+   // TODO(crbug.com/40153853): Investigate the performance impact of simply
+   // calling the 3d version of this function
+   cc::PaintCanvas* c = GetOrCreatePaintCanvas();
+@@ -1451,6 +1465,7 @@
+                                         double m22,
+                                         double dx,
+                                         double dy) {
++  RecordBridgeOp(41u /* Canvas2DOp::kTransform */, std::string(), {m11, m12, m21, m22, dx, dy});
+   cc::PaintCanvas* c = GetOrCreatePaintCanvas();
+   if (!c) {
+     return;
+@@ -1493,6 +1508,7 @@
+ // |effective_zoom_| in resetTransform instead of setTransform, to avoid
+ // integrating it twice if we have resetTransform and setTransform API calls.
+ void Canvas2DRecorderContext::resetTransform() {
++  RecordBridgeOp(45u /* Canvas2DOp::kResetTransform */, std::string(), {});
+   cc::PaintCanvas* c = GetOrCreatePaintCanvas();
+   if (!c) {
+     return;
+@@ -1535,6 +1551,7 @@
+                                            double m22,
+                                            double dx,
+                                            double dy) {
++  RecordBridgeOp(40u /* Canvas2DOp::kSetTransform */, std::string(), {m11, m12, m21, m22, dx, dy});
+   if (!std::isfinite(m11) || !std::isfinite(m21) || !std::isfinite(dx) ||
+       !std::isfinite(m12) || !std::isfinite(m22) || !std::isfinite(dy)) {
+     return;
+@@ -1573,6 +1590,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::beginPath() {
++  RecordBridgeOp(3u /* Canvas2DOp::kBeginPath */, std::string(), {});
+   Clear();
+ }
+ 
+@@ -1671,10 +1689,12 @@
+ }
+ 
+ void Canvas2DRecorderContext::fill() {
++  RecordBridgeOp(5u /* Canvas2DOp::kFill */, std::string(), {});
+   FillImpl(SkPathFillType::kWinding);
+ }
+ 
+ void Canvas2DRecorderContext::fill(const V8CanvasFillRule& winding) {
++  RecordBridgeOp(5u /* Canvas2DOp::kFill */, std::string(), {});
+   FillImpl(CanvasFillRuleToSkiaFillType(winding));
+ }
+ 
+@@ -1699,6 +1719,7 @@
+ }
+ 
+ void Canvas2DRecorderContext::stroke() {
++  RecordBridgeOp(6u /* Canvas2DOp::kStroke */, std::string(), {});
+   DrawPathInternal(*this, CanvasRenderingContext2DState::kStrokePaintType,
+                    SkPathFillType::kWinding, UsePaintCache::kDisabled);
+ }
+@@ -1712,6 +1733,8 @@
+                                        double y,
+                                        double width,
+                                        double height) {
++  RecordBridgeOp(10u /* Canvas2DOp::kFillRect */, std::string(),
++                 {x, y, width, height});
+   if (!ValidateRectForCanvas(x, y, width, height)) {
+     return;
+   }
+@@ -1775,6 +1798,7 @@
+                                          double y,
+                                          double width,
+                                          double height) {
++  RecordBridgeOp(11u /* Canvas2DOp::kStrokeRect */, std::string(), {x, y, width, height});
+   if (!ValidateRectForCanvas(x, y, width, height)) {
+     return;
+   }
+@@ -1933,6 +1957,7 @@
+                                         double y,
+                                         double width,
+                                         double height) {
++  RecordBridgeOp(12u /* Canvas2DOp::kClearRect */, std::string(), {x, y, width, height});
+   if (!ValidateRectForCanvas(x, y, width, height)) {
+     return;
+   }
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.cc
+@@ -75,6 +75,7 @@
+ }  // namespace
+ 
+ void CanvasPath::closePath() {
++  RecordBridgeOp(4u /* closePath */, std::string(), {});
+   if (IsEmpty()) [[unlikely]] {
+     return;
+   }
+@@ -105,6 +106,7 @@
+ }
+ 
+ void CanvasPath::moveTo(double double_x, double double_y) {
++  RecordBridgeOp(30u /* moveTo */, std::string(), {double_x, double_y});
+   float x = base::saturated_cast<float>(double_x);
+   float y = base::saturated_cast<float>(double_y);
+   if (!std::isfinite(x) || !std::isfinite(y)) [[unlikely]] {
+@@ -123,6 +125,7 @@
+ }
+ 
+ void CanvasPath::lineTo(double double_x, double double_y) {
++  RecordBridgeOp(31u /* lineTo */, std::string(), {double_x, double_y});
+   float x = base::saturated_cast<float>(double_x);
+   float y = base::saturated_cast<float>(double_y);
+   if (!std::isfinite(x) || !std::isfinite(y)) [[unlikely]] {
+@@ -154,6 +157,7 @@
+                                   double double_cpy,
+                                   double double_x,
+                                   double double_y) {
++  RecordBridgeOp(35u /* quadraticCurveTo */, std::string(), {double_cpx, double_cpy, double_x, double_y});
+   float cpx = base::saturated_cast<float>(double_cpx);
+   float cpy = base::saturated_cast<float>(double_cpy);
+   float x = base::saturated_cast<float>(double_x);
+@@ -185,6 +189,7 @@
+                                double double_cp2y,
+                                double double_x,
+                                double double_y) {
++  RecordBridgeOp(36u /* bezierCurveTo */, std::string(), {double_cp1x, double_cp1y, double_cp2x, double_cp2y, double_x, double_y});
+   float cp1x = base::saturated_cast<float>(double_cp1x);
+   float cp1y = base::saturated_cast<float>(double_cp1y);
+   float cp2x = base::saturated_cast<float>(double_cp2x);
+@@ -220,6 +225,7 @@
+                        double double_y2,
+                        double double_r,
+                        ExceptionState& exception_state) {
++  RecordBridgeOp(34u /* arcTo */, std::string(), {double_x1, double_y1, double_x2, double_y2, double_r});
+   float x1 = base::saturated_cast<float>(double_x1);
+   float y1 = base::saturated_cast<float>(double_y1);
+   float x2 = base::saturated_cast<float>(double_x2);
+@@ -431,6 +437,7 @@
+                      double double_end_angle,
+                      bool anticlockwise,
+                      ExceptionState& exception_state) {
++  RecordBridgeOp(33u /* arc */, std::string(), {double_x, double_y, double_radius, double_start_angle, double_end_angle});
+   float x = base::saturated_cast<float>(double_x);
+   float y = base::saturated_cast<float>(double_y);
+   float radius = base::saturated_cast<float>(double_radius);
+@@ -486,6 +493,7 @@
+                          double double_end_angle,
+                          bool anticlockwise,
+                          ExceptionState& exception_state) {
++  RecordBridgeOp(37u /* ellipse */, std::string(), {double_x, double_y, double_radius_x, double_radius_y, double_rotation, double_start_angle, double_end_angle});
+   float x = base::saturated_cast<float>(double_x);
+   float y = base::saturated_cast<float>(double_y);
+   float radius_x = base::saturated_cast<float>(double_radius_x);
+@@ -540,6 +548,7 @@
+                       double double_y,
+                       double double_width,
+                       double double_height) {
++  RecordBridgeOp(32u /* rect */, std::string(), {double_x, double_y, double_width, double_height});
+   float x = base::saturated_cast<float>(double_x);
+   float y = base::saturated_cast<float>(double_y);
+   float width = base::saturated_cast<float>(double_width);
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.h
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_path.h
+@@ -176,6 +176,10 @@
+   gfx::RectF BoundingRect() const;
+ 
+  protected:
++  // canvas-bridge: forward one recorded 2D op to a remote render host. Default
++  // no-op; BaseRenderingContext2D supplies the real implementation.
++  virtual void RecordBridgeOp(uint32_t op, const std::string& str,
++                              const std::vector<double>& args) {}
+   CanvasPath() { path_builder_.SetIsVolatile(true); }
+   explicit CanvasPath(const Path& path) : path_builder_(path) {
+     path_builder_.SetIsVolatile(true);
 --- a/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
 +++ b/third_party/blink/renderer/platform/graphics/image_data_buffer.cc
 @@ -32,8 +32,11 @@

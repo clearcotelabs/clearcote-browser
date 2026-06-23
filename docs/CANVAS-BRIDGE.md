@@ -52,17 +52,25 @@ WebSocket carrying a compact binary message stream; the persona seed
 
 ### 1. Start the bridge server (on the real-GPU host)
 
-Run a headless clearcote in bridge-server mode:
+The server is a small Python coordinator (in
+[`tools/canvas-bridge-server/`](../tools/canvas-bridge-server/)) that launches a
+**headless clearcote** and replays the forwarded ops on its real canvas via the
+DevTools protocol — so the pixels it returns are exactly what a real clearcote on
+that GPU produces, no approximation.
 
 ```bash
-clearcote --canvas-bridge-server=0.0.0.0:8443 \
-          --canvas-bridge-auth=user:secret \
-          --fingerprint=<seed> \
-          --headless=new --no-sandbox
+pip install playwright    # one-time
+python tools/canvas-bridge-server/server.py \
+    --chrome /path/to/clearcote/chrome.exe \
+    --port 8443 \
+    --fingerprint <seed>      # the persona/GPU this host presents
 ```
 
-The server renders forwarded ops through clearcote's own pipeline, so the pixels
-are exactly what a real clearcote on that GPU produces — no approximation.
+The `--fingerprint` seed selects the persona (and thus the GPU strings) the
+server presents; run it with the **same seed as your clients** so the whole
+identity stays coherent. The server currently relies on the private network /
+tunnel below for access control (it does not yet enforce `--canvas-bridge-auth`),
+so never expose its port publicly.
 
 ### 2. Tunnel it (recommended)
 
