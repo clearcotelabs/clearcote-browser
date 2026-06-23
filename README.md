@@ -60,12 +60,12 @@ It's a **drop-in for [Playwright](https://playwright.dev/) / [Puppeteer](https:/
 
 From **one `--fingerprint` seed** *or* an **imported real-machine profile**, all kept coherent together:
 
-- **Identity** — UA + UA-CH brand / platform / version (a real "Google Chrome" brand set, not bare "Chromium")
-- **GPU** — WebGL unmasked vendor/renderer, the full `getParameter` table + extension list; **session-constant** (never a per-origin tell)
+- **Identity** — UA + UA-CH brand / platform / version + high-entropy hints (`bitness` / `wow64` / `model`); a real "Google Chrome" brand set, not bare "Chromium"
+- **GPU** — WebGL unmasked vendor/renderer + the full `getParameter` table & extension list, **and WebGPU (`navigator.gpu`) limits/features kept coherent with that same GPU**; session-constant (never a per-origin tell)
 - **Rendering** — deterministic per-site canvas / WebGL / audio noise, *or off* — plus an experimental **[real-GPU canvas bridge](docs/CANVAS-BRIDGE.md)** that renders on a real GPU host for hardware-accurate readbacks
-- **Hardware & screen** — `hardwareConcurrency`, `deviceMemory`, screen geometry / color depth / DPR, a realistic `jsHeapSizeLimit`, touch points
-- **Locale & network** — timezone + `navigator.languages` + `Accept-Language` (auto-matched to your proxy via `geoip`), and a coherent WebRTC egress IP with no STUN/LAN leak
-- **Long-tail** — speech voices, installed fonts, CSS `@media` (pointer / hover / color-gamut), battery, connection, keyboard layout
+- **Hardware & screen** — `hardwareConcurrency`, `deviceMemory`, **`storageQuota`** (a realistic on-disk size, not an incognito-looking one), screen geometry / depth / DPR + `getScreenDetails()`, a realistic `jsHeapSizeLimit`, touch points
+- **Locale & network** — timezone + `navigator.languages` + `Accept-Language` + the **ICU / `Intl` locale all pinned to one language** (no `en-GB`-on-a-US-IP leak), geolocation, and a coherent WebRTC egress IP (no STUN/LAN leak) — all auto-matched to your proxy via `geoip`
+- **Long-tail** — speech-synthesis voices, installed fonts, `MediaCapabilities.decodingInfo()` codecs, `enumerateDevices()`, CSS `@media` (pointer / hover / color-gamut), battery, connection, keyboard layout
 - **Behavior** — humanized, *trusted* bezier mouse input that keeps `navigator.webdriver = false`
 
 ---
