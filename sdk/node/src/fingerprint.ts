@@ -161,7 +161,10 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
     }
   };
   set("fingerprint", o.fingerprint);
-  set("fingerprint-platform", o.platform);
+  // clearcote ships a Windows x64 binary and should always present a coherent Windows + Chrome
+  // identity by default; default the persona platform to Windows when the caller doesn't pass one
+  // (rather than a seed-derived OS that could vary). Override via platform: "linux" | "macos".
+  set("fingerprint-platform", o.platform ?? "windows");
   set("fingerprint-platform-version", o.platformVersion);
   // clearcote presents as Google Chrome (its UA says "Chrome/<v>"); default the UA-CH brand to
   // "chrome" so navigator.userAgentData advertises "Google Chrome", not bare "Chromium" (a

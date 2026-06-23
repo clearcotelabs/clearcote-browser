@@ -105,6 +105,12 @@ def fingerprint_args(opts):
         value = opts.get(key)
         if value is not None and value != "":
             args.append(f"--{flag}={value}")
+    # clearcote ships a Windows x64 binary and should always present a coherent Windows + Chrome
+    # identity by default. Default the persona platform to Windows when the caller doesn't pass one,
+    # rather than letting it fall back to a seed-derived OS that could vary (linux/macos). Override
+    # explicitly via platform="linux"/"macos".
+    if not opts.get("platform"):
+        args.append("--fingerprint-platform=windows")
     # clearcote presents as Google Chrome (its UA string says "Chrome/<v>"), so default the
     # UA-CH brand to "chrome" — otherwise navigator.userAgentData advertises only "Chromium",
     # a UA/UA-CH mismatch some bot detectors flag. Override via brand="edge" etc.

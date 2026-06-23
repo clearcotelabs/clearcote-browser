@@ -10,12 +10,14 @@ from clearcote._fingerprint import (
 )
 
 
-def test_default_brand_is_chrome():
-    # clearcote presents as Google Chrome; the default brand prevents a UA/UA-CH mismatch.
+def test_default_persona_is_windows_chrome():
+    # clearcote presents as Windows + Google Chrome; the defaults keep navigator.platform and
+    # the UA-CH brand coherent (no seed-derived OS drift, no Chromium/Chrome UA-CH mismatch).
     # A coherent Accept-Language is also always emitted (defaults to en-US,en) so the language
     # never falls back to the build/OS locale and mismatches the proxy geo. --lang pins the UI/ICU
     # locale to the primary tag so Intl (main thread + workers) matches navigator.language.
     assert fingerprint_args({}) == [
+        "--fingerprint-platform=windows",
         "--fingerprint-brand=chrome",
         "--accept-lang=en-US,en",
         "--lang=en-US",
