@@ -24,13 +24,13 @@ export interface ReleaseInfo {
 }
 
 export const RELEASE: ReleaseInfo = {
-  tag: "v0.1.0-pre.10",
+  tag: "v0.1.0-pre.11",
   version: "149.0.7827.114",
   asset: "clearcote-149.0.7827.114-windows-x64.zip",
-  url: "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.10/clearcote-149.0.7827.114-windows-x64.zip",
-  sha256: "8e1f72cc32b3c2adcc64b6ef6be9d367c4a63b51c4a459a626b000126cb019af",
+  url: "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.11/clearcote-149.0.7827.114-windows-x64.zip",
+  sha256: "b144b2ae3ef8fe07eb3453f1b15fc73edc753b3b0eb351753977cb17b5667cc7",
   exeSha256: "5743595256c89c6874804bf3315acce592fc7f1883760c8d380c010151a73b23",
-  size: 242602257,
+  size: 242626707,
   os: "win32",
 };
 
