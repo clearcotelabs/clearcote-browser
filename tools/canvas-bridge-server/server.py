@@ -323,16 +323,112 @@ def build_measure_js(cw, ch, ops, text):
 def webgl_op_to_js(op, ints, floats, s, data):
     def n(i, d=0): return ints[i] if i < len(ints) else d
     def f(i, d=0.0): return floats[i] if i < len(floats) else d
+    # ---- object lifecycle (ints[0] = the client's stable bridge object id) ----
+    if op == 1:   # kCreateBuffer
+        return f"objs[{n(0)}]=gl.createBuffer();"
+    if op == 2:   # kCreateShader (ints[1] = GLenum type)
+        return f"objs[{n(0)}]=gl.createShader({n(1)});"
+    if op == 3:   # kCreateProgram
+        return f"objs[{n(0)}]=gl.createProgram();"
+    if op == 4:   # kCreateTexture
+        return f"objs[{n(0)}]=gl.createTexture();"
+    # ---- program / shader ----
+    if op == 10:  # kShaderSource (ints[0]=shader, s=source)
+        return f"gl.shaderSource(objs[{n(0)}],{json.dumps(s)});"
+    if op == 11:  # kCompileShader
+        return f"gl.compileShader(objs[{n(0)}]);"
+    if op == 12:  # kAttachShader (program, shader)
+        return f"gl.attachShader(objs[{n(0)}],objs[{n(1)}]);"
+    if op == 13:  # kBindAttribLocation (program, index, name)
+        return f"gl.bindAttribLocation(objs[{n(0)}],{n(1)},{json.dumps(s)});"
+    if op == 14:  # kLinkProgram
+        return f"gl.linkProgram(objs[{n(0)}]);"
+    if op == 15:  # kUseProgram (0 = null)
+        return f"gl.useProgram({n(0)}?objs[{n(0)}]:null);"
+    if op == 16:  # kGetUniformLocation (program, locId; s=name) -> objs[locId]
+        return f"objs[{n(1)}]=gl.getUniformLocation(objs[{n(0)}],{json.dumps(s)});"
+    # ---- uniforms (ints[0] = location bridge id, floats/ints carry values) ----
+    if op == 40:  # kUniform1f
+        return f"gl.uniform1f(objs[{n(0)}],{f(0)});"
+    if op == 41:  # kUniform2f
+        return f"gl.uniform2f(objs[{n(0)}],{f(0)},{f(1)});"
+    if op == 42:  # kUniform3f
+        return f"gl.uniform3f(objs[{n(0)}],{f(0)},{f(1)},{f(2)});"
+    if op == 43:  # kUniform4f
+        return f"gl.uniform4f(objs[{n(0)}],{f(0)},{f(1)},{f(2)},{f(3)});"
+    if op == 44:  # kUniform1i (ints[1] = int value)
+        return f"gl.uniform1i(objs[{n(0)}],{n(1)});"
+    if op == 50:  # kUniformMatrix4fv (ints[1]=transpose, floats=16*count values)
+        mat = ",".join(repr(x) for x in floats)
+        return (f"gl.uniformMatrix4fv(objs[{n(0)}],"
+                f"{'true' if n(1) else 'false'},[{mat}]);")
+    # ---- buffers / vertex attribs ----
+    if op == 20:  # kBindBuffer (target, buffer; 0 = null)
+        return f"gl.bindBuffer({n(0)},{n(1)}?objs[{n(1)}]:null);"
+    if op == 21:  # kBufferData (target, usage, binary blob)
+        b64 = base64.b64encode(bytes(data)).decode()
+        return (f"(function(){{var b=atob('{b64}');var u=new Uint8Array(b.length);"
+                f"for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);"
+                f"gl.bufferData({n(0)},u,{n(1)});}})();")
+    if op == 22:  # kBufferDataSize (target, size, usage)
+        return f"gl.bufferData({n(0)},{n(1)},{n(2)});"
+    if op == 30:  # kEnableVertexAttribArray
+        return f"gl.enableVertexAttribArray({n(0)});"
+    if op == 31:  # kDisableVertexAttribArray
+        return f"gl.disableVertexAttribArray({n(0)});"
+    if op == 32:  # kVertexAttribPointer (index,size,type,normalized,stride,offset)
+        return (f"gl.vertexAttribPointer({n(0)},{n(1)},{n(2)},"
+                f"{'true' if n(3) else 'false'},{n(4)},{n(5)});")
+    # ---- textures ----
+    if op == 60:  # kBindTexture (target, texture; 0 = null)
+        return f"gl.bindTexture({n(0)},{n(1)}?objs[{n(1)}]:null);"
+    if op == 61:  # kTexImage2D (target,level,internalformat,w,h,border,format,type; data)
+        if data:
+            b64 = base64.b64encode(bytes(data)).decode()
+            return (f"(function(){{var b=atob('{b64}');var u=new Uint8Array(b.length);"
+                    f"for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);"
+                    f"gl.texImage2D({n(0)},{n(1)},{n(2)},{n(3)},{n(4)},{n(5)},"
+                    f"{n(6)},{n(7)},u);}})();")
+        return (f"gl.texImage2D({n(0)},{n(1)},{n(2)},{n(3)},{n(4)},{n(5)},"
+                f"{n(6)},{n(7)},null);")
+    if op == 62:  # kTexParameteri (target, pname, param)
+        return f"gl.texParameteri({n(0)},{n(1)},{n(2)});"
+    if op == 63:  # kActiveTexture
+        return f"gl.activeTexture({n(0)});"
+    if op == 64:  # kGenerateMipmap
+        return f"gl.generateMipmap({n(0)});"
+    if op == 65:  # kTexParameterf (target, pname, paramf)
+        return f"gl.texParameterf({n(0)},{n(1)},{f(0)});"
+    if op == 66:  # kTexSubImage2D (target,level,xoff,yoff,w,h,format,type; data)
+        b64 = base64.b64encode(bytes(data)).decode()
+        return (f"(function(){{var b=atob('{b64}');var u=new Uint8Array(b.length);"
+                f"for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);"
+                f"gl.texSubImage2D({n(0)},{n(1)},{n(2)},{n(3)},{n(4)},{n(5)},"
+                f"{n(6)},{n(7)},u);}})();")
+    # ---- fixed-function state ----
+    if op == 80:  # kViewport
+        return f"gl.viewport({n(0)},{n(1)},{n(2)},{n(3)});"
     if op == 81:  # kClearColor
         return f"gl.clearColor({f(0)},{f(1)},{f(2)},{f(3)});"
     if op == 82:  # kClear
         return f"gl.clear({n(0)});"
-    if op == 80:  # kViewport
-        return f"gl.viewport({n(0)},{n(1)},{n(2)},{n(3)});"
     if op == 83:  # kEnable
         return f"gl.enable({n(0)});"
     if op == 84:  # kDisable
         return f"gl.disable({n(0)});"
+    if op == 85:  # kBlendFunc
+        return f"gl.blendFunc({n(0)},{n(1)});"
+    if op == 86:  # kDepthFunc
+        return f"gl.depthFunc({n(0)});"
+    if op == 87:  # kPixelStorei
+        return f"gl.pixelStorei({n(0)},{n(1)});"
+    if op == 88:  # kScissor
+        return f"gl.scissor({n(0)},{n(1)},{n(2)},{n(3)});"
+    # ---- draws ----
+    if op == 90:  # kDrawArrays (mode, first, count)
+        return f"gl.drawArrays({n(0)},{n(1)},{n(2)});"
+    if op == 91:  # kDrawElements (mode, count, type, offset)
+        return f"gl.drawElements({n(0)},{n(1)},{n(2)},{n(3)});"
     return ""
 
 

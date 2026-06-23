@@ -3,8 +3,13 @@
 Render canvas and WebGL on a **real remote GPU** so the pixels a page reads back are
 coherent with the GPU your profile claims.
 
-> **Status:** experimental — ships in `v0.1.0-pre.11`. Opt-in: with no
+> **Status:** experimental — `v0.1.0-pre.12`. Opt-in: with no
 > `--canvas-bridge-url`, clearcote renders entirely locally, exactly as before.
+> Canvas2D (incl. `measureText`) **and WebGL** are forwarded: geometry, shaders,
+> uniforms, draws, **procedural textures** (`texImage2D` from a pixel array),
+> `readPixels` and `toDataURL`. A WebGL canvas that sources a texture from an
+> image / 2D-canvas / video, or uses 3D textures, automatically **falls back to
+> local rendering** for that canvas, so it is never returned half-rendered.
 
 ## Why
 
@@ -206,8 +211,11 @@ const browser = await clearcote.launch({
 
 ## Caveats & limits
 
-- **Canvas2D + measureText** are fully bridged. WebGL op coverage is being expanded
-  (clear/readback today; full geometry on the roadmap).
+- **Canvas2D + measureText** are fully bridged. **WebGL** is bridged too —
+  geometry, shaders, uniforms, draws, **procedural textures** (`texImage2D` from
+  a pixel array), `readPixels` and `toDataURL`. Textures sourced from an image /
+  2D-canvas / video / `ImageBitmap`, and 3D textures, fall back to local
+  rendering for that canvas (so they stay correct but un-bridged).
 - **`--no-sandbox` is required** on the client.
 - Graceful fallback: if the bridge is unreachable, clearcote logs a warning and
   **renders locally** — a misconfigured bridge degrades gracefully, it does not break

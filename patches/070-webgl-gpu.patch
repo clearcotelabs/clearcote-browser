@@ -423,6 +423,30 @@
      case GL_MIN_PROGRAM_TEXEL_OFFSET:
        return GetIntParameter(script_state, pname);
      case GL_PACK_ROW_LENGTH:
+--- a/third_party/blink/renderer/modules/webgl/webgl_object.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_object.h
+@@ -93,6 +93,11 @@
+   const GLuint& Object() const { return object_; }
+   bool HasObject() const { return object_ != 0; }
+ 
++  // Canvas bridge: stable id assigned by the bridge client so the remote
++  // render server can map this object across forwarded commands (0 = unset).
++  uint32_t BridgeId() const { return bridge_id_; }
++  void SetBridgeId(uint32_t id) { bridge_id_ = id; }
++
+   virtual bool IsRenderbuffer() const { return false; }
+   virtual bool IsTexture() const { return false; }
+ 
+@@ -123,6 +128,9 @@
+ 
+   GLuint object_ = 0;
+ 
++  // Canvas bridge object id (see BridgeId()); 0 until the bridge assigns one.
++  uint32_t bridge_id_ = 0;
++
+   // The context generation number of the associated WebGLContext when the
+   // object was created, to prevent reuse in later generations.
+   uint64_t context_generation_at_creation_;
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
 @@ -30,6 +30,7 @@
@@ -433,17 +457,19 @@
  #include "base/compiler_specific.h"
  #include "base/feature_list.h"
  #include "base/memory/scoped_refptr.h"
-@@ -41,6 +42,9 @@
+@@ -41,6 +42,11 @@
  #include "base/task/single_thread_task_runner.h"
  #include "base/trace_event/trace_event.h"
  #include "build/build_config.h"
 +#include "components/ungoogled/farble_seed.h"
 +#include "components/ungoogled/ungoogled_switches.h"
++#include "third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_client.h"
++#include "third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_codec.h"
 +#include "components/ungoogled/persona_profile.h"
  #include "components/viz/common/gpu/raster_context_provider.h"
  #include "components/viz/common/resources/shared_image_format_utils.h"
  #include "device/vr/buildflags/buildflags.h"
-@@ -100,6 +104,7 @@
+@@ -100,6 +106,7 @@
  #include "third_party/blink/renderer/modules/webgl/ext_shader_texture_lod.h"
  #include "third_party/blink/renderer/modules/webgl/ext_texture_filter_anisotropic.h"
  #include "third_party/blink/renderer/modules/webgl/gl_string_query.h"
@@ -451,7 +477,7 @@
  #include "third_party/blink/renderer/modules/webgl/oes_element_index_uint.h"
  #include "third_party/blink/renderer/modules/webgl/oes_standard_derivatives.h"
  #include "third_party/blink/renderer/modules/webgl/oes_texture_float.h"
-@@ -154,6 +159,7 @@
+@@ -154,6 +161,7 @@
  #include "third_party/blink/renderer/platform/heap/member.h"
  #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
  #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
@@ -459,7 +485,307 @@
  #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
  #include "third_party/blink/renderer/platform/wtf/functional.h"
  #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
-@@ -3893,17 +3899,54 @@
+@@ -203,6 +211,57 @@
+ 
+ namespace {
+ 
++namespace {
++
++uint32_t EnsureBridgeWebGL(blink::canvas_bridge::CanvasBridgeClient* bridge,
++                           uint32_t& id, int width, int height) {
++  if (id == 0) {
++    id = bridge->AllocateCanvasId();
++    blink::canvas_bridge::CreateWebGLMessage create;
++    create.canvas_id = id;
++    create.width = static_cast<uint32_t>(width < 0 ? 0 : width);
++    create.height = static_cast<uint32_t>(height < 0 ? 0 : height);
++    create.context_type = 1;
++    bridge->Send(blink::canvas_bridge::Encode(create));
++  }
++  return id;
++}
++
++void RecordWebGLOp(uint32_t op, std::vector<int32_t> ints,
++                   std::vector<double> floats, uint32_t& id, int width,
++                   int height, std::string str = std::string(),
++                   std::vector<uint8_t> data = std::vector<uint8_t>()) {
++  auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
++  if (!cb || !cb->Connected())
++    return;
++  blink::canvas_bridge::WebGLOpMessage m;
++  m.canvas_id = EnsureBridgeWebGL(cb, id, width, height);
++  m.op = op;
++  m.ints = std::move(ints);
++  m.floats = std::move(floats);
++  m.str = std::move(str);
++  m.data = std::move(data);
++  cb->Send(blink::canvas_bridge::Encode(m));
++}
++
++// Assigns a fresh bridge object id to a just-created WebGL object and records
++// the matching create op so the server builds the same object server-side.
++void RecordWebGLCreate(uint32_t op, WebGLObject* obj, uint32_t& counter,
++                       uint32_t& id, int width, int height) {
++  auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
++  if (!cb || !cb->Connected())
++    return;
++  obj->SetBridgeId(++counter);
++  blink::canvas_bridge::WebGLOpMessage m;
++  m.canvas_id = EnsureBridgeWebGL(cb, id, width, height);
++  m.op = op;
++  m.ints = {static_cast<int32_t>(obj->BridgeId())};
++  cb->Send(blink::canvas_bridge::Encode(m));
++}
++
++}  // namespace
++
++
+ enum class WebGLANGLEImplementation {
+   // These values are persisted to logs. Entries should not be renumbered and
+   // numeric values should never be reused.
+@@ -2466,6 +2525,10 @@
+     return;
+   }
+   active_texture_unit_ = texture - GL_TEXTURE0;
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kActiveTexture),
++      {static_cast<int32_t>(texture)}, {}, bridge_canvas_id_,
++      drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->ActiveTexture(texture);
+ }
+ 
+@@ -2479,6 +2542,11 @@
+                       "shader attachment already has shader");
+     return;
+   }
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kAttachShader),
++      {static_cast<int32_t>(program->BridgeId()),
++       static_cast<int32_t>(shader->BridgeId())},
++      {}, bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->AttachShader(ObjectOrZero(program), ObjectOrZero(shader));
+   shader->OnAttached();
+ }
+@@ -2495,6 +2563,11 @@
+                       "reserved prefix");
+     return;
+   }
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kBindAttribLocation),
++      {static_cast<int32_t>(program->BridgeId()), static_cast<int32_t>(index)},
++      {}, bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight(),
++      name.Utf8());
+   ContextGL()->BindAttribLocation(ObjectOrZero(program), index,
+                                   name.Utf8().c_str());
+ }
+@@ -2534,6 +2607,11 @@
+     return;
+   if (!ValidateAndUpdateBufferBindTarget("bindBuffer", target, buffer))
+     return;
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kBindBuffer),
++      {static_cast<int32_t>(target),
++       static_cast<int32_t>(buffer ? buffer->BridgeId() : 0)},
++      {}, bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->BindBuffer(target, ObjectOrZero(buffer));
+ }
+ 
+@@ -2575,6 +2653,14 @@
+     return;
+   }
+ 
++  // canvas-bridge: forward the texture binding (pixel uploads are forwarded
++  // separately by the texImage path; unsupported sources still fall back).
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kBindTexture),
++      {static_cast<int32_t>(target),
++       static_cast<int32_t>(texture ? texture->BridgeId() : 0)},
++      {}, bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
++
+   if (target == GL_TEXTURE_2D) {
+     texture_units_[active_texture_unit_].texture2d_binding_ = texture;
+   } else if (target == GL_TEXTURE_CUBE_MAP) {
+@@ -2701,6 +2787,20 @@
+ 
+   buffer->SetSize(size);
+ 
++  if (data && size > 0) {
++    const uint8_t* p = static_cast<const uint8_t*>(data);
++    RecordWebGLOp(
++        static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kBufferData),
++        {static_cast<int32_t>(target), static_cast<int32_t>(usage)}, {},
++        bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight(),
++        std::string(), std::vector<uint8_t>(p, p + size));
++  } else {
++    RecordWebGLOp(
++        static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kBufferDataSize),
++        {static_cast<int32_t>(target), static_cast<int32_t>(size),
++         static_cast<int32_t>(usage)},
++        {}, bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
++  }
+   ContextGL()->BufferData(target, static_cast<GLsizeiptr>(size), data, usage);
+ }
+ 
+@@ -2807,6 +2907,9 @@
+ void WebGLRenderingContextBase::clear(GLbitfield mask) {
+   if (isContextLost())
+     return;
++  RecordWebGLOp(static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kClear),
++                {static_cast<int32_t>(mask)}, {}, bridge_canvas_id_,
++                drawingBufferWidth(), drawingBufferHeight());
+   if (mask &
+       ~(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) {
+     SynthesizeGLError(GL_INVALID_VALUE, "clear", "invalid mask");
+@@ -2866,9 +2969,36 @@
+   clear_color_[1] = g;
+   clear_color_[2] = b;
+   clear_color_[3] = a;
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kClearColor), {},
++      {r, g, b, a}, bridge_canvas_id_, drawingBufferWidth(),
++      drawingBufferHeight());
+   ContextGL()->ClearColor(r, g, b, a);
+ }
+ 
++bool WebGLRenderingContextBase::ReadBridgePixels(std::vector<uint8_t>* out,
++                                                 int width, int height) {
++  if (bridge_canvas_id_ == 0 || bridge_webgl_unsupported_ || width <= 0 ||
++      height <= 0)
++    return false;
++  auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
++  if (!cb || !cb->Connected())
++    return false;
++  std::optional<std::vector<uint8_t>> px =
++      cb->RequestImageData(bridge_canvas_id_, 0, 0, width, height);
++  if (!px || px->size() != static_cast<size_t>(width) * height * 4)
++    return false;
++  // gl.readPixels is bottom-left origin; toDataURL/Skia want top-left -> flip.
++  out->resize(px->size());
++  const size_t row = static_cast<size_t>(width) * 4;
++  for (int y = 0; y < height; ++y) {
++    __builtin_memcpy(out->data() + static_cast<size_t>(y) * row,
++                     px->data() + static_cast<size_t>(height - 1 - y) * row,
++                     row);
++  }
++  return true;
++}
++
+ void WebGLRenderingContextBase::clearDepth(GLfloat depth) {
+   if (isContextLost())
+     return;
+@@ -2899,6 +3029,10 @@
+ void WebGLRenderingContextBase::compileShader(WebGLShader* shader) {
+   if (!ValidateWebGLProgramOrShader("compileShader", shader))
+     return;
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kCompileShader),
++      {static_cast<int32_t>(shader->BridgeId())}, {}, bridge_canvas_id_,
++      drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->CompileShader(ObjectOrZero(shader));
+ }
+ 
+@@ -3056,7 +3190,12 @@
+ }
+ 
+ WebGLBuffer* WebGLRenderingContextBase::createBuffer() {
+-  return MakeGarbageCollected<WebGLBuffer>(this);
++  auto* o = MakeGarbageCollected<WebGLBuffer>(this);
++  RecordWebGLCreate(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kCreateBuffer), o,
++      bridge_webgl_obj_counter_, bridge_canvas_id_, drawingBufferWidth(),
++      drawingBufferHeight());
++  return o;
+ }
+ 
+ WebGLFramebuffer* WebGLRenderingContextBase::createFramebuffer() {
+@@ -3064,11 +3203,21 @@
+ }
+ 
+ WebGLTexture* WebGLRenderingContextBase::createTexture() {
+-  return MakeGarbageCollected<WebGLTexture>(this);
++  auto* o = MakeGarbageCollected<WebGLTexture>(this);
++  RecordWebGLCreate(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kCreateTexture), o,
++      bridge_webgl_obj_counter_, bridge_canvas_id_, drawingBufferWidth(),
++      drawingBufferHeight());
++  return o;
+ }
+ 
+ WebGLProgram* WebGLRenderingContextBase::createProgram() {
+-  return MakeGarbageCollected<WebGLProgram>(this);
++  auto* o = MakeGarbageCollected<WebGLProgram>(this);
++  RecordWebGLCreate(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kCreateProgram), o,
++      bridge_webgl_obj_counter_, bridge_canvas_id_, drawingBufferWidth(),
++      drawingBufferHeight());
++  return o;
+ }
+ 
+ WebGLRenderbuffer* WebGLRenderingContextBase::createRenderbuffer() {
+@@ -3088,7 +3237,16 @@
+     return nullptr;
+   }
+ 
+-  return MakeGarbageCollected<WebGLShader>(this, type);
++  auto* o = MakeGarbageCollected<WebGLShader>(this, type);
++  if (auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
++      cb && cb->Connected()) {
++    o->SetBridgeId(++bridge_webgl_obj_counter_);
++    RecordWebGLOp(
++        static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kCreateShader),
++        {static_cast<int32_t>(o->BridgeId()), static_cast<int32_t>(type)}, {},
++        bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
++  }
++  return o;
+ }
+ 
+ void WebGLRenderingContextBase::cullFace(GLenum mode) {
+@@ -3363,6 +3521,10 @@
+   if (!ValidateDrawArrays("drawArrays"))
+     return;
+ 
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kDrawArrays),
++      {static_cast<int32_t>(mode), first, count}, {}, bridge_canvas_id_,
++      drawingBufferWidth(), drawingBufferHeight());
+   DrawWrapper("drawArrays", CanvasPerformanceMonitor::DrawType::kDrawArrays,
+               [&]() { ContextGL()->DrawArrays(mode, first, count); });
+ }
+@@ -3374,6 +3536,11 @@
+   if (!ValidateDrawElements("drawElements", type, offset))
+     return;
+ 
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kDrawElements),
++      {static_cast<int32_t>(mode), count, static_cast<int32_t>(type),
++       static_cast<int32_t>(offset)},
++      {}, bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
+   DrawWrapper("drawElements", CanvasPerformanceMonitor::DrawType::kDrawElements,
+               [&]() {
+                 ContextGL()->DrawElements(
+@@ -3443,6 +3610,10 @@
+   }
+ 
+   bound_vertex_array_object_->SetAttribEnabled(index, true);
++  RecordWebGLOp(static_cast<uint32_t>(
++                    blink::canvas_bridge::WebGLOp::kEnableVertexAttribArray),
++                {static_cast<int32_t>(index)}, {}, bridge_canvas_id_,
++                drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->EnableVertexAttribArray(index);
+ }
+ 
+@@ -3541,6 +3712,10 @@
+     return;
+   if (!ValidateTextureBinding("generateMipmap", target))
+     return;
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kGenerateMipmap),
++      {static_cast<int32_t>(target)}, {}, bridge_canvas_id_,
++      drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->GenerateMipmap(target);
+ }
+ 
+@@ -3893,17 +4068,54 @@
    if (isContextLost())
      return ScriptValue::CreateNull(script_state->GetIsolate());
    const int kIntZero = 0;
@@ -519,7 +845,7 @@
      case GL_ARRAY_BUFFER_BINDING:
        return WebGLAny(script_state, bound_array_buffer_.Get());
      case GL_BLEND:
-@@ -3923,7 +3966,8 @@
+@@ -3923,7 +4135,8 @@
      case GL_BLEND_SRC_RGB:
        return GetUnsignedIntParameter(script_state, pname);
      case GL_BLUE_BITS:
@@ -529,7 +855,7 @@
      case GL_COLOR_CLEAR_VALUE:
        return GetWebGLFloatArrayParameter(script_state, pname);
      case GL_COLOR_WRITEMASK:
-@@ -3940,7 +3984,8 @@
+@@ -3940,7 +4153,8 @@
      case GL_DEPTH_BITS:
        if (!framebuffer_binding_ && !CreationAttributes().depth)
          return WebGLAny(script_state, kIntZero);
@@ -539,7 +865,7 @@
      case GL_DEPTH_CLEAR_VALUE:
        return GetFloatParameter(script_state, pname);
      case GL_DEPTH_FUNC:
-@@ -3963,7 +4008,8 @@
+@@ -3963,7 +4177,8 @@
      case GL_GENERATE_MIPMAP_HINT:
        return GetUnsignedIntParameter(script_state, pname);
      case GL_GREEN_BITS:
@@ -549,7 +875,7 @@
      case GL_IMPLEMENTATION_COLOR_READ_FORMAT:
        return GetIntParameter(script_state, pname);
      case GL_IMPLEMENTATION_COLOR_READ_TYPE:
-@@ -3971,25 +4017,43 @@
+@@ -3971,25 +4186,43 @@
      case GL_LINE_WIDTH:
        return GetFloatParameter(script_state, pname);
      case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
@@ -601,7 +927,7 @@
      case GL_MAX_VIEWPORT_DIMS:
        return GetWebGLIntArrayParameter(script_state, pname);
      case GL_PACK_ALIGNMENT:
-@@ -4001,7 +4065,8 @@
+@@ -4001,7 +4234,8 @@
      case GL_POLYGON_OFFSET_UNITS:
        return GetFloatParameter(script_state, pname);
      case GL_RED_BITS:
@@ -611,7 +937,7 @@
      case GL_RENDERBUFFER_BINDING:
        return WebGLAny(script_state, renderbuffer_binding_.Get());
      case GL_RENDERER:
-@@ -4009,7 +4074,8 @@
+@@ -4009,7 +4243,8 @@
      case GL_SAMPLE_ALPHA_TO_COVERAGE:
        return GetBooleanParameter(script_state, pname);
      case GL_SAMPLE_BUFFERS:
@@ -621,7 +947,7 @@
      case GL_SAMPLE_COVERAGE:
        return GetBooleanParameter(script_state, pname);
      case GL_SAMPLE_COVERAGE_INVERT:
-@@ -4017,7 +4083,8 @@
+@@ -4017,7 +4252,8 @@
      case GL_SAMPLE_COVERAGE_VALUE:
        return GetFloatParameter(script_state, pname);
      case GL_SAMPLES:
@@ -631,7 +957,7 @@
      case GL_SCISSOR_BOX:
        return GetWebGLIntArrayParameter(script_state, pname);
      case GL_SCISSOR_TEST:
-@@ -4045,7 +4112,8 @@
+@@ -4045,7 +4281,8 @@
      case GL_STENCIL_BITS:
        if (!framebuffer_binding_ && !CreationAttributes().stencil)
          return WebGLAny(script_state, kIntZero);
@@ -641,7 +967,7 @@
      case GL_STENCIL_CLEAR_VALUE:
        return GetIntParameter(script_state, pname);
      case GL_STENCIL_FAIL:
-@@ -4065,7 +4133,8 @@
+@@ -4065,7 +4302,8 @@
      case GL_STENCIL_WRITEMASK:
        return GetUnsignedIntParameter(script_state, pname);
      case GL_SUBPIXEL_BITS:
@@ -651,7 +977,7 @@
      case GL_TEXTURE_BINDING_2D:
        return WebGLAny(
            script_state,
-@@ -4101,6 +4170,27 @@
+@@ -4101,6 +4339,27 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
@@ -679,7 +1005,7 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLRendererParam.Get()));
          return WebGLAny(script_state,
-@@ -4112,6 +4202,17 @@
+@@ -4112,6 +4371,17 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
@@ -697,7 +1023,7 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLVendorParam.Get()));
          return WebGLAny(script_state,
-@@ -4133,8 +4234,9 @@
+@@ -4133,8 +4403,9 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT:  // EXT_texture_filter_anisotropic
        if (ExtensionEnabled(kEXTTextureFilterAnisotropicName)) {
@@ -709,7 +1035,7 @@
        }
        SynthesizeGLError(
            GL_INVALID_ENUM, "getParameter",
-@@ -4438,6 +4540,15 @@
+@@ -4438,6 +4709,15 @@
      }
    }
  
@@ -725,15 +1051,63 @@
    return result;
  }
  
-@@ -5260,6 +5371,44 @@
+@@ -4751,7 +5031,19 @@
+       ObjectOrZero(program), name.Utf8().c_str());
+   if (uniform_location == -1)
+     return nullptr;
+-  return MakeGarbageCollected<WebGLUniformLocation>(program, uniform_location);
++  auto* loc =
++      MakeGarbageCollected<WebGLUniformLocation>(program, uniform_location);
++  if (auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
++      cb && cb->Connected()) {
++    loc->SetBridgeId(++bridge_webgl_obj_counter_);
++    RecordWebGLOp(static_cast<uint32_t>(
++                      blink::canvas_bridge::WebGLOp::kGetUniformLocation),
++                  {static_cast<int32_t>(program->BridgeId()),
++                   static_cast<int32_t>(loc->BridgeId())},
++                  {}, bridge_canvas_id_, drawingBufferWidth(),
++                  drawingBufferHeight(), name.Utf8());
++  }
++  return loc;
+ }
+ 
+ ScriptValue WebGLRenderingContextBase::getVertexAttrib(
+@@ -4971,6 +5263,10 @@
+     return;
+   }
+ 
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kLinkProgram),
++      {static_cast<int32_t>(program->BridgeId())}, {}, bridge_canvas_id_,
++      drawingBufferWidth(), drawingBufferHeight());
+   GLuint query = 0u;
+   if (ExtensionEnabled(kKHRParallelShaderCompileName)) {
+     ContextGL()->GenQueriesEXT(1, &query);
+@@ -5260,6 +5556,60 @@
        return;
      }
      ContextGL()->ReadPixels(x, y, width, height, format, type, data);
 +
++    // canvas-bridge: substitute the remote render's pixels (RGBA8 only).
++    bool cb_substituted = false;
++    if (format == GL_RGBA && type == GL_UNSIGNED_BYTE &&
++        bridge_canvas_id_ != 0 && !bridge_webgl_unsupported_) {
++      if (auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
++          cb && cb->Connected()) {
++        std::optional<std::vector<uint8_t>> cbpx =
++            cb->RequestImageData(bridge_canvas_id_, x, y, width, height);
++        if (cbpx &&
++            cbpx->size() == static_cast<size_t>(width) * height * 4) {
++          __builtin_memcpy(data, cbpx->data(), cbpx->size());
++          cb_substituted = true;
++        }
++      }
++    }
++
 +    // Fingerprint protection: perturb the pixels just read back.
 +    const base::CommandLine* command_line =
 +        base::CommandLine::ForCurrentProcess();
-+    if (command_line->HasSwitch(switches::kFingerprint)) {
++    if (!cb_substituted && command_line->HasSwitch(switches::kFingerprint)) {
 +      // Build an SkImageInfo describing the pixel layout.
 +      SkColorType color_type;
 +      SkAlphaType alpha_type = kUnpremul_SkAlphaType;
@@ -770,3 +1144,232 @@
    }
  }
  
+@@ -5371,6 +5721,10 @@
+     return;
+   String ascii_string = ReplaceNonASCII(string).Result();
+   shader->SetSource(string);
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kShaderSource),
++      {static_cast<int32_t>(shader->BridgeId())}, {}, bridge_canvas_id_,
++      drawingBufferWidth(), drawingBufferHeight(), ascii_string.Utf8());
+   DCHECK(ascii_string.Is8Bit() && ascii_string.ContainsOnlyAsciiOrEmpty());
+   const GLchar* shader_data = base::as_chars(ascii_string.Span8()).data();
+   const GLint shader_length = ascii_string.length();
+@@ -5673,6 +6027,11 @@
+                                  params.type, pixels);
+       break;
+   }
++  // canvas-bridge: any texture upload we did NOT forward (non-ArrayBufferView
++  // sources, 3D) leaves the server texture incomplete -> fall back to local.
++  if (bridge_canvas_id_ != 0 && !bridge_tex_handled_)
++    bridge_webgl_unsupported_ = true;
++  bridge_tex_handled_ = false;
+ }
+ 
+ void WebGLRenderingContextBase::TexImageStaticBitmapImage(
+@@ -5949,6 +6308,33 @@
+     return;
+   }
+ 
++  // canvas-bridge: forward the 2D texture pixel upload (procedural data path).
++  if (bridge_canvas_id_ != 0 &&
++      (params.function_id == kTexImage2D ||
++       params.function_id == kTexSubImage2D)) {
++    std::vector<uint8_t> tex(data.begin(), data.end());
++    if (params.function_id == kTexImage2D) {
++      RecordWebGLOp(
++          static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kTexImage2D),
++          {static_cast<int32_t>(params.target), params.level,
++           params.internalformat, params.width.value_or(0),
++           params.height.value_or(0), params.border,
++           static_cast<int32_t>(params.format),
++           static_cast<int32_t>(params.type)},
++          {}, bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight(),
++          std::string(), std::move(tex));
++    } else {
++      RecordWebGLOp(
++          static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kTexSubImage2D),
++          {static_cast<int32_t>(params.target), params.level, params.xoffset,
++           params.yoffset, params.width.value_or(0),
++           params.height.value_or(0), static_cast<int32_t>(params.format),
++           static_cast<int32_t>(params.type)},
++          {}, bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight(),
++          std::string(), std::move(tex));
++    }
++    bridge_tex_handled_ = true;
++  }
+   ScopedUnpackParametersResetRestore temporary_reset_unpack(
+       this, change_unpack_params);
+   TexImageBase(params, data.data());
+@@ -6842,12 +7228,21 @@
+ void WebGLRenderingContextBase::texParameterf(GLenum target,
+                                               GLenum pname,
+                                               GLfloat param) {
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kTexParameterf),
++      {static_cast<int32_t>(target), static_cast<int32_t>(pname)}, {param},
++      bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
+   TexParameter(target, pname, param, 0, true);
+ }
+ 
+ void WebGLRenderingContextBase::texParameteri(GLenum target,
+                                               GLenum pname,
+                                               GLint param) {
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kTexParameteri),
++      {static_cast<int32_t>(target), static_cast<int32_t>(pname),
++       static_cast<int32_t>(param)},
++      {}, bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
+   TexParameter(target, pname, 0, param, false);
+ }
+ 
+@@ -7095,6 +7490,9 @@
+     return;
+   }
+ 
++  RecordWebGLOp(static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kUniform1f),
++                {static_cast<int32_t>(location->BridgeId())}, {x},
++                bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->Uniform1f(location->Location(), x);
+ }
+ 
+@@ -7120,6 +7518,11 @@
+     return;
+   }
+ 
++  RecordWebGLOp(static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kUniform1i),
++                {static_cast<int32_t>(location->BridgeId()),
++                 static_cast<int32_t>(x)},
++                {}, bridge_canvas_id_, drawingBufferWidth(),
++                drawingBufferHeight());
+   ContextGL()->Uniform1i(location->Location(), x);
+ }
+ 
+@@ -7146,6 +7549,9 @@
+     return;
+   }
+ 
++  RecordWebGLOp(static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kUniform2f),
++                {static_cast<int32_t>(location->BridgeId())}, {x, y},
++                bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->Uniform2f(location->Location(), x, y);
+ }
+ 
+@@ -7199,6 +7605,9 @@
+     return;
+   }
+ 
++  RecordWebGLOp(static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kUniform3f),
++                {static_cast<int32_t>(location->BridgeId())}, {x, y, z},
++                bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->Uniform3f(location->Location(), x, y, z);
+ }
+ 
+@@ -7254,6 +7663,9 @@
+     return;
+   }
+ 
++  RecordWebGLOp(static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kUniform4f),
++                {static_cast<int32_t>(location->BridgeId())}, {x, y, z, w},
++                bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->Uniform4f(location->Location(), x, y, z, w);
+ }
+ 
+@@ -7337,6 +7749,18 @@
+                                        v, 16, 0, v.size(), &data, &length)) {
+     return;
+   }
++  {
++    std::vector<double> mv;
++    mv.reserve(static_cast<size_t>(length) * 16);
++    for (GLuint i = 0; i < length * 16; ++i)
++      mv.push_back(data[i]);
++    RecordWebGLOp(static_cast<uint32_t>(
++                      blink::canvas_bridge::WebGLOp::kUniformMatrix4fv),
++                  {static_cast<int32_t>(location->BridgeId()),
++                   transpose ? 1 : 0},
++                  std::move(mv), bridge_canvas_id_, drawingBufferWidth(),
++                  drawingBufferHeight());
++  }
+   ContextGL()->UniformMatrix4fv(location->Location(), length, transpose, data);
+ }
+ 
+@@ -7348,6 +7772,10 @@
+     return;
+   }
+ 
++  RecordWebGLOp(
++      static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kUseProgram),
++      {static_cast<int32_t>(program ? program->BridgeId() : 0)}, {},
++      bridge_canvas_id_, drawingBufferWidth(), drawingBufferHeight());
+   if (current_program_ != program) {
+     if (current_program_)
+       current_program_->OnDetached(ContextGL());
+@@ -7477,6 +7905,12 @@
+     return;
+   }
+ 
++  RecordWebGLOp(static_cast<uint32_t>(
++                    blink::canvas_bridge::WebGLOp::kVertexAttribPointer),
++                {static_cast<int32_t>(index), size, static_cast<int32_t>(type),
++                 normalized ? 1 : 0, stride, static_cast<int32_t>(offset)},
++                {}, bridge_canvas_id_, drawingBufferWidth(),
++                drawingBufferHeight());
+   bound_vertex_array_object_->SetArrayBufferForAttrib(
+       index, bound_array_buffer_.Get());
+   ContextGL()->VertexAttribPointer(
+@@ -7504,6 +7938,9 @@
+                                          GLsizei height) {
+   if (isContextLost())
+     return;
++  RecordWebGLOp(static_cast<uint32_t>(blink::canvas_bridge::WebGLOp::kViewport),
++                {x, y, width, height}, {}, bridge_canvas_id_,
++                drawingBufferWidth(), drawingBufferHeight());
+   ContextGL()->Viewport(x, y, width, height);
+ }
+ 
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+@@ -1972,6 +1972,21 @@
+   void RecordANGLEImplementation();
+ 
+  private:
++  // canvas-bridge: stable server-side WebGL surface id (0 = none yet).
++  uint32_t bridge_canvas_id_ = 0;
++  // canvas-bridge: monotonic counter handing each WebGL object a stable id.
++  uint32_t bridge_webgl_obj_counter_ = 0;
++  // canvas-bridge: set when the canvas uses a feature the bridge can't forward
++  // yet -> fall back to the local readback instead of garbage.
++  bool bridge_webgl_unsupported_ = false;
++  // canvas-bridge: set by the ArrayBufferView texImage path when it forwards an
++  // upload, so the TexImageBase backstop knows not to flag it unsupported.
++  bool bridge_tex_handled_ = false;
++  // canvas-bridge: serve toDataURL() from the remote render (Y-flipped to
++  // top-left for Skia); see html_canvas_element.cc::ToDataURLInternal.
++  bool ReadBridgePixels(std::vector<uint8_t>* out, int width,
++                        int height) override;
++
+   WebGLRenderingContextBase(CanvasRenderingContextHost*,
+                             scoped_refptr<base::SingleThreadTaskRunner>,
+                             std::unique_ptr<WebGraphicsContext3DProvider>,
+--- a/third_party/blink/renderer/modules/webgl/webgl_uniform_location.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_uniform_location.h
+@@ -42,12 +42,18 @@
+ 
+   GLint Location() const;
+ 
++  // Canvas bridge: stable id so the server can map this uniform location back
++  // to gl.getUniformLocation() on its own program (0 = unset).
++  uint32_t BridgeId() const { return bridge_id_; }
++  void SetBridgeId(uint32_t id) { bridge_id_ = id; }
++
+   void Trace(Visitor*) const override;
+ 
+  private:
+   Member<WebGLProgram> program_;
+   GLint location_;
+   unsigned link_count_;
++  uint32_t bridge_id_ = 0;
+ };
+ 
+ }  // namespace blink

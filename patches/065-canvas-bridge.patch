@@ -607,7 +607,7 @@
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_CANVAS_BRIDGE_CANVAS_BRIDGE_CLIENT_H_
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_codec.cc
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,334 @@
 +// Copyright 2026 The Clearcote Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license.
 +
@@ -766,6 +766,32 @@
 +  return w.Take();
 +}
 +
++std::vector<uint8_t> Encode(const CreateWebGLMessage& m) {
++  Writer w;
++  w.U32(static_cast<uint32_t>(MessageType::kCreateWebGL));
++  w.U32(m.canvas_id);
++  w.U32(m.width);
++  w.U32(m.height);
++  w.U32(m.context_type);
++  return w.Take();
++}
++
++std::vector<uint8_t> Encode(const WebGLOpMessage& m) {
++  Writer w;
++  w.U32(static_cast<uint32_t>(MessageType::kWebGLOp));
++  w.U32(m.canvas_id);
++  w.U32(m.op);
++  w.U32(static_cast<uint32_t>(m.ints.size()));
++  for (int32_t v : m.ints)
++    w.I32(v);
++  w.U32(static_cast<uint32_t>(m.floats.size()));
++  for (double v : m.floats)
++    w.F64(v);
++  w.Str(m.str);
++  w.Bytes(m.data);
++  return w.Take();
++}
++
 +std::vector<uint8_t> Encode(const GetImageDataMessage& m) {
 +  Writer w;
 +  w.U32(static_cast<uint32_t>(MessageType::kCanvas2DGetImageData));
@@ -852,6 +878,43 @@
 +  return r.ok() ? std::optional<MeasureTextMessage>(std::move(m)) : std::nullopt;
 +}
 +
++std::optional<CreateWebGLMessage> DecodeCreateWebGL(
++    base::span<const uint8_t> f) {
++  Reader r(f);
++  if (static_cast<MessageType>(r.U32()) != MessageType::kCreateWebGL)
++    return std::nullopt;
++  CreateWebGLMessage m;
++  m.canvas_id = r.U32();
++  m.width = r.U32();
++  m.height = r.U32();
++  m.context_type = r.U32();
++  return r.ok() ? std::optional<CreateWebGLMessage>(m) : std::nullopt;
++}
++
++std::optional<WebGLOpMessage> DecodeWebGLOp(base::span<const uint8_t> f) {
++  Reader r(f);
++  if (static_cast<MessageType>(r.U32()) != MessageType::kWebGLOp)
++    return std::nullopt;
++  WebGLOpMessage m;
++  m.canvas_id = r.U32();
++  m.op = r.U32();
++  uint32_t ni = r.U32();
++  if (!r.ok())
++    return std::nullopt;
++  m.ints.reserve(ni);
++  for (uint32_t i = 0; i < ni; ++i)
++    m.ints.push_back(r.I32());
++  uint32_t nf = r.U32();
++  if (!r.ok())
++    return std::nullopt;
++  m.floats.reserve(nf);
++  for (uint32_t i = 0; i < nf; ++i)
++    m.floats.push_back(r.F64());
++  m.str = r.Str();
++  m.data = r.Bytes();
++  return r.ok() ? std::optional<WebGLOpMessage>(std::move(m)) : std::nullopt;
++}
++
 +std::optional<GetImageDataMessage> DecodeGetImageData(
 +    base::span<const uint8_t> f) {
 +  Reader r(f);
@@ -881,7 +944,7 @@
 +}  // namespace blink::canvas_bridge
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_codec.h
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,209 @@
 +// Copyright 2026 The Clearcote Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license.
 +//
@@ -914,6 +977,32 @@
 +  kCanvas2DOp = 6,            // client -> server (one recorded 2D draw op)
 +  kMeasureText = 7,           // client -> server (request; reply reuses kImageData
 +                              // with the 9 metric doubles packed into pixels)
++  kCreateWebGL = 8,           // client -> server (create a server WebGL context)
++  kWebGLOp = 9,               // client -> server (one recorded WebGL command)
++};
++
++// WebGL command ids — must match the server's webgl_op_to_js dispatcher. A
++// single generic op message carries object ids (ints), numeric params (floats),
++// a string (shader source / attrib name), and binary (bufferData).
++enum class WebGLOp : uint32_t {
++  kUnknown = 0,
++  kCreateBuffer = 1, kCreateShader = 2, kCreateProgram = 3, kCreateTexture = 4,
++  kCreateFramebuffer = 5, kCreateRenderbuffer = 6, kDeleteObject = 9,
++  kShaderSource = 10, kCompileShader = 11, kAttachShader = 12,
++  kBindAttribLocation = 13, kLinkProgram = 14, kUseProgram = 15,
++  kGetUniformLocation = 16,
++  kBindBuffer = 20, kBufferData = 21, kBufferDataSize = 22, kBufferSubData = 23,
++  kEnableVertexAttribArray = 30, kDisableVertexAttribArray = 31,
++  kVertexAttribPointer = 32,
++  kUniform1f = 40, kUniform2f = 41, kUniform3f = 42, kUniform4f = 43,
++  kUniform1i = 44, kUniformMatrix4fv = 50,
++  kBindTexture = 60, kTexImage2D = 61, kTexParameteri = 62, kActiveTexture = 63,
++  kGenerateMipmap = 64, kTexParameterf = 65, kTexSubImage2D = 66,
++  kBindFramebuffer = 70, kFramebufferTexture2D = 71, kBindRenderbuffer = 72,
++  kRenderbufferStorage = 73, kFramebufferRenderbuffer = 74,
++  kViewport = 80, kClearColor = 81, kClear = 82, kEnable = 83, kDisable = 84,
++  kBlendFunc = 85, kDepthFunc = 86, kPixelStorei = 87, kScissor = 88,
++  kDrawArrays = 90, kDrawElements = 91,
 +};
 +
 +// Canvas2D operation ids — must match the server's dispatcher. A single generic
@@ -1008,6 +1097,22 @@
 +  std::string text;
 +};
 +
++struct CreateWebGLMessage {
++  uint32_t canvas_id = 0;
++  uint32_t width = 0;
++  uint32_t height = 0;
++  uint32_t context_type = 1;  // 1 = webgl, 2 = webgl2
++};
++
++struct WebGLOpMessage {
++  uint32_t canvas_id = 0;
++  uint32_t op = 0;             // WebGLOp
++  std::vector<int32_t> ints;   // object ids + GLenum/GLint params
++  std::vector<double> floats;  // numeric params
++  std::string str;             // shader source / attrib name (empty if unused)
++  std::vector<uint8_t> data;   // bufferData / texImage2D binary (empty if unused)
++};
++
 +struct GetImageDataMessage {
 +  uint32_t canvas_id = 0;
 +  int32_t x = 0;
@@ -1031,6 +1136,8 @@
 +std::vector<uint8_t> Encode(const CreateCanvas2DMessage&);
 +std::vector<uint8_t> Encode(const Canvas2DOpMessage&);
 +std::vector<uint8_t> Encode(const MeasureTextMessage&);
++std::vector<uint8_t> Encode(const CreateWebGLMessage&);
++std::vector<uint8_t> Encode(const WebGLOpMessage&);
 +std::vector<uint8_t> Encode(const GetImageDataMessage&);
 +std::vector<uint8_t> Encode(const ImageDataMessage&);
 +
@@ -1039,6 +1146,8 @@
 +std::optional<CreateCanvas2DMessage> DecodeCreateCanvas2D(base::span<const uint8_t>);
 +std::optional<Canvas2DOpMessage> DecodeCanvas2DOp(base::span<const uint8_t>);
 +std::optional<MeasureTextMessage> DecodeMeasureText(base::span<const uint8_t>);
++std::optional<CreateWebGLMessage> DecodeCreateWebGL(base::span<const uint8_t>);
++std::optional<WebGLOpMessage> DecodeWebGLOp(base::span<const uint8_t>);
 +std::optional<GetImageDataMessage> DecodeGetImageData(base::span<const uint8_t>);
 +std::optional<ImageDataMessage> DecodeImageData(base::span<const uint8_t>);
 +
