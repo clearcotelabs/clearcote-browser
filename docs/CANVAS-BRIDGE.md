@@ -5,11 +5,19 @@ coherent with the GPU your profile claims.
 
 > **Status:** experimental — `v0.1.0-pre.12`. Opt-in: with no
 > `--canvas-bridge-url`, clearcote renders entirely locally, exactly as before.
-> Canvas2D (incl. `measureText`) **and WebGL** are forwarded: geometry, shaders,
-> uniforms, draws, **procedural textures** (`texImage2D` from a pixel array),
-> `readPixels` and `toDataURL`. A WebGL canvas that sources a texture from an
-> image / 2D-canvas / video, or uses 3D textures, automatically **falls back to
-> local rendering** for that canvas, so it is never returned half-rendered.
+> Canvas2D (incl. `measureText`) and **WebGL** are both forwarded: geometry,
+> shaders, uniforms, draws, **procedural textures** (`texImage2D` from a pixel
+> array), `readPixels` **and** `toDataURL`. A WebGL canvas that sources a
+> texture from an image / 2D-canvas / video, or uses 3D textures, automatically
+> **falls back to local rendering** for that canvas, so it is never returned
+> half-rendered.
+>
+> **Engine support:** `--canvas-bridge-url` / `--canvas-bridge-auth` (the bridge itself)
+> work on the current released build. The per-origin policy switches
+> (`--canvas-bridge-mode` / `-allow` / `-deny` / `-fallback`) require the **latest engine
+> build** and are silently ignored (no-op) by older binaries — so the SDK's `canvasBridge`
+> option is forward-compatible: setting `mode`/`allow`/`deny`/`fallback` on an older binary
+> simply bridges all origins with `fallback=block`.
 
 ## Why
 
@@ -132,7 +140,10 @@ clearcote \
 | `--no-sandbox` | **Required** — the client opens the bridge socket from the renderer process, which the sandbox blocks. |
 | `--fingerprint=<seed>` | Your persona seed. |
 | `--fingerprint-gpu-vendor` / `--fingerprint-gpu-renderer` | Set to the render GPU from step 3 so the reported GPU string matches the bridged pixels. |
-| `--canvas-bridge-auth=user:secret` | Optional HTTP Basic credentials (if your deployment adds auth in front of the server). |
+| `--canvas-bridge-auth=user:secret` | Optional HTTP Basic credentials (if your deployment adds auth in front of the server). Passed as a process argument (visible in `ps` / Task Manager) — use a per-host secret on a private network, not a shared/long-lived one. |
+| `--canvas-bridge-mode=off\|all\|allow\|deny` | Per-origin policy (default `all`). Restrict bridging to the origins where canvas coherence is actually scored. |
+| `--canvas-bridge-allow=a.com,b.com` / `--canvas-bridge-deny=...` | eTLD+1 list for `mode=allow` / `mode=deny`. |
+| `--canvas-bridge-fallback=block\|local` | Cold cache-miss behavior (default `block`). `local` = never stall: a miss serves the fast local render instead of waiting on the bridge. |
 
 ### 5. Verify
 
@@ -156,18 +167,21 @@ The canvas identity is then that machine's GPU.
 
 ## Using it from the SDK
 
-Pass the flags through your launch arguments:
+Use the first-class `canvasBridge` option — it emits the switches and auto-adds the
+required `--no-sandbox`:
 
 ```python
 import clearcote
 browser = clearcote.launch(
     fingerprint="user-1",
-    args=[
-        "--canvas-bridge-url=ws://127.0.0.1:9099",
-        "--no-sandbox",
-        "--fingerprint-gpu-vendor=Google Inc. (Intel)",
-        "--fingerprint-gpu-renderer=ANGLE (Intel, Intel(R) UHD Graphics ... D3D11)",
-    ],
+    gpu_vendor="Google Inc. (Intel)",
+    gpu_renderer="ANGLE (Intel, Intel(R) UHD Graphics ... D3D11)",
+    canvas_bridge={
+        "url": "ws://127.0.0.1:9099",
+        "mode": "allow",                 # only bridge where canvas is scored
+        "allow": ["target-site.com"],
+        "fallback": "local",             # never stall on a cold miss
+    },
 )
 ```
 
@@ -175,14 +189,18 @@ browser = clearcote.launch(
 // Node
 const browser = await clearcote.launch({
   fingerprint: "user-1",
-  args: [
-    "--canvas-bridge-url=ws://127.0.0.1:9099",
-    "--no-sandbox",
-    "--fingerprint-gpu-vendor=Google Inc. (Intel)",
-    "--fingerprint-gpu-renderer=ANGLE (Intel, Intel(R) UHD Graphics ... D3D11)",
-  ],
+  gpuVendor: "Google Inc. (Intel)",
+  gpuRenderer: "ANGLE (Intel, Intel(R) UHD Graphics ... D3D11)",
+  canvasBridge: {
+    url: "ws://127.0.0.1:9099",
+    mode: "allow",
+    allow: ["target-site.com"],
+    fallback: "local",
+  },
 });
 ```
+
+(You can still pass the raw `--canvas-bridge-*` flags via `args` if you prefer.)
 
 ## Operational notes & gotchas
 
@@ -209,14 +227,42 @@ const browser = await clearcote.launch({
   network or an encrypted tunnel (Tailscale, WireGuard, SSH `-L`). Never expose the
   server's port on the public internet.
 
+## Latency & timing
+
+A synchronous canvas readback (`getImageData`/`toDataURL`/`readPixels`/`measureText`)
+over the bridge is a network round-trip on the renderer thread. Against a
+*latency-aware* detector, that round-trip is itself a signal — distinct from the
+static canvas/WebGL hash the bridge makes coherent. clearcote mitigates this at the
+engine level; tune it for your target:
+
+- **Prefetch + cache (automatic).** After each draw, the engine speculatively fetches
+  the surface in the background and caches it. Any read that is separated from the
+  last draw by *any* async boundary — animation frames, deferred reads, repeated
+  reads — is served from cache with **no round-trip** (a real, fast `performance.now()`).
+  Only the *first synchronous read immediately after a draw* can still pay the RTT.
+- **`--canvas-bridge-fallback=local` (never stall).** On a cold cache miss, serve the
+  fast local render instead of waiting on the bridge. The warm/coherent cache still
+  serves most reads; only the rare cold read is local. Best when you want coherence
+  *and* must never present a readback stall.
+- **`--canvas-bridge-mode` (per-origin).** Bridge only the origins where canvas
+  coherence is actually scored; serve everything else locally (fast, and using the
+  coherent persona GPU strings). On non-bridged origins clearcote behaves exactly as
+  it does with no bridge configured.
+- **Collapse the RTT.** The only way to keep coherence *and* erase the timing
+  difference entirely is to put the render host on the same LAN/datacenter so the RTT
+  sits within local-GPU readback variance. A far, residential render GPU and a
+  zero-latency readback are mutually exclusive — pick per target. (Residential *IP* is
+  a proxy concern, independent of where pixels render.)
+
 ## Caveats & limits
 
-- **Canvas2D + measureText** are fully bridged. **WebGL** is bridged too —
-  geometry, shaders, uniforms, draws, **procedural textures** (`texImage2D` from
-  a pixel array), `readPixels` and `toDataURL`. Textures sourced from an image /
-  2D-canvas / video / `ImageBitmap`, and 3D textures, fall back to local
-  rendering for that canvas (so they stay correct but un-bridged).
+- **Canvas2D, measureText, and WebGL** (geometry, shaders, uniforms, draws,
+  `readPixels`, `toDataURL`, and procedural `texImage2D` textures) are all bridged.
+  Image/canvas/video-sourced WebGL textures fall back to the local render rather than
+  bridging.
 - **`--no-sandbox` is required** on the client.
+- The first synchronous read right after a draw still pays one round-trip — see
+  **Latency & timing** for the prefetch/`fallback=local`/per-origin mitigations.
 - Graceful fallback: if the bridge is unreachable, clearcote logs a warning and
   **renders locally** — a misconfigured bridge degrades gracefully, it does not break
   the page.

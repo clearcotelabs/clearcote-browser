@@ -72,9 +72,34 @@ export interface FingerprintOptions {
    * machine or incognito; set a realistic on-disk value (e.g. `250000` for ~244 GB).
    */
   storageQuota?: number;
+  /**
+   * Canvas bridge — forward canvas/WebGL readbacks to a remote real-GPU host so the pixels a page
+   * hashes are coherent with the GPU your persona claims. Setting `url` enables it and auto-adds
+   * `--no-sandbox` (the bridge opens its socket from the renderer process).
+   *
+   * Latency note: a synchronous readback over the bridge is a network round-trip on the renderer
+   * thread (a timing signal vs latency-aware detectors). Mitigations are built in — the engine
+   * prefetches+caches so deferred/animated/repeated reads don't block — and you can tune behavior
+   * here: `mode` restricts bridging to the origins where canvas coherence is actually scored, and
+   * `fallback: "local"` makes a cold cache miss serve the fast local render instead of stalling.
+   */
+  canvasBridge?: {
+    /** Bridge endpoint, "ws://host:port[/path]". Required to enable the bridge. */
+    url: string;
+    /** HTTP Basic credentials "user:secret"; must match the server. */
+    auth?: string;
+    /** Per-origin policy: "off" | "all" (default) | "allow" | "deny". */
+    mode?: "off" | "all" | "allow" | "deny";
+    /** eTLD+1 list bridged when mode="allow". */
+    allow?: string[];
+    /** eTLD+1 list NOT bridged when mode="deny". */
+    deny?: string[];
+    /** Cold cache-miss behavior: "block" (default) | "local" (never stall; render locally). */
+    fallback?: "block" | "local";
+  };
 }
 
-const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
+export const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "fingerprint",
   "platform",
   "platformVersion",
@@ -91,6 +116,7 @@ const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "fingerprintNoise",
   "fingerprintProfile",
   "storageQuota",
+  "canvasBridge",
 ];
 
 /** Split an options object into its fingerprint half and the remaining (Playwright) half. */
@@ -204,5 +230,17 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // tools/fingerprint-collect. Its fields override the seed-derived persona; absent fields fall
   // back to the seed, so partial profiles stay coherent.
   if (o.fingerprintProfile) args.push(`--fingerprint-profile=${encodeProfile(o.fingerprintProfile)}`);
+  // Canvas bridge: forward canvas/WebGL readbacks to a remote real-GPU host. Enabling it
+  // (url set) requires --no-sandbox (the bridge opens its socket from the renderer process).
+  if (o.canvasBridge?.url) {
+    const cb = o.canvasBridge;
+    args.push(`--canvas-bridge-url=${cb.url}`);
+    if (cb.auth) args.push(`--canvas-bridge-auth=${cb.auth}`);
+    if (cb.mode) args.push(`--canvas-bridge-mode=${cb.mode}`);
+    if (cb.allow?.length) args.push(`--canvas-bridge-allow=${cb.allow.join(",")}`);
+    if (cb.deny?.length) args.push(`--canvas-bridge-deny=${cb.deny.join(",")}`);
+    if (cb.fallback) args.push(`--canvas-bridge-fallback=${cb.fallback}`);
+    if (!args.includes("--no-sandbox")) args.push("--no-sandbox");
+  }
   return args;
 }

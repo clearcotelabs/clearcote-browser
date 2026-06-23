@@ -25,12 +25,14 @@ import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } fro
 import { resolveGeo, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
 import { agentArgs, splitAgentOptions, type AgentOptions } from "./agent.js";
+import { resolveProfileOptions, Profile } from "./profile.js";
 import { RELEASE } from "./release.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
 export { resolveGeo, type Geo } from "./geoip.js";
 export type { HumanizeOptions } from "./humanize.js";
+export { Profile, listProfiles, loadProfile, PROFILE_DIR, type ProfileOptions } from "./profile.js";
 export {
   runAgentTask,
   agentArgs,
@@ -48,8 +50,15 @@ interface GeoipOption {
   geoip?: boolean;
 }
 
+/** When set, launch a saved persona ({@link Profile}) — by name (under `CLEARCOTE_PROFILE_DIR`),
+ * by path, or a `Profile` instance. Its saved options form the base; any options passed alongside
+ * here override them. */
+interface ProfileOption {
+  profile?: string | Profile;
+}
+
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, HumanizeOptions, DownloadOptions {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, HumanizeOptions, DownloadOptions {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
@@ -58,6 +67,7 @@ export interface PersistentContextOptions
     FingerprintOptions,
     AgentOptions,
     GeoipOption,
+    ProfileOption,
     HumanizeOptions,
     DownloadOptions {}
 
@@ -102,7 +112,9 @@ export async function download(options: DownloadOptions = {}): Promise<string> {
 
 /** Launch Clearcote and return a standard Playwright {@link Browser}. */
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
-  const { executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = options;
+  // profile= a saved persona: its options are the base, explicit options override.
+  const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
+  const { profile: _profile, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
@@ -125,7 +137,8 @@ export async function launchPersistentContext(
   userDataDir: string,
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
-  const { executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = options;
+  const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
+  const { profile: _profile, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
@@ -170,4 +183,16 @@ export async function launchAgent(options: LaunchAgentOptions = {}): Promise<Bro
 }
 
 import { runAgentTask } from "./agent.js";
-export default { launch, launchPersistentContext, launchAgent, executablePath, download, runAgentTask, RELEASE };
+import { listProfiles, loadProfile } from "./profile.js";
+export default {
+  launch,
+  launchPersistentContext,
+  launchAgent,
+  executablePath,
+  download,
+  runAgentTask,
+  Profile,
+  listProfiles,
+  loadProfile,
+  RELEASE,
+};

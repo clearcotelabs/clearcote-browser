@@ -158,13 +158,40 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `disableGpuFingerprint` | `--disable-gpu-fingerprint` | Turn off GPU/WebGL spoofing. |
 | `geoip` | _(directive)_ | `true` → resolve the proxy's exit-IP geo and auto-fill timezone/acceptLanguage/location/**webrtcIp**. |
 | `fingerprintProfile` | `--fingerprint-profile` | A real machine's captured fingerprint (file path / object / JSON string; the SDK gzip+base64-encodes it). Fields present override the seed-derived persona; absent fields fall back to `fingerprint`. |
+| `canvasBridge` | `--canvas-bridge-*` | Forward canvas/WebGL readbacks to a remote real-GPU host so the pixels a page hashes match the GPU your persona claims. `{ url, auth?, mode?, allow?, deny?, fallback? }`; setting `url` auto-adds `--no-sandbox`. See [docs/CANVAS-BRIDGE.md](../../docs/CANVAS-BRIDGE.md). |
+
+## Saved profiles (`Profile`)
+
+A `Profile` bundles a persona (seed, GPU, brand, …) **and** its `canvasBridge` config under one
+name you can persist and re-launch — so the claimed GPU, the bridge endpoint, and the bridge's
+GPU-keyed cache stay coherent because they travel together.
+
+```ts
+import { Profile, launch } from "clearcote";
+
+// save once
+await new Profile("acct-1", {
+  fingerprint: "acct-1",
+  gpuVendor: "Google Inc. (Intel)",
+  gpuRenderer: "ANGLE (Intel, Intel(R) UHD Graphics ... D3D11)",
+  canvasBridge: { url: "ws://127.0.0.1:9099", auth: "user:secret" },
+}).save();
+
+// re-launch anywhere (explicit options override the saved ones)
+const browser = await Profile.load("acct-1").launch({ headless: false });
+// equivalently: await launch({ profile: "acct-1" });
+```
+
+Profiles are JSON at `~/.clearcote/profiles/<name>.json` (set `CLEARCOTE_PROFILE_DIR` to relocate).
 
 ## API
 
-- `launch(options?)` → `Promise<Browser>` — launch and get a Playwright `Browser`.
+- `launch(options?)` → `Promise<Browser>` — launch and get a Playwright `Browser`. Pass `profile` (a name, path, or `Profile`) to launch a saved persona.
 - `launchPersistentContext(userDataDir, options?)` → `Promise<BrowserContext>`.
 - `executablePath(options?)` → `Promise<string>` — resolve (download/verify if needed) the chrome.exe path, e.g. for raw `chromium.launch({ executablePath })`.
 - `download(options?)` → `Promise<string>` — pre-fetch + verify the binary without launching.
+- `Profile` — `new Profile(name, options)`, `.save(path?)`, `Profile.load(name)`, `.launch(overrides?)`, `.launchPersistentContext(dir, overrides?)`.
+- `listProfiles()` → `string[]`, `loadProfile(name)` → `Profile`.
 - `RELEASE` — the pinned release metadata (tag, version, sha256).
 
 ## Binary resolution & verification

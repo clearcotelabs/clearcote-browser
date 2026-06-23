@@ -159,13 +159,39 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `disable_gpu_fingerprint` | `--disable-gpu-fingerprint` | Turn off GPU/WebGL spoofing. |
 | `geoip` | _(directive)_ | `True` → resolve the proxy's exit-IP geo and auto-fill timezone/accept_language/location/**webrtc_ip**. |
 | `fingerprint_profile` | _(directive → `--fingerprint-profile`)_ | A real captured machine profile (file path / dict / JSON string); the SDK gzip+base64-encodes it. Fields present **override** the seed-derived persona; absent fields fall back to `fingerprint`. Also derives `accept_language` from the profile's `navigator.languages` when none is set. |
+| `canvas_bridge` | _(→ `--canvas-bridge-*`)_ | Forward canvas/WebGL readbacks to a remote real-GPU host so the pixels a page hashes match the GPU your persona claims. `{"url", "auth", "mode", "allow", "deny", "fallback"}`; setting `url` auto-adds `--no-sandbox`. See [docs/CANVAS-BRIDGE.md](../../docs/CANVAS-BRIDGE.md). |
+
+## Saved profiles (`Profile`)
+
+A `Profile` bundles a persona (seed, GPU, brand, …) **and** its `canvas_bridge` config under one
+name you can persist and re-launch — the claimed GPU, the bridge endpoint, and the bridge's
+GPU-keyed cache stay coherent because they travel together.
+
+```python
+from clearcote import Profile, launch
+
+# save once
+Profile("acct-1", {
+    "fingerprint": "acct-1",
+    "gpu_vendor": "Google Inc. (Intel)",
+    "gpu_renderer": "ANGLE (Intel, Intel(R) UHD Graphics ... D3D11)",
+    "canvas_bridge": {"url": "ws://127.0.0.1:9099", "auth": "user:secret"},
+}).save()
+
+# re-launch anywhere (explicit kwargs override the saved options)
+browser = Profile.load("acct-1").launch(headless=False)
+# equivalently: launch(profile="acct-1")
+```
+
+Profiles are JSON at `~/.clearcote/profiles/<name>.json` (set `CLEARCOTE_PROFILE_DIR` to relocate).
 
 ## API
 
-- `launch(**options)` → Playwright `Browser`.
+- `launch(**options)` → Playwright `Browser`. Pass `profile=` (a name, path, or `Profile`) to launch a saved persona.
 - `launch_persistent_context(user_data_dir, **options)` → Playwright `BrowserContext`.
 - `executable_path(executable_path=None, cache_dir=None, quiet=False)` → `str` — resolve (download/verify if needed) the chrome.exe path.
 - `download(cache_dir=None, quiet=False)` → `str` — pre-fetch + verify without launching.
+- `Profile` — `Profile(name, options)`, `.save(path=None)`, `Profile.load(name)`, `.launch(**overrides)`, `.launch_persistent_context(dir, **overrides)`; plus `list_profiles()`, `load_profile(name)`.
 - `RELEASE` — the pinned release metadata (tag, version, sha256).
 
 ## Binary resolution & verification

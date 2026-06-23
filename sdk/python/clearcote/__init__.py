@@ -20,6 +20,7 @@ import sys
 from ._agent import AGENT_KEYS, OPENROUTER_BASE_URL, agent_args, run_agent_task
 from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args
 from ._humanize import install_humanize, install_humanize_on_context
+from ._profile import Profile, list_profiles, load_profile, resolve_profile_options
 from .download import ensure_binary
 from .geoip import resolve_geo
 from .release import RELEASE
@@ -32,11 +33,14 @@ __all__ = [
     "download",
     "run_agent_task",
     "resolve_geo",
+    "Profile",
+    "list_profiles",
+    "load_profile",
     "OPENROUTER_BASE_URL",
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.8.2"
+__version__ = "0.9.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -99,6 +103,12 @@ def _guard(exe):
 
 
 def _prepare(kwargs):
+    # profile= a saved persona (name, path, or Profile): its options are the base layer;
+    # explicit kwargs passed to launch() override them.
+    profile = kwargs.pop("profile", None)
+    if profile is not None:
+        for key, value in resolve_profile_options(profile).items():
+            kwargs.setdefault(key, value)
     geoip = kwargs.pop("geoip", False)
     humanize = kwargs.pop("humanize", False)
     show_cursor = kwargs.pop("show_cursor", False)

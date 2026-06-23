@@ -28,6 +28,7 @@ FINGERPRINT_KEYS = (
     "fingerprint_noise",
     "fingerprint_profile",
     "storage_quota",
+    "canvas_bridge",
 )
 
 # kwarg -> switch name (without leading "--"). disable_gpu_fingerprint is a boolean flag,
@@ -156,4 +157,26 @@ def fingerprint_args(opts):
     profile = opts.get("fingerprint_profile")
     if profile:
         args.append(f"--fingerprint-profile={encode_profile(profile)}")
+    # canvas_bridge forwards canvas/WebGL readbacks to a remote real-GPU host. Passed as a dict:
+    # {"url": "ws://host:port", "auth": "user:secret", "mode": "off|all|allow|deny",
+    #  "allow": [...eTLD+1], "deny": [...eTLD+1], "fallback": "block|local"}. Enabling it (url set)
+    # requires --no-sandbox (the bridge opens its socket from the renderer). Latency note: a
+    # synchronous readback is a network round-trip on the renderer thread; the engine prefetches+
+    # caches deferred/animated reads, and fallback="local" serves a cold miss locally instead of
+    # stalling. Use mode to restrict bridging to origins where canvas coherence is actually scored.
+    cb = opts.get("canvas_bridge")
+    if cb and cb.get("url"):
+        args.append(f"--canvas-bridge-url={cb['url']}")
+        if cb.get("auth"):
+            args.append(f"--canvas-bridge-auth={cb['auth']}")
+        if cb.get("mode"):
+            args.append(f"--canvas-bridge-mode={cb['mode']}")
+        if cb.get("allow"):
+            args.append("--canvas-bridge-allow=" + ",".join(cb["allow"]))
+        if cb.get("deny"):
+            args.append("--canvas-bridge-deny=" + ",".join(cb["deny"]))
+        if cb.get("fallback"):
+            args.append(f"--canvas-bridge-fallback={cb['fallback']}")
+        if "--no-sandbox" not in args:
+            args.append("--no-sandbox")
     return args
