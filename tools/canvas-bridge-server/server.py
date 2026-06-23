@@ -1,19 +1,33 @@
 #!/usr/bin/env python3
-"""Canvas-bridge REAL render server.
+"""Canvas-bridge render server.
 
-Unlike the stub, this renders forwarded ops on an actual **headless clearcote**
-(real Chromium canvas pipeline on the host GPU), so the pixels it returns are
-genuine Chrome output for the server host's GPU. It:
+Replays the canvas/WebGL operations forwarded by a clearcote client on a *real*
+browser and returns the genuine readback pixels. Whatever GPU that browser runs on
+becomes the canvas/WebGL identity your clients present, so the readback APIs
+(getImageData / toDataURL / readPixels / measureText) stay coherent with real
+hardware instead of the scraper host's GPU.
 
-  * speaks the clearcote LE codec over RFC 6455 (async),
-  * launches one headless clearcote and reuses its page,
-  * buffers Canvas2D ops per server-side canvas id and, on getImageData,
-    replays them on a real OffscreenCanvas via page.evaluate and returns the
-    actual getImageData bytes.
+Two render backends:
 
-This is the "headless clearcote server" the docs spec as --canvas-bridge-server.
+  --backend local --chrome <path>
+        Launch a local headless clearcote and render on THIS host's GPU. Simple, but
+        the canvas identity is your own machine's GPU.
 
-    python cb_render_server.py --chrome <path> [--port 9099] [--fingerprint 99117]
+  --backend cdp --cdp-url <ws(s)://...>
+        Connect over the Chrome DevTools Protocol to a browser running somewhere with
+        the GPU you want to present, and render there. **Bring your own browser host.**
+        Anything that exposes a CDP/WebSocket endpoint works: a cloud browser service,
+        or a browser you run on a spare machine with `--remote-debugging-port`. Pick a
+        host whose GPU is a *real consumer GPU* (not a datacenter card or a software
+        rasterizer) if you want a plausible consumer canvas identity.
+        See get_cdp_url() to plug a provider that mints short-lived sessions via an API.
+
+The server speaks the clearcote little-endian bridge codec over RFC 6455 (async),
+buffers ops per server-side canvas id, and on a readback request replays them on a
+real OffscreenCanvas via page.evaluate.
+
+    python server.py --backend local --chrome <path> [--port 9099]
+    python server.py --backend cdp --cdp-url ws://127.0.0.1:9222/... [--port 9099]
 """
 import argparse
 import asyncio
@@ -27,6 +41,145 @@ from playwright.async_api import async_playwright
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 HELLO, WELCOME, CREATE_CANVAS2D, GET_IMAGE_DATA, IMAGE_DATA, CANVAS2D_OP, MEASURE_TEXT = 1, 2, 3, 4, 5, 6, 7
+CREATE_WEBGL, WEBGL_OP = 8, 9
+
+
+# ============================================================================
+#  Render backends. Each exposes:
+#     await backend.start()        -> establish a Playwright Page (backend.page)
+#     await backend.ensure()       -> (re)connect if the page/session died
+#     backend.gpu_vendor/renderer  -> real GPU strings for the Welcome message
+#     await backend.close()
+#  handle_client() only touches backend.page + backend.lock, so the rest of the
+#  server is identical for every backend.
+# ============================================================================
+
+
+async def _probe_gpu(page):
+    """Read the render browser's REAL WebGL vendor/renderer (reported in Welcome)."""
+    try:
+        info = await page.evaluate(
+            "() => { const c=new OffscreenCanvas(1,1);"
+            "const gl=c.getContext('webgl')||c.getContext('experimental-webgl');"
+            "if(!gl)return null;"
+            "const e=gl.getExtension('WEBGL_debug_renderer_info');"
+            "return {vendor: e?gl.getParameter(e.UNMASKED_VENDOR_WEBGL):gl.getParameter(gl.VENDOR),"
+            "renderer: e?gl.getParameter(e.UNMASKED_RENDERER_WEBGL):gl.getParameter(gl.RENDERER)};}")
+        if info:
+            return info.get("vendor") or "", info.get("renderer") or ""
+    except Exception as e:  # noqa: BLE001
+        print("[backend] GPU probe failed:", e, flush=True)
+    return "", ""
+
+
+async def _warm(page):
+    """Touch the GL + 2D pipelines so the first client-facing readback skips cold start."""
+    try:
+        await page.evaluate(
+            "() => { const g=new OffscreenCanvas(8,8).getContext('webgl');"
+            "if(g){g.clear(g.COLOR_BUFFER_BIT);}"
+            "const x=new OffscreenCanvas(8,8).getContext('2d');"
+            "x.fillRect(0,0,8,8); x.getImageData(0,0,8,8); }")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+class LocalBackend:
+    """Render on a local headless clearcote (this host's GPU)."""
+
+    def __init__(self, pw, chrome, fingerprint):
+        self.pw, self.chrome, self.fingerprint = pw, chrome, fingerprint
+        self.browser = self.page = None
+        self.lock = asyncio.Lock()
+        self.gpu_vendor = self.gpu_renderer = ""
+
+    async def start(self):
+        self.browser = await self.pw.chromium.launch(
+            executable_path=self.chrome, headless=True,
+            args=["--no-first-run", "--no-sandbox",
+                  "--fingerprint=" + self.fingerprint] if self.fingerprint else
+                 ["--no-first-run", "--no-sandbox"],
+            ignore_default_args=["--enable-automation"])
+        self.page = await self.browser.new_page()
+        await self.page.goto("about:blank")
+        self.gpu_vendor, self.gpu_renderer = await _probe_gpu(self.page)
+        await _warm(self.page)
+        print("[backend] local headless browser up; GPU=%r" % self.gpu_renderer, flush=True)
+
+    async def ensure(self):
+        if self.page is None or self.page.is_closed():
+            await self.start()
+
+    async def close(self):
+        if self.browser:
+            await self.browser.close()
+
+
+class RemoteCDPBackend:
+    """Render on ANY browser reachable over the Chrome DevTools Protocol.
+
+    Bring your own browser host. `cdp_url` is a CDP/WebSocket endpoint to a browser
+    running on the GPU you want to present.
+
+    Providers that issue short-lived sessions via an API: override get_cdp_url() to
+    (1) call your provider to create a session and (2) return its CDP WebSocket URL,
+    and stop the session in close() (closing the CDP connection usually does NOT end
+    the remote session or its billing -- you must call the provider's stop endpoint).
+    Keep credentials in the environment; never hard-code them.
+    """
+
+    def __init__(self, pw, cdp_url):
+        self.pw, self.cdp_url = pw, cdp_url
+        self.browser = self.page = None
+        self.lock = asyncio.Lock()
+        self.gpu_vendor = self.gpu_renderer = ""
+
+    def get_cdp_url(self):
+        if not self.cdp_url:
+            raise SystemExit("--backend cdp requires --cdp-url (or override get_cdp_url())")
+        return self.cdp_url
+
+    async def _connect(self, url):
+        self.browser = await self.pw.chromium.connect_over_cdp(url, timeout=90000)
+        # A CDP session usually has a pre-existing context + page; fall back if not.
+        ctx = self.browser.contexts[0] if self.browser.contexts else await self.browser.new_context()
+        self.page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        try:
+            await self.page.goto("about:blank")
+        except Exception:  # noqa: BLE001 -- some hosts reject navigation; evaluate still works
+            pass
+        v, r = await _probe_gpu(self.page)
+        # The remote host can change between (re)connects -> a different GPU changes the
+        # canvas identity. Surface it so the caller can rotate/quarantine the persona.
+        if self.gpu_renderer and r and r != self.gpu_renderer:
+            print("[backend] WARNING: GPU drift %r -> %r (canvas identity changed)" %
+                  (self.gpu_renderer, r), flush=True)
+        self.gpu_vendor, self.gpu_renderer = v, r
+        await _warm(self.page)
+        print("[backend] connected over CDP; render GPU=%r" % self.gpu_renderer, flush=True)
+
+    async def start(self):
+        await self._connect(self.get_cdp_url())
+
+    async def ensure(self):
+        alive = (self.browser is not None and self.browser.is_connected()
+                 and self.page is not None and not self.page.is_closed())
+        if alive:
+            return
+        try:
+            if self.browser:
+                await self.browser.close()
+        except Exception:  # noqa: BLE001
+            pass
+        print("[backend] CDP session gone -> reconnecting", flush=True)
+        await self._connect(self.get_cdp_url())
+
+    async def close(self):
+        try:
+            if self.browser:
+                await self.browser.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---- async RFC 6455 framing (client frames are masked; ours are not) ----
@@ -99,12 +252,13 @@ class Reader:
     def f64(self): v = struct.unpack_from("<d", self.d, self.o)[0]; self.o += 8; return v
     def s(self):
         n = self.u32(); v = self.d[self.o:self.o + n].decode("utf-8", "replace"); self.o += n; return v
+    def b(self):
+        n = self.u32(); v = self.d[self.o:self.o + n]; self.o += n; return v
 
 
-def enc_welcome():
+def enc_welcome(gpu_vendor, gpu_renderer):
     out = struct.pack("<I", WELCOME) + struct.pack("<I", 1)
-    for field in ["clearcote-render-server/1", "Windows", "Google Inc. (Intel)",
-                  "ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11, D3D11)"]:
+    for field in ["clearcote-render-server/1", "Windows", gpu_vendor, gpu_renderer]:
         b = field.encode("utf-8"); out += struct.pack("<I", len(b)) + b
     return out
 
@@ -165,7 +319,36 @@ def build_measure_js(cw, ch, ops, text):
     return "() => {" + body + "}"
 
 
-async def handle_client(reader, writer, page, lock):
+# ---- WebGL op id -> JS (matches WebGLOp in the codec). objs[] maps bridge ids. ----
+def webgl_op_to_js(op, ints, floats, s, data):
+    def n(i, d=0): return ints[i] if i < len(ints) else d
+    def f(i, d=0.0): return floats[i] if i < len(floats) else d
+    if op == 81:  # kClearColor
+        return f"gl.clearColor({f(0)},{f(1)},{f(2)},{f(3)});"
+    if op == 82:  # kClear
+        return f"gl.clear({n(0)});"
+    if op == 80:  # kViewport
+        return f"gl.viewport({n(0)},{n(1)},{n(2)},{n(3)});"
+    if op == 83:  # kEnable
+        return f"gl.enable({n(0)});"
+    if op == 84:  # kDisable
+        return f"gl.disable({n(0)});"
+    return ""
+
+
+def build_webgl_js(cw, ch, ops, x, y, w, h):
+    body = (f"const c=new OffscreenCanvas({cw},{ch});"
+            + "const gl=c.getContext('webgl')||c.getContext('experimental-webgl');"
+            + "if(!gl)return '';const objs={};"
+            + "".join(ops)
+            + f"const u=new Uint8Array({w}*{h}*4);"
+            + f"gl.readPixels({x},{y},{w},{h},gl.RGBA,gl.UNSIGNED_BYTE,u);"
+            + "let s='';const CH=16384;for(let i=0;i<u.length;i+=CH)"
+            + "s+=String.fromCharCode.apply(null,u.subarray(i,i+CH));return btoa(s);")
+    return "() => {" + body + "}"
+
+
+async def handle_client(reader, writer, backend):
     if not await ws_handshake(reader, writer):
         return
     print("[server] client connected", flush=True)
@@ -179,7 +362,7 @@ async def handle_client(reader, writer, page, lock):
             t = r.u32()
             if t == HELLO:
                 r.u32(); print("[server] Hello seed=%d ver=%r" % (r.u64(), r.s()), flush=True)
-                await write_ws_frame(writer, enc_welcome())
+                await write_ws_frame(writer, enc_welcome(backend.gpu_vendor, backend.gpu_renderer))
             elif t == CREATE_CANVAS2D:
                 cid, cw, ch = r.u32(), r.u32(), r.u32()
                 canvases[cid] = {"w": max(cw, 1), "h": max(ch, 1), "ops": []}
@@ -189,13 +372,29 @@ async def handle_client(reader, writer, page, lock):
                 cv = canvases.get(cid)
                 if cv is not None:
                     cv["ops"].append(op_to_js(op, s, args))
+            elif t == CREATE_WEBGL:
+                cid, cw, ch, ctype = r.u32(), r.u32(), r.u32(), r.u32()
+                canvases[cid] = {"type": "webgl", "w": max(cw, 1), "h": max(ch, 1), "ops": []}
+                print("[server] CreateWebGL id=%d %dx%d type=%d" % (cid, cw, ch, ctype), flush=True)
+            elif t == WEBGL_OP:
+                cid, op = r.u32(), r.u32()
+                ints = [r.i32() for _ in range(r.u32())]
+                floats = [r.f64() for _ in range(r.u32())]
+                s = r.s(); data = r.b()
+                cv = canvases.get(cid)
+                if cv is not None:
+                    cv["ops"].append(webgl_op_to_js(op, ints, floats, s, data))
             elif t == GET_IMAGE_DATA:
                 cid, x, y, w, h = r.u32(), r.i32(), r.i32(), r.u32(), r.u32()
                 cv = canvases.get(cid, {"w": w, "h": h, "ops": []})
-                js = build_render_js(cv["w"], cv["h"], cv["ops"], x, y, w, h)
-                async with lock:
+                if cv.get("type") == "webgl":
+                    js = build_webgl_js(cv["w"], cv["h"], cv["ops"], x, y, w, h)
+                else:
+                    js = build_render_js(cv["w"], cv["h"], cv["ops"], x, y, w, h)
+                async with backend.lock:
                     try:
-                        b64 = await page.evaluate(js)
+                        await backend.ensure()
+                        b64 = await backend.page.evaluate(js)
                         pixels = base64.b64decode(b64)
                     except Exception as e:  # noqa: BLE001
                         print("[server] render error:", e, flush=True)
@@ -210,9 +409,10 @@ async def handle_client(reader, writer, page, lock):
                 text = r.s()
                 cv = canvases.get(cid, {"w": 1, "h": 1, "ops": []})
                 js = build_measure_js(cv["w"], cv["h"], cv["ops"], text)
-                async with lock:
+                async with backend.lock:
                     try:
-                        vals = await page.evaluate(js)
+                        await backend.ensure()
+                        vals = await backend.page.evaluate(js)
                     except Exception as e:  # noqa: BLE001
                         print("[server] measureText error:", e, flush=True)
                         vals = [0.0] * 9
@@ -227,23 +427,33 @@ async def handle_client(reader, writer, page, lock):
 
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--chrome", required=True)
+    ap.add_argument("--backend", choices=["local", "cdp"], default="local")
     ap.add_argument("--port", type=int, default=9099)
-    ap.add_argument("--fingerprint", default="99117")
+    ap.add_argument("--host", default="127.0.0.1")
+    # local backend
+    ap.add_argument("--chrome", help="path to a clearcote chrome binary (--backend local)")
+    ap.add_argument("--fingerprint", default="")
+    # cdp backend
+    ap.add_argument("--cdp-url", help="CDP/WebSocket endpoint of the render browser (--backend cdp)")
     args = ap.parse_args()
+
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            executable_path=args.chrome, headless=True,
-            args=["--no-first-run", "--no-sandbox", "--fingerprint=" + args.fingerprint],
-            ignore_default_args=["--enable-automation"])
-        page = await browser.new_page()
-        await page.goto("about:blank")
-        lock = asyncio.Lock()
-        print("[server] headless clearcote up; listening on ws://127.0.0.1:%d" % args.port, flush=True)
+        if args.backend == "cdp":
+            backend = RemoteCDPBackend(pw, args.cdp_url)
+        else:
+            if not args.chrome:
+                sys.exit("--backend local requires --chrome <path>")
+            backend = LocalBackend(pw, args.chrome, args.fingerprint)
+        await backend.start()
+        print("[server] backend=%s up; render GPU=%r; listening on ws://%s:%d" %
+              (args.backend, backend.gpu_renderer, args.host, args.port), flush=True)
         srv = await asyncio.start_server(
-            lambda r, w: handle_client(r, w, page, lock), "127.0.0.1", args.port)
-        async with srv:
-            await srv.serve_forever()
+            lambda r, w: handle_client(r, w, backend), args.host, args.port)
+        try:
+            async with srv:
+                await srv.serve_forever()
+        finally:
+            await backend.close()
 
 
 if __name__ == "__main__":
