@@ -19,6 +19,7 @@ Pre-release, building in the open. Latest signed browser build: v0.1.0-pre.6 (Ch
 - /ROADMAP.md — phased plan and future
 - /docs/BUILDING.md — build from source
 - /docs/VERIFY.md — verify a release (don't trust, verify)
+- /docs/CANVAS-BRIDGE.md — run the optional real-GPU canvas bridge (forward canvas/WebGL ops to a remote GPU host so readbacks are coherent with the GPU you present; opt-in via --canvas-bridge-url)
 - /AGENTS.md — contributor & automation guide
 - /CREDITS.md — upstream attributions and licenses
 - /DISCLAIMER.md — responsible use and legal
@@ -27,7 +28,7 @@ Pre-release, building in the open. Latest signed browser build: v0.1.0-pre.6 (Ch
 - Chromium (BSD-3)
 - ungoogled-chromium (BSD-3) — de-Googled base
 - fingerprint-chromium by adryfish (BSD-3) — engine-level fingerprint controls
-- chromiumfish by arman-bd (MIT) — coherence-surface reference (battery, navigator.connection, keyboard, display, WebGL limits) and the in-browser AI-agent layer Clearcote ports + adapts to OpenRouter
+- chromiumfish by arman-bd (MIT) — coherence-surface reference (battery, navigator.connection, keyboard, display, WebGL limits), the in-browser AI-agent layer Clearcote ports + adapts to OpenRouter, and the canvas-bridge concept (remote real-GPU rendering) Clearcote re-implements clean-room
 - Brave — per-site deterministic "farbling" model
 - Camoufox — sibling open anti-detect browser (Firefox), design reference
 
