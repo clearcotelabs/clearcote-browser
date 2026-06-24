@@ -44,7 +44,7 @@ crash the renderer.
 | `100-webrtc-leak` | WebRTC: **fabricates** the server-reflexive candidate at `--webrtc-ip` and sends **no real STUN** (`stun_port.cc`), and suppresses raw host candidates (`port.cc`) — reports the proxy IP, never leaks the real IP at the packet level. |
 | `110-runtime-enable` | Suppresses the `Runtime.enable` CDP automation tell (`v8-runtime-agent-impl`). |
 | `120-headless` | Removes a headless-mode tell (`headless_browser_impl`). |
-| `130-humanized-input` | Human-like CDP input + cursor overlay (`devtools/protocol/input_handler`, `browser_handler`, `humanized_cursor_overlay`) so dispatched input isn't trivially bot-flagged. |
+| `130-humanized-input` | Human-like CDP input + cursor overlay (`devtools/protocol/input_handler`, `browser_handler`, `humanized_cursor_overlay`) so dispatched input isn't trivially bot-flagged. Also hardens `devtools/protocol/network_handler` cookie serialization against an infinite-expiry cookie (which otherwise aborts the tab under CDP in DCHECK-enabled builds). |
 | `140-screen` | Coherent display geometry from the persona: `screen.*` (`screen.cc`), multi-screen `getScreenDetails()` (`screen_detailed.cc`), and `window.outer*`/`screenX/Y`/`devicePixelRatio` (`local_dom_window.cc`) — never the real display. |
 | `141-media-queries` | CSS `@media` coherence — `(pointer: fine)` / `(hover: hover)` (and the `any-` forms) report a real desktop-with-mouse instead of a touchless/headless device, plus persona/profile-driven display characteristics (`device-width/height`, `resolution`, color depth, `color-gamut`) gated on `--fingerprint` so unfingerprinted runs keep the real screen (`media_values*`). |
 | `145-storage-quota` | `navigator.storage.estimate()` quota coherence (`quota/storage_manager.cc`). |

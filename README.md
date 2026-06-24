@@ -23,7 +23,7 @@
 
 </div>
 
-> **Status:** [**v0.1.0-pre.13**](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.13) is live — Chromium 149, Windows x64, signed + checksummed ([verify it](docs/VERIFY.md)). Scopes the opt-in **[canvas bridge](docs/CANVAS-BRIDGE.md)** per origin (`--canvas-bridge-mode=off|all|allow|deny` + allow/deny lists, cold-miss `--canvas-bridge-fallback`, speculative prefetch) so you bridge only where it matters, and makes the **humanized cursor** (`Browser.humanizedClick`) move continuously — each path now starts from the last cursor position instead of snapping back to the corner between moves. **Windows x64 only for now**; macOS/Linux are on the [Roadmap](ROADMAP.md). An experimental pre-release.
+> **Status:** [**v0.1.0-pre.14**](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.14) is live — Chromium 149, Windows x64, signed + checksummed ([verify it](docs/VERIFY.md)). Fixes a renderer crash when driving the browser over CDP (Playwright/Puppeteer) on pages that set a cookie with an unbounded ("infinite") expiry — the DevTools cookie serializer aborted the tab (surfaced as *"Target page, context or browser has been closed"*). All pre.13 surfaces remain: the per-origin opt-in **[canvas bridge](docs/CANVAS-BRIDGE.md)** (`--canvas-bridge-mode`) and the continuous **humanized cursor** (`Browser.humanizedClick`). **Windows x64 only for now**; macOS/Linux are on the [Roadmap](ROADMAP.md). An experimental pre-release.
 
 ---
 
@@ -204,6 +204,60 @@ _UA ↔ UA-CH version consistency: ✅ (UA major `149`, UA-CH major `149`). WebR
 <!-- CREEPJS_RESULTS:END -->
 
 > Spoofed per-seed identity (synthetic, not real machine data); a demo timezone and a documentation WebRTC IP are used so no real PII appears here. Regenerated each release.
+
+---
+
+## Independent detection coverage
+
+<div align="center">
+
+Beyond the per-build audit above, Clearcote is exercised against **independent, third-party detection services** — and comes back clean across every category we check automatically. *Service names are omitted by policy; the categories are what matter.*
+
+<br />
+
+[![categories verified](https://img.shields.io/badge/categories%20verified-6%20%2F%206-54d39b?style=for-the-badge&labelColor=07080a)](#independent-detection-coverage)
+
+![navigator.webdriver](https://img.shields.io/badge/navigator.webdriver-hidden-54d39b?style=flat-square&labelColor=07080a)
+![headless](https://img.shields.io/badge/headless-0%25-54d39b?style=flat-square&labelColor=07080a)
+![CDP leaks](https://img.shields.io/badge/CDP%20automation%20leaks-none-54d39b?style=flat-square&labelColor=07080a)
+![TLS / JA4](https://img.shields.io/badge/TLS%20%2F%20JA4-genuine%20Chrome-38e0d6?style=flat-square&labelColor=07080a)
+![WebRTC](https://img.shields.io/badge/WebRTC-no%20IP%20leak-38e0d6?style=flat-square&labelColor=07080a)
+![locale coherence](https://img.shields.io/badge/locale%20%E2%86%94%20timezone%20%E2%86%94%20network-coherent-a78bfa?style=flat-square&labelColor=07080a)
+
+<sub>Method: driven headful through the SDK with <code>geoip</code> + a residential proxy + humanized input, a fresh per-seed identity per check · build <code>149.x</code> · 2026-06-24.</sub>
+
+</div>
+
+```mermaid
+flowchart LR
+  S([" 🎲 one --fingerprint seed "]):::seed
+  subgraph SURF [" 🧬 one coherent machine — every layer agrees "]
+    direction TB
+    JS["🎨 JS identity<br/>canvas · WebGL · audio · fonts · locale"]
+    NET["🔒 network<br/>TLS / JA4 · HTTP&#47;2"]
+    RTC["📡 WebRTC egress"]
+    BEH["🖱️ humanized input"]
+  end
+  S --> JS & NET & RTC & BEH
+  JS --> R
+  NET --> R
+  RTC --> R
+  BEH --> R
+  R["✅ passes webdriver · headless · CDP-leak<br/>· TLS · WebRTC · locale checks"]:::ok
+  classDef seed fill:#07080a,stroke:#38e0d6,color:#6ee7ff;
+  classDef ok fill:#0b1a14,stroke:#54d39b,color:#54d39b;
+```
+
+| Detection category | What it verifies | Result |
+|---|---|:--|
+| 🤖 **Webdriver / headless suites** | `navigator.webdriver`, headless heuristics, plugin / UA tells | ✅ Hidden · normal headful Chrome |
+| 🧩 **Automation-framework leak detectors** | CDP `Runtime.enable` leak, injected init-scripts, main-world execution, automation-default viewport | ✅ No leaks · isolated world · non-default viewport |
+| 🔒 **TLS / JA4 client fingerprint** | Handshake matches a real Chrome — no spoofed-JS-over-tooling-TLS seam | ✅ Genuine Chrome 149 JA4 |
+| 📡 **WebRTC leak tests** | STUN / host candidates exposing a real LAN or ISP IP | ✅ Only the egress IP — no LAN/host leak |
+| 🎨 **Canvas / WebGL / fonts / audio** | Per-surface fingerprints render coherently and deterministically per seed | ✅ Coherent · consistent GPU strings |
+| 🌐 **Locale / timezone coherence** | JS `Intl` / timezone ↔ `navigator.languages` ↔ network egress all agree | ✅ Aligned end-to-end via `geoip` |
+
+> Scope: the categories above are what we verify automatically. Aggregate "trust score" scanners that require interactive runs aren't covered by this automated pass. And detection is only half the picture — a clean fingerprint over a **burned proxy IP** can still be blocked on IP reputation alone; treat IP quality as a separate axis from browser identity.
 
 ---
 

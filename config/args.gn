@@ -36,6 +36,12 @@ is_debug = false
 is_official_build = false             # NOTE: the published pre-release was built non-official.
                                       # Flip to true for a production/stealth-grade build, but
                                       # then config + shipped binary must match (see docs/RELEASING.md).
+                                      # NOTE: a non-official build defaults dcheck_always_on to
+                                      # !is_official_build = true, so upstream DCHECKs are FATAL and
+                                      # can crash the tab under CDP on edge inputs. The fix is to set
+                                      # dcheck_always_on=false, but that is a full rebuild — stage it
+                                      # with the next from-scratch/official build, NOT an incremental
+                                      # one, so this published config keeps matching the shipped binary.
 is_component_build = false            # single, shippable binary
 symbol_level = 0
 blink_symbol_level = 0
