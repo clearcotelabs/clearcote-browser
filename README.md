@@ -15,8 +15,11 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-a78bfa?style=flat-square&labelColor=07080a)](https://github.com/clearcotelabs/clearcote-browser/releases)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-38e0d6?style=flat-square&labelColor=07080a)](LICENSE)
 [![Open source](https://img.shields.io/badge/100%25-open%20source-54d39b?style=flat-square&labelColor=07080a)](#license)
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=07080a)](https://discord.gg/WxvCjAnXZm)
 
 <sub><i>Meet <b>Clyde</b> — chameleons blend in to stay unseen. So does your browser.</i></sub>
+
+<sub>💬 Questions, ideas, or want to get involved? <b><a href="https://discord.gg/WxvCjAnXZm">Join us on Discord</a></b>.</sub>
 
 </div>
 
@@ -215,3 +218,7 @@ Clearcote stands on excellent open-source work: **[Chromium](https://www.chromiu
 - **Responsible use** — a privacy + automation tool for **lawful** purposes (privacy, QA/testing, research, authorized automation). You are responsible for how you use it; respect site terms and the law. Provided "as is." See [DISCLAIMER.md](DISCLAIMER.md).
 
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md). The repo is laid out so **humans and automated contributors** alike can navigate and build it.
+
+## Community
+
+Questions, feedback, or want to get involved? **[Join the Clearcote Discord](https://discord.gg/WxvCjAnXZm).**
