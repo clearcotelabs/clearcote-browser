@@ -97,7 +97,10 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
       const f = ease(i / steps);
       const nx = Math.round(dx * f), ny = Math.round(dy * f);
       await nativeWheel(nx - px, ny - py); px = nx; py = ny;
-      await page.waitForTimeout(rand(12, 45));
+      // local sleep, NOT page.waitForTimeout: the latter is a CDP round-trip per call, so it
+      // emits protocol traffic bot-detectors (e.g. reCAPTCHA) can score — a self-inflicted tell
+      // inside the humanize path. setTimeout is off-protocol.
+      await new Promise((r) => setTimeout(r, rand(12, 45)));
     }
     if (px !== dx || py !== dy) await nativeWheel(dx - px, dy - py);
   };
@@ -105,13 +108,45 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   const wrapTargeted = (name: "click" | "hover", noClick: boolean) => {
     const orig = (page as any)[name].bind(page);
     (page as any)[name] = async (selector: string, options: any = {}) => {
+      // Actionability pre-flight before a TRUSTED humanized click: a native Playwright click waits
+      // for visible+enabled+stable+receives-events; the humanized path dispatches a real OS-level
+      // event at a point, so without these checks it could fire under a cookie banner/overlay or
+      // mid-animation. Each check falls back to the native click (which has its own actionability
+      // waits), so this only improves — it never regresses.
       try {
+        const timeout = options.timeout ?? 30000;
         const loc = page.locator(selector).first();
-        await loc.scrollIntoViewIfNeeded({ timeout: options.timeout ?? 30000 });
-        const box = await loc.boundingBox();
+        await loc.waitFor({ state: "visible", timeout });
+        await loc.scrollIntoViewIfNeeded({ timeout });
+        if (!(await loc.isEnabled())) return orig(selector, options);
+        let box = await loc.boundingBox();
         if (!box) return orig(selector, options);
+        // stability: a box that's still moving = an animation in flight -> let PW settle it
+        await new Promise((r) => setTimeout(r, 50));
+        const box2 = await loc.boundingBox();
+        if (!box2 || Math.abs(box2.x - box.x) > 1 || Math.abs(box2.y - box.y) > 1) {
+          return orig(selector, options);
+        }
+        box = box2;
         const x = box.x + box.width * rand(0.3, 0.7);
         const y = box.y + box.height * rand(0.3, 0.7);
+        // covered-by: don't fire a trusted click at a point some overlay owns. The callback runs
+        // in the browser; this is a Node tsconfig (no DOM lib), so reach document via globalThis.
+        try {
+          const handle = await loc.elementHandle();
+          const covered =
+            handle &&
+            (await (page.evaluate as (fn: unknown, arg: unknown) => Promise<boolean>)(
+              ([px, py, el]: [number, number, any]) => {
+                const t: any = (globalThis as any).document.elementFromPoint(px, py);
+                return !(t && (t === el || el.contains(t) || t.contains(el)));
+              },
+              [x, y, handle]
+            ));
+          if (covered) return orig(selector, options); // covered -> let PW wait for it on top
+        } catch {
+          /* covered-by check best-effort */
+        }
         if (await humanizedMove(x, y, noClick)) return;
         return orig(selector, options);
       } catch {

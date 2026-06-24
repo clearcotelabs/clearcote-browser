@@ -20,6 +20,13 @@ import sys
 from ._agent import AGENT_KEYS, OPENROUTER_BASE_URL, agent_args, run_agent_task
 from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args
 from ._humanize import install_humanize, install_humanize_on_context
+from ._launchopts import (
+    extension_args,
+    merge_feature_flags,
+    privacy_sandbox_args,
+    resolve_proxy,
+    webrtc_default_deny_args,
+)
 from ._profile import Profile, list_profiles, load_profile, resolve_profile_options
 from .download import ensure_binary
 from .geoip import resolve_geo
@@ -40,7 +47,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -116,6 +123,10 @@ def _prepare(kwargs):
     agent = {k: kwargs.pop(k) for k in list(kwargs) if k in AGENT_KEYS}
     exe_path = kwargs.pop("executable_path", None)
     extra_args = kwargs.pop("args", None)
+    extensions = kwargs.pop("extensions", None)
+    # de-Googled-coherence default: disable Privacy Sandbox + intrusive APIs (Topics/FLEDGE/WebUSB/
+    # etc). Pass disable_privacy_sandbox=False to keep them.
+    disable_privacy_sandbox = kwargs.pop("disable_privacy_sandbox", True)
     cache_dir = kwargs.pop("cache_dir", None)
     quiet = kwargs.pop("quiet", False)
     auto_update = kwargs.pop("auto_update", None)
@@ -132,8 +143,49 @@ def _prepare(kwargs):
                 fp["webrtc_ip"] = geo["ip"]
     exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update)
     _guard(exe)
-    args = fingerprint_args(fp) + agent_args(agent) + list(extra_args or [])
+    # SOCKS5-with-credentials must go through --proxy-server (Playwright rejects creds in its SOCKS
+    # proxy descriptor); resolve_proxy returns proxy=None for that case so we drop it from Playwright.
+    proxy_args, proxy = resolve_proxy(kwargs.get("proxy"))
+    if proxy is None:
+        kwargs.pop("proxy", None)
+    else:
+        kwargs["proxy"] = proxy
+    base = fingerprint_args(fp) + agent_args(agent) + extension_args(extensions) + proxy_args
+    if disable_privacy_sandbox:
+        base += privacy_sandbox_args()
+    user = list(extra_args or [])
+    # default WebRTC to leak-proof unless the user wired a webrtc_ip / policy themselves
+    base += webrtc_default_deny_args(base + user, fp.get("webrtc_ip"))
+    # collapse all --enable-features/--disable-features (ours + the user's) into one of each, else
+    # Chromium keeps only the last occurrence and the rest are silently dropped.
+    args = merge_feature_flags(base + user)
     return exe, args, kwargs, humanize, show_cursor
+
+
+def _headed_no_viewport(pw_kwargs):
+    """A headed launch with Playwright's default emulated viewport (1280x720) sitting on the real
+    OS window makes window.innerWidth/Height disagree with the actual window — an impossible-window
+    tell that defeats the engine's coherence. True when headed and no viewport was requested, so we
+    default new pages/contexts to no_viewport (innerWidth then tracks the real window)."""
+    return (pw_kwargs.get("headless") is False
+            and "viewport" not in pw_kwargs and "no_viewport" not in pw_kwargs)
+
+
+def _install_headed_viewport(browser):
+    """Default a headed browser's new pages/contexts to no_viewport (unless the caller sets one)."""
+    orig_new_page, orig_new_context = browser.new_page, browser.new_context
+
+    def new_page(**kw):
+        if "viewport" not in kw and "no_viewport" not in kw:
+            kw["no_viewport"] = True
+        return orig_new_page(**kw)
+
+    def new_context(**kw):
+        if "viewport" not in kw and "no_viewport" not in kw:
+            kw["no_viewport"] = True
+        return orig_new_context(**kw)
+
+    browser.new_page, browser.new_context = new_page, new_context
 
 
 def launch(**kwargs):
@@ -146,7 +198,10 @@ def launch(**kwargs):
     args, timeout, ...) pass through to Playwright's chromium.launch().
     """
     exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
+    headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
     browser = _playwright().chromium.launch(executable_path=exe, args=args, **pw_kwargs)
+    if headed:
+        _install_headed_viewport(browser)
     install_humanize(browser, humanize, show_cursor)
     return browser
 
@@ -155,6 +210,8 @@ def launch_persistent_context(user_data_dir, **kwargs):
     """Launch Clearcote with a persistent profile directory; returns a Playwright
     ``BrowserContext`` (cookies/storage persist in ``user_data_dir``)."""
     exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
+    if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
+        pw_kwargs["no_viewport"] = True
     context = _playwright().chromium.launch_persistent_context(
         user_data_dir, executable_path=exe, args=args, **pw_kwargs
     )

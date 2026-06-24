@@ -37,7 +37,28 @@ AGENT_KEYS = (
     "agent_llm_key",
     "agent_model",
     "agent_tool_mode",
+    "agent_typing",
 )
+
+
+def _typing_feature(speed):
+    """Tune the engine's GlicActorIncrementalTyping cadence (the agent's per-keystroke timing) via a
+    runtime field-trial flag. The feature is ON by default but at a fast, uniform 25ms/25ms cadence,
+    and it auto-PASTES text over ~200 chars (instant, zero keystroke events — a hard tell). The
+    'human' default slows the cadence and pushes the paste threshold out of the way so long text
+    still types key-by-key. No rebuild — these are FeatureParams."""
+    if speed == "instant":
+        return "--disable-features=GlicActorIncrementalTyping"  # one-shot, machine-perfect
+    if speed == "fast":
+        return ("--enable-features=GlicActorIncrementalTyping:"
+                "glic-actor-incremental-typing-key-down-duration/8ms/"
+                "glic-actor-incremental-typing-key-up-duration/8ms")
+    return ("--enable-features=GlicActorIncrementalTyping:"  # "human" (default)
+            "glic-actor-incremental-typing-key-down-duration/45ms/"
+            "glic-actor-incremental-typing-key-up-duration/60ms/"
+            "glic-actor-incremental-typing-long-multiplier/0.7/"
+            "glic-actor-incremental-typing-long-text-threshold/80/"
+            "glic-actor-long-text-paste-threshold/100000")
 
 
 def agent_args(opts):
@@ -45,7 +66,9 @@ def agent_args(opts):
 
     Kwargs: ``agent_llm_url`` (default OpenRouter when a key is set), ``agent_llm_key`` (Bearer
     token -- setting it turns the agent on), ``agent_model`` (e.g. ``"openai/gpt-4o-mini"`` or any
-    OpenRouter ``provider/model`` slug), ``agent_tool_mode`` (``"tools"`` or ``"json"``)."""
+    OpenRouter ``provider/model`` slug), ``agent_tool_mode`` (``"tools"`` or ``"json"``),
+    ``agent_typing`` (``"human"`` default / ``"fast"`` / ``"instant"``) -- the agent's keystroke
+    cadence."""
     args = []
     if opts.get("agent_llm_key") is None and opts.get("agent_llm_url") is None:
         return args
@@ -56,6 +79,8 @@ def agent_args(opts):
         args.append(f"--agent-model={opts['agent_model']}")
     if opts.get("agent_tool_mode") is not None:
         args.append(f"--agent-tool-mode={opts['agent_tool_mode']}")
+    # default the agent's typing to the stealthier 'human' cadence (free; beats the fast engine default)
+    args.append(_typing_feature(opts.get("agent_typing") or "human"))
     return args
 
 

@@ -74,7 +74,9 @@ def _sha256_file(path):
 
 def _http_get(url):
     req = urllib.request.Request(url, headers={"User-Agent": "clearcote-sdk"})
-    with urllib.request.urlopen(req) as resp:  # noqa: S310
+    # timeout is the socket idle timeout (max wait per read), so a stalled connection fails fast
+    # instead of hanging first-run launch forever. 30s for small API/text fetches.
+    with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
         return resp.read()
 
 
@@ -82,7 +84,9 @@ def _download(url, dest, expected_size, quiet):
     """Stream the download to dest, hashing as we go; return the hex digest."""
     h = hashlib.sha256()
     req = urllib.request.Request(url, headers={"User-Agent": "clearcote-sdk"})
-    with urllib.request.urlopen(req) as resp, open(dest, "wb") as out:  # noqa: S310
+    # 60s socket idle timeout: aborts a stalled stream (no bytes for 60s) without capping the
+    # total time of the large (~242 MB) binary download, since the timeout resets each read.
+    with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as out:  # noqa: S310
         total = int(resp.headers.get("Content-Length") or expected_size or 0)
         seen = 0
         last = -1

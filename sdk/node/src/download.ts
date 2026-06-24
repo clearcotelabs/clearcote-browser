@@ -99,30 +99,46 @@ function sha256File(file: string): Promise<string> {
 }
 
 async function downloadTo(url: string, dest: string, expectedSize: number, quiet: boolean | undefined): Promise<void> {
-  const res = await fetch(url, { redirect: "follow" });
-  if (!res.ok || !res.body) {
-    throw new Error(`Clearcote download failed: HTTP ${res.status} ${res.statusText} for ${url}`);
+  // Idle-timeout the stream: a 60s timer reset on every chunk aborts a stalled connection (no data
+  // for 60s) without capping the total time of the large (~242 MB) binary download.
+  const ctrl = new AbortController();
+  const IDLE_MS = 60_000;
+  let idle: ReturnType<typeof setTimeout> | undefined;
+  const bump = () => {
+    if (idle) clearTimeout(idle);
+    idle = setTimeout(() => ctrl.abort(new Error("clearcote download stalled (no data for 60s)")), IDLE_MS);
+  };
+  bump();
+  try {
+    const res = await fetch(url, { redirect: "follow", signal: ctrl.signal });
+    if (!res.ok || !res.body) {
+      throw new Error(`Clearcote download failed: HTTP ${res.status} ${res.statusText} for ${url}`);
+    }
+    const total = Number(res.headers.get("content-length")) || expectedSize;
+    let seen = 0;
+    let lastPct = -1;
+    const progress = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        bump(); // data arrived -> reset the idle deadline
+        seen += chunk.byteLength;
+        const pct = total ? Math.floor((seen / total) * 100) : 0;
+        if (!quiet && pct !== lastPct && pct % 5 === 0) {
+          lastPct = pct;
+          process.stderr.write(`\r[clearcote] downloading ${pct}% (${(seen / 1e6).toFixed(0)}/${(total / 1e6).toFixed(0)} MB)`);
+        }
+        controller.enqueue(chunk);
+      },
+    });
+    await pipeline(Readable.fromWeb(res.body.pipeThrough(progress) as any), createWriteStream(dest));
+    if (!quiet) process.stderr.write("\n");
+  } finally {
+    if (idle) clearTimeout(idle);
   }
-  const total = Number(res.headers.get("content-length")) || expectedSize;
-  let seen = 0;
-  let lastPct = -1;
-  const progress = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      seen += chunk.byteLength;
-      const pct = total ? Math.floor((seen / total) * 100) : 0;
-      if (!quiet && pct !== lastPct && pct % 5 === 0) {
-        lastPct = pct;
-        process.stderr.write(`\r[clearcote] downloading ${pct}% (${(seen / 1e6).toFixed(0)}/${(total / 1e6).toFixed(0)} MB)`);
-      }
-      controller.enqueue(chunk);
-    },
-  });
-  await pipeline(Readable.fromWeb(res.body.pipeThrough(progress) as any), createWriteStream(dest));
-  if (!quiet) process.stderr.write("\n");
 }
 
 async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url, { redirect: "follow", headers: { "User-Agent": "clearcote-sdk" } });
+  // 30s total timeout for small API/text fetches so a stalled connection fails fast.
+  const res = await fetch(url, { redirect: "follow", headers: { "User-Agent": "clearcote-sdk" }, signal: AbortSignal.timeout(30_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   return res.text();
 }
@@ -151,6 +167,7 @@ async function resolveLatest(quiet: boolean | undefined): Promise<ResolvedReleas
     const res = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=30`, {
       redirect: "follow",
       headers: { "User-Agent": "clearcote-sdk", Accept: "application/vnd.github+json" },
+      signal: AbortSignal.timeout(30_000),
     });
     if (!res.ok) throw new Error(`GitHub API HTTP ${res.status}`);
     list = (await res.json()) as any[];

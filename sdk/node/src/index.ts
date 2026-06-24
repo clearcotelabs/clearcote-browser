@@ -26,6 +26,14 @@ import { resolveGeo, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
 import { agentArgs, splitAgentOptions, type AgentOptions } from "./agent.js";
 import { resolveProfileOptions, Profile } from "./profile.js";
+import {
+  extensionArgs,
+  resolveProxy,
+  mergeFeatureFlags,
+  privacySandboxArgs,
+  webrtcDefaultDenyArgs,
+  type PwProxy,
+} from "./launchopts.js";
 import { RELEASE } from "./release.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
@@ -57,8 +65,17 @@ interface ProfileOption {
   profile?: string | Profile;
 }
 
+/** Load unpacked extensions (emits --load-extension + --disable-extensions-except). */
+interface ExtensionsOption {
+  /** Unpacked-extension directory paths. */
+  extensions?: string[];
+  /** Disable Privacy Sandbox + intrusive APIs (Topics/FLEDGE/WebUSB/…). Default `true` — a
+   * de-Googled build shouldn't expose them. Set `false` to keep them. */
+  disablePrivacySandbox?: boolean;
+}
+
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, HumanizeOptions, DownloadOptions {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, HumanizeOptions, DownloadOptions {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
@@ -68,6 +85,7 @@ export interface PersistentContextOptions
     AgentOptions,
     GeoipOption,
     ProfileOption,
+    ExtensionsOption,
     HumanizeOptions,
     DownloadOptions {}
 
@@ -110,21 +128,58 @@ export async function download(options: DownloadOptions = {}): Promise<string> {
   return ensureBinary(options);
 }
 
+/** A headed launch with Playwright's default emulated viewport (1280x720) on the real OS window
+ * makes window.innerWidth/Height disagree with the actual window — an impossible-window tell. For a
+ * headed browser, default new pages/contexts to `viewport: null` (innerWidth tracks the real window)
+ * unless the caller asked for a viewport. */
+function installHeadedViewport(browser: Browser): void {
+  const origNewPage = browser.newPage.bind(browser);
+  (browser as { newPage: unknown }).newPage = (o: Record<string, unknown> = {}) =>
+    origNewPage("viewport" in o ? o : { ...o, viewport: null });
+  const origNewContext = browser.newContext.bind(browser);
+  (browser as { newContext: unknown }).newContext = (o: Record<string, unknown> = {}) =>
+    origNewContext("viewport" in o ? o : { ...o, viewport: null });
+}
+
+/** Assemble the final engine args from all layers: persona + agent + extensions + proxy, the
+ * Privacy-Sandbox-disable default, the WebRTC leak-proof default, and the user's own args — then
+ * collapse all --enable-features/--disable-features into one each (Chromium keeps only the last). */
+function assembleArgs(
+  fpArgs: string[],
+  agArgs: string[],
+  extArgs: string[],
+  proxyArgs: string[],
+  disablePrivacySandbox: boolean | undefined,
+  webrtcIp: unknown,
+  userArgs: string[]
+): string[] {
+  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs];
+  if (disablePrivacySandbox !== false) base.push(...privacySandboxArgs());
+  base.push(...webrtcDefaultDenyArgs([...base, ...userArgs], webrtcIp));
+  return mergeFeatureFlags([...base, ...userArgs]);
+}
+
 /** Launch Clearcote and return a standard Playwright {@link Browser}. */
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   // profile= a saved persona: its options are the base, explicit options override.
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = merged;
+  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
+  // SOCKS5-with-credentials must go through --proxy-server (Playwright rejects it); drop it from PW.
+  const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined);
+  // proxy unchanged unless it was rerouted to --proxy-server, in which case drop it from Playwright
+  if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
+  const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
   const browser = await chromium.launch({
     ...(pwOptions as PlaywrightLaunchOptions),
     executablePath: exe,
-    args: [...fingerprintArgs(fingerprint), ...agentArgs(agent), ...(args ?? [])],
+    args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? []),
   });
+  if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
   installHumanize(browser, { humanize, showCursor });
   return browser;
 }
@@ -138,16 +193,21 @@ export async function launchPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = merged;
+  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
+  const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined);
+  if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
+  const opts = pwOptions as PlaywrightLaunchOptions & BrowserContextOptions;
+  // headed + no explicit viewport -> disable the emulated viewport (impossible-window tell)
+  if (opts.headless === false && opts.viewport === undefined) opts.viewport = null;
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
   const context = await chromium.launchPersistentContext(userDataDir, {
-    ...(pwOptions as PlaywrightLaunchOptions & BrowserContextOptions),
+    ...opts,
     executablePath: exe,
-    args: [...fingerprintArgs(fingerprint), ...agentArgs(agent), ...(args ?? [])],
+    args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? []),
   });
   installHumanizeOnContext(context, { humanize, showCursor });
   return context;

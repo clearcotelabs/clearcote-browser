@@ -51,6 +51,14 @@ export interface AgentOptions {
    * tool-calling.
    */
   agentToolMode?: "tools" | "json" | (string & {});
+  /**
+   * The agent's keystroke cadence (engine `GlicActorIncrementalTyping`, tuned via a runtime
+   * field-trial flag — no rebuild). `"human"` (default) types at a slower, less-uniform cadence and
+   * keeps typing long text key-by-key (the engine default fast-pastes text over ~200 chars, which
+   * emits zero keystroke events — a hard tell). `"fast"` ~ engine default; `"instant"` disables
+   * incremental typing (one-shot, machine-perfect).
+   */
+  agentTyping?: "human" | "fast" | "instant";
 }
 
 export const AGENT_KEYS: (keyof AgentOptions)[] = [
@@ -58,7 +66,24 @@ export const AGENT_KEYS: (keyof AgentOptions)[] = [
   "agentLlmKey",
   "agentModel",
   "agentToolMode",
+  "agentTyping",
 ];
+
+/** Map a typing speed to the GlicActorIncrementalTyping field-trial flag (no rebuild). */
+function typingFeature(speed?: string): string {
+  if (speed === "instant") return "--disable-features=GlicActorIncrementalTyping";
+  if (speed === "fast") {
+    return "--enable-features=GlicActorIncrementalTyping:glic-actor-incremental-typing-key-down-duration/8ms/glic-actor-incremental-typing-key-up-duration/8ms";
+  }
+  return (
+    "--enable-features=GlicActorIncrementalTyping:" + // "human" (default)
+    "glic-actor-incremental-typing-key-down-duration/45ms/" +
+    "glic-actor-incremental-typing-key-up-duration/60ms/" +
+    "glic-actor-incremental-typing-long-multiplier/0.7/" +
+    "glic-actor-incremental-typing-long-text-threshold/80/" +
+    "glic-actor-long-text-paste-threshold/100000"
+  );
+}
 
 /** Split an options object into its agent half and the remaining (Playwright/other) half. */
 export function splitAgentOptions<T extends AgentOptions>(
@@ -84,6 +109,8 @@ export function agentArgs(o: AgentOptions): string[] {
   if (o.agentLlmKey != null) args.push(`--agent-llm-key=${o.agentLlmKey}`);
   if (o.agentModel != null) args.push(`--agent-model=${o.agentModel}`);
   if (o.agentToolMode != null) args.push(`--agent-tool-mode=${o.agentToolMode}`);
+  // default the agent's typing to the stealthier 'human' cadence (free; beats the fast engine default)
+  args.push(typingFeature(o.agentTyping ?? "human"));
   return args;
 }
 
