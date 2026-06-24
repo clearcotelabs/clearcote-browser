@@ -52,7 +52,7 @@
 +}
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_client.cc
-@@ -0,0 +1,439 @@
+@@ -0,0 +1,616 @@
 +// Copyright 2026 The Clearcote Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license.
 +
@@ -78,6 +78,8 @@
 +#include "base/logging.h"
 +#include "base/rand_util.h"
 +#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/synchronization/condition_variable.h"
 +#include "base/time/time.h"
 +#include "components/ungoogled/persona_profile.h"
 +#include "components/ungoogled/ungoogled_switches.h"
@@ -296,12 +298,42 @@
 +      std::optional<ImageDataMessage> msg = DecodeImageData(frame);
 +      if (!msg)
 +        return;
-+      base::AutoLock lock(pending_lock_);
-+      auto it = pending_.find(msg->canvas_id);
-+      if (it != pending_.end()) {
-+        it->second->pixels = std::move(msg->pixels);
-+        it->second->event.Signal();
++      if (msg->content_version == 0) {
++        // Synchronous reply -> the blocking waiter.
++        base::AutoLock lock(pending_lock_);
++        auto it = pending_.find(msg->canvas_id);
++        if (it != pending_.end()) {
++          it->second->pixels = std::move(msg->pixels);
++          it->second->event.Signal();
++        }
++        return;
 +      }
++      // Prefetch reply -> the per-canvas cache; coalesce a queued refetch.
++      uint32_t rc = 0, rv = 0, rw = 0, rh = 0;
++      bool do_refetch = false;
++      {
++        base::AutoLock lock(cache_lock_);
++        CachedSurface& c = cache_[msg->canvas_id];
++        if (msg->content_version >= c.have_version) {
++          c.have_version = msg->content_version;
++          c.full_width = msg->width;
++          c.full_height = msg->height;
++          c.pixels = std::move(msg->pixels);
++        }
++        c.inflight_version = 0;
++        if (c.refetch_pending && c.have_version != c.current_version) {
++          c.refetch_pending = false;
++          c.inflight_version = c.current_version;
++          rc = msg->canvas_id;
++          rv = c.current_version;
++          rw = c.full_width;
++          rh = c.full_height;
++          do_refetch = true;
++        }
++        cache_cv_.Broadcast();
++      }
++      if (do_refetch)
++        SendPrefetchRequest(rc, rv, rw, rh);
 +      return;
 +    }
 +    case MessageType::kWelcome: {
@@ -370,6 +402,151 @@
 +    result = std::move(pending.pixels);
 +  }
 +  return result;
++}
++
++void CanvasBridgeClient::EnsurePolicyParsed() {
++  if (policy_parsed_)
++    return;
++  policy_parsed_ = true;
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  const std::string mode = cmd->GetSwitchValueASCII(switches::kCanvasBridgeMode);
++  std::string list_switch;
++  if (mode == "off") {
++    policy_mode_ = PolicyMode::kOff;
++  } else if (mode == "allow") {
++    policy_mode_ = PolicyMode::kAllow;
++    list_switch = switches::kCanvasBridgeAllow;
++  } else if (mode == "deny") {
++    policy_mode_ = PolicyMode::kDeny;
++    list_switch = switches::kCanvasBridgeDeny;
++  } else {
++    policy_mode_ = PolicyMode::kAll;  // default ("all" / empty)
++  }
++  if (!list_switch.empty()) {
++    for (const std::string& s : base::SplitString(
++             cmd->GetSwitchValueASCII(list_switch), ",", base::TRIM_WHITESPACE,
++             base::SPLIT_WANT_NONEMPTY)) {
++      policy_origins_.insert(s);
++    }
++  }
++  fallback_local_ =
++      cmd->GetSwitchValueASCII(switches::kCanvasBridgeFallback) == "local";
++}
++
++bool CanvasBridgeClient::BridgeEnabledForOrigin(const std::string& etld1) {
++  EnsurePolicyParsed();
++  switch (policy_mode_) {
++    case PolicyMode::kOff:
++      return false;
++    case PolicyMode::kAll:
++      return true;
++    case PolicyMode::kAllow:
++      return policy_origins_.count(etld1) > 0;
++    case PolicyMode::kDeny:
++      return policy_origins_.count(etld1) == 0;
++  }
++  return true;
++}
++
++bool CanvasBridgeClient::FallbackToLocal() {
++  EnsurePolicyParsed();
++  return fallback_local_;
++}
++
++void CanvasBridgeClient::BumpVersion(uint32_t canvas_id) {
++  base::AutoLock lock(cache_lock_);
++  cache_[canvas_id].current_version++;
++}
++
++void CanvasBridgeClient::MaybePrefetch(uint32_t canvas_id, uint32_t full_width,
++                                       uint32_t full_height) {
++  if (!Connected())
++    return;
++  uint32_t send_ver = 0;
++  bool do_send = false;
++  {
++    base::AutoLock lock(cache_lock_);
++    CachedSurface& c = cache_[canvas_id];
++    c.full_width = full_width;
++    c.full_height = full_height;
++    if (c.current_version == 0 || c.have_version == c.current_version)
++      return;  // nothing new to fetch
++    if (c.inflight_version != 0) {
++      c.refetch_pending = true;  // coalesce
++      return;
++    }
++    c.inflight_version = c.current_version;
++    send_ver = c.current_version;
++    do_send = true;
++  }
++  if (do_send)
++    SendPrefetchRequest(canvas_id, send_ver, full_width, full_height);
++}
++
++std::optional<std::vector<uint8_t>> CanvasBridgeClient::TryGetCachedSurface(
++    uint32_t canvas_id, int32_t x, int32_t y, uint32_t width, uint32_t height,
++    bool wait_for_inflight) {
++  base::AutoLock lock(cache_lock_);
++  auto it = cache_.find(canvas_id);
++  if (it == cache_.end())
++    return std::nullopt;
++  CachedSurface& c = it->second;
++  const uint32_t want = c.current_version;
++  if (want == 0)
++    return std::nullopt;
++  if (c.have_version != want) {
++    if (!wait_for_inflight || c.inflight_version != want)
++      return std::nullopt;  // never-block, or not in flight -> caller falls back
++    const base::TimeTicks deadline = base::TimeTicks::Now() + base::Seconds(5);
++    while (c.have_version != want) {
++      const base::TimeDelta remaining = deadline - base::TimeTicks::Now();
++      if (remaining <= base::TimeDelta())
++        return std::nullopt;
++      cache_cv_.TimedWait(remaining);
++      if (c.current_version != want)
++        return std::nullopt;  // mutated again while waiting
++    }
++  }
++  if (x < 0 || y < 0)
++    return std::nullopt;
++  const uint64_t fx = static_cast<uint64_t>(x);
++  const uint64_t fy = static_cast<uint64_t>(y);
++  if (fx + width > c.full_width || fy + height > c.full_height)
++    return std::nullopt;  // out of bounds -> caller falls back
++  if (c.pixels.size() != static_cast<size_t>(c.full_width) * c.full_height * 4)
++    return std::nullopt;
++  std::vector<uint8_t> out(static_cast<size_t>(width) * height * 4);
++  const size_t src_stride = static_cast<size_t>(c.full_width) * 4;
++  const size_t dst_stride = static_cast<size_t>(width) * 4;
++  for (uint32_t row = 0; row < height; ++row) {
++    std::memcpy(out.data() + row * dst_stride,
++                c.pixels.data() + (fy + row) * src_stride + fx * 4, dst_stride);
++  }
++  return out;
++}
++
++std::optional<std::vector<uint8_t>> CanvasBridgeClient::GetImageDataCacheFirst(
++    uint32_t canvas_id, int32_t x, int32_t y, uint32_t width, uint32_t height) {
++  const bool never_block = FallbackToLocal();
++  if (auto cached =
++          TryGetCachedSurface(canvas_id, x, y, width, height, !never_block))
++    return cached;
++  if (never_block)
++    return std::nullopt;  // never-block: cache miss -> caller renders locally
++  return RequestImageData(canvas_id, x, y, width, height);
++}
++
++void CanvasBridgeClient::SendPrefetchRequest(uint32_t canvas_id,
++                                             uint32_t content_version,
++                                             uint32_t width, uint32_t height) {
++  GetImageDataMessage req;
++  req.canvas_id = canvas_id;
++  req.x = 0;
++  req.y = 0;
++  req.width = width;
++  req.height = height;
++  req.content_version = content_version;
++  Send(Encode(req));
 +}
 +
 +bool CanvasBridgeClient::Send(base::span<const uint8_t> frame) {
@@ -494,7 +671,7 @@
 +}  // namespace blink::canvas_bridge
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_client.h
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,162 @@
 +// Copyright 2026 The Clearcote Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license.
 +//
@@ -512,11 +689,13 @@
 +
 +#include <cstdint>
 +#include <map>
++#include <set>
 +#include <optional>
 +#include <string>
 +#include <vector>
 +
 +#include "base/containers/span.h"
++#include "base/synchronization/condition_variable.h"
 +#include "base/synchronization/lock.h"
 +#include "base/synchronization/waitable_event.h"
 +#include "base/threading/platform_thread.h"
@@ -556,6 +735,30 @@
 +  std::optional<std::vector<uint8_t>> RequestTextMetrics(
 +      uint32_t canvas_id, const std::string& text);
 +
++  // --- Tier 1: speculative prefetch + version-keyed cache ------------------
++  // Main thread, per surface-mutating draw op: marks the cache stale.
++  void BumpVersion(uint32_t canvas_id);
++  // Main thread, after a draw op: fires a coalesced async whole-surface
++  // prefetch for the current version (<=1 in flight + 1 queued per canvas).
++  void MaybePrefetch(uint32_t canvas_id, uint32_t full_width,
++                     uint32_t full_height);
++  // Main thread, readback: return the sub-rect from the cache with no network
++  // wait when fresh (briefly waiting for an in-flight prefetch of the current
++  // version); nullopt = miss.
++  std::optional<std::vector<uint8_t>> TryGetCachedSurface(
++      uint32_t canvas_id, int32_t x, int32_t y, uint32_t width, uint32_t height,
++      bool wait_for_inflight = true);
++  // Cache-first readback: TryGetCachedSurface, else the blocking RequestImageData.
++  std::optional<std::vector<uint8_t>> GetImageDataCacheFirst(uint32_t canvas_id,
++                                                             int32_t x,
++                                                             int32_t y,
++                                                             uint32_t width,
++                                                             uint32_t height);
++
++  // --- WS-Policy: per-origin opt-in + never-block (parsed once from switches) -
++  bool BridgeEnabledForOrigin(const std::string& etld1);
++  bool FallbackToLocal();
++
 + private:
 +  CanvasBridgeClient(std::string host,
 +                     int port,
@@ -575,6 +778,16 @@
 +  bool ReadExact(void* buf, size_t n);
 +  bool WriteExact(const void* buf, size_t n);
 +  void CloseSocket();
++
++  void SendPrefetchRequest(uint32_t canvas_id, uint32_t content_version,
++                           uint32_t width, uint32_t height);
++
++  enum class PolicyMode { kAll, kOff, kAllow, kDeny };
++  void EnsurePolicyParsed();
++  bool policy_parsed_ = false;
++  PolicyMode policy_mode_ = PolicyMode::kAll;
++  std::set<std::string> policy_origins_;  // eTLD+1 list for allow/deny
++  bool fallback_local_ = false;
 +
 +  const std::string host_;
 +  const int port_;
@@ -600,6 +813,22 @@
 +  };
 +  base::Lock pending_lock_;
 +  std::map<uint32_t, PendingReadback*> pending_;  // keyed by canvas_id
++
++  // Tier 1 prefetch cache: one full-surface snapshot per canvas. current_version
++  // is written by the main thread (draw ops); have_version/pixels by the I/O
++  // thread (prefetch replies). All guarded by cache_lock_.
++  struct CachedSurface {
++    uint32_t current_version = 0;
++    uint32_t have_version = 0;
++    uint32_t inflight_version = 0;  // 0 = no prefetch in flight
++    bool refetch_pending = false;
++    uint32_t full_width = 0;
++    uint32_t full_height = 0;
++    std::vector<uint8_t> pixels;  // full surface, native order (2D top-left / GL bottom-left)
++  };
++  base::Lock cache_lock_;
++  base::ConditionVariable cache_cv_{&cache_lock_};
++  std::map<uint32_t, CachedSurface> cache_;  // keyed by canvas_id
 +};
 +
 +}  // namespace blink::canvas_bridge
@@ -607,7 +836,7 @@
 +#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_CANVAS_BRIDGE_CANVAS_BRIDGE_CLIENT_H_
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_codec.cc
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,340 @@
 +// Copyright 2026 The Clearcote Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license.
 +
@@ -800,6 +1029,7 @@
 +  w.I32(m.y);
 +  w.U32(m.width);
 +  w.U32(m.height);
++  w.U32(m.content_version);
 +  return w.Take();
 +}
 +
@@ -810,6 +1040,7 @@
 +  w.U32(m.width);
 +  w.U32(m.height);
 +  w.Bytes(m.pixels);
++  w.U32(m.content_version);
 +  return w.Take();
 +}
 +
@@ -926,7 +1157,9 @@
 +  m.y = r.I32();
 +  m.width = r.U32();
 +  m.height = r.U32();
-+  return r.ok() ? std::optional<GetImageDataMessage>(m) : std::nullopt;
++  bool core_ok = r.ok();
++  m.content_version = r.U32();  // optional trailing field (0 if absent)
++  return core_ok ? std::optional<GetImageDataMessage>(m) : std::nullopt;
 +}
 +
 +std::optional<ImageDataMessage> DecodeImageData(base::span<const uint8_t> f) {
@@ -938,13 +1171,15 @@
 +  m.width = r.U32();
 +  m.height = r.U32();
 +  m.pixels = r.Bytes();
-+  return r.ok() ? std::optional<ImageDataMessage>(std::move(m)) : std::nullopt;
++  bool core_ok = r.ok();
++  m.content_version = r.U32();  // optional trailing field (0 if absent)
++  return core_ok ? std::optional<ImageDataMessage>(std::move(m)) : std::nullopt;
 +}
 +
 +}  // namespace blink::canvas_bridge
 --- /dev/null
 +++ b/third_party/blink/renderer/platform/canvas_bridge/canvas_bridge_codec.h
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,215 @@
 +// Copyright 2026 The Clearcote Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license.
 +//
@@ -1119,6 +1354,9 @@
 +  int32_t y = 0;
 +  uint32_t width = 0;
 +  uint32_t height = 0;
++  // 0 = synchronous request (reply routed to the blocking waiter); >0 = a
++  // speculative prefetch tagged with the canvas content version (reply cached).
++  uint32_t content_version = 0;
 +};
 +
 +struct ImageDataMessage {
@@ -1126,6 +1364,9 @@
 +  uint32_t width = 0;
 +  uint32_t height = 0;
 +  std::vector<uint8_t> pixels;  // RGBA8, width*height*4 bytes
++  // Echoes the request's content_version: 0 = sync reply (-> waiter); >0 = a
++  // prefetch reply (-> the per-canvas cache slot for that version).
++  uint32_t content_version = 0;
 +};
 +
 +// Leading message type, or kUnknown if the frame is too short.

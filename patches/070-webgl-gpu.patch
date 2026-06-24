@@ -485,7 +485,7 @@
  #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
  #include "third_party/blink/renderer/platform/wtf/functional.h"
  #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
-@@ -203,6 +211,57 @@
+@@ -203,6 +211,71 @@
  
  namespace {
  
@@ -520,6 +520,20 @@
 +  m.str = std::move(str);
 +  m.data = std::move(data);
 +  cb->Send(blink::canvas_bridge::Encode(m));
++  // Tier 1: draw ops change the rendered surface -> bump version + prefetch.
++  using GLOp = blink::canvas_bridge::WebGLOp;
++  switch (static_cast<GLOp>(op)) {
++    case GLOp::kDrawArrays:
++    case GLOp::kDrawElements:
++    case GLOp::kClear:
++      cb->BumpVersion(m.canvas_id);
++      cb->MaybePrefetch(m.canvas_id,
++                        static_cast<uint32_t>(width < 0 ? 0 : width),
++                        static_cast<uint32_t>(height < 0 ? 0 : height));
++      break;
++    default:
++      break;
++  }
 +}
 +
 +// Assigns a fresh bridge object id to a just-created WebGL object and records
@@ -543,7 +557,7 @@
  enum class WebGLANGLEImplementation {
    // These values are persisted to logs. Entries should not be renumbered and
    // numeric values should never be reused.
-@@ -2466,6 +2525,10 @@
+@@ -2466,6 +2539,10 @@
      return;
    }
    active_texture_unit_ = texture - GL_TEXTURE0;
@@ -554,7 +568,7 @@
    ContextGL()->ActiveTexture(texture);
  }
  
-@@ -2479,6 +2542,11 @@
+@@ -2479,6 +2556,11 @@
                        "shader attachment already has shader");
      return;
    }
@@ -566,7 +580,7 @@
    ContextGL()->AttachShader(ObjectOrZero(program), ObjectOrZero(shader));
    shader->OnAttached();
  }
-@@ -2495,6 +2563,11 @@
+@@ -2495,6 +2577,11 @@
                        "reserved prefix");
      return;
    }
@@ -578,7 +592,7 @@
    ContextGL()->BindAttribLocation(ObjectOrZero(program), index,
                                    name.Utf8().c_str());
  }
-@@ -2534,6 +2607,11 @@
+@@ -2534,6 +2621,11 @@
      return;
    if (!ValidateAndUpdateBufferBindTarget("bindBuffer", target, buffer))
      return;
@@ -590,7 +604,7 @@
    ContextGL()->BindBuffer(target, ObjectOrZero(buffer));
  }
  
-@@ -2575,6 +2653,14 @@
+@@ -2575,6 +2667,14 @@
      return;
    }
  
@@ -605,7 +619,7 @@
    if (target == GL_TEXTURE_2D) {
      texture_units_[active_texture_unit_].texture2d_binding_ = texture;
    } else if (target == GL_TEXTURE_CUBE_MAP) {
-@@ -2701,6 +2787,20 @@
+@@ -2701,6 +2801,20 @@
  
    buffer->SetSize(size);
  
@@ -626,7 +640,7 @@
    ContextGL()->BufferData(target, static_cast<GLsizeiptr>(size), data, usage);
  }
  
-@@ -2807,6 +2907,9 @@
+@@ -2807,6 +2921,9 @@
  void WebGLRenderingContextBase::clear(GLbitfield mask) {
    if (isContextLost())
      return;
@@ -636,7 +650,7 @@
    if (mask &
        ~(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) {
      SynthesizeGLError(GL_INVALID_VALUE, "clear", "invalid mask");
-@@ -2866,9 +2969,36 @@
+@@ -2866,9 +2983,51 @@
    clear_color_[1] = g;
    clear_color_[2] = b;
    clear_color_[3] = a;
@@ -647,16 +661,31 @@
    ContextGL()->ClearColor(r, g, b, a);
  }
  
++bool WebGLRenderingContextBase::BridgeAllowedForThisContext() {
++  if (!bridge_policy_checked_) {
++    bridge_policy_checked_ = true;
++    bridge_policy_allowed_ = false;
++    if (auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get()) {
++      std::string etld1;
++      if (auto* ec = GetExecutionContext(); ec && ec->GetSecurityOrigin()) {
++        etld1 = ec->GetSecurityOrigin()->RegistrableDomain().Utf8();
++      }
++      bridge_policy_allowed_ = cb->BridgeEnabledForOrigin(etld1);
++    }
++  }
++  return bridge_policy_allowed_;
++}
++
 +bool WebGLRenderingContextBase::ReadBridgePixels(std::vector<uint8_t>* out,
 +                                                 int width, int height) {
 +  if (bridge_canvas_id_ == 0 || bridge_webgl_unsupported_ || width <= 0 ||
-+      height <= 0)
++      height <= 0 || !BridgeAllowedForThisContext())
 +    return false;
 +  auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
 +  if (!cb || !cb->Connected())
 +    return false;
 +  std::optional<std::vector<uint8_t>> px =
-+      cb->RequestImageData(bridge_canvas_id_, 0, 0, width, height);
++      cb->GetImageDataCacheFirst(bridge_canvas_id_, 0, 0, width, height);
 +  if (!px || px->size() != static_cast<size_t>(width) * height * 4)
 +    return false;
 +  // gl.readPixels is bottom-left origin; toDataURL/Skia want top-left -> flip.
@@ -673,7 +702,7 @@
  void WebGLRenderingContextBase::clearDepth(GLfloat depth) {
    if (isContextLost())
      return;
-@@ -2899,6 +3029,10 @@
+@@ -2899,6 +3058,10 @@
  void WebGLRenderingContextBase::compileShader(WebGLShader* shader) {
    if (!ValidateWebGLProgramOrShader("compileShader", shader))
      return;
@@ -684,7 +713,7 @@
    ContextGL()->CompileShader(ObjectOrZero(shader));
  }
  
-@@ -3056,7 +3190,12 @@
+@@ -3056,7 +3219,12 @@
  }
  
  WebGLBuffer* WebGLRenderingContextBase::createBuffer() {
@@ -698,7 +727,7 @@
  }
  
  WebGLFramebuffer* WebGLRenderingContextBase::createFramebuffer() {
-@@ -3064,11 +3203,21 @@
+@@ -3064,11 +3232,21 @@
  }
  
  WebGLTexture* WebGLRenderingContextBase::createTexture() {
@@ -722,7 +751,7 @@
  }
  
  WebGLRenderbuffer* WebGLRenderingContextBase::createRenderbuffer() {
-@@ -3088,7 +3237,16 @@
+@@ -3088,7 +3266,16 @@
      return nullptr;
    }
  
@@ -740,7 +769,7 @@
  }
  
  void WebGLRenderingContextBase::cullFace(GLenum mode) {
-@@ -3363,6 +3521,10 @@
+@@ -3363,6 +3550,10 @@
    if (!ValidateDrawArrays("drawArrays"))
      return;
  
@@ -751,7 +780,7 @@
    DrawWrapper("drawArrays", CanvasPerformanceMonitor::DrawType::kDrawArrays,
                [&]() { ContextGL()->DrawArrays(mode, first, count); });
  }
-@@ -3374,6 +3536,11 @@
+@@ -3374,6 +3565,11 @@
    if (!ValidateDrawElements("drawElements", type, offset))
      return;
  
@@ -763,7 +792,7 @@
    DrawWrapper("drawElements", CanvasPerformanceMonitor::DrawType::kDrawElements,
                [&]() {
                  ContextGL()->DrawElements(
-@@ -3443,6 +3610,10 @@
+@@ -3443,6 +3639,10 @@
    }
  
    bound_vertex_array_object_->SetAttribEnabled(index, true);
@@ -774,7 +803,7 @@
    ContextGL()->EnableVertexAttribArray(index);
  }
  
-@@ -3541,6 +3712,10 @@
+@@ -3541,6 +3741,10 @@
      return;
    if (!ValidateTextureBinding("generateMipmap", target))
      return;
@@ -785,7 +814,7 @@
    ContextGL()->GenerateMipmap(target);
  }
  
-@@ -3893,17 +4068,54 @@
+@@ -3893,17 +4097,54 @@
    if (isContextLost())
      return ScriptValue::CreateNull(script_state->GetIsolate());
    const int kIntZero = 0;
@@ -845,7 +874,7 @@
      case GL_ARRAY_BUFFER_BINDING:
        return WebGLAny(script_state, bound_array_buffer_.Get());
      case GL_BLEND:
-@@ -3923,7 +4135,8 @@
+@@ -3923,7 +4164,8 @@
      case GL_BLEND_SRC_RGB:
        return GetUnsignedIntParameter(script_state, pname);
      case GL_BLUE_BITS:
@@ -855,7 +884,7 @@
      case GL_COLOR_CLEAR_VALUE:
        return GetWebGLFloatArrayParameter(script_state, pname);
      case GL_COLOR_WRITEMASK:
-@@ -3940,7 +4153,8 @@
+@@ -3940,7 +4182,8 @@
      case GL_DEPTH_BITS:
        if (!framebuffer_binding_ && !CreationAttributes().depth)
          return WebGLAny(script_state, kIntZero);
@@ -865,7 +894,7 @@
      case GL_DEPTH_CLEAR_VALUE:
        return GetFloatParameter(script_state, pname);
      case GL_DEPTH_FUNC:
-@@ -3963,7 +4177,8 @@
+@@ -3963,7 +4206,8 @@
      case GL_GENERATE_MIPMAP_HINT:
        return GetUnsignedIntParameter(script_state, pname);
      case GL_GREEN_BITS:
@@ -875,7 +904,7 @@
      case GL_IMPLEMENTATION_COLOR_READ_FORMAT:
        return GetIntParameter(script_state, pname);
      case GL_IMPLEMENTATION_COLOR_READ_TYPE:
-@@ -3971,25 +4186,43 @@
+@@ -3971,25 +4215,43 @@
      case GL_LINE_WIDTH:
        return GetFloatParameter(script_state, pname);
      case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
@@ -927,7 +956,7 @@
      case GL_MAX_VIEWPORT_DIMS:
        return GetWebGLIntArrayParameter(script_state, pname);
      case GL_PACK_ALIGNMENT:
-@@ -4001,7 +4234,8 @@
+@@ -4001,7 +4263,8 @@
      case GL_POLYGON_OFFSET_UNITS:
        return GetFloatParameter(script_state, pname);
      case GL_RED_BITS:
@@ -937,7 +966,7 @@
      case GL_RENDERBUFFER_BINDING:
        return WebGLAny(script_state, renderbuffer_binding_.Get());
      case GL_RENDERER:
-@@ -4009,7 +4243,8 @@
+@@ -4009,7 +4272,8 @@
      case GL_SAMPLE_ALPHA_TO_COVERAGE:
        return GetBooleanParameter(script_state, pname);
      case GL_SAMPLE_BUFFERS:
@@ -947,7 +976,7 @@
      case GL_SAMPLE_COVERAGE:
        return GetBooleanParameter(script_state, pname);
      case GL_SAMPLE_COVERAGE_INVERT:
-@@ -4017,7 +4252,8 @@
+@@ -4017,7 +4281,8 @@
      case GL_SAMPLE_COVERAGE_VALUE:
        return GetFloatParameter(script_state, pname);
      case GL_SAMPLES:
@@ -957,7 +986,7 @@
      case GL_SCISSOR_BOX:
        return GetWebGLIntArrayParameter(script_state, pname);
      case GL_SCISSOR_TEST:
-@@ -4045,7 +4281,8 @@
+@@ -4045,7 +4310,8 @@
      case GL_STENCIL_BITS:
        if (!framebuffer_binding_ && !CreationAttributes().stencil)
          return WebGLAny(script_state, kIntZero);
@@ -967,7 +996,7 @@
      case GL_STENCIL_CLEAR_VALUE:
        return GetIntParameter(script_state, pname);
      case GL_STENCIL_FAIL:
-@@ -4065,7 +4302,8 @@
+@@ -4065,7 +4331,8 @@
      case GL_STENCIL_WRITEMASK:
        return GetUnsignedIntParameter(script_state, pname);
      case GL_SUBPIXEL_BITS:
@@ -977,7 +1006,7 @@
      case GL_TEXTURE_BINDING_2D:
        return WebGLAny(
            script_state,
-@@ -4101,6 +4339,27 @@
+@@ -4101,6 +4368,27 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
@@ -1005,7 +1034,7 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLRendererParam.Get()));
          return WebGLAny(script_state,
-@@ -4112,6 +4371,17 @@
+@@ -4112,6 +4400,17 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
@@ -1023,7 +1052,7 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLVendorParam.Get()));
          return WebGLAny(script_state,
-@@ -4133,8 +4403,9 @@
+@@ -4133,8 +4432,9 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT:  // EXT_texture_filter_anisotropic
        if (ExtensionEnabled(kEXTTextureFilterAnisotropicName)) {
@@ -1035,7 +1064,7 @@
        }
        SynthesizeGLError(
            GL_INVALID_ENUM, "getParameter",
-@@ -4438,6 +4709,15 @@
+@@ -4438,6 +4738,15 @@
      }
    }
  
@@ -1051,7 +1080,7 @@
    return result;
  }
  
-@@ -4751,7 +5031,19 @@
+@@ -4751,7 +5060,19 @@
        ObjectOrZero(program), name.Utf8().c_str());
    if (uniform_location == -1)
      return nullptr;
@@ -1072,7 +1101,7 @@
  }
  
  ScriptValue WebGLRenderingContextBase::getVertexAttrib(
-@@ -4971,6 +5263,10 @@
+@@ -4971,6 +5292,10 @@
      return;
    }
  
@@ -1083,7 +1112,7 @@
    GLuint query = 0u;
    if (ExtensionEnabled(kKHRParallelShaderCompileName)) {
      ContextGL()->GenQueriesEXT(1, &query);
-@@ -5260,6 +5556,60 @@
+@@ -5260,6 +5585,61 @@
        return;
      }
      ContextGL()->ReadPixels(x, y, width, height, format, type, data);
@@ -1091,11 +1120,12 @@
 +    // canvas-bridge: substitute the remote render's pixels (RGBA8 only).
 +    bool cb_substituted = false;
 +    if (format == GL_RGBA && type == GL_UNSIGNED_BYTE &&
-+        bridge_canvas_id_ != 0 && !bridge_webgl_unsupported_) {
++        bridge_canvas_id_ != 0 && !bridge_webgl_unsupported_ &&
++        BridgeAllowedForThisContext()) {
 +      if (auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
 +          cb && cb->Connected()) {
 +        std::optional<std::vector<uint8_t>> cbpx =
-+            cb->RequestImageData(bridge_canvas_id_, x, y, width, height);
++            cb->GetImageDataCacheFirst(bridge_canvas_id_, x, y, width, height);
 +        if (cbpx &&
 +            cbpx->size() == static_cast<size_t>(width) * height * 4) {
 +          __builtin_memcpy(data, cbpx->data(), cbpx->size());
@@ -1144,7 +1174,7 @@
    }
  }
  
-@@ -5371,6 +5721,10 @@
+@@ -5371,6 +5751,10 @@
      return;
    String ascii_string = ReplaceNonASCII(string).Result();
    shader->SetSource(string);
@@ -1155,7 +1185,7 @@
    DCHECK(ascii_string.Is8Bit() && ascii_string.ContainsOnlyAsciiOrEmpty());
    const GLchar* shader_data = base::as_chars(ascii_string.Span8()).data();
    const GLint shader_length = ascii_string.length();
-@@ -5673,6 +6027,11 @@
+@@ -5673,6 +6057,11 @@
                                   params.type, pixels);
        break;
    }
@@ -1167,7 +1197,7 @@
  }
  
  void WebGLRenderingContextBase::TexImageStaticBitmapImage(
-@@ -5949,6 +6308,33 @@
+@@ -5949,6 +6338,33 @@
      return;
    }
  
@@ -1201,7 +1231,7 @@
    ScopedUnpackParametersResetRestore temporary_reset_unpack(
        this, change_unpack_params);
    TexImageBase(params, data.data());
-@@ -6842,12 +7228,21 @@
+@@ -6842,12 +7258,21 @@
  void WebGLRenderingContextBase::texParameterf(GLenum target,
                                                GLenum pname,
                                                GLfloat param) {
@@ -1223,7 +1253,7 @@
    TexParameter(target, pname, 0, param, false);
  }
  
-@@ -7095,6 +7490,9 @@
+@@ -7095,6 +7520,9 @@
      return;
    }
  
@@ -1233,7 +1263,7 @@
    ContextGL()->Uniform1f(location->Location(), x);
  }
  
-@@ -7120,6 +7518,11 @@
+@@ -7120,6 +7548,11 @@
      return;
    }
  
@@ -1245,7 +1275,7 @@
    ContextGL()->Uniform1i(location->Location(), x);
  }
  
-@@ -7146,6 +7549,9 @@
+@@ -7146,6 +7579,9 @@
      return;
    }
  
@@ -1255,7 +1285,7 @@
    ContextGL()->Uniform2f(location->Location(), x, y);
  }
  
-@@ -7199,6 +7605,9 @@
+@@ -7199,6 +7635,9 @@
      return;
    }
  
@@ -1265,7 +1295,7 @@
    ContextGL()->Uniform3f(location->Location(), x, y, z);
  }
  
-@@ -7254,6 +7663,9 @@
+@@ -7254,6 +7693,9 @@
      return;
    }
  
@@ -1275,7 +1305,7 @@
    ContextGL()->Uniform4f(location->Location(), x, y, z, w);
  }
  
-@@ -7337,6 +7749,18 @@
+@@ -7337,6 +7779,18 @@
                                         v, 16, 0, v.size(), &data, &length)) {
      return;
    }
@@ -1294,7 +1324,7 @@
    ContextGL()->UniformMatrix4fv(location->Location(), length, transpose, data);
  }
  
-@@ -7348,6 +7772,10 @@
+@@ -7348,6 +7802,10 @@
      return;
    }
  
@@ -1305,7 +1335,7 @@
    if (current_program_ != program) {
      if (current_program_)
        current_program_->OnDetached(ContextGL());
-@@ -7477,6 +7905,12 @@
+@@ -7477,6 +7935,12 @@
      return;
    }
  
@@ -1318,7 +1348,7 @@
    bound_vertex_array_object_->SetArrayBufferForAttrib(
        index, bound_array_buffer_.Get());
    ContextGL()->VertexAttribPointer(
-@@ -7504,6 +7938,9 @@
+@@ -7504,6 +7968,9 @@
                                           GLsizei height) {
    if (isContextLost())
      return;
@@ -1330,12 +1360,16 @@
  
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
-@@ -1972,6 +1972,21 @@
+@@ -1972,6 +1972,25 @@
    void RecordANGLEImplementation();
  
   private:
 +  // canvas-bridge: stable server-side WebGL surface id (0 = none yet).
 +  uint32_t bridge_canvas_id_ = 0;
++  // WS-Policy: per-context cache of the origin gate (lazy).
++  bool bridge_policy_checked_ = false;
++  bool bridge_policy_allowed_ = false;
++  bool BridgeAllowedForThisContext();
 +  // canvas-bridge: monotonic counter handing each WebGL object a stable id.
 +  uint32_t bridge_webgl_obj_counter_ = 0;
 +  // canvas-bridge: set when the canvas uses a feature the bridge can't forward

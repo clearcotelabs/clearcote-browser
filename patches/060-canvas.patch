@@ -186,7 +186,7 @@
  
  namespace blink {
  
-@@ -374,6 +381,52 @@
+@@ -374,6 +381,85 @@
  }
  perfetto::EventContext GetEventContext();
  
@@ -210,10 +210,25 @@
 +
 +}  // namespace
 +
++bool BaseRenderingContext2D::BridgeAllowedForThisContext() {
++  if (!bridge_policy_checked_) {
++    bridge_policy_checked_ = true;
++    bridge_policy_allowed_ = false;
++    if (auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get()) {
++      std::string etld1;
++      if (auto* ec = GetTopExecutionContext(); ec && ec->GetSecurityOrigin()) {
++        etld1 = ec->GetSecurityOrigin()->RegistrableDomain().Utf8();
++      }
++      bridge_policy_allowed_ = cb->BridgeEnabledForOrigin(etld1);
++    }
++  }
++  return bridge_policy_allowed_;
++}
++
 +void BaseRenderingContext2D::RecordBridgeOp(
 +    uint32_t op, const std::string& str, const std::vector<double>& args) {
 +  auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
-+  if (!cb || !cb->Connected())
++  if (!cb || !cb->Connected() || !BridgeAllowedForThisContext())
 +    return;
 +  blink::canvas_bridge::Canvas2DOpMessage m;
 +  m.canvas_id = EnsureBridgeCanvas(cb, bridge_canvas_id_, Width(), Height());
@@ -221,15 +236,33 @@
 +  m.str_arg = str;
 +  m.args = args;
 +  cb->Send(blink::canvas_bridge::Encode(m));
++  // Tier 1: a draw op changes the rendered surface -> bump version + prefetch.
++  using CbOp = blink::canvas_bridge::Canvas2DOp;
++  switch (static_cast<CbOp>(op)) {
++    case CbOp::kFill:
++    case CbOp::kStroke:
++    case CbOp::kFillRect:
++    case CbOp::kStrokeRect:
++    case CbOp::kClearRect:
++    case CbOp::kFillText:
++    case CbOp::kStrokeText:
++      cb->BumpVersion(m.canvas_id);
++      cb->MaybePrefetch(m.canvas_id, static_cast<uint32_t>(Width()),
++                        static_cast<uint32_t>(Height()));
++      break;
++    default:
++      break;
++  }
 +}
 +
 +bool BaseRenderingContext2D::ReadBridgePixels(std::vector<uint8_t>* out,
 +                                              int width, int height) {
 +  auto* cb = blink::canvas_bridge::CanvasBridgeClient::Get();
-+  if (!cb || !cb->Connected() || bridge_canvas_id_ == 0)
++  if (!cb || !cb->Connected() || bridge_canvas_id_ == 0 ||
++      !BridgeAllowedForThisContext())
 +    return false;
 +  std::optional<std::vector<uint8_t>> px =
-+      cb->RequestImageData(bridge_canvas_id_, 0, 0, width, height);
++      cb->GetImageDataCacheFirst(bridge_canvas_id_, 0, 0, width, height);
 +  if (!px || px->size() != static_cast<size_t>(width) * height * 4)
 +    return false;
 +  *out = std::move(*px);
@@ -239,7 +272,7 @@
  ImageData* BaseRenderingContext2D::getImageDataInternal(
      int sx,
      int sy,
-@@ -515,6 +568,23 @@
+@@ -515,6 +601,23 @@
    if (!image_data)
      return nullptr;
  
@@ -247,11 +280,11 @@
 +  // its authentic pixels for this region instead of the local render (and skip
 +  // the local farble below; the bridge pixels are ground truth).
 +  if (auto* bridge = blink::canvas_bridge::CanvasBridgeClient::Get();
-+      bridge && bridge->Connected()) {
++      bridge && bridge->Connected() && BridgeAllowedForThisContext()) {
 +    SkPixmap bridge_pixmap = image_data->GetSkPixmap();
 +    const size_t expected = bridge_pixmap.computeByteSize();
 +    std::optional<std::vector<uint8_t>> bridge_pixels =
-+        bridge->RequestImageData(
++        bridge->GetImageDataCacheFirst(
 +            EnsureBridgeCanvas(bridge, bridge_canvas_id_, Width(), Height()),
 +            sx, sy, sw, sh);
 +    if (bridge_pixels && bridge_pixels->size() == expected) {
@@ -263,7 +296,7 @@
    // Read pixels into |image_data|.
    if (snapshot) {
      gfx::Rect snapshot_rect{snapshot->Size()};
-@@ -535,8 +605,17 @@
+@@ -535,8 +638,17 @@
            snapshot->PaintImageForCurrentFrame().GetSkImageInfo().bounds();
        DCHECK(!bounds.intersect(SkIRect::MakeXYWH(sx, sy, sw, sh)));
      }
@@ -283,7 +316,7 @@
      }
    }
  
-@@ -688,6 +767,9 @@
+@@ -688,6 +800,9 @@
  }
  
  void BaseRenderingContext2D::setTextAlign(const V8CanvasTextAlign align) {
@@ -293,7 +326,7 @@
    GetState().SetTextAlign(align.AsEnum());
  }
  
-@@ -697,6 +779,9 @@
+@@ -697,6 +812,9 @@
  
  void BaseRenderingContext2D::setTextBaseline(
      const V8CanvasTextBaseline baseline) {
@@ -303,7 +336,7 @@
    GetState().SetTextBaseline(baseline.AsEnum());
  }
  
-@@ -837,6 +922,10 @@
+@@ -837,6 +955,10 @@
      return;
    }
  
@@ -314,7 +347,7 @@
    CanvasRenderingContext2DState& state = GetState();
    if (new_font == state.UnparsedFont() && CurrentFontResolvedAndUpToDate()) {
      return;
-@@ -894,6 +983,9 @@
+@@ -894,6 +1016,9 @@
  }
  
  void BaseRenderingContext2D::fillText(const String& text, double x, double y) {
@@ -324,7 +357,7 @@
    CanvasRenderingContext2DState& state = GetState();
    DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kFillPaintType,
                     state.GetTextAlign(), state.GetTextBaseline(), 0,
-@@ -950,6 +1042,7 @@
+@@ -950,6 +1075,7 @@
  void BaseRenderingContext2D::strokeText(const String& text,
                                          double x,
                                          double y) {
@@ -332,7 +365,7 @@
    CanvasRenderingContext2DState& state = GetState();
    DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kStrokePaintType,
                     state.GetTextAlign(), state.GetTextBaseline(), 0,
-@@ -960,6 +1053,7 @@
+@@ -960,6 +1086,7 @@
                                          double x,
                                          double y,
                                          double max_width) {
@@ -340,7 +373,7 @@
    CanvasRenderingContext2DState& state = GetState();
    DrawTextInternal(text, x, y, CanvasRenderingContext2DState::kStrokePaintType,
                     state.GetTextAlign(), state.GetTextBaseline(), 0,
-@@ -1182,15 +1276,44 @@
+@@ -1182,15 +1309,44 @@
        font, direction, state.GetTextBaseline(), state.GetTextAlign(), text,
        host->GetPlainTextPainter());
  
@@ -392,12 +425,16 @@
    return text_metrics;
 --- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
 +++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
-@@ -360,6 +360,12 @@
+@@ -360,6 +360,16 @@
    void WillUseCurrentFont() const;
  
    int num_readbacks_performed_ = 0;
 +  // canvas-bridge: stable server-side surface id for this 2D context (0 = none yet).
 +  uint32_t bridge_canvas_id_ = 0;
++  // WS-Policy: per-context cache of the origin gate (lazy).
++  bool bridge_policy_checked_ = false;
++  bool bridge_policy_allowed_ = false;
++  bool BridgeAllowedForThisContext();
 +  void RecordBridgeOp(uint32_t op, const std::string& str,
 +                      const std::vector<double>& args) override;
 +  bool ReadBridgePixels(std::vector<uint8_t>* out, int width,

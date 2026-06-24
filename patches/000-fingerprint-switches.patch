@@ -1,6 +1,6 @@
 --- a/components/ungoogled/ungoogled_switches.cc
 +++ b/components/ungoogled/ungoogled_switches.cc
-@@ -15,4 +15,45 @@
+@@ -15,4 +15,52 @@
  // Enable fingerprinting deception for Canvas image data
  const char kFingerprintingCanvasImageDataNoise[] = "fingerprinting-canvas-image-data-noise";
  
@@ -44,11 +44,18 @@
 +const char kCanvasBridgeUrl[] = "canvas-bridge-url";
 +// Canvas bridge HTTP Basic credentials, "user:secret".
 +const char kCanvasBridgeAuth[] = "canvas-bridge-auth";
++// Per-origin policy: off | all (default) | allow | deny.
++const char kCanvasBridgeMode[] = "canvas-bridge-mode";
++// Comma-separated eTLD+1 list for mode=allow / mode=deny.
++const char kCanvasBridgeAllow[] = "canvas-bridge-allow";
++const char kCanvasBridgeDeny[] = "canvas-bridge-deny";
++// Cold cache-miss behavior: block (default) | local (never stall; render local).
++const char kCanvasBridgeFallback[] = "canvas-bridge-fallback";
 +
  }  // namespace switches
 --- a/components/ungoogled/ungoogled_switches.h
 +++ b/components/ungoogled/ungoogled_switches.h
-@@ -15,6 +15,21 @@
+@@ -15,6 +15,25 @@
  COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasMeasureTextNoise[];
  COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintingCanvasImageDataNoise[];
  
@@ -67,12 +74,16 @@
 +COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintProfile[];
 +COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeUrl[];
 +COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeAuth[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeMode[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeAllow[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeDeny[];
++COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeFallback[];
  }
  
  #endif  // THIRD_PARTY_UNGOOGLED_FINGERPRINTING_SWITCHES_H_
 --- a/content/browser/renderer_host/render_process_host_impl.cc
 +++ b/content/browser/renderer_host/render_process_host_impl.cc
-@@ -3868,6 +3868,27 @@
+@@ -3868,6 +3868,31 @@
        switches::kFingerprintingClientRectsNoise,
        switches::kFingerprintingCanvasMeasureTextNoise,
        switches::kFingerprintingCanvasImageDataNoise,
@@ -97,6 +108,10 @@
 +      switches::kFingerprintProfile,
 +      switches::kCanvasBridgeUrl,
 +      switches::kCanvasBridgeAuth,
++      switches::kCanvasBridgeMode,
++      switches::kCanvasBridgeAllow,
++      switches::kCanvasBridgeDeny,
++      switches::kCanvasBridgeFallback,
        switches::kForceDeviceScaleFactor,
        switches::kForceDisplayColorProfile,
        switches::kForceHighContrast,

@@ -23,7 +23,7 @@
 
 </div>
 
-> **Status:** [**v0.1.0-pre.12**](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.12) is live — Chromium 149, Windows x64, signed + checksummed ([verify it](docs/VERIFY.md)). Completes the opt-in **[canvas bridge](docs/CANVAS-BRIDGE.md)** for **WebGL**: full op-forwarding of geometry, shaders, uniforms, draws, procedural textures, `readPixels` **and** `toDataURL` to a real-GPU render host, so WebGL readbacks are coherent with the GPU you present (image/video-sourced textures degrade gracefully to local rendering). **Windows x64 only for now**; macOS/Linux are on the [Roadmap](ROADMAP.md). An experimental pre-release.
+> **Status:** [**v0.1.0-pre.13**](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.13) is live — Chromium 149, Windows x64, signed + checksummed ([verify it](docs/VERIFY.md)). Scopes the opt-in **[canvas bridge](docs/CANVAS-BRIDGE.md)** per origin (`--canvas-bridge-mode=off|all|allow|deny` + allow/deny lists, cold-miss `--canvas-bridge-fallback`, speculative prefetch) so you bridge only where it matters, and makes the **humanized cursor** (`Browser.humanizedClick`) move continuously — each path now starts from the last cursor position instead of snapping back to the corner between moves. **Windows x64 only for now**; macOS/Linux are on the [Roadmap](ROADMAP.md). An experimental pre-release.
 
 ---
 
