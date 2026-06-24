@@ -41,6 +41,34 @@ Already using Playwright? Swap `p.chromium.launch(...)` for `launch(...)` from `
 returned object is a normal Playwright `Browser`. (One shared Playwright driver is started lazily
 and stopped at interpreter exit.)
 
+### Async API (`clearcote.async_api`)
+
+Inside an asyncio event loop, use the async API — it mirrors the sync one and returns Playwright
+**async** objects (the sync API raises "Sync API inside the asyncio loop"):
+
+```python
+import asyncio
+from clearcote.async_api import launch
+
+async def main():
+    browser = await launch(
+        fingerprint="user-7423",
+        platform="windows",
+        timezone="America/New_York",
+    )
+    page = await browser.new_page()
+    await page.goto("https://abrahamjuliot.github.io/creepjs/")
+    # ... standard Playwright (async API) from here ...
+    await browser.close()
+
+asyncio.run(main())
+```
+
+Same options as the sync `launch` (fingerprint/persona/proxy/`geoip`/`profile`/`canvas_bridge`/
+`humanize`/…). `clearcote.async_api` exposes `launch`, `launch_persistent_context`, `launch_agent`,
+`run_agent_task`, `executable_path`, `download`, plus `Profile` (use `launch(profile="name")`). Each
+launched browser owns its Playwright driver and stops it on `await browser.close()`.
+
 ### Through a proxy (report the proxy's IP, not your host's)
 
 ```python

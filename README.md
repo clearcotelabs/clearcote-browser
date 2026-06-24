@@ -123,6 +123,21 @@ page.goto("https://example.com")
 browser.close()
 ```
 
+Inside an asyncio loop, use the async API (same options, returns Playwright async objects):
+
+```python
+import asyncio
+from clearcote.async_api import launch
+
+async def main():
+    browser = await launch(fingerprint="user-7423", platform="windows", timezone="America/New_York")
+    page = await browser.new_page()
+    await page.goto("https://example.com")
+    await browser.close()
+
+asyncio.run(main())
+```
+
 ### Key SDK options
 
 - **Match a proxy automatically** — `geoip: true` resolves the proxy's exit region and sets a coherent timezone + languages + `Accept-Language`:
