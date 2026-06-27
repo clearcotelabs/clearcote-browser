@@ -98,6 +98,36 @@ Anything you set explicitly wins over `geoip`. With no proxy it uses your direct
 
 Geo data comes from the offline [geoip-all-in-one](https://github.com/daijro/geoip-all-in-one) MaxMind database (downloaded + cached on first use; GPL-3.0 data, the same source Camoufox uses) — more accurate than a single online API — with `ip-api.com` as a fallback.
 
+### Humanized input (`humanize`, `show_cursor`)
+
+```python
+browser = launch(fingerprint="user-7423", humanize=True)
+page = browser.new_page()
+page.goto("https://example.com")
+
+page.click("#login")                       # eased bezier glide, then a trusted click
+page.fill("#user", "alice")                # focus + key-by-key typing with human timing
+page.locator("#pwd").type("s3cr3t")        # locators are humanized too
+page.mouse.wheel(0, 800)                   # eased, multi-step scroll
+# a held-button drag (slider captchas): the button stays pressed across the move
+page.mouse.move(x0, y0); page.mouse.down(); page.mouse.move(x1, y0); page.mouse.up()
+```
+
+`humanize=True` installs **one consistent human-input standard** covering moving, clicking,
+dragging, scrolling and typing — all dispatched as **native trusted input** (`isTrusted === true`,
+`navigator.webdriver` stays `false`), at both the page level (`page.click`/`hover`/`dblclick`/
+`type`/`fill`/`press`, `page.mouse.*`, `page.keyboard.type`) and the locator level
+(`locator.click`/`type`/`fill`/`hover`/`press_sequentially`/`drag_to`/`check`/…). Mouse paths are
+eased, slightly bowed cubic-beziers built from the *last* cursor position (no snap back to the
+corner); because they use native input, the button held by `mouse.down()` stays held across the
+move, so `down → move → up` is a real drag (slider captchas work). Clicks get an actionability
+pre-flight (visible + enabled + stable + not covered) and fall back to the native click if it
+fails. Typing goes key-by-key with randomized inter-key timing and the occasional correction.
+`page.fill` with a value over 200 chars stays atomic (skips per-key typing) to avoid crawling.
+
+`show_cursor=True` injects a red cursor dot that follows the real mouse, handy for watching a
+headed run. Both default to off; everything stays standard Playwright when `humanize=False`.
+
 ### Persistent profile
 
 ```python
@@ -189,6 +219,8 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `fingerprint_profile` | _(directive → `--fingerprint-profile`)_ | A real captured machine profile (file path / dict / JSON string); the SDK gzip+base64-encodes it. Fields present **override** the seed-derived persona; absent fields fall back to `fingerprint`. Also derives `accept_language` from the profile's `navigator.languages` when none is set. |
 | `canvas_bridge` | _(→ `--canvas-bridge-*`)_ | Forward canvas/WebGL readbacks to a remote real-GPU host so the pixels a page hashes match the GPU your persona claims. `{"url", "auth", "mode", "allow", "deny", "fallback"}`; setting `url` auto-adds `--no-sandbox`. See [docs/CANVAS-BRIDGE.md](../../docs/CANVAS-BRIDGE.md). |
 | `extensions` | _(→ `--load-extension` + `--disable-extensions-except`)_ | List of unpacked-extension directory paths to load (Chromium forces headed when extensions are present). |
+| `humanize` | _(directive)_ | `True` → humanize all input (move/click/drag/scroll/type) as native trusted events, at the page and locator level. See [Humanized input](#humanized-input-humanize-show_cursor). |
+| `show_cursor` | _(directive)_ | `True` → inject a red cursor dot that follows the real mouse (handy for watching a headed run). |
 
 > **Headed launches** default to `no_viewport=True` so `window.innerWidth` tracks the real OS window — an emulated `1280×720` on a real window is an impossible-window tell. Pass an explicit `viewport` to override.
 >

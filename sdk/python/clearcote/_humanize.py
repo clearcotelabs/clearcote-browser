@@ -1,14 +1,28 @@
 """Humanized input + cursor visualization (Python).
 
-``humanize=True``   — routes page.click/hover/mouse.move/mouse.click along an eased, slightly
-  bowed cubic-bezier path that starts from the *last* cursor position (continuous — no snap back
-  to the top-left corner between moves), dispatched as native trusted input (isTrusted=True,
-  navigator.webdriver stays False); eases mouse.wheel SDK-side.
-``show_cursor=True`` — injects a red cursor dot that follows the real mousemove events.
+``humanize=True`` installs ONE consistent human-input standard that covers moving, clicking,
+dragging, scrolling and typing — dispatched as native trusted input (isTrusted=True,
+navigator.webdriver stays False). It works whether you drive the page directly or via locators:
 
-Note: the engine's ``Browser.humanizedClick`` CDP command always starts its path from the
-document origin (0,0), so chained moves visibly flick back to the corner. We therefore build the
-path SDK-side from the tracked cursor position instead, which needs no special binary.
+  * page level   — page.click / page.hover / page.dblclick / page.type / page.fill / page.press,
+                   page.mouse.move / mouse.click / mouse.wheel and held-button drags
+                   (mouse.down → mouse.move → mouse.up), page.keyboard.type
+  * locator level — locator.click / type / fill / hover / dblclick / press /
+                    press_sequentially / clear / check / uncheck / tap / drag_to
+                    (routed through the humanized page methods; main-frame locators only,
+                    with a safe fall-through to native for anything exotic)
+
+``show_cursor=True`` injects a red cursor dot that follows the real mousemove events.
+
+Design notes:
+  * Mouse moves build an eased, slightly bowed cubic-bezier path SDK-side from the *tracked*
+    cursor position (continuous — no snap back to the 0,0 corner between moves) using
+    Playwright's NATIVE mouse.move. Because it is native input, the button state is carried
+    correctly: down() → move() → up() is a real held-button drag (sliders work) with no
+    separate CDP channel to desync.
+  * Typing goes key-by-key through Playwright's native keyboard (trusted, shift handled by the
+    engine) with randomized inter-key timing, occasional thinking pauses, and a small
+    fat-finger-then-correct chance.
 """
 
 import math
@@ -33,9 +47,29 @@ CURSOR_OVERLAY = """(() => {
   }, true);
 })();"""
 
+# Clearcote ships a Windows x64 binary, so Control is the correct select-all modifier.
+_SELECT_ALL = "Control+a"
+
+# Compact keyboard-adjacency map for realistic fat-finger typos.
+_NEARBY = {
+    "a": "sqwz", "b": "vghn", "c": "xdfv", "d": "sfecx", "e": "wrsdf", "f": "dgrtcv",
+    "g": "fhtyb", "h": "gjybn", "i": "ujko", "j": "hkunm", "k": "jloi", "l": "kop",
+    "m": "njk", "n": "bhjm", "o": "iklp", "p": "ol", "q": "wa", "r": "edft",
+    "s": "awedxz", "t": "rfgy", "u": "yhji", "v": "cfgb", "w": "qase", "x": "zsdc",
+    "y": "tghu", "z": "asx",
+}
+
 
 def _rand(a, b):
     return a + random.random() * (b - a)
+
+
+def _nearby_key(ch):
+    lo = ch.lower()
+    if lo in _NEARBY:
+        w = random.choice(_NEARBY[lo])
+        return w.upper() if ch.isupper() else w
+    return ch
 
 
 def attach_humanize(browser, page, humanize=False, show_cursor=False):
@@ -61,7 +95,10 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
 
     def _glide(x, y, jitter=0.6):
         """Move from the tracked position to (x, y) along an eased, slightly bowed cubic-bezier
-        path, emitting native (trusted) mousemove events the whole way. No snap-back."""
+        path, emitting native (trusted) mousemove events the whole way. No snap-back.
+
+        Native input means a button pressed via mouse.down() stays pressed across the whole
+        glide — so the same path code powers both a free move and a held-button drag."""
         x0, y0 = st["pos"]
         dx, dy = x - x0, y - y0
         dist = math.hypot(dx, dy)
@@ -117,6 +154,145 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
 
     mouse.move, mouse.click, mouse.wheel = hmove, hclick, hwheel
 
+    # ----------------------------------------------------------------- keyboard
+    kb = page.keyboard
+    native_kb_type, native_kb_press = kb.type, kb.press
+
+    def _human_type_text(text):
+        """Type text key-by-key with human timing. Each char goes through Playwright's native
+        keyboard (trusted; shift/symbols handled by the engine), so this stays isTrusted=True."""
+        n = len(text)
+        for i, ch in enumerate(text):
+            # occasional fat-finger on alnum chars, then notice + correct
+            if ch.isascii() and ch.isalnum() and random.random() < 0.02:
+                try:
+                    native_kb_type(_nearby_key(ch))
+                    time.sleep(_rand(120, 300) / 1000.0)
+                    native_kb_press("Backspace")
+                    time.sleep(_rand(80, 200) / 1000.0)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                native_kb_type(ch)
+            except Exception:  # noqa: BLE001
+                break
+            if i < n - 1:
+                if random.random() < 0.06:                 # brief thinking pause
+                    time.sleep(_rand(180, 450) / 1000.0)
+                else:
+                    time.sleep(_rand(45, 150) / 1000.0)
+
+    def hkb_type(text, **kw):
+        _human_type_text(text)
+
+    kb.type = hkb_type
+
+    # ------------------------------------------------------- page-level targeted helpers
+    def _is_focused(selector):
+        try:
+            return bool(page.evaluate(
+                "(s) => { const e = document.querySelector(s);"
+                " return !!e && e === document.activeElement; }",
+                selector))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _point_for(selector, timeout):
+        """Resolve a humane click point inside the element, after actionability waits."""
+        loc = page.locator(selector).first
+        loc.wait_for(state="visible", timeout=timeout)
+        loc.scroll_into_view_if_needed(timeout=timeout)
+        if not loc.is_enabled():
+            return None
+        box = loc.bounding_box()
+        if not box:
+            return None
+        # stability: a box that's still moving = an animation in flight -> let PW settle it
+        time.sleep(0.05)
+        box2 = loc.bounding_box()
+        if not box2 or abs(box2["x"] - box["x"]) > 1 or abs(box2["y"] - box["y"]) > 1:
+            return None
+        box = box2
+        return (box["x"] + box["width"] * _rand(0.3, 0.7),
+                box["y"] + box["height"] * _rand(0.3, 0.7))
+
+    def _focus_click(selector, timeout):
+        pt = _point_for(selector, timeout)
+        if not pt:
+            return False
+        _glide(pt[0], pt[1])
+        time.sleep(_rand(40, 130) / 1000.0)
+        native_click(pt[0], pt[1])
+        return True
+
+    native_page_type = page.type
+    native_page_fill = page.fill
+    native_page_press = page.press
+    native_page_dblclick = page.dblclick
+
+    def htype(selector, text, **options):
+        try:
+            timeout = options.get("timeout", 30000)
+            if not _is_focused(selector):
+                if not _focus_click(selector, timeout):
+                    return native_page_type(selector, text, **options)
+                time.sleep(_rand(40, 120) / 1000.0)
+            _human_type_text(text)
+            return None
+        except Exception:  # noqa: BLE001
+            return native_page_type(selector, text, **options)
+
+    def hfill(selector, value, **options):
+        try:
+            timeout = options.get("timeout", 30000)
+            # bulk values: keep fill fast/atomic (humanizing 1000s of chars would crawl)
+            if len(value) > 200:
+                return native_page_fill(selector, value, **options)
+            if not _focus_click(selector, timeout):
+                return native_page_fill(selector, value, **options)
+            time.sleep(_rand(40, 120) / 1000.0)
+            try:
+                native_kb_press(_SELECT_ALL)
+                time.sleep(_rand(30, 80) / 1000.0)
+                native_kb_press("Backspace")
+                time.sleep(_rand(40, 120) / 1000.0)
+            except Exception:  # noqa: BLE001
+                pass
+            _human_type_text(value)
+            return None
+        except Exception:  # noqa: BLE001
+            return native_page_fill(selector, value, **options)
+
+    def hdblclick(selector, **options):
+        try:
+            timeout = options.get("timeout", 30000)
+            pt = _point_for(selector, timeout)
+            if not pt:
+                return native_page_dblclick(selector, **options)
+            _glide(pt[0], pt[1])
+            time.sleep(_rand(40, 130) / 1000.0)
+            native_click(pt[0], pt[1], click_count=2, delay=_rand(40, 90))
+            return None
+        except Exception:  # noqa: BLE001
+            return native_page_dblclick(selector, **options)
+
+    def hpress(selector, key, **options):
+        try:
+            timeout = options.get("timeout", 30000)
+            if not _is_focused(selector):
+                if not _focus_click(selector, timeout):
+                    return native_page_press(selector, key, **options)
+                time.sleep(_rand(40, 120) / 1000.0)
+            native_kb_press(key)
+            return None
+        except Exception:  # noqa: BLE001
+            return native_page_press(selector, key, **options)
+
+    page.type = htype
+    page.fill = hfill
+    page.dblclick = hdblclick
+    page.press = hpress
+
     def _make_targeted(orig, no_click):
         def wrapped(selector, **options):
             # Actionability pre-flight before a TRUSTED humanized click: a native Playwright click
@@ -164,6 +340,189 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
 
     page.click = _make_targeted(page.click, False)
     page.hover = _make_targeted(page.hover, True)
+
+    # Marker the Locator-class patch keys off: humanize is active for THIS page.
+    page._clearcote_humanized = True
+    _patch_locator_class()
+
+
+# --------------------------------------------------------------------------- locator patch
+_locator_patched = False
+
+
+def _patch_locator_class():
+    """Patch the sync Locator class once so locator.* interactions route through the humanized
+    page.* methods. Each method is a no-op unless the locator's page has humanize active AND the
+    locator targets the main frame; anything else (frame locators, exotic selectors, errors)
+    falls straight through to the original Playwright behaviour. Composes safely if another
+    library has already patched Locator — we chain to whatever was there before."""
+    global _locator_patched
+    if _locator_patched:
+        return
+    _locator_patched = True
+    try:
+        from playwright.sync_api._generated import Locator
+    except Exception:  # noqa: BLE001
+        return
+
+    o_fill = Locator.fill
+    o_click = Locator.click
+    o_type = Locator.type
+    o_dblclick = Locator.dblclick
+    o_hover = Locator.hover
+    o_press = Locator.press
+    o_press_seq = Locator.press_sequentially
+    o_clear = Locator.clear
+    o_tap = Locator.tap
+    o_check = Locator.check
+    o_uncheck = Locator.uncheck
+    o_drag_to = Locator.drag_to
+
+    def _on(self):
+        # humanize active for this page?
+        if not getattr(self.page, "_clearcote_humanized", False):
+            return False
+        # main-frame only: frame-locator selectors don't round-trip through page.* reliably,
+        # so let those use native Playwright (which handles frames correctly).
+        try:
+            return self._impl_obj._frame.parent_frame is None
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _sel(self):
+        return self._impl_obj._selector
+
+    def _fwd(kw):
+        out = {}
+        if "timeout" in kw:
+            out["timeout"] = kw["timeout"]
+        return out
+
+    def fill(self, value, **kw):
+        if _on(self):
+            try:
+                return self.page.fill(_sel(self), value, **_fwd(kw))
+            except Exception:  # noqa: BLE001
+                pass
+        return o_fill(self, value, **kw)
+
+    def click(self, **kw):
+        if _on(self):
+            try:
+                return self.page.click(_sel(self), **_fwd(kw))
+            except Exception:  # noqa: BLE001
+                pass
+        return o_click(self, **kw)
+
+    def type_(self, text, **kw):
+        if _on(self):
+            try:
+                return self.page.type(_sel(self), text, **_fwd(kw))
+            except Exception:  # noqa: BLE001
+                pass
+        return o_type(self, text, **kw)
+
+    def dblclick(self, **kw):
+        if _on(self):
+            try:
+                return self.page.dblclick(_sel(self), **_fwd(kw))
+            except Exception:  # noqa: BLE001
+                pass
+        return o_dblclick(self, **kw)
+
+    def hover(self, **kw):
+        if _on(self):
+            try:
+                return self.page.hover(_sel(self), **_fwd(kw))
+            except Exception:  # noqa: BLE001
+                pass
+        return o_hover(self, **kw)
+
+    def press(self, key, **kw):
+        if _on(self):
+            try:
+                return self.page.press(_sel(self), key, **_fwd(kw))
+            except Exception:  # noqa: BLE001
+                pass
+        return o_press(self, key, **kw)
+
+    def press_sequentially(self, text, **kw):
+        if _on(self):
+            try:
+                return self.page.type(_sel(self), text, **_fwd(kw))
+            except Exception:  # noqa: BLE001
+                pass
+        return o_press_seq(self, text, **kw)
+
+    def clear(self, **kw):
+        if _on(self):
+            try:
+                return self.page.fill(_sel(self), "", **_fwd(kw))
+            except Exception:  # noqa: BLE001
+                pass
+        return o_clear(self, **kw)
+
+    def tap(self, **kw):
+        if _on(self):
+            try:
+                return self.page.click(_sel(self), **_fwd(kw))
+            except Exception:  # noqa: BLE001
+                pass
+        return o_tap(self, **kw)
+
+    def check(self, **kw):
+        if _on(self):
+            try:
+                if not self.is_checked():
+                    return self.page.click(_sel(self), **_fwd(kw))
+                return None
+            except Exception:  # noqa: BLE001
+                pass
+        return o_check(self, **kw)
+
+    def uncheck(self, **kw):
+        if _on(self):
+            try:
+                if self.is_checked():
+                    return self.page.click(_sel(self), **_fwd(kw))
+                return None
+            except Exception:  # noqa: BLE001
+                pass
+        return o_uncheck(self, **kw)
+
+    def drag_to(self, target, **kw):
+        if _on(self):
+            try:
+                page = self.page
+                sb = self.bounding_box()
+                tb = target.bounding_box()
+                if sb and tb:
+                    sx, sy = sb["x"] + sb["width"] / 2, sb["y"] + sb["height"] / 2
+                    tx, ty = tb["x"] + tb["width"] / 2, tb["y"] + tb["height"] / 2
+                    page.mouse.move(sx, sy)
+                    time.sleep(_rand(100, 200) / 1000.0)
+                    page.mouse.down()                     # native -> button held across the glide
+                    time.sleep(_rand(80, 150) / 1000.0)
+                    page.mouse.move(tx, ty)               # humanized, held-button drag
+                    time.sleep(_rand(80, 150) / 1000.0)
+                    page.mouse.up()
+                    return None
+            except Exception:  # noqa: BLE001
+                pass
+        return o_drag_to(self, target, **kw)
+
+    Locator.fill = fill
+    Locator.click = click
+    Locator.type = type_
+    Locator.dblclick = dblclick
+    Locator.hover = hover
+    Locator.press = press
+    Locator.press_sequentially = press_sequentially
+    Locator.clear = clear
+    Locator.tap = tap
+    Locator.check = check
+    Locator.uncheck = uncheck
+    Locator.drag_to = drag_to
 
 
 def install_humanize_on_context(context, humanize=False, show_cursor=False, browser=None):
