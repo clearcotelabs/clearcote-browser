@@ -4,6 +4,7 @@ from clearcote._launchopts import (
     extension_args,
     merge_feature_flags,
     privacy_sandbox_args,
+    quic_args,
     resolve_proxy,
     webrtc_default_deny_args,
 )
@@ -30,6 +31,15 @@ def test_webrtc_default_deny():
     assert webrtc_default_deny_args([], None) == ["--webrtc-ip-handling-policy=disable_non_proxied_udp"]
     assert webrtc_default_deny_args([], "1.2.3.4") == []  # webrtc_ip set -> engine fabricates coherently
     assert webrtc_default_deny_args(["--webrtc-ip-handling-policy=default"], None) == []  # caller set it
+
+
+def test_quic_args_disabled_only_when_proxied():
+    # Behind any proxy (SOCKS or HTTP) QUIC can't tunnel -> disable so no UDP egresses around it.
+    assert quic_args({"server": "socks5://host:1080"}) == ["--disable-quic"]
+    assert quic_args({"server": "http://host:8080"}) == ["--disable-quic"]
+    # No proxy -> leave QUIC on (matches real Chrome).
+    assert quic_args(None) == []
+    assert quic_args({}) == []  # malformed/empty proxy descriptor -> no flag
 
 
 def test_extension_args_empty():

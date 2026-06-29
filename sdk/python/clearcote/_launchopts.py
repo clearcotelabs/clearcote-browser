@@ -51,6 +51,15 @@ def privacy_sandbox_args():
     return ["--disable-features=" + ",".join(PRIVACY_SANDBOX_FEATURES)]
 
 
+def quic_args(proxy):
+    """Behind a proxy, real Chrome cannot use QUIC/HTTP3 — a SOCKS5/HTTP proxy carries only TCP, so
+    Chrome falls back to TCP for proxied requests. Disable QUIC when a proxy is configured so no
+    HTTP/3 UDP is even attempted: coherent with proxied Chrome, and a belt-and-suspenders guarantee
+    that no UDP egresses *around* the proxy (the #9 leak). No proxy -> leave QUIC on (real Chrome
+    uses it, so disabling it everywhere would itself be a tell)."""
+    return ["--disable-quic"] if (isinstance(proxy, dict) and proxy.get("server")) else []
+
+
 def webrtc_default_deny_args(args, webrtc_ip):
     """When no persona WebRTC IP is configured, default WebRTC to disable_non_proxied_udp so the real
     local IP can't leak via srflx (stock Chromium leaks it). Skipped if the caller already set a

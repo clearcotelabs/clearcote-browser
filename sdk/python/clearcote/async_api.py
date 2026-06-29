@@ -26,6 +26,7 @@ import tempfile
 from . import _headed_no_viewport, _prepare  # shared sync arg-building (run off the loop)
 from ._humanize_async import install_humanize, install_humanize_on_context
 from ._profile import Profile, list_profiles, load_profile
+from ._render_async import check_render_coherence
 from .download import ensure_binary
 from .geoip import resolve_geo
 from .release import RELEASE
@@ -43,6 +44,7 @@ __all__ = [
     "Profile",
     "list_profiles",
     "load_profile",
+    "check_render_coherence",
     "RELEASE",
     "__version__",
 ]
@@ -124,6 +126,9 @@ async def launch_persistent_context(user_data_dir, **kwargs):
     ``BrowserContext`` (cookies/storage persist in ``user_data_dir``).
 
     Pass ``widevine=True`` to seed + enable the (opt-in) Widevine CDM so DRM/EME works."""
+    # Automation strip before the Widevine helper (it appends --disable-component-update rather than
+    # clobbering ['--enable-automation']) — mirrors the sync path.
+    kwargs.setdefault("ignore_default_args", ["--enable-automation"])
     if kwargs.get("widevine"):
         from ._widevine import apply_widevine_launch
         await asyncio.to_thread(apply_widevine_launch, user_data_dir, kwargs, kwargs.get("quiet", False))

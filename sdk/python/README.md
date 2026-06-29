@@ -118,15 +118,51 @@ dragging, scrolling and typing — all dispatched as **native trusted input** (`
 `navigator.webdriver` stays `false`), at both the page level (`page.click`/`hover`/`dblclick`/
 `type`/`fill`/`press`, `page.mouse.*`, `page.keyboard.type`) and the locator level
 (`locator.click`/`type`/`fill`/`hover`/`press_sequentially`/`drag_to`/`check`/…). Mouse paths are
-eased, slightly bowed cubic-beziers built from the *last* cursor position (no snap back to the
-corner); because they use native input, the button held by `mouse.down()` stays held across the
-move, so `down → move → up` is a real drag (slider captchas work). Clicks get an actionability
-pre-flight (visible + enabled + stable + not covered) and fall back to the native click if it
-fails. Typing goes key-by-key with randomized inter-key timing and the occasional correction.
-`page.fill` with a value over 200 chars stays atomic (skips per-key typing) to avoid crawling.
+slightly bowed cubic-beziers built from the *last* cursor position (no snap back to the corner),
+walked as a **sum of sub-movements with a min-jerk velocity profile** — a ballistic primary that
+slightly over/undershoots plus a corrective move, i.e. the multi-peak velocity of real reaching, not
+one symmetric bell. Because they use native input, the button held by `mouse.down()` stays held
+across the move, so `down → move → up` is a real drag (slider captchas work). Clicks get an
+actionability pre-flight (visible + enabled + stable + not covered) and fall back to the native click
+if it fails. Typing goes key-by-key with **gaussian inter-key timing** + word-boundary pauses and the
+occasional fat-finger correction; `page.fill` over 200 chars stays atomic (skips per-key typing) to
+avoid crawling. Scrolling uses **ease-out inertia** (a fast flick decaying to a slow settle) with the
+occasional reading pause.
 
 `show_cursor=True` injects a red cursor dot that follows the real mouse, handy for watching a
 headed run. Both default to off; everything stays standard Playwright when `humanize=False`.
+
+### Render-backend coherence check (`check_render_coherence`)
+
+A persona can claim a GPU, but if the page is actually painted by a software rasterizer
+(SwiftShader/llvmpipe — common headless with no GPU) a strict detector can tell. Probe a live page:
+
+```python
+from clearcote import launch, check_render_coherence
+
+br = launch(fingerprint="user-7423")
+page = br.new_page(); page.goto("about:blank")
+verdict = check_render_coherence(page)        # {'renderer', 'software_suspected', 'coherent', 'warnings', ...}
+if not verdict["coherent"]:
+    print(verdict["warnings"])                 # e.g. software rasterizer / incoherent GPU family
+```
+
+It reads the (unmasked) WebGL vendor/renderer the page actually sees, flags a software rasterizer (a
+fatal headless tell — enable the canvas bridge or run headed on a real GPU) and an incoherent
+vendor/renderer pair. Pass `claimed_gpu=...` to also assert the rendered family. The async API
+exposes the same as `await clearcote.async_api.check_render_coherence(page)`.
+
+### Hardened launch defaults
+
+Every `launch()` already does, with no extra options:
+
+- **drops Playwright's `--enable-automation`** so the engine's `AutomationControlled` feature stays
+  off (it otherwise flips `navigator.webdriver`-adjacent tells). Pass your own `ignore_default_args`
+  to override.
+- **disables QUIC/HTTP-3 when a proxy is set**, so no UDP egresses around the proxy (a SOCKS5/HTTP
+  proxy carries only TCP) — coherent with proxied Chrome.
+- prints a one-line **coherence warning** to stderr for incoherent option combos it can't auto-fix
+  (silence with `quiet=True` or `CLEARCOTE_NO_WARN=1`).
 
 ### Persistent profile
 

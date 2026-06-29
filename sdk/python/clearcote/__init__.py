@@ -24,10 +24,13 @@ from ._launchopts import (
     extension_args,
     merge_feature_flags,
     privacy_sandbox_args,
+    quic_args,
     resolve_proxy,
     webrtc_default_deny_args,
 )
 from ._profile import Profile, list_profiles, load_profile, resolve_profile_options
+from ._render import check_render_coherence
+from ._warnings import emit_coherence_warnings
 from ._widevine import apply_widevine_launch, fetch_widevine, seed_widevine
 from .download import ensure_binary
 from .geoip import resolve_geo
@@ -44,13 +47,14 @@ __all__ = [
     "Profile",
     "list_profiles",
     "load_profile",
+    "check_render_coherence",
     "fetch_widevine",
     "seed_widevine",
     "OPENROUTER_BASE_URL",
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.10.2"
+__version__ = "0.10.3"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -136,6 +140,7 @@ def _prepare(kwargs):
     cache_dir = kwargs.pop("cache_dir", None)
     quiet = kwargs.pop("quiet", False)
     auto_update = kwargs.pop("auto_update", None)
+    proxy_opt = kwargs.get("proxy")  # captured before resolve_proxy rewrites it (for quic + warnings)
     if geoip:
         # resolve the proxy's exit-IP geo and fill any UNSET timezone/accept_language/location/webrtc_ip
         geo = resolve_geo(kwargs.get("proxy"), quiet=quiet)
@@ -157,6 +162,7 @@ def _prepare(kwargs):
     else:
         kwargs["proxy"] = proxy
     base = fingerprint_args(fp) + agent_args(agent) + extension_args(extensions) + proxy_args
+    base += quic_args(proxy_opt)  # behind a proxy, disable QUIC so no HTTP/3 UDP egresses around it
     if disable_privacy_sandbox:
         base += privacy_sandbox_args()
     user = list(extra_args or [])
@@ -165,6 +171,18 @@ def _prepare(kwargs):
     # collapse all --enable-features/--disable-features (ours + the user's) into one of each, else
     # Chromium keeps only the last occurrence and the rest are silently dropped.
     args = merge_feature_flags(base + user)
+    # Drop Playwright's default automation flag so the engine's AutomationControlled feature stays
+    # OFF (it otherwise flips navigator.webdriver-adjacent tells). The control transport
+    # (--remote-debugging-pipe) is left intact. Caller can override via their own ignore_default_args.
+    # NOTE: launch_persistent_context sets this BEFORE the Widevine helper so that helper appends
+    # --disable-component-update rather than clobbering the automation strip.
+    kwargs.setdefault("ignore_default_args", ["--enable-automation"])
+    # Surface incoherent / missing-recommended option combos the SDK can't auto-fix (stderr; gated
+    # by quiet / CLEARCOTE_NO_WARN). geoip may have just filled timezone/accept_language above.
+    emit_coherence_warnings(
+        {**fp, "proxy": proxy_opt, "geoip": geoip, "headless": kwargs.get("headless"),
+         "_user_args": user},
+        quiet=quiet, build_major=str(RELEASE["version"]).split(".")[0])
     return exe, args, kwargs, humanize, show_cursor
 
 
@@ -219,6 +237,10 @@ def launch_persistent_context(user_data_dir, **kwargs):
     Pass ``widevine=True`` to seed + enable the (opt-in, user-fetched) Widevine CDM so DRM/EME works
     (``requestMediaKeySystemAccess('com.widevine.alpha')`` resolves) and the EME surface matches a
     real Chrome instead of being a no-Widevine tell."""
+    # Set the automation strip BEFORE the Widevine helper so it appends --disable-component-update to
+    # ['--enable-automation'] rather than replacing it (which would lose the AutomationControlled
+    # strip on Widevine launches).
+    kwargs.setdefault("ignore_default_args", ["--enable-automation"])
     if kwargs.get("widevine"):
         apply_widevine_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
     exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)

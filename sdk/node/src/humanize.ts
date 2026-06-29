@@ -127,8 +127,8 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   };
   // scroll easing: break into eased chunks of native wheel deltas
   mouse.wheel = async (dx: number, dy: number) => {
-    const steps = Math.max(5, Math.min(20, Math.round((Math.abs(dx) + Math.abs(dy)) / 80)));
-    const ease = (u: number) => u * u * (3 - 2 * u);
+    const steps = Math.max(5, Math.min(24, Math.round((Math.abs(dx) + Math.abs(dy)) / 60)));
+    const ease = (u: number) => 1 - Math.pow(1 - u, 2.2); // ease-OUT: fast flick -> slow inertial settle
     let px = 0, py = 0;
     for (let i = 1; i <= steps; i++) {
       const f = ease(i / steps);
@@ -137,7 +137,8 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
       // local sleep, NOT page.waitForTimeout: the latter is a CDP round-trip per call, so it
       // emits protocol traffic bot-detectors (e.g. reCAPTCHA) can score — a self-inflicted tell
       // inside the humanize path. setTimeout is off-protocol.
-      await sleep(rand(12, 45));
+      await sleep(rand(10, 38));
+      if (Math.random() < 0.07) await sleep(rand(40, 120)); // occasional mid-scroll pause (reading)
     }
     if (px !== dx || py !== dy) await nativeWheel(dx - px, dy - py);
   };
@@ -165,6 +166,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
       if (i < n - 1) {
         if (Math.random() < 0.06) await sleep(rand(180, 450)); // brief thinking pause
         else await sleep(rand(45, 150));
+        if (/\s/.test(ch)) await sleep(rand(20, 100)); // slight extra pause at word boundaries
       }
     }
   };

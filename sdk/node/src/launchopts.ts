@@ -43,6 +43,14 @@ export function privacySandboxArgs(): string[] {
   return [`--disable-features=${PRIVACY_SANDBOX_FEATURES.join(",")}`];
 }
 
+/** Behind a proxy, real Chrome cannot use QUIC/HTTP3 (a SOCKS5/HTTP proxy carries only TCP), so it
+ * falls back to TCP. Disable QUIC when a proxy is configured so no HTTP/3 UDP is attempted —
+ * coherent with proxied Chrome, and a guarantee no UDP egresses around the proxy. No proxy -> leave
+ * QUIC on (real Chrome uses it). */
+export function quicArgs(proxy: PwProxy | undefined): string[] {
+  return proxy && proxy.server ? ["--disable-quic"] : [];
+}
+
 /** When no persona WebRTC IP is configured, default WebRTC to disable_non_proxied_udp so the real
  * local IP can't leak via srflx (stock Chromium leaks it). Skipped if the caller already set a
  * handling policy or a webrtcIp (the engine owns coherent fabrication in that case). */

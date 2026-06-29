@@ -32,26 +32,42 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False):
     mouse = page.mouse
     native_move, native_click, native_wheel = mouse.move, mouse.click, mouse.wheel
 
-    async def _glide(x, y, jitter=0.6):
-        x0, y0 = st["pos"]
-        dx, dy = x - x0, y - y0
+    async def _submove(x0, y0, x1, y1, jitter):
+        # one ballistic sub-movement, min-jerk velocity (see _humanize.py for rationale)
+        dx, dy = x1 - x0, y1 - y0
         dist = math.hypot(dx, dy)
-        steps = int(max(10, min(38, dist / 14)))
+        steps = int(max(6, min(30, dist / 16)))
         nx, ny = (-dy / dist, dx / dist) if dist > 1e-6 else (0.0, 0.0)
-        bow = (random.random() * 0.22 - 0.11) * dist
+        bow = (random.random() * 0.18 - 0.09) * dist
         cp1 = (x0 + dx * 0.33 + nx * bow, y0 + dy * 0.33 + ny * bow)
         cp2 = (x0 + dx * 0.66 + nx * bow, y0 + dy * 0.66 + ny * bow)
         for i in range(1, steps + 1):
             t = i / steps
-            e = t * t * (3 - 2 * t)
+            e = t * t * t * (10 - 15 * t + 6 * t * t)   # min-jerk
             mt = 1.0 - e
-            bx = mt*mt*mt*x0 + 3*mt*mt*e*cp1[0] + 3*mt*e*e*cp2[0] + e*e*e*x
-            by = mt*mt*mt*y0 + 3*mt*mt*e*cp1[1] + 3*mt*e*e*cp2[1] + e*e*e*y
+            bx = mt*mt*mt*x0 + 3*mt*mt*e*cp1[0] + 3*mt*e*e*cp2[0] + e*e*e*x1
+            by = mt*mt*mt*y0 + 3*mt*mt*e*cp1[1] + 3*mt*e*e*cp2[1] + e*e*e*y1
             try:
                 await native_move(bx + random.gauss(0, jitter), by + random.gauss(0, jitter))
             except Exception:  # noqa: BLE001
-                break
-            await asyncio.sleep(_rand(7, 20) / 1000.0)
+                return False
+            await asyncio.sleep(_rand(7, 18) / 1000.0)
+        return True
+
+    async def _glide(x, y, jitter=0.6):
+        # sum-of-sub-movements: ballistic primary (slight over/undershoot) + corrective onto target
+        x0, y0 = st["pos"]
+        dist = math.hypot(x - x0, y - y0)
+        if dist > 60:
+            frac = _rand(0.82, 0.96)
+            spread = min(14.0, dist * 0.05)
+            ox = x0 + (x - x0) * frac + random.gauss(0, spread)
+            oy = y0 + (y - y0) * frac + random.gauss(0, spread)
+            if await _submove(x0, y0, ox, oy, jitter):
+                await asyncio.sleep(_rand(12, 40) / 1000.0)
+                await _submove(ox, oy, x, y, jitter * 0.6)
+        else:
+            await _submove(x0, y0, x, y, jitter)
         try:
             await native_move(x, y)
         except Exception:  # noqa: BLE001
@@ -70,15 +86,17 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False):
             pass
 
     async def hwheel(delta_x, delta_y):
-        steps = max(5, min(20, round((abs(delta_x) + abs(delta_y)) / 80)))
+        steps = max(5, min(24, round((abs(delta_x) + abs(delta_y)) / 60)))
         px = py = 0
         for i in range(1, steps + 1):
             t = i / steps
-            f = t * t * (3 - 2 * t)
+            f = 1 - (1 - t) ** 2.2            # ease-OUT inertia (fast flick -> slow settle)
             nx, ny = round(delta_x * f), round(delta_y * f)
             await native_wheel(nx - px, ny - py)
             px, py = nx, ny
-            await asyncio.sleep(_rand(12, 45) / 1000.0)
+            await asyncio.sleep(_rand(10, 38) / 1000.0)
+            if random.random() < 0.07:
+                await asyncio.sleep(_rand(40, 120) / 1000.0)
         if px != delta_x or py != delta_y:
             await native_wheel(delta_x - px, delta_y - py)
 
@@ -124,6 +142,58 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False):
 
     page.click = _make_targeted(page.click, False)
     page.hover = _make_targeted(page.hover, True)
+
+    # ---- keystroke dynamics (async; mirrors _humanize.py) ----
+    kb = page.keyboard
+    native_kb_type = kb.type
+    native_fill, native_type = page.fill, page.type
+
+    async def _type_humanized(text):
+        text = str(text)
+        n = len(text)
+        for i, ch in enumerate(text):
+            try:
+                await native_kb_type(ch)
+            except Exception:  # noqa: BLE001
+                break
+            if i < n - 1:
+                d = max(0.025, random.gauss(0.085, 0.045))
+                if ch in " \t\n":
+                    d += _rand(0.02, 0.10)
+                if random.random() < 0.05:
+                    d += _rand(0.18, 0.5)
+                await asyncio.sleep(d)
+
+    async def _focus(selector, timeout):
+        loc = page.locator(selector).first
+        await loc.wait_for(state="visible", timeout=timeout)
+        await loc.scroll_into_view_if_needed(timeout=timeout)
+        await loc.click(timeout=timeout)
+        return loc
+
+    async def hfill(selector, value, **kw):
+        try:
+            timeout = kw.get("timeout", 30000)
+            await _focus(selector, timeout)
+            await kb.press("ControlOrMeta+a")
+            await kb.press("Delete")
+            await _type_humanized(value)
+            return None
+        except Exception:  # noqa: BLE001
+            return await native_fill(selector, value, **kw)
+
+    async def htype(selector, text, **kw):
+        try:
+            await _focus(selector, kw.get("timeout", 30000))
+            await _type_humanized(text)
+            return None
+        except Exception:  # noqa: BLE001
+            return await native_type(selector, text, **kw)
+
+    async def hkbtype(text, **kw):
+        await _type_humanized(text)
+
+    page.fill, page.type, kb.type = hfill, htype, hkbtype
 
 
 async def install_humanize_on_context(context, humanize=False, show_cursor=False, browser=None):

@@ -32,10 +32,51 @@ class _FakeMouse:
         self.wheels.append((dx, dy))
 
 
+class _FakeKeyboard:
+    def __init__(self):
+        self.typed, self.presses = [], []
+
+    async def type(self, ch, **k):
+        self.typed.append(ch)
+
+    async def press(self, combo, **k):
+        self.presses.append(combo)
+
+
+class _FakeLocator:
+    def __init__(self):
+        self.clicked = 0
+
+    @property
+    def first(self):
+        return self
+
+    async def wait_for(self, **k):
+        pass
+
+    async def scroll_into_view_if_needed(self, **k):
+        pass
+
+    async def click(self, **k):
+        self.clicked += 1
+
+    async def bounding_box(self):
+        return {"x": 10, "y": 10, "width": 100, "height": 20}
+
+    async def is_enabled(self):
+        return True
+
+    async def element_handle(self):
+        return object()
+
+
 class _FakePage:
     def __init__(self):
         self.mouse = _FakeMouse()
+        self.keyboard = _FakeKeyboard()
+        self.loc = _FakeLocator()
         self.evals = []
+        self.fill_fallback, self.type_fallback = [], []
         self.main_frame = object()
 
     async def evaluate(self, *a, **k):
@@ -46,6 +87,15 @@ class _FakePage:
 
     async def hover(self, *a, **k):
         pass
+
+    def locator(self, sel):
+        return self.loc
+
+    async def fill(self, sel, val, **k):
+        self.fill_fallback.append((sel, val))   # native bulk fill (the paste-signature fallback)
+
+    async def type(self, sel, txt, **k):
+        self.type_fallback.append((sel, txt))
 
     def on(self, *a, **k):
         pass
@@ -69,6 +119,16 @@ async def test_humanize_click_presses_after_gliding():
     await page.mouse.click(120, 140)
     assert page.mouse.clicks == [(120, 140)]
     assert page.mouse.moves and page.mouse.moves[-1] == (120, 140)
+
+
+async def test_humanize_typing_is_per_character_not_paste():
+    page = _FakePage()
+    await attach_humanize(None, page, humanize=True)
+    await page.fill("#email", "abc")
+    assert page.keyboard.typed == ["a", "b", "c"]        # per-character key events
+    assert page.fill_fallback == []                       # native bulk fill (paste) NOT used
+    assert "ControlOrMeta+a" in page.keyboard.presses     # field cleared first
+    assert page.loc.clicked == 1                           # field focused via a click
 
 
 async def test_show_cursor_injects_overlay():

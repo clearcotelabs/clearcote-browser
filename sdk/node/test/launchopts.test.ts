@@ -4,6 +4,7 @@ import {
   resolveProxy,
   mergeFeatureFlags,
   privacySandboxArgs,
+  quicArgs,
   webrtcDefaultDenyArgs,
 } from "../src/launchopts.js";
 
@@ -36,6 +37,17 @@ describe("webrtcDefaultDenyArgs", () => {
   });
   it("is skipped when the caller already set a policy", () => {
     expect(webrtcDefaultDenyArgs(["--webrtc-ip-handling-policy=default"], undefined)).toEqual([]);
+  });
+});
+
+describe("quicArgs", () => {
+  it("disables QUIC behind any proxy (SOCKS or HTTP)", () => {
+    expect(quicArgs({ server: "socks5://host:1080" })).toEqual(["--disable-quic"]);
+    expect(quicArgs({ server: "http://host:8080" })).toEqual(["--disable-quic"]);
+  });
+  it("leaves QUIC on when no proxy is set", () => {
+    expect(quicArgs(undefined)).toEqual([]);
+    expect(quicArgs({})).toEqual([]);
   });
 });
 

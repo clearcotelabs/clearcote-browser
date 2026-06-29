@@ -31,11 +31,13 @@ import {
   resolveProxy,
   mergeFeatureFlags,
   privacySandboxArgs,
+  quicArgs,
   webrtcDefaultDenyArgs,
   type PwProxy,
 } from "./launchopts.js";
 import { RELEASE } from "./release.js";
 import { fetchWidevine, seedWidevine, widevineArgs } from "./widevine.js";
+import { emitCoherenceWarnings } from "./warnings.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
@@ -53,6 +55,7 @@ export {
 } from "./agent.js";
 export { RELEASE } from "./release.js";
 export { fetchWidevine, seedWidevine } from "./widevine.js";
+export { checkRenderCoherence, type RenderVerdict } from "./render.js";
 
 /** When true (and a proxy is set), resolve the proxy's exit-IP geo and auto-fill any unset
  * `timezone` + `acceptLanguage` (+ `location`) so they match the proxy region. */
@@ -161,9 +164,10 @@ function assembleArgs(
   proxyArgs: string[],
   disablePrivacySandbox: boolean | undefined,
   webrtcIp: unknown,
-  userArgs: string[]
+  userArgs: string[],
+  proxyForQuic?: PwProxy
 ): string[] {
-  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs];
+  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic)];
   if (disablePrivacySandbox !== false) base.push(...privacySandboxArgs());
   base.push(...webrtcDefaultDenyArgs([...base, ...userArgs], webrtcIp));
   return mergeFeatureFlags([...base, ...userArgs]);
@@ -176,18 +180,25 @@ export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
+  const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
   // SOCKS5-with-credentials must go through --proxy-server (Playwright rejects it); drop it from PW.
   const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined);
   // proxy unchanged unless it was rerouted to --proxy-server, in which case drop it from Playwright
   if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
+  emitCoherenceWarnings(
+    { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless, _userArgs: args ?? [] },
+    quiet, process.platform, String(RELEASE.version).split(".")[0]);
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
   const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
   const browser = await chromium.launch({
+    // Drop Playwright's default --enable-automation so the engine's AutomationControlled feature
+    // stays off (it flips webdriver-adjacent tells). Caller can override via ignoreDefaultArgs.
+    ignoreDefaultArgs: ["--enable-automation"],
     ...(pwOptions as PlaywrightLaunchOptions),
     executablePath: exe,
-    args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? []),
+    args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined),
   });
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
   installHumanize(browser, { humanize, showCursor });
@@ -206,14 +217,22 @@ export async function launchPersistentContext(
   const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
+  const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
   const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined);
   if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
+  emitCoherenceWarnings(
+    { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless, _userArgs: args ?? [] },
+    quiet, process.platform, String(RELEASE.version).split(".")[0]);
   const opts = pwOptions as PlaywrightLaunchOptions & BrowserContextOptions;
   // headed + no explicit viewport -> disable the emulated viewport (impossible-window tell)
   if (opts.headless === false && opts.viewport === undefined) opts.viewport = null;
   // widevine=true: seed the CDM into the profile + un-suppress the component updater (Playwright
   // disables it by default) so the engine registers it. Failure -> DRM gracefully off, launch proceeds.
+  // Default the automation strip BEFORE the Widevine helper so it appends --disable-component-update
+  // to ['--enable-automation'] rather than clobbering it (losing the strip). Caller's own wins.
+  let ignoreDefaultArgs: string[] | boolean | undefined =
+    (opts.ignoreDefaultArgs as string[] | boolean | undefined) ?? ["--enable-automation"];
   let userArgs = args ?? [];
   if (widevine) {
     try {
@@ -223,19 +242,21 @@ export async function launchPersistentContext(
       if (cu.length && !cu.some((a) => a.includes("fast-update")) && !quiet) {
         process.stderr.write("[clearcote] [widevine] note: your --component-updater mode may not register the CDM; --component-updater=fast-update is needed to scan the pre-installed component\n");
       }
-      const tweak = widevineArgs(opts.ignoreDefaultArgs as string[] | boolean | undefined, userArgs);
-      opts.ignoreDefaultArgs = tweak.ignoreDefaultArgs as typeof opts.ignoreDefaultArgs;
+      const tweak = widevineArgs(ignoreDefaultArgs, userArgs);
+      ignoreDefaultArgs = tweak.ignoreDefaultArgs;
       userArgs = tweak.args;
     } catch (e) {
       if (!quiet) process.stderr.write(`[clearcote] [widevine] setup failed (continuing without DRM): ${String(e)}\n`);
     }
   }
+  delete (opts as Record<string, unknown>).ignoreDefaultArgs;  // passed explicitly below
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
   const context = await chromium.launchPersistentContext(userDataDir, {
     ...opts,
+    ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
     executablePath: exe,
-    args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs),
+    args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined),
   });
   installHumanizeOnContext(context, { humanize, showCursor });
   return context;

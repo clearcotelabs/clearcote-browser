@@ -93,34 +93,53 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
     mouse = page.mouse
     native_move, native_click, native_wheel = mouse.move, mouse.click, mouse.wheel
 
-    def _glide(x, y, jitter=0.6):
-        """Move from the tracked position to (x, y) along an eased, slightly bowed cubic-bezier
-        path, emitting native (trusted) mousemove events the whole way. No snap-back.
-
-        Native input means a button pressed via mouse.down() stays pressed across the whole
-        glide — so the same path code powers both a free move and a held-button drag."""
-        x0, y0 = st["pos"]
-        dx, dy = x - x0, y - y0
+    def _submove(x0, y0, x1, y1, jitter):
+        """One ballistic sub-movement to (x1,y1): a slightly bowed bezier walked with a MIN-JERK
+        velocity profile (the human reach profile: fast rise, slow settle). Native (trusted) moves
+        the whole way, so a button held via mouse.down() stays pressed across it (drag). Returns
+        False if a native move raised (page gone)."""
+        dx, dy = x1 - x0, y1 - y0
         dist = math.hypot(dx, dy)
-        steps = int(max(10, min(38, dist / 14)))
+        steps = int(max(6, min(30, dist / 16)))
         # unit perpendicular, to bow the path off the straight line
         nx, ny = (-dy / dist, dx / dist) if dist > 1e-6 else (0.0, 0.0)
-        bow = (random.random() * 0.22 - 0.11) * dist
+        bow = (random.random() * 0.18 - 0.09) * dist
         cp1 = (x0 + dx * 0.33 + nx * bow, y0 + dy * 0.33 + ny * bow)
         cp2 = (x0 + dx * 0.66 + nx * bow, y0 + dy * 0.66 + ny * bow)
         for i in range(1, steps + 1):
             t = i / steps
-            e = t * t * (3 - 2 * t)           # smoothstep: slow out of start, slow into target
+            e = t * t * t * (10 - 15 * t + 6 * t * t)   # min-jerk easing (not symmetric smoothstep)
             mt = 1.0 - e
-            bx = mt*mt*mt*x0 + 3*mt*mt*e*cp1[0] + 3*mt*e*e*cp2[0] + e*e*e*x
-            by = mt*mt*mt*y0 + 3*mt*mt*e*cp1[1] + 3*mt*e*e*cp2[1] + e*e*e*y
+            bx = mt*mt*mt*x0 + 3*mt*mt*e*cp1[0] + 3*mt*e*e*cp2[0] + e*e*e*x1
+            by = mt*mt*mt*y0 + 3*mt*mt*e*cp1[1] + 3*mt*e*e*cp2[1] + e*e*e*y1
             try:
                 native_move(bx + random.gauss(0, jitter), by + random.gauss(0, jitter))
             except Exception:  # noqa: BLE001
-                break
-            time.sleep(_rand(7, 20) / 1000.0)  # off-protocol pacing, ~60fps-ish
+                return False
+            time.sleep(_rand(7, 18) / 1000.0)  # off-protocol pacing, ~60fps-ish
+        return True
+
+    def _glide(x, y, jitter=0.6):
+        """Move to (x, y) as a SUM OF SUB-MOVEMENTS — a ballistic primary that slightly over/under-
+        shoots, then a corrective sub-movement onto the target — so the velocity profile is
+        multi-peak (real neuromotor motion) instead of one symmetric bell. Continuous (starts at the
+        last tracked position, lands exactly on target). Native input the whole way, so a button held
+        via mouse.down() stays pressed across the glide — the same path powers a free move and a
+        held-button drag."""
+        x0, y0 = st["pos"]
+        dist = math.hypot(x - x0, y - y0)
+        if dist > 60:
+            frac = _rand(0.82, 0.96)                       # primary covers ~82-96% of the distance
+            spread = min(14.0, dist * 0.05)                # with a small over/undershoot
+            ox = x0 + (x - x0) * frac + random.gauss(0, spread)
+            oy = y0 + (y - y0) * frac + random.gauss(0, spread)
+            if _submove(x0, y0, ox, oy, jitter):
+                time.sleep(_rand(12, 40) / 1000.0)         # inter-submovement gap (motor re-planning)
+                _submove(ox, oy, x, y, jitter * 0.6)       # corrective sub-movement
+        else:
+            _submove(x0, y0, x, y, jitter)
         try:
-            native_move(x, y)                  # exact landing
+            native_move(x, y)                              # exact landing (no jitter)
         except Exception:  # noqa: BLE001
             pass
         st["pos"] = (x, y)
@@ -137,20 +156,22 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
             pass
 
     def hwheel(delta_x, delta_y):
-        steps = max(5, min(20, round((abs(delta_x) + abs(delta_y)) / 80)))
+        steps = max(5, min(24, round((abs(delta_x) + abs(delta_y)) / 60)))
         px = py = 0
         for i in range(1, steps + 1):
             t = i / steps
-            f = t * t * (3 - 2 * t)
+            f = 1 - (1 - t) ** 2.2           # ease-OUT: a fast flick decaying to a slow inertial settle
             nx, ny = round(delta_x * f), round(delta_y * f)
             native_wheel(nx - px, ny - py)
             px, py = nx, ny
             # local sleep, NOT page.wait_for_timeout: the latter is a CDP round-trip per call,
             # so it emits protocol traffic that bot-detectors (e.g. reCAPTCHA) can score — a
             # self-inflicted tell inside the humanize path. time.sleep is off-protocol.
-            time.sleep(_rand(12, 45) / 1000.0)
+            time.sleep(_rand(10, 38) / 1000.0)
+            if random.random() < 0.07:
+                time.sleep(_rand(40, 120) / 1000.0)   # occasional mid-scroll pause (reading)
         if px != delta_x or py != delta_y:
-            native_wheel(delta_x - px, delta_y - py)
+            native_wheel(delta_x - px, delta_y - py)  # exact total
 
     mouse.move, mouse.click, mouse.wheel = hmove, hclick, hwheel
 
@@ -177,10 +198,13 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
             except Exception:  # noqa: BLE001
                 break
             if i < n - 1:
-                if random.random() < 0.06:                 # brief thinking pause
-                    time.sleep(_rand(180, 450) / 1000.0)
-                else:
-                    time.sleep(_rand(45, 150) / 1000.0)
+                # gaussian inter-key cadence (a realistic distribution, not a uniform band)
+                d = max(0.025, random.gauss(0.085, 0.045))   # ~85ms +- 45ms, floored at 25ms
+                if ch in " \t\n":
+                    d += _rand(0.02, 0.10)                    # slight pause at word boundaries
+                if random.random() < 0.06:
+                    d += _rand(0.18, 0.45)                    # occasional thinking pause
+                time.sleep(d)
 
     def hkb_type(text, **kw):
         _human_type_text(text)

@@ -70,6 +70,29 @@ Anything you set explicitly wins over `geoip`. With no proxy it uses your direct
 
 Geo data comes from the offline [geoip-all-in-one](https://github.com/daijro/geoip-all-in-one) MaxMind database (downloaded + cached on first use; GPL-3.0 data, the same source Camoufox uses) — more accurate than a single online API — with `ip-api.com` as a fallback.
 
+### Humanized input (`humanize`, `showCursor`)
+
+`humanize: true` installs **one consistent human-input standard** across every Playwright surface (`page.click`/`hover`/`dblclick`/`type`/`fill`/`press`, `page.mouse.*`, `page.keyboard.type`, and the `Locator` equivalents incl. `dragTo`), dispatched as **native trusted input** (`isTrusted === true`, `navigator.webdriver` stays `false`). Mouse paths are slightly bowed cubic-beziers from the *last* cursor position (no snap to the corner), walked as a **sum of sub-movements with a min-jerk velocity profile** (a ballistic primary + corrective move — multi-peak velocity, not one symmetric bell); a held `mouse.down()` stays pressed across the move so `down → move → up` is a real drag. Typing is key-by-key with **gaussian inter-key timing** + word-boundary pauses + the occasional fat-finger correction (bulk values over 200 chars stay atomic). Scrolling uses **ease-out inertia** with the occasional reading pause. `showCursor: true` injects a cursor dot for headed runs. Both default off.
+
+### Render-backend coherence check (`checkRenderCoherence`)
+
+A persona can claim a GPU, but if the page is actually painted by a software rasterizer (SwiftShader/llvmpipe — common headless with no GPU) a strict detector can tell:
+
+```ts
+import { launch, checkRenderCoherence } from "clearcote";
+
+const br = await launch({ fingerprint: "user-7423" });
+const page = await br.newPage(); await page.goto("about:blank");
+const verdict = await checkRenderCoherence(page); // { renderer, softwareSuspected, coherent, warnings, ... }
+if (!verdict.coherent) console.warn(verdict.warnings);
+```
+
+It reads the (unmasked) WebGL vendor/renderer the page sees, flags a software rasterizer (a fatal headless tell — enable the canvas bridge or run headed on a real GPU) and an incoherent vendor/renderer pair. Pass a second arg (`claimedGpu`) to also assert the rendered family.
+
+### Hardened launch defaults
+
+Every `launch()` already, with no extra options: **drops Playwright's `--enable-automation`** (so the engine's `AutomationControlled` feature stays off — pass your own `ignoreDefaultArgs` to override); **disables QUIC/HTTP-3 when a proxy is set** (a SOCKS5/HTTP proxy carries only TCP, so no UDP egresses around it); and prints a one-line **coherence warning** to stderr for incoherent option combos (silence with `quiet: true` or `CLEARCOTE_NO_WARN=1`).
+
 ### Persistent profile
 
 ```ts
