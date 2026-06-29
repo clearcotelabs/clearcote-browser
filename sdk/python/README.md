@@ -140,6 +140,35 @@ context = launch_persistent_context(
 )
 ```
 
+### Widevine / DRM (`widevine=True`)
+
+clearcote ships the **EME/Widevine plumbing** compiled in, but — being 100% open source — it does
+**not** bundle Google's proprietary CDM. Pass `widevine=True` on a **persistent** context and the SDK
+fetches that CDM once from Google's own component server (same as a real Chrome receives it), seeds it
+into the profile, and enables it — so `navigator.requestMediaKeySystemAccess('com.widevine.alpha')`
+resolves and DRM streams play, instead of EME being a "no-Widevine" tell.
+
+```python
+from clearcote import launch_persistent_context
+
+ctx = launch_persistent_context("./profile-drm", widevine=True)   # fetch + seed + enable the CDM
+page = ctx.pages[0] if ctx.pages else ctx.new_page()
+page.goto("https://example.com")
+ok = page.evaluate("""async () => {
+  const a = await navigator.requestMediaKeySystemAccess('com.widevine.alpha',
+    [{initDataTypes:['cenc'], videoCapabilities:[{contentType:'video/mp4;codecs="avc1.42E01E"',
+      robustness:'SW_SECURE_DECODE'}]}]);
+  await a.createMediaKeys(); return true;
+}""")
+print("Widevine:", ok)            # True
+ctx.close()
+```
+
+- Requires a **persistent** context (the CDM lives in `user_data_dir`) — not the incognito `launch()`.
+- The CDM is cached under `~/.clearcote/WidevineCdm`; fetch it ahead of time with `fetch_widevine()`.
+- It's **opt-in**: the clearcote package never distributes Google's CDM — *you* trigger the download.
+- Software-secure (L3) playback. Hardware-secure (L1) paths are out of scope.
+
 ### AI agent (OpenRouter)
 
 Drive a page with an **in-browser AI agent** — it perceives the live page, asks an LLM what to do,

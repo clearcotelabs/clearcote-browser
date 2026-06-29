@@ -35,6 +35,7 @@ import {
   type PwProxy,
 } from "./launchopts.js";
 import { RELEASE } from "./release.js";
+import { fetchWidevine, seedWidevine, widevineArgs } from "./widevine.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
@@ -51,6 +52,7 @@ export {
   type AgentStep,
 } from "./agent.js";
 export { RELEASE } from "./release.js";
+export { fetchWidevine, seedWidevine } from "./widevine.js";
 
 /** When true (and a proxy is set), resolve the proxy's exit-IP geo and auto-fill any unset
  * `timezone` + `acceptLanguage` (+ `location`) so they match the proxy region. */
@@ -87,7 +89,15 @@ export interface PersistentContextOptions
     ProfileOption,
     ExtensionsOption,
     HumanizeOptions,
-    DownloadOptions {}
+    DownloadOptions {
+  /**
+   * Seed + enable the opt-in Widevine CDM in this profile so DRM/EME works
+   * (`requestMediaKeySystemAccess('com.widevine.alpha')` resolves) and the EME surface matches a
+   * real Chrome instead of being a no-Widevine tell. The CDM is fetched once from Google's
+   * component server (see {@link fetchWidevine}); clearcote never bundles Google's blob.
+   */
+  widevine?: boolean;
+}
 
 /** Fill unset timezone/acceptLanguage/location/webrtcIp on `fp` from the proxy's exit-IP geo. */
 async function applyGeoip(fp: FingerprintOptions, proxy: unknown): Promise<void> {
@@ -193,7 +203,7 @@ export async function launchPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = merged;
+  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
@@ -202,12 +212,30 @@ export async function launchPersistentContext(
   const opts = pwOptions as PlaywrightLaunchOptions & BrowserContextOptions;
   // headed + no explicit viewport -> disable the emulated viewport (impossible-window tell)
   if (opts.headless === false && opts.viewport === undefined) opts.viewport = null;
+  // widevine=true: seed the CDM into the profile + un-suppress the component updater (Playwright
+  // disables it by default) so the engine registers it. Failure -> DRM gracefully off, launch proceeds.
+  let userArgs = args ?? [];
+  if (widevine) {
+    try {
+      await seedWidevine(userDataDir, { quiet });
+      // a user-supplied non-fast-update --component-updater mode wins but may not register the CDM
+      const cu = userArgs.filter((a) => a.includes("component-updater"));
+      if (cu.length && !cu.some((a) => a.includes("fast-update")) && !quiet) {
+        process.stderr.write("[clearcote] [widevine] note: your --component-updater mode may not register the CDM; --component-updater=fast-update is needed to scan the pre-installed component\n");
+      }
+      const tweak = widevineArgs(opts.ignoreDefaultArgs as string[] | boolean | undefined, userArgs);
+      opts.ignoreDefaultArgs = tweak.ignoreDefaultArgs as typeof opts.ignoreDefaultArgs;
+      userArgs = tweak.args;
+    } catch (e) {
+      if (!quiet) process.stderr.write(`[clearcote] [widevine] setup failed (continuing without DRM): ${String(e)}\n`);
+    }
+  }
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
   const context = await chromium.launchPersistentContext(userDataDir, {
     ...opts,
     executablePath: exe,
-    args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? []),
+    args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs),
   });
   installHumanizeOnContext(context, { humanize, showCursor });
   return context;
@@ -254,5 +282,7 @@ export default {
   Profile,
   listProfiles,
   loadProfile,
+  fetchWidevine,
+  seedWidevine,
   RELEASE,
 };

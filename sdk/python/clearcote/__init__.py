@@ -28,6 +28,7 @@ from ._launchopts import (
     webrtc_default_deny_args,
 )
 from ._profile import Profile, list_profiles, load_profile, resolve_profile_options
+from ._widevine import apply_widevine_launch, fetch_widevine, seed_widevine
 from .download import ensure_binary
 from .geoip import resolve_geo
 from .release import RELEASE
@@ -43,11 +44,13 @@ __all__ = [
     "Profile",
     "list_profiles",
     "load_profile",
+    "fetch_widevine",
+    "seed_widevine",
     "OPENROUTER_BASE_URL",
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.10.0"
+__version__ = "0.10.2"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -119,6 +122,9 @@ def _prepare(kwargs):
     geoip = kwargs.pop("geoip", False)
     humanize = kwargs.pop("humanize", False)
     show_cursor = kwargs.pop("show_cursor", False)
+    # widevine= is seeded into a persistent profile by launch_persistent_context; pop it here so it
+    # never leaks to Playwright from launch()/the async path (incognito can't load the component CDM).
+    kwargs.pop("widevine", None)
     fp = {k: kwargs.pop(k) for k in list(kwargs) if k in FINGERPRINT_KEYS}
     agent = {k: kwargs.pop(k) for k in list(kwargs) if k in AGENT_KEYS}
     exe_path = kwargs.pop("executable_path", None)
@@ -208,7 +214,13 @@ def launch(**kwargs):
 
 def launch_persistent_context(user_data_dir, **kwargs):
     """Launch Clearcote with a persistent profile directory; returns a Playwright
-    ``BrowserContext`` (cookies/storage persist in ``user_data_dir``)."""
+    ``BrowserContext`` (cookies/storage persist in ``user_data_dir``).
+
+    Pass ``widevine=True`` to seed + enable the (opt-in, user-fetched) Widevine CDM so DRM/EME works
+    (``requestMediaKeySystemAccess('com.widevine.alpha')`` resolves) and the EME surface matches a
+    real Chrome instead of being a no-Widevine tell."""
+    if kwargs.get("widevine"):
+        apply_widevine_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
     exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True

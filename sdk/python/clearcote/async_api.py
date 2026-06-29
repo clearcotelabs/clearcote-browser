@@ -121,7 +121,12 @@ async def launch(**kwargs):
 
 async def launch_persistent_context(user_data_dir, **kwargs):
     """Launch Clearcote with a persistent profile dir; returns a Playwright **async**
-    ``BrowserContext`` (cookies/storage persist in ``user_data_dir``)."""
+    ``BrowserContext`` (cookies/storage persist in ``user_data_dir``).
+
+    Pass ``widevine=True`` to seed + enable the (opt-in) Widevine CDM so DRM/EME works."""
+    if kwargs.get("widevine"):
+        from ._widevine import apply_widevine_launch
+        await asyncio.to_thread(apply_widevine_launch, user_data_dir, kwargs, kwargs.get("quiet", False))
     exe, args, pw_kwargs, humanize, show_cursor = await asyncio.to_thread(_prepare, kwargs)
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
