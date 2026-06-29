@@ -336,6 +336,13 @@ sha256sum -c clearcote-149.0.7827.114-windows-x64.zip.sha256    # OK
 unzip -p clearcote-149.0.7827.114-windows-x64.zip chrome.exe | sha256sum   # matches chrome.exe in SHA256SUMS.txt
 ```
 
+Then run the **stealth-coherence gate** against the shipped binary on real Windows — it asserts the persona/farble layer doesn't betray itself (text metrics on the 1/512 grid, main thread == worker, BCR == Range, render bytes origin-invariant, WebGPU vendor coheres with WebGL). It must report **no contract violation** (no REQUIRED check failing = no regression; no `KNOWN_GAP` newly passing without being promoted). See [docs/STEALTH-COHERENCE.md](STEALTH-COHERENCE.md).
+
+```powershell
+py -3 -m pip install playwright
+py -3 scripts\stealth_coherence.py --binary "$STAGE\chrome.exe"   # exit 0 = OK; or run the "Stealth coherence" GH workflow on the pinned release
+```
+
 Finally, update the project's private build notes (not in this repo) with the tag, the new zip hash, and anything that changed.
 
 ---
@@ -346,6 +353,7 @@ Drop the `-pre.N` suffix and `--prerelease` only when **all** hold:
 
 - [ ] Built + signed + verified per §§4–8.
 - [ ] **Validated on real Windows** against CreepJS / BrowserScan / Pixelscan: same seed ⇒ stable fingerprint, different seeds differ, `navigator.webdriver=false`, canvas/WebGL/audio shift with the seed.
+- [ ] **Stealth-coherence gate passes** (`scripts/stealth_coherence.py`, or the "Stealth coherence" workflow): no REQUIRED check regressed, and any `KNOWN_GAP` that now passes has been promoted into `REQUIRED`. See [docs/STEALTH-COHERENCE.md](STEALTH-COHERENCE.md).
 - [ ] `config/args.gn` matches the shipped binary (the `is_official_build` discrepancy in §4 resolved).
 - [ ] Signing key rotated to a `clearcote`-named UID (§6) so verification output is on-brand.
 - [ ] The caveats that gated "pre-release" (§9) are genuinely resolved or explicitly accepted.

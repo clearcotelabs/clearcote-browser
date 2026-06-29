@@ -27,8 +27,13 @@ jobs:
   ci:
     uses: ./.github/workflows/sdk-ci.yml
 
+  # Gate: the pinned browser binary (what this SDK auto-downloads) must also pass
+  # the stealth-coherence checks — run the gate on every deploy.
+  coherence:
+    uses: ./.github/workflows/stealth-coherence.yml
+
   build:
-    needs: ci
+    needs: [ci, coherence]
     runs-on: ubuntu-latest
     defaults:
       run:

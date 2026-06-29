@@ -1,0 +1,55 @@
+# Stealth-coherence gate: launches the SHIPPED Windows binary and asserts that
+# the persona/farble layer does not betray itself (text metrics on Chrome's 1/512
+# grid, main thread == worker, BCR == Range, render bytes origin-invariant, WebGPU
+# vendor coheres with WebGL). Self-referential checks — no external baseline — so a
+# regression (e.g. a farble that only hooks the window context) fails here instead
+# of shipping. See docs/STEALTH-COHERENCE.md.
+name: Stealth coherence
+
+on:
+  workflow_dispatch: {}
+  workflow_call: {} # callable as a release / promotion / deploy gate
+  pull_request:
+    paths:
+      - "scripts/stealth_coherence.py"
+      - "scripts/fetch_release_binary.py"
+      - ".github/workflows/stealth-coherence.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    # Validates the gate's pure check logic on synthetic fixtures — runs anywhere,
+    # needs no binary, so every PR that touches the gate is covered.
+    name: gate logic selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python scripts/stealth_coherence.py --selftest
+
+  gate:
+    # The real gate: download + checksum-verify the pinned chrome.exe and run it.
+    # Slow + Windows-only, so on-demand / release-gate only (PRs use selftest above).
+    name: coherence gate (pinned Windows binary)
+    runs-on: windows-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip playwright
+      - name: Fetch + verify the SDK-pinned chrome.exe
+        id: fetch
+        run: python scripts/fetch_release_binary.py --dest "${{ runner.temp }}/clearcote"
+      - name: Run stealth-coherence gate
+        run: python scripts/stealth_coherence.py --binary "${{ steps.fetch.outputs.binary }}" --json "${{ runner.temp }}/coherence.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coherence-results
+          path: ${{ runner.temp }}/coherence.json

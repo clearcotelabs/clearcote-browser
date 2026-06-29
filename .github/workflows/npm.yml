@@ -26,8 +26,13 @@ jobs:
   ci:
     uses: ./.github/workflows/sdk-ci.yml
 
+  # Gate: the pinned browser binary (what this SDK auto-downloads) must also pass
+  # the stealth-coherence checks — run the gate on every deploy.
+  coherence:
+    uses: ./.github/workflows/stealth-coherence.yml
+
   publish:
-    needs: ci
+    needs: [ci, coherence]
     runs-on: ubuntu-latest          # must be a cloud-hosted runner for OIDC + provenance
     environment: npm                # approval gate; OIDC sub = repo:clearcotelabs/clearcote-browser:environment:npm
     permissions:
