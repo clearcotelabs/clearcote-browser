@@ -23,7 +23,7 @@
 
 </div>
 
-> **Status:** [**v0.1.0-pre.14**](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.14) is live — Chromium 149, Windows x64, signed + checksummed ([verify it](docs/VERIFY.md)). Fixes a renderer crash when driving the browser over CDP (Playwright/Puppeteer) on pages that set a cookie with an unbounded ("infinite") expiry — the DevTools cookie serializer aborted the tab (surfaced as *"Target page, context or browser has been closed"*). All pre.13 surfaces remain: the per-origin opt-in **[canvas bridge](docs/CANVAS-BRIDGE.md)** (`--canvas-bridge-mode`) and the continuous **humanized cursor** (`Browser.humanizedClick`). **Windows x64 only for now**; macOS/Linux are on the [Roadmap](ROADMAP.md). An experimental pre-release.
+> **Status:** [**v0.1.0-pre.15**](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.15) is live — Chromium 149, Windows x64, signed + checksummed ([verify it](docs/VERIFY.md)). Adds **opt-in Widevine / EME (DRM) support**: the build now ships the EME plumbing (`enable_widevine`), and the [SDK](sdk/python) fetches the Widevine CDM on demand from Google's component server (`widevine=True`) so `requestMediaKeySystemAccess('com.widevine.alpha')` resolves like a real Chrome — clearcote never bundles Google's proprietary blob. All prior surfaces remain: the per-origin opt-in **[canvas bridge](docs/CANVAS-BRIDGE.md)** (`--canvas-bridge-mode`) and the continuous **humanized cursor** (`Browser.humanizedClick`). **Windows x64 only for now**; macOS/Linux are on the [Roadmap](ROADMAP.md). An experimental pre-release.
 
 ---
 
@@ -150,6 +150,10 @@ asyncio.run(main())
   await launch({ fingerprint: "u1", fingerprintProfile: "./profile.json" });
   ```
   …then **prove it loaded** with [`verify_profile.py`](tools/fingerprint-collect/verify_profile.py) (probes the live surfaces, prints a PASS/FAIL table).
+- **Widevine / DRM** — `widevine: true` on a persistent context makes EME work like a real Chrome (`requestMediaKeySystemAccess('com.widevine.alpha')` resolves). The CDM is **opt-in**: clearcote never bundles Google's blob — the SDK fetches it once from Google's own component server, on your call:
+  ```javascript
+  await launchPersistentContext("./profile-drm", { widevine: true });
+  ```
 
 Full option list: [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python).
 

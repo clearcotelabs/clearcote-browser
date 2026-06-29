@@ -783,7 +783,7 @@
    auto w = info.width() - srcX, h = info.height() - srcY;
  
    // skip tiny images; info.width()/height() can also be 0
-@@ -131,136 +134,265 @@
+@@ -131,136 +134,74 @@
      return;
    }
  
@@ -796,17 +796,22 @@
 -    pixels = 10;
 -  } else if (pixels < 2) {
 -    pixels = 2;
--  }
-+  // Per-site farbling: use the pre-mixed seed threaded in from the caller
-+  // (global --fingerprint seed mixed with the eTLD+1) instead of reading the
-+  // raw global switch here. Keeps the downstream per-pixel hash keys identical.
-+  std::string seed_str = base::NumberToString(effective_seed);
++  const auto colorType = info.colorType();
++  const size_t fRowBytes = info.minRowBytes();  // stride
++  size_t bpp;
++  switch (colorType) {
++    case kGray_8_SkColorType: bpp = 1; break;
++    case kRGB_565_SkColorType: bpp = 2; break;
++    case kRGBA_8888_SkColorType:
++    case kBGRA_8888_SkColorType: bpp = 4; break;
++    default: return;  // unsupported layout -> leave the pixels untouched
+   }
  
-   auto colorType = info.colorType();
-   auto fRowBytes = info.minRowBytes(); // stride
- 
-   DLOG(INFO) << "BRM: ShuffleSubchannelColorData() w=" << w << " h=" << h << " colorType=" << colorType << " fRowBytes=" << fRowBytes;
- 
+-  auto colorType = info.colorType();
+-  auto fRowBytes = info.minRowBytes(); // stride
+-
+-  DLOG(INFO) << "BRM: ShuffleSubchannelColorData() w=" << w << " h=" << h << " colorType=" << colorType << " fRowBytes=" << fRowBytes;
+-
 -  // second random number (for y/height)
 -  double shuffleY = base::RandDouble();
 -
@@ -886,13 +891,7 @@
 -         g = shuffleComponent(g, UINT8_MAX-1, shuffleG);
 -         b = shuffleComponent(b, UINT8_MAX-1, shuffleB);
 -         // alpha is left unchanged
-+  auto max_pixels = (w * h) / 128;
-+  if (max_pixels > 10) {
-+    max_pixels = 10;
-+  } else if (max_pixels < 2) {
-+    max_pixels = 2;
-+  }
- 
+-
 -         *pixel = (a << SK_A32_SHIFT) | (r << SK_R32_SHIFT) |
 -                  (g << SK_G32_SHIFT) | (b << SK_B32_SHIFT);
 -      }
@@ -906,6 +905,240 @@
 -         g = shuffleComponent(g, UINT8_MAX-1, shuffleG);
 -         b = shuffleComponent(b, UINT8_MAX-1, shuffleB);
 -         // alpha is left unchanged
+-
+-         *pixel = (a << SK_BGRA_A32_SHIFT) | (r << SK_BGRA_R32_SHIFT) |
+-                  (g << SK_BGRA_G32_SHIFT) | (b << SK_BGRA_B32_SHIFT);
+-      }
+-      break;
+-      default:
+-         // the remaining formats are not expected to be used in Chromium
+-         LOG(WARNING) << "BRM: ShuffleSubchannelColorData(): Ignoring pixel format";
+-         return;
++  // Content-keyed sparse LSB perturbation. The previous implementation flipped the LSB of <=10
++  // EDGE pixels (deduped one-per-row/col) -- a recognizable anti-detect signature that also missed
++  // proof-of-work canvases. Instead: hash the FULL pixel buffer, mix it with the per-eTLD+1 farble
++  // seed, and LSB-flip a sparse set of pixels at PRNG-chosen positions spread across the whole
++  // image. Deterministic per (site, content) -> the readback stays STABLE across reads (a changing
++  // canvas hash would itself be a tell), while the perturbation looks like distributed per-pixel
++  // noise rather than an edge-only pattern.
++  char* const pbase = const_cast<char*>(reinterpret_cast<const char*>(addr));
++
++  // 1) FNV-1a over the visible pixel rows -> 64-bit content hash.
++  uint64_t content = 1469598103934665603ULL;
++  for (int y = 0; y < h; ++y) {
++    const uint8_t* row = reinterpret_cast<const uint8_t*>(pbase + static_cast<size_t>(y) * fRowBytes);
++    const size_t row_len = static_cast<size_t>(w) * bpp;
++    for (size_t k = 0; k < row_len; ++k) {
++      content ^= row[k];
++      content *= 1099511628211ULL;
+     }
++  }
+ 
+-    // keep bisecting or reset current width/height as needed
+-    if (x == 0) {
+-       currentW = w;
+-    } else {
+-       currentW = x;
+-    }
+-    if (y == 0) {
+-       currentH = h;
++  // 2) xorshift64 PRNG seeded from (per-site farble seed XOR content hash).
++  uint64_t state = effective_seed ^ content;
++  if (state == 0) {
++    state = 0x9E3779B97F4A7C15ULL;
++  }
++  auto next = [&state]() -> uint64_t {
++    state ^= state << 13;
++    state ^= state >> 7;
++    state ^= state << 17;
++    return state;
++  };
++
++  // 3) perturb ~0.17% of the pixels (clamped to [24, 512]) at PRNG positions.
++  const long area = static_cast<long>(w) * static_cast<long>(h);
++  int n_perturb = static_cast<int>(area / 600);
++  if (n_perturb < 24) {
++    n_perturb = 24;
++  } else if (n_perturb > 512) {
++    n_perturb = 512;
++  }
++
++  for (int n = 0; n < n_perturb; ++n) {
++    const uint64_t rnd = next();
++    const int x = static_cast<int>(rnd % static_cast<uint64_t>(w));
++    const int y = static_cast<int>((rnd >> 21) % static_cast<uint64_t>(h));
++    const uint64_t bits = rnd >> 42;
++    uint8_t* px = reinterpret_cast<uint8_t*>(
++        pbase + static_cast<size_t>(y) * fRowBytes + static_cast<size_t>(x) * bpp);
++    if (bpp == 4) {
++      // bytes 0..2 are the colour channels (R,G,B or B,G,R); byte 3 is alpha in both -> leave it.
++      px[0] ^= static_cast<uint8_t>(bits & 1u);
++      px[1] ^= static_cast<uint8_t>((bits >> 1) & 1u);
++      px[2] ^= static_cast<uint8_t>((bits >> 2) & 1u);
++    } else if (bpp == 2) {
++      px[0] ^= static_cast<uint8_t>(bits & 1u);  // LSB of the RGB_565 word
+     } else {
+-       currentH = y;
++      *px ^= static_cast<uint8_t>(bits & 1u);    // gray
+     }
+   }
+ }
+--- /dev/null
++++ b/third_party/blink/renderer/platform/graphics/static_bitmap_image.cc.perturbbak
+@@ -0,0 +1,403 @@
++// Copyright 2014 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
++
++#include <unordered_set>
++#include <vector>
++#include "base/rand_util.h"
++#include "base/logging.h"
++#include "base/numerics/checked_math.h"
++#include "base/strings/string_number_conversions.h"
++#include "gpu/command_buffer/client/gles2_interface.h"
++#include "third_party/blink/renderer/platform/graphics/accelerated_static_bitmap_image.h"
++#include "third_party/blink/renderer/platform/graphics/graphics_context.h"
++#include "third_party/blink/renderer/platform/graphics/image_observer.h"
++#include "third_party/blink/renderer/platform/graphics/paint/paint_image.h"
++#include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
++#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
++#include "third_party/blink/renderer/platform/transforms/affine_transform.h"
++#include "third_party/skia/include/core/SkCanvas.h"
++#include "third_party/skia/include/core/SkImage.h"
++#include "third_party/skia/include/core/SkPaint.h"
++#include "third_party/skia/include/core/SkSurface.h"
++#include "third_party/skia/src/core/SkColorData.h"
++#include "ui/gfx/geometry/skia_conversions.h"
++#include "v8/include/v8.h"
++
++namespace blink {
++
++scoped_refptr<StaticBitmapImage> StaticBitmapImage::Create(
++    PaintImage image,
++    ImageOrientation orientation) {
++  DCHECK(!image.IsTextureBacked());
++  return UnacceleratedStaticBitmapImage::Create(std::move(image), orientation);
++}
++
++scoped_refptr<StaticBitmapImage> StaticBitmapImage::Create(
++    sk_sp<SkData> data,
++    const SkImageInfo& info,
++    ImageOrientation orientation) {
++  return UnacceleratedStaticBitmapImage::Create(
++      SkImages::RasterFromData(info, std::move(data), info.minRowBytes()),
++      orientation);
++}
++
++gfx::Size StaticBitmapImage::SizeWithConfig(SizeConfig config) const {
++  gfx::Size size = GetSize();
++  if (config.apply_orientation && orientation_.UsesWidthAsHeight())
++    size.Transpose();
++  return size;
++}
++
++Vector<uint8_t> StaticBitmapImage::CopyImageData(const SkImageInfo& info,
++                                                 bool apply_orientation) {
++  if (info.isEmpty())
++    return {};
++  PaintImage paint_image = PaintImageForCurrentFrame();
++  if (paint_image.GetSkImageInfo().isEmpty())
++    return {};
++
++  wtf_size_t byte_length =
++      base::checked_cast<wtf_size_t>(info.computeMinByteSize());
++  if (byte_length > partition_alloc::MaxDirectMapped())
++    return {};
++  Vector<uint8_t> dst_buffer(byte_length);
++
++  bool read_pixels_successful =
++      paint_image.readPixels(info, dst_buffer.data(), info.minRowBytes(), 0, 0);
++  DCHECK(read_pixels_successful);
++  if (!read_pixels_successful)
++    return {};
++
++  // Orient the data, and re-read the pixels.
++  if (apply_orientation && !HasDefaultOrientation()) {
++    paint_image = Image::ResizeAndOrientImage(paint_image, Orientation(),
++                                              gfx::Vector2dF(1, 1), 1,
++                                              kInterpolationNone);
++    read_pixels_successful = paint_image.readPixels(info, dst_buffer.data(),
++                                                    info.minRowBytes(), 0, 0);
++    DCHECK(read_pixels_successful);
++    if (!read_pixels_successful)
++      return {};
++  }
++
++  return dst_buffer;
++}
++
++void StaticBitmapImage::DrawHelper(cc::PaintCanvas* canvas,
++                                   const cc::PaintFlags& flags,
++                                   const gfx::RectF& dst_rect,
++                                   const gfx::RectF& src_rect,
++                                   const ImageDrawOptions& draw_options,
++                                   const PaintImage& image) {
++  gfx::RectF adjusted_src_rect = src_rect;
++  adjusted_src_rect.Intersect(gfx::RectF(image.width(), image.height()));
++
++  if (dst_rect.IsEmpty() || adjusted_src_rect.IsEmpty())
++    return;  // Nothing to draw.
++
++  cc::PaintCanvasAutoRestore auto_restore(canvas, false);
++  gfx::RectF adjusted_dst_rect = dst_rect;
++  if (draw_options.respect_orientation &&
++      orientation_ != ImageOrientationEnum::kDefault) {
++    canvas->save();
++
++    // ImageOrientation expects the origin to be at (0, 0)
++    canvas->translate(adjusted_dst_rect.x(), adjusted_dst_rect.y());
++    adjusted_dst_rect.set_origin(gfx::PointF());
++
++    canvas->concat(
++        orientation_.TransformFromDefault(adjusted_dst_rect.size()).ToSkM44());
++
++    if (orientation_.UsesWidthAsHeight())
++      adjusted_dst_rect.set_size(gfx::TransposeSize(adjusted_dst_rect.size()));
++  }
++
++  canvas->drawImageRect(image, gfx::RectFToSkRect(adjusted_src_rect),
++                        gfx::RectFToSkRect(adjusted_dst_rect),
++                        draw_options.sampling_options, &flags,
++                        ToSkiaRectConstraint(draw_options.clamping_mode));
++}
++
++// set the component to maximum-delta if it is >= maximum, or add to existing color component (color + delta)
++#define shuffleComponent(color, max, delta) ( (color) >= (max) ? ((max)-(delta)) : ((color)+(delta)) )
++
++#define writable_addr(T, p, stride, x, y) (T*)((const char *)p + y * stride + x * sizeof(T))
++
++void StaticBitmapImage::ShuffleSubchannelColorData(const void *addr, const SkImageInfo& info, int srcX, int srcY, uint64_t effective_seed) {
++  auto w = info.width() - srcX, h = info.height() - srcY;
++
++  // skip tiny images; info.width()/height() can also be 0
++  if ((w < 8) || (h < 8)) {
++    return;
++  }
++
++  // Per-site farbling: use the pre-mixed seed threaded in from the caller
++  // (global --fingerprint seed mixed with the eTLD+1) instead of reading the
++  // raw global switch here. Keeps the downstream per-pixel hash keys identical.
++  std::string seed_str = base::NumberToString(effective_seed);
++
++  auto colorType = info.colorType();
++  auto fRowBytes = info.minRowBytes(); // stride
++
++  DLOG(INFO) << "BRM: ShuffleSubchannelColorData() w=" << w << " h=" << h << " colorType=" << colorType << " fRowBytes=" << fRowBytes;
++
++  auto max_pixels = (w * h) / 128;
++  if (max_pixels > 10) {
++    max_pixels = 10;
++  } else if (max_pixels < 2) {
++    max_pixels = 2;
++  }
++
 +  int modified_pixels = 0;
 +  std::unordered_set<int> processed_rows;
 +  std::unordered_set<int> processed_cols;
@@ -1144,32 +1377,18 @@
 +          }
 +        }
 +        break;
- 
--         *pixel = (a << SK_BGRA_A32_SHIFT) | (r << SK_BGRA_R32_SHIFT) |
--                  (g << SK_BGRA_G32_SHIFT) | (b << SK_BGRA_B32_SHIFT);
++
 +        default:
 +          break;
-       }
--      break;
--      default:
--         // the remaining formats are not expected to be used in Chromium
--         LOG(WARNING) << "BRM: ShuffleSubchannelColorData(): Ignoring pixel format";
--         return;
--    }
--
--    // keep bisecting or reset current width/height as needed
--    if (x == 0) {
--       currentW = w;
--    } else {
--       currentW = x;
--    }
--    if (y == 0) {
--       currentH = h;
--    } else {
--       currentH = y;
-     }
-   }
- }
++      }
++    }
++  }
++}
++
++#undef writable_addr
++#undef shuffleComponent
++
++}  // namespace blink
 --- a/third_party/blink/renderer/platform/graphics/static_bitmap_image.h
 +++ b/third_party/blink/renderer/platform/graphics/static_bitmap_image.h
 @@ -36,7 +36,7 @@
