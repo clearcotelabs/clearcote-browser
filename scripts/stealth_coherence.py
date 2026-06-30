@@ -205,15 +205,19 @@ def evaluate(a, b):
                    if (canvas_inv and webgl_inv)
                    else f"canvas {ca}{'==' if canvas_inv else '!='}{cb}; webgl {ga}{'==' if webgl_inv else '!='}{gb}"))
 
-    # webgl-webgpu-vendor-match: WebGPU vendor family agrees with WebGL UNMASKED_VENDOR
+    # webgl-webgpu-vendor-match: WebGPU vendor family agrees with WebGL UNMASKED_VENDOR.
+    # Only a *mismatch between two present surfaces* is a tell. If WebGPU (or WebGL) is
+    # unavailable — e.g. a GPU-less CI runner where navigator.gpu returns no adapter — there
+    # is no cross-surface mismatch to observe, so the check is N/A (pass), not a failure.
     wg = a.get("webgpu")
     wl = a.get("webgl")
-    if not isinstance(wg, dict) or not isinstance(wl, dict):
-        checks.append(("webgl-webgpu-vendor-match", False, f"webgpu={wg} webgl={wl}"))
+    gpu_vendor = str(wg.get("vendor", "")).lower() if isinstance(wg, dict) else ""
+    gl_vendor = str(wl.get("vendor", "")).lower() if isinstance(wl, dict) else ""
+    if not gpu_vendor or not gl_vendor:
+        checks.append(("webgl-webgpu-vendor-match", True,
+                       f"N/A — surface unavailable (webgpu_vendor={gpu_vendor or 'none'}, webgl_vendor={gl_vendor or 'none'})"))
     else:
-        gpu_vendor = str(wg.get("vendor", "")).lower()
-        gl_vendor = str(wl.get("vendor", "")).lower()
-        match = bool(gpu_vendor) and gpu_vendor in gl_vendor
+        match = gpu_vendor in gl_vendor
         checks.append(("webgl-webgpu-vendor-match", match,
                        f"webgpu '{wg.get('vendor')}' coheres with webgl '{wl.get('vendor')}'" if match
                        else f"MISMATCH webgpu '{wg.get('vendor')}' vs webgl '{wl.get('vendor')}'"))
