@@ -74,9 +74,9 @@
 +  double norm_x = (hash_val_x & 0xFFFFFFFF) / 4294967295.0 - 0.5;
 +  double norm_y = (hash_val_y & 0xFFFFFFFF) / 4294967295.0 - 0.5;
 +
-+  // Compute a very small offset: +/- 0.001 pixels.
-+  noise_factor_x_ = norm_x * 0.002;
-+  noise_factor_y_ = norm_y * 0.002;
++  // clearcote: clientRects offset disabled (factor 0); see docs/STEALTH-COHERENCE.md
++  noise_factor_x_ = norm_x * 0.0;
++  noise_factor_y_ = norm_y * 0.0;
 +}
 +
  double Document::GetNoiseFactorX() {

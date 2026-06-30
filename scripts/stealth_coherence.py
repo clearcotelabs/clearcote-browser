@@ -84,12 +84,14 @@ PAGE_HTML = "<!doctype html><html><head><meta charset=utf-8><title>coherence</ti
 # KNOWN_GAP starts passing, MOVE it into REQUIRED (the gate will tell you to).
 REQUIRED = {
     "webgl-webgpu-vendor-match",
+    # Promoted 2026-06-30 after the engine fix landed and this gate verified the flip.
+    # Enforced forward now: a regression fails the build.
+    "measuretext-grid",   # measureText metrics truthful/on-grid (patch 060: noise factor 0)
+    "worker-vs-main",     # main thread == OffscreenCanvas worker (patch 060)
+    "bcr-vs-range",       # getBoundingClientRect == Range rects, on-grid (patch 050: clientRects offset 0)
 }
 KNOWN_GAPS = {
-    "measuretext-grid": "metric farble is a sub-grid scalar; fix = quantize to the 1/512 grid or pass real font metrics through (patch 060). Survives --disable-fingerprint-noise.",
-    "worker-vs-main": "farble only hooks the window execution context; fix = apply the same seed-keyed farble in worker / OffscreenCanvas paths (patch 060).",
-    "bcr-vs-range": "client-rects farble is inconsistent across rect APIs and off-grid; fix = apply coherently to all rect APIs + grid-quantize (patch 080).",
-    "origin-invariant": "farble seed is keyed by registrable domain, so one identity renders differently per site; fix = key the seed to the persona/profile, not the domain (patch 001). NOTE: this is a deliberate design choice — confirm the per-persona model before flipping.",
+    "origin-invariant": "canvas/WebGL readback is keyed by registrable domain, so one identity renders differently per site. Left domain-keyed by design (2026-06-30): per-site noise-unlinkability is retained. Flipping to persona-keyed (patch 001) is only warranted if the usage model becomes one-profile-per-identity.",
 }
 
 STRS = ["A", "WWWWWWWWWW", "mmmmmmmmmm", "iiiiiiiiii", "Coherence 0123"]

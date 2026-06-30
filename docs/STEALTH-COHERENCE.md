@@ -65,17 +65,21 @@ tell not yet closed, tracked with its fix location), both declared at the top of
 So today's documented gaps don't block releases, but every engine fix is enforced
 forward the instant it lands.
 
+### Fixed + enforced
+
+| id | fix that landed |
+|----|-----|
+| `measuretext-grid` | measureText perturbation set to factor 0 (patch `060`): metrics are truthful and on the 1/512 grid. Entropy comes from the spoofed font set, not a sub-grid scale. |
+| `worker-vs-main` | with the metric scale gone, the main thread returns the same truthful metrics as an `OffscreenCanvas` worker (patch `060`). |
+| `bcr-vs-range` | clientRects offset set to factor 0 (patch `050`): `getBoundingClientRect` and `Range` rects agree and stay on-grid. |
+
+These are now `REQUIRED` — a regression fails the build.
+
 ### Current known gaps
 
-These fail today (they are the verified tells) and are tracked here until the
-engine fixes land — then move each into `REQUIRED`:
-
-| id | fix |
+| id | status |
 |----|-----|
-| `measuretext-grid` | quantize the farbled metric back onto the 1/512 grid, or pass the persona font-set's real metrics through (patch `060`). Note: survives `--disable-fingerprint-noise` today. |
-| `worker-vs-main` | apply the same seed-keyed farble in worker / `OffscreenCanvas` paths, not just the window context (patch `060`). |
-| `bcr-vs-range` | apply the rect farble coherently across all rect APIs and grid-quantize it (patch `080`). |
-| `origin-invariant` | key the farble seed to the persona/profile, not the registrable domain (patch `001`). This is a deliberate design choice — confirm the per-persona usage model before flipping. |
+| `origin-invariant` | **Left domain-keyed by design.** canvas/WebGL readback is keyed by registrable domain, so one identity renders differently per site. This retains per-site noise-unlinkability; flipping the seed to persona-keyed (patch `001`) is only warranted if the usage model becomes one-profile-per-identity. |
 
 ## CI
 

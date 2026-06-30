@@ -406,8 +406,8 @@
 +    uint32_t hash_val_x = std::hash<std::string>{}(combined_rects_x);
 +    // Map to [-0.5, 0.5] range
 +    double norm_x = (hash_val_x & 0xFFFFFFFF) / 4294967295.0 - 0.5;
-+    // Use 0.00001 as factor (equivalent to original 1/100000.0)
-+    double noise_x = norm_x * 0.00001;
++    // clearcote: measureText perturbation disabled (factor 0); see docs/STEALTH-COHERENCE.md
++    double noise_x = norm_x * 0.0;
      if (HostAsOffscreenCanvas()) {
        if (auto* window = DynamicTo<LocalDOMWindow>(GetTopExecutionContext())) {
 -        if (window->GetFrame() && window->GetFrame()->GetDocument())
