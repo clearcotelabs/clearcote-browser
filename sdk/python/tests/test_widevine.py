@@ -21,10 +21,10 @@ def test_constants_pin_the_widevine_component():
     assert HINT_FILE == "latest-component-updated-widevine-cdm"
 
 
-def test_omaha_request_body_targets_windows_x64():
+def test_omaha_request_body_targets_current_os():
     body = _omaha_request_body()["request"]
-    assert body["@os"] == "win" and body["arch"] == "x64"
-    assert body["acceptformat"] == "crx3"
+    assert body["arch"] == "x64" and body["acceptformat"] == "crx3"
+    assert body["@os"] in ("win", "Linux")  # platform-aware (Windows dev host / Linux CI)
     app = body["app"][0]
     assert app["appid"] == WIDEVINE_APP_ID
     assert app["version"] == "0.0.0.0"  # forces the server to return the latest
@@ -74,8 +74,11 @@ def test_crx3_to_zip_passes_through_plain_zip():
 
 
 def _no_network_seed(monkeypatch):
-    # apply_widevine_launch seeds the CDM (network/disk) first — stub it out for arg-only tests
+    # apply_widevine_launch seeds the CDM (network/disk) first — stub it out; also pin the arg path to
+    # Windows (the fast-update scan) so these arg tests are deterministic on any CI OS. The Linux
+    # branch (hint file, no scan) is covered by test_apply_widevine_launch_linux_no_fast_update.
     monkeypatch.setattr(_widevine, "seed_widevine", lambda *a, **k: "X:/cdm")
+    monkeypatch.setattr(_widevine.sys, "platform", "win32")
 
 
 def test_apply_widevine_launch_adds_the_two_flags(monkeypatch):
@@ -129,6 +132,17 @@ def test_apply_widevine_launch_respects_user_component_updater(monkeypatch):
     # don't clobber a user-chosen component-updater mode
     assert "--component-updater=fast-update" not in kw["args"]
     assert "--component-updater=test-request" in kw["args"]
+
+
+def test_apply_widevine_launch_linux_no_fast_update(monkeypatch):
+    # On Linux the seeded CDM hint file IS the registration mechanism; the component updater is
+    # un-suppressed but there is NO fast-update scan (verified against the real Linux binary).
+    monkeypatch.setattr(_widevine, "seed_widevine", lambda *a, **k: "/cdm")
+    monkeypatch.setattr(_widevine.sys, "platform", "linux")
+    kw = {}
+    apply_widevine_launch("prof", kw, quiet=True)
+    assert "--disable-component-update" in kw["ignore_default_args"]
+    assert not any("component-updater" in a for a in kw["args"])
 
 
 def test_apply_widevine_launch_skips_args_when_seeding_fails(monkeypatch):

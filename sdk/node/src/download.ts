@@ -12,16 +12,16 @@
 //                            to the pinned release if GitHub is unreachable.
 // A hash mismatch (either mode) is always a hard failure and the partial download is deleted.
 
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import extract from "extract-zip";
-import { RELEASE, REPO, SIGNING_KEY_FPR, type ReleaseInfo } from "./release.js";
+import { RELEASE, REPO, SIGNING_KEY_FPR, platformRelease, type ReleaseInfo } from "./release.js";
 
 export interface DownloadOptions {
   /** Override the cache directory (default: per-OS user cache dir). */
@@ -147,21 +147,31 @@ async function fetchToFile(url: string, dest: string): Promise<void> {
   writeFileSync(dest, await fetchText(url));
 }
 
-/** Pull the zip + chrome.exe hashes out of a SHA256SUMS.txt body. */
-function parseSums(text: string, zipName: string): { zip?: string; exe?: string } {
+/** Pull the archive + inner-binary hashes out of a SHA256SUMS.txt body. */
+function parseSums(text: string, assetName: string, binary: string): { zip?: string; exe?: string } {
   const out: { zip?: string; exe?: string } = {};
   for (const raw of text.split(/\r?\n/)) {
     const m = raw.trim().match(/^([0-9a-fA-F]{64})\s+[*]?(.+)$/);
     if (!m) continue;
     const base = m[2].split(/[\\/]/).pop();
-    if (base === zipName) out.zip = m[1].toLowerCase();
-    else if (base === "chrome.exe") out.exe = m[1].toLowerCase();
+    if (base === assetName) out.zip = m[1].toLowerCase();
+    else if (base === binary) out.exe = m[1].toLowerCase();
   }
   return out;
 }
 
-/** Resolve the newest non-draft GitHub release with a windows-x64 zip + SHA256SUMS.txt. */
+/** Escape a string for safe interpolation into a RegExp. */
+function reEscape(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Resolve the newest non-draft GitHub release with THIS platform's asset + SHA256SUMS.txt. */
 async function resolveLatest(quiet: boolean | undefined): Promise<ResolvedRelease | null> {
+  const pin = platformRelease();
+  if (!pin) return null; // unsupported OS -> nothing to auto-resolve
+  const { assetGlob: glob, binary, os: pinOs, archive } = pin;
+  const assetRe = new RegExp(`^clearcote-.*-${reEscape(glob)}\\.(?:zip|tar\\.xz)$`);
+  const verRe = new RegExp(`^clearcote-(.+)-${reEscape(glob)}\\.(?:zip|tar\\.xz)$`);
   let list: any[];
   try {
     const res = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=30`, {
@@ -180,26 +190,29 @@ async function resolveLatest(quiet: boolean | undefined): Promise<ResolvedReleas
     .sort((a, b) => String(b.published_at || "").localeCompare(String(a.published_at || "")));
   for (const r of releases) {
     const assets: any[] = r.assets || [];
-    const zip = assets.find((a) => /^clearcote-.*-windows-x64\.zip$/.test(a.name));
+    const asset = assets.find((a) => assetRe.test(a.name));
     const sums = assets.find((a) => a.name === "SHA256SUMS.txt");
-    if (!zip || !sums) continue;
+    if (!asset || !sums) continue;
     let parsed: { zip?: string; exe?: string };
     try {
-      parsed = parseSums(await fetchText(sums.browser_download_url), zip.name);
+      parsed = parseSums(await fetchText(sums.browser_download_url), asset.name, binary);
     } catch {
       continue;
     }
     if (!parsed.zip) continue;
-    const m = zip.name.match(/^clearcote-(.+)-windows-x64\.zip$/);
+    const m = asset.name.match(verRe);
     return {
       tag: r.tag_name,
       version: m ? m[1] : r.tag_name,
-      asset: zip.name,
-      url: zip.browser_download_url,
+      asset: asset.name,
+      url: asset.browser_download_url,
       sha256: parsed.zip,
       exeSha256: parsed.exe || "",
-      size: zip.size || 0,
-      os: "win32",
+      size: asset.size || 0,
+      os: pinOs,
+      archive,
+      binary,
+      assetGlob: glob,
       unpinned: true,
       ascUrl: assets.find((a) => a.name === "SHA256SUMS.txt.asc")?.browser_download_url,
       keyUrl: assets.find((a) => a.name === "clearcote-signing-key.asc")?.browser_download_url,
@@ -261,7 +274,7 @@ async function gpgVerifyAsync(
   }
 }
 
-/** Download + verify a resolved release into `base`, returning the extracted chrome.exe path. */
+/** Download + verify a resolved release into `base`, returning the extracted browser-binary path. */
 async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: DownloadOptions): Promise<string> {
   const browserDir = path.join(base, "browser");
   mkdirSync(base, { recursive: true });
@@ -294,14 +307,40 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
 
   log(opts.quiet, "extracting");
   await rm(browserDir, { recursive: true, force: true });
-  await extract(zipPath, { dir: browserDir });
+  mkdirSync(browserDir, { recursive: true });
+  if (rel.asset.endsWith(".tar.xz") || rel.archive === "tar.xz") {
+    // Node has no stdlib xz; the system `tar` (always present on Linux) auto-detects .xz.
+    execFileSync("tar", ["-xf", zipPath, "-C", browserDir]);
+  } else {
+    await extract(zipPath, { dir: browserDir });
+  }
 
-  const exe = findFile(browserDir, "chrome.exe");
-  if (!exe) throw new Error("Clearcote archive verified but chrome.exe was not found inside it.");
+  const binaryName = rel.binary || "chrome.exe";
+  const exe = findFile(browserDir, binaryName);
+  if (!exe) throw new Error(`Clearcote archive verified but ${binaryName} was not found inside it.`);
   if (rel.exeSha256) {
     const exeHash = await sha256File(exe);
     if (exeHash.toLowerCase() !== rel.exeSha256.toLowerCase()) {
-      throw new Error(`Clearcote chrome.exe SHA-256 mismatch — refusing to use it.\n  expected ${rel.exeSha256}\n  got      ${exeHash}`);
+      throw new Error(`Clearcote ${binaryName} SHA-256 mismatch — refusing to use it.\n  expected ${rel.exeSha256}\n  got      ${exeHash}`);
+    }
+  }
+
+  if (process.platform !== "win32") {
+    // Make the launcher executable (tar preserves 0755, but be defensive) + a best-effort setuid on
+    // the sandbox helper. The setuid bit only takes effect if chrome-sandbox is root-owned; in
+    // containers/non-root, pass --no-sandbox (see docs). We never require root here.
+    try {
+      chmodSync(exe, 0o755);
+    } catch {
+      /* best-effort */
+    }
+    const sandbox = path.join(path.dirname(exe), "chrome-sandbox");
+    if (existsSync(sandbox)) {
+      try {
+        chmodSync(sandbox, 0o4755);
+      } catch {
+        /* best-effort — never require root */
+      }
     }
   }
 
@@ -333,7 +372,7 @@ export async function ensureBinary(opts: DownloadOptions = {}): Promise<string> 
 
   const base = path.join(cacheRoot, rel.tag);
   if (existsSync(path.join(base, ".verified"))) {
-    const cached = findFile(path.join(base, "browser"), "chrome.exe");
+    const cached = findFile(path.join(base, "browser"), rel.binary || "chrome.exe");
     if (cached) return cached;
   }
   return fetchAndVerify(rel, base, opts);

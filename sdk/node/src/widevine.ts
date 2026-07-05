@@ -1,4 +1,4 @@
-// Opt-in Widevine CDM fetch + persistent-profile seeding (Windows).
+// Opt-in Widevine CDM fetch + persistent-profile seeding (Windows + Linux).
 //
 // clearcote is a 100%-open-source build: it ships the EME/Widevine *plumbing* (enable_widevine=true)
 // but NOT Google's proprietary CDM binary (that blob can't live in a FOSS package). This module lets
@@ -21,9 +21,28 @@ import extract from "extract-zip";
 export const WIDEVINE_APP_ID = "oimompecagnajdejgnnjijobebaeigek";
 export const OMAHA_URL = "https://update.googleapis.com/service/update2/json";
 export const HINT_FILE = "latest-component-updated-widevine-cdm";
+
+/** Per-OS CDM coordinates. Linux ships libwidevinecdm.so under linux_x64 and registers via the hint
+ * file; Windows ships widevinecdm.dll under win_x64 and registers via the component-updater scan. */
+function cdmPlatform(): {
+  atOs: string;
+  osPlatform: string;
+  osVersion: string;
+  subdir: string;
+  filename: string;
+} {
+  if (process.platform === "linux") {
+    return { atOs: "Linux", osPlatform: "Linux", osVersion: "6.1.0", subdir: "linux_x64", filename: "libwidevinecdm.so" };
+  }
+  return { atOs: "win", osPlatform: "Windows", osVersion: "10.0.19045.0", subdir: "win_x64", filename: "widevinecdm.dll" };
+}
+
 // update.googleapis.com sits behind Google's edge; a bare fetch UA can 403 — send a browser-ish one.
+// Match the request UA to the OS we ask the CDM for, so the Omaha call is coherent.
 const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
+  process.platform === "linux"
+    ? "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+    : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 
 export interface WidevineOptions {
   /** Destination root (default ~/.clearcote/WidevineCdm). */
@@ -40,11 +59,12 @@ function cacheRoot(): string {
   return process.env.CLEARCOTE_WIDEVINE_DIR || path.join(os.homedir(), ".clearcote", "WidevineCdm");
 }
 
-/** Minimal Omaha v3.1 update check for the Windows x64 Widevine CDM (version 0.0.0.0 -> latest). */
+/** Minimal Omaha v3.1 update check for the current-OS x64 Widevine CDM (version 0.0.0.0 -> latest). */
 export function omahaRequestBody(): unknown {
+  const { atOs, osPlatform, osVersion } = cdmPlatform();
   return {
     request: {
-      "@os": "win",
+      "@os": atOs,
       "@updater": "clearcote",
       acceptformat: "crx3",
       protocol: "3.1",
@@ -53,7 +73,7 @@ export function omahaRequestBody(): unknown {
       prodversion: "149.0.0.0",
       updaterversion: "149.0.0.0",
       dedup: "cr",
-      os: { arch: "x86_64", platform: "Windows", version: "10.0.19045.0" },
+      os: { arch: "x86_64", platform: osPlatform, version: osVersion },
       app: [{ appid: WIDEVINE_APP_ID, version: "0.0.0.0", updatecheck: {}, ping: { r: -2 } }],
     },
   };
@@ -101,15 +121,16 @@ export function crx3ToZip(buf: Buffer): Buffer {
 }
 
 /**
- * Download + verify the Windows x64 Widevine CDM into `dest` (default ~/.clearcote/WidevineCdm/
- * <version>). Returns the versioned CDM directory (manifest.json + _platform_specific/win_x64/
- * widevinecdm.dll). Re-fetch is skipped if already present.
+ * Download + verify the current-OS x64 Widevine CDM into `dest` (default ~/.clearcote/WidevineCdm/
+ * <version>). Returns the versioned CDM directory (manifest.json + _platform_specific/<subdir>/
+ * <filename>). Re-fetch is skipped if already present.
  */
 export async function fetchWidevine(opts: WidevineOptions = {}): Promise<string> {
   const [url, sha256, version] = parseUpdate(await postJson(OMAHA_URL, omahaRequestBody()));
   const root = opts.dest || cacheRoot();
   const verDir = path.join(root, version || "current");
-  const dll = path.join(verDir, "_platform_specific", "win_x64", "widevinecdm.dll");
+  const { subdir, filename } = cdmPlatform();
+  const dll = path.join(verDir, "_platform_specific", subdir, filename);
   if (existsSync(dll) && existsSync(path.join(verDir, "manifest.json"))) {
     log(opts.quiet, `already present: ${verDir}`);
     return verDir;
@@ -133,7 +154,7 @@ export async function fetchWidevine(opts: WidevineOptions = {}): Promise<string>
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
-  if (!existsSync(dll)) throw new Error(`extracted CDM but widevinecdm.dll not at ${dll}`);
+  if (!existsSync(dll)) throw new Error(`extracted CDM but ${filename} not at ${dll}`);
   log(opts.quiet, `installed: ${verDir}`);
   return verDir;
 }
@@ -147,7 +168,8 @@ export async function seedWidevine(userDataDir: string, opts: WidevineOptions = 
   const version = path.basename(src);
   const wvRoot = path.join(userDataDir, "WidevineCdm");
   const target = path.join(wvRoot, version);
-  if (!existsSync(path.join(target, "_platform_specific", "win_x64", "widevinecdm.dll"))) {
+  const { subdir, filename } = cdmPlatform();
+  if (!existsSync(path.join(target, "_platform_specific", subdir, filename))) {
     mkdirSync(wvRoot, { recursive: true });
     cpSync(src, target, { recursive: true });
   }
@@ -161,12 +183,16 @@ export async function seedWidevine(userDataDir: string, opts: WidevineOptions = 
 }
 
 /**
- * Adjust launch args so the engine actually registers the seeded CDM: un-suppress the component
- * updater (Playwright disables it by default) and force the startup scan. Pure — returns the new
- * values. `ignoreDefaultArgs` may be a list, `undefined`, or the boolean form Playwright accepts
- * (`true` = ignore ALL defaults, so the updater is already un-suppressed); only the list/undefined
- * forms need `--disable-component-update` added. Verified: with these, requestMediaKeySystemAccess
- * + createMediaKeys succeed.
+ * Adjust launch args so the engine actually registers the seeded CDM. Pure — returns the new values.
+ *
+ * The un-suppress of the component updater (Playwright disables it by default via
+ * `--disable-component-update`) applies on BOTH platforms: `ignoreDefaultArgs` may be a list,
+ * `undefined`, or the boolean form Playwright accepts (`true` = ignore ALL defaults, so the updater
+ * is already un-suppressed); only the list/undefined forms need `--disable-component-update` added.
+ *
+ * The `--component-updater=fast-update` startup scan is Windows-ONLY: on Linux the seeded CDM hint
+ * file IS the registration mechanism (read at startup regardless), so no scan flag is added there.
+ * Verified: with these, requestMediaKeySystemAccess + createMediaKeys succeed.
  */
 export function widevineArgs(
   ignoreDefaultArgs: string[] | boolean | undefined,
@@ -180,8 +206,10 @@ export function widevineArgs(
   } else if (ignoreDefaultArgs === undefined) {
     ida = ["--disable-component-update"];
   }
-  const args = userArgs.some((a) => a.includes("component-updater"))
-    ? userArgs
-    : [...userArgs, "--component-updater=fast-update"];
+  // Force the pre-installed-component scan on WINDOWS only. On Linux the hint file registers the CDM.
+  const args =
+    process.platform === "linux" || userArgs.some((a) => a.includes("component-updater"))
+      ? userArgs
+      : [...userArgs, "--component-updater=fast-update"];
   return { ignoreDefaultArgs: ida, args };
 }

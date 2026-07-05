@@ -1,29 +1,38 @@
-// Pinned Clearcote release the SDK downloads and verifies.
-// Bumping the SDK to a new browser build = updating these constants (and the version in
-// package.json). The sha256 is the SINGLE trust anchor for the auto-download: if you trust
-// this package, the hash check guarantees you run exactly the published, signed binary.
-// Published checksums + GPG signatures live on the release page.
+// Pinned Clearcote releases the SDK downloads and verifies — one pin per platform.
+// Bumping to a new browser build = updating the platform entry here (and the version in
+// package.json). The sha256 is the SINGLE trust anchor for the auto-download: if you trust this
+// package, the hash check guarantees you run exactly the published, signed binary.
+// Published checksums + GPG signatures live on each release page.
 
 export interface ReleaseInfo {
   /** Git tag / release the binary comes from. */
   tag: string;
   /** Chromium version the build is based on. */
   version: string;
-  /** Release asset (zip) file name. */
+  /** Release asset (archive) file name. */
   asset: string;
   /** Direct download URL for the asset. */
   url: string;
-  /** SHA-256 of the zip — verified after download; mismatch is a hard failure. */
+  /** SHA-256 of the archive — verified after download; mismatch is a hard failure. */
   sha256: string;
-  /** SHA-256 of chrome.exe inside the zip — verified after extraction (defense in depth). */
+  /** SHA-256 of the inner browser binary — verified after extraction (defense in depth). */
   exeSha256: string;
-  /** Expected zip size in bytes (for progress display only). */
+  /** Expected archive size in bytes (for progress display only). */
   size: number;
   /** Platform the binary runs on. */
   os: NodeJS.Platform;
+  /** Archive format of the asset — how to unpack it. */
+  archive: "zip" | "tar.xz";
+  /** Inner browser-binary file name (chrome.exe on Windows, chrome on Linux). */
+  binary: string;
+  /** The `-<glob>.<ext>` marker that identifies this platform's asset (e.g. "windows-x64"). */
+  assetGlob: string;
 }
 
-export const RELEASE: ReleaseInfo = {
+// Per-platform pin. Each entry is a complete, self-contained pinned release for that OS: the exact
+// signed asset + its SHA-256 (the trust anchor) + the inner-binary hash (defense in depth) + how to
+// unpack it. Windows and Linux ship from their own release tags.
+const WINDOWS: ReleaseInfo = {
   tag: "v0.1.0-pre.16",
   version: "149.0.7827.114",
   asset: "clearcote-149.0.7827.114-windows-x64.zip",
@@ -32,7 +41,37 @@ export const RELEASE: ReleaseInfo = {
   exeSha256: "5743595256c89c6874804bf3315acce592fc7f1883760c8d380c010151a73b23",
   size: 242642508,
   os: "win32",
+  archive: "zip",
+  binary: "chrome.exe",
+  assetGlob: "windows-x64",
 };
+
+const LINUX: ReleaseInfo = {
+  tag: "v0.1.0-pre.17",
+  version: "149.0.7827.114",
+  asset: "clearcote-149.0.7827.114-linux-x64.tar.xz",
+  url: "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.17/clearcote-149.0.7827.114-linux-x64.tar.xz",
+  sha256: "4beb6ef0df2ea9b35ed654a356094a27ed1ac0d34ea6cb284719a957da6f5981",
+  exeSha256: "b4f60c1dc1858173a0b41624c5d2cf7340a915cc000bae0ea1465f118374b3e0",
+  size: 147074836,
+  os: "linux",
+  archive: "tar.xz",
+  binary: "chrome",
+  assetGlob: "linux-x64",
+};
+
+/** process.platform -> pinned release. Add an entry to support another OS. */
+export const PLATFORMS: Record<string, ReleaseInfo> = { win32: WINDOWS, linux: LINUX };
+
+/** The pinned release for the given platform (default: this OS), or undefined if unsupported. */
+export function platformRelease(plat: NodeJS.Platform | string = process.platform): ReleaseInfo | undefined {
+  return PLATFORMS[plat];
+}
+
+// The pin for the CURRENT platform. Falls back to the Windows entry on an unsupported OS so the
+// existing error messaging still has a version to quote. Most code uses this; the download/guard
+// paths branch on platformRelease() to reject unsupported OSes.
+export const RELEASE: ReleaseInfo = platformRelease() ?? WINDOWS;
 
 /** GitHub repo (owner/name) the releases come from — used by the opt-in auto-update resolver. */
 export const REPO = "clearcotelabs/clearcote-browser";

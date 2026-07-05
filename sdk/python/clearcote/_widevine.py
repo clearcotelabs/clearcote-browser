@@ -22,6 +22,7 @@ import io
 import json
 import os
 import struct
+import sys
 import urllib.request
 import zipfile
 
@@ -29,9 +30,23 @@ import zipfile
 WIDEVINE_APP_ID = "oimompecagnajdejgnnjijobebaeigek"
 OMAHA_URL = "https://update.googleapis.com/service/update2/json"
 # update.googleapis.com is behind Google's edge; send a browser-ish UA (a bare urllib UA can 403).
-_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-       "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+# Match the request UA to the OS we ask the CDM for, so the Omaha call is coherent.
+if sys.platform == "linux":
+    _UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
+else:
+    _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36")
 HINT_FILE = "latest-component-updated-widevine-cdm"
+
+
+def _cdm_platform():
+    """(@os, os.platform, os.version, platform_subdir, cdm_filename) for the current OS. Linux ships
+    libwidevinecdm.so under linux_x64 and registers via the hint file; Windows ships widevinecdm.dll
+    under win_x64 and registers via the component-updater scan (see apply_widevine_launch)."""
+    if sys.platform == "linux":
+        return ("Linux", "Linux", "6.1.0", "linux_x64", "libwidevinecdm.so")
+    return ("win", "Windows", "10.0.19045.0", "win_x64", "widevinecdm.dll")
 
 
 def _cache_root():
@@ -42,13 +57,14 @@ def _cache_root():
 def _omaha_request_body():
     # Minimal Omaha v3.1 update check for the Windows x64 Widevine CDM. version=0.0.0.0 forces the
     # server to return the latest. (No requestid randomness — keep it deterministic + simple.)
+    at_os, os_platform, os_version, _sub, _fn = _cdm_platform()
     return {
         "request": {
-            "@os": "win", "@updater": "clearcote",
+            "@os": at_os, "@updater": "clearcote",
             "acceptformat": "crx3", "protocol": "3.1",
             "arch": "x64", "nacl_arch": "x86-64", "prodversion": "149.0.0.0",
             "updaterversion": "149.0.0.0", "dedup": "cr",
-            "os": {"arch": "x86_64", "platform": "Windows", "version": "10.0.19045.0"},
+            "os": {"arch": "x86_64", "platform": os_platform, "version": os_version},
             "app": [{
                 "appid": WIDEVINE_APP_ID, "version": "0.0.0.0",
                 "updatecheck": {}, "ping": {"r": -2},
@@ -112,7 +128,8 @@ def fetch_widevine(dest=None, quiet=False):
     url, sha256, version = _parse_update(resp)
     root = dest or _cache_root()
     ver_dir = os.path.join(root, version or "current")
-    dll = os.path.join(ver_dir, "_platform_specific", "win_x64", "widevinecdm.dll")
+    _at, _p, _v, sub, fn = _cdm_platform()
+    dll = os.path.join(ver_dir, "_platform_specific", sub, fn)
     if os.path.isfile(dll) and os.path.isfile(os.path.join(ver_dir, "manifest.json")):
         if not quiet:
             print("[widevine] already present:", ver_dir)
@@ -134,7 +151,7 @@ def fetch_widevine(dest=None, quiet=False):
         zf.extractall(ver_dir)
     if not os.path.isfile(dll):
         # some CRX layouts nest the platform dir differently; surface a clear error
-        raise RuntimeError("extracted CDM but widevinecdm.dll not at %s" % dll)
+        raise RuntimeError("extracted CDM but the CDM binary was not at %s" % dll)
     if not quiet:
         print("[widevine] installed:", ver_dir)
     return ver_dir
@@ -165,13 +182,17 @@ def apply_widevine_launch(user_data_dir, kwargs, quiet=False):
             kwargs["ignore_default_args"] = ["--disable-component-update"]
         # Force the pre-installed-component scan. A user-supplied --component-updater mode wins, but
         # if it isn't fast-update the CDM may not register — surface that instead of silently failing.
+        # Force the pre-installed-component scan on WINDOWS (the component-updater path). On Linux the
+        # CDM hint file we seeded IS the registration mechanism — read at startup regardless — so no
+        # fast-update scan is needed there (verified: hint file + un-suppressed updater is enough).
         args = list(kwargs.get("args") or [])
-        existing = [a for a in args if "component-updater" in a]
-        if not existing:
-            args.append("--component-updater=fast-update")
-        elif not any("fast-update" in a for a in existing) and not quiet:
-            print("[widevine] note: your --component-updater mode may not register the CDM; "
-                  "--component-updater=fast-update is needed to scan the pre-installed component")
+        if sys.platform != "linux":
+            existing = [a for a in args if "component-updater" in a]
+            if not existing:
+                args.append("--component-updater=fast-update")
+            elif not any("fast-update" in a for a in existing) and not quiet:
+                print("[widevine] note: your --component-updater mode may not register the CDM; "
+                      "--component-updater=fast-update is needed to scan the pre-installed component")
         kwargs["args"] = args
     except Exception as exc:  # noqa: BLE001 — DRM is best-effort; never abort the launch
         if not quiet:
@@ -186,7 +207,8 @@ def seed_widevine(user_data_dir, cdm_dir=None, quiet=False):
     version = os.path.basename(src.rstrip(os.sep))
     wv_root = os.path.join(user_data_dir, "WidevineCdm")
     target = os.path.join(wv_root, version)
-    if not os.path.isfile(os.path.join(target, "_platform_specific", "win_x64", "widevinecdm.dll")):
+    _at, _p, _v, sub, fn = _cdm_platform()
+    if not os.path.isfile(os.path.join(target, "_platform_specific", sub, fn)):
         import shutil
         os.makedirs(wv_root, exist_ok=True)
         shutil.copytree(src, target, dirs_exist_ok=True)

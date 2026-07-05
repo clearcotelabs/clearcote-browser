@@ -34,16 +34,23 @@ A fresh import prints `WARNING: This key is not certified with a trusted signatu
 
 ## 2. Check the published checksums
 
-With the signature verified, confirm your download matches the signed checksum:
+With the signature verified, confirm your download matches the signed checksum. The Windows asset is
+a `.zip`; the Linux asset is a `.tar.xz`:
 
 ```bash
-sha256sum -c clearcote-<version>-<platform>.zip.sha256
+# Windows
+sha256sum -c clearcote-<version>-windows-x64.zip.sha256
+# Linux
+sha256sum -c clearcote-<version>-linux-x64.tar.xz.sha256
 ```
 
-You can also confirm the inner binaries against the signed aggregate list:
+You can also confirm the inner binary against the signed aggregate list:
 
 ```bash
-unzip -p clearcote-<version>-<platform>.zip chrome.exe | sha256sum   # compare to chrome.exe in SHA256SUMS.txt
+# Windows — compare to the chrome.exe line in SHA256SUMS.txt
+unzip -p clearcote-<version>-windows-x64.zip chrome.exe | sha256sum
+# Linux — compare to the chrome line in SHA256SUMS.txt
+tar -xJOf clearcote-<version>-linux-x64.tar.xz chrome | sha256sum
 ```
 
 If a hash doesn't match `SHA256SUMS.txt` (whose authenticity you verified in step 1), **do not run it.**

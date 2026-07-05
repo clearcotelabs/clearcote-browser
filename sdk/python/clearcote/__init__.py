@@ -54,7 +54,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.10.4"
+__version__ = "0.11.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -108,11 +108,12 @@ def download(cache_dir=None, quiet=False, auto_update=None):
 
 
 def _guard(exe):
-    if sys.platform != "win32":
+    from .release import platform_release
+    if platform_release() is None:
         raise RuntimeError(
-            f"Clearcote {RELEASE['version']} ships a Windows x64 binary only — it cannot launch "
-            f"on {sys.platform!r}.\nRun on Windows, or pass executable_path=... to a compatible "
-            f"binary.\n(The binary downloaded and verified fine; it is cached at: {exe})"
+            f"Clearcote {RELEASE['version']} ships Windows x64 and Linux x64 binaries — there is no "
+            f"build for {sys.platform!r}.\nRun on Windows or Linux, or pass executable_path=... to a "
+            f"compatible binary.\n(A binary downloaded and verified fine; it is cached at: {exe})"
         )
 
 

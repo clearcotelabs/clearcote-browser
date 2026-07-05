@@ -27,7 +27,7 @@ import tempfile
 import urllib.request
 import zipfile
 
-from .release import RELEASE, REPO, SIGNING_KEY_FPR
+from .release import RELEASE, REPO, SIGNING_KEY_FPR, platform_release
 
 
 def _log(quiet, msg):
@@ -112,26 +112,32 @@ def _download(url, dest, expected_size, quiet):
     return h.hexdigest()
 
 
-def _parse_sums(text, zip_name):
-    """Pull the zip + chrome.exe hashes out of a SHA256SUMS.txt body."""
+def _parse_sums(text, asset_name, binary):
+    """Pull the archive + inner-binary hashes out of a SHA256SUMS.txt body."""
     out = {}
     for raw in text.splitlines():
         m = re.match(r"^([0-9a-fA-F]{64})\s+[*]?(.+)$", raw.strip())
         if not m:
             continue
         base = re.split(r"[\\/]", m.group(2))[-1]
-        if base == zip_name:
-            out["zip"] = m.group(1).lower()
-        elif base == "chrome.exe":
-            out["exe"] = m.group(1).lower()
+        if base == asset_name:
+            out["archive"] = m.group(1).lower()
+        elif base == binary:
+            out["bin"] = m.group(1).lower()
     return out
 
 
 def _resolve_latest(quiet):
-    """Resolve the newest non-draft GitHub release with a windows-x64 zip + SHA256SUMS.txt.
+    """Resolve the newest non-draft GitHub release with THIS platform's asset + SHA256SUMS.txt.
 
     Returns a release dict (with ``unpinned=True`` and ``asc_url``/``key_url``) or None.
     """
+    pin = platform_release()
+    if pin is None:  # unsupported OS -> nothing to auto-resolve
+        return None
+    glob, binary = pin["asset_glob"], pin["binary"]
+    asset_re = re.compile(rf"^clearcote-.*-{re.escape(glob)}\.(?:zip|tar\.xz)$")
+    ver_re = re.compile(rf"^clearcote-(.+)-{re.escape(glob)}\.(?:zip|tar\.xz)$")
     try:
         data = json.loads(_http_get(f"https://api.github.com/repos/{REPO}/releases?per_page=30"))
     except Exception as exc:  # noqa: BLE001
@@ -144,28 +150,32 @@ def _resolve_latest(quiet):
     )
     for r in releases:
         assets = r.get("assets") or []
-        zip_asset = next((a for a in assets if re.match(r"^clearcote-.*-windows-x64\.zip$", a["name"])), None)
+        asset = next((a for a in assets if asset_re.match(a["name"])), None)
         sums_asset = next((a for a in assets if a["name"] == "SHA256SUMS.txt"), None)
-        if not zip_asset or not sums_asset:
+        if not asset or not sums_asset:
             continue
         try:
-            parsed = _parse_sums(_http_get(sums_asset["browser_download_url"]).decode("utf-8", "replace"), zip_asset["name"])
+            parsed = _parse_sums(
+                _http_get(sums_asset["browser_download_url"]).decode("utf-8", "replace"),
+                asset["name"], binary)
         except Exception:  # noqa: BLE001
             continue
-        if not parsed.get("zip"):
+        if not parsed.get("archive"):
             continue
-        m = re.match(r"^clearcote-(.+)-windows-x64\.zip$", zip_asset["name"])
+        m = ver_re.match(asset["name"])
         asc = next((a for a in assets if a["name"] == "SHA256SUMS.txt.asc"), None)
         key = next((a for a in assets if a["name"] == "clearcote-signing-key.asc"), None)
         return {
             "tag": r["tag_name"],
             "version": m.group(1) if m else r["tag_name"],
-            "asset": zip_asset["name"],
-            "url": zip_asset["browser_download_url"],
-            "sha256": parsed["zip"],
-            "exe_sha256": parsed.get("exe", ""),
-            "size": zip_asset.get("size") or 0,
-            "os": "win32",
+            "asset": asset["name"],
+            "url": asset["browser_download_url"],
+            "sha256": parsed["archive"],
+            "exe_sha256": parsed.get("bin", ""),
+            "size": asset.get("size") or 0,
+            "os": pin["os"],
+            "archive": pin["archive"],
+            "binary": binary,
             "unpinned": True,
             "asc_url": asc["browser_download_url"] if asc else None,
             "key_url": key["browser_download_url"] if key else None,
@@ -267,25 +277,46 @@ def _fetch_and_verify(rel, base, quiet):
     _log(quiet, "extracting")
     if os.path.isdir(browser_dir):
         shutil.rmtree(browser_dir, ignore_errors=True)
-    with zipfile.ZipFile(zip_path) as z:
-        z.extractall(browser_dir)
+    if rel["asset"].endswith(".tar.xz") or rel.get("archive") == "tar.xz":
+        import tarfile
+        with tarfile.open(zip_path) as t:
+            t.extractall(browser_dir)
+    else:
+        with zipfile.ZipFile(zip_path) as z:
+            z.extractall(browser_dir)
 
-    exe = _find(browser_dir, "chrome.exe")
+    binary = rel.get("binary", "chrome.exe")
+    exe = _find(browser_dir, binary)
     if not exe:
-        raise RuntimeError("Clearcote archive verified but chrome.exe was not found inside it.")
+        raise RuntimeError(f"Clearcote archive verified but {binary} was not found inside it.")
 
     if rel.get("exe_sha256"):
         exe_hash = _sha256_file(exe)
         if exe_hash.lower() != rel["exe_sha256"].lower():
             raise RuntimeError(
-                "Clearcote chrome.exe SHA-256 mismatch — refusing to use it.\n"
+                f"Clearcote {binary} SHA-256 mismatch — refusing to use it.\n"
                 f"  expected {rel['exe_sha256']}\n  got      {exe_hash}"
             )
+
+    if sys.platform != "win32":
+        # Make the launcher executable (tar preserves 0755, but be defensive) + a best-effort setuid
+        # on the sandbox helper. The setuid bit only takes effect if chrome-sandbox is root-owned; in
+        # containers/non-root, pass --no-sandbox (see docs). We never require root here.
+        try:
+            os.chmod(exe, 0o755)
+        except OSError:
+            pass
+        sandbox = os.path.join(os.path.dirname(exe), "chrome-sandbox")
+        if os.path.exists(sandbox):
+            try:
+                os.chmod(sandbox, 0o4755)
+            except OSError:
+                pass
 
     with open(os.path.join(base, ".verified"), "w", encoding="utf-8") as f:
         f.write(rel["sha256"] + "\n")
     try:
-        os.remove(zip_path)  # reclaim ~250 MB; keep only the extracted tree
+        os.remove(zip_path)  # reclaim disk; keep only the extracted tree
     except OSError:
         pass
     _log(quiet, f"ready: {exe}")
@@ -313,7 +344,7 @@ def ensure_binary(cache_dir=None, quiet=False, auto_update=None):
 
     base = os.path.join(cache_root, rel["tag"])
     if os.path.exists(os.path.join(base, ".verified")):
-        cached = _find(os.path.join(base, "browser"), "chrome.exe")
+        cached = _find(os.path.join(base, "browser"), rel.get("binary", "chrome.exe"))
         if cached:
             return cached
     return _fetch_and_verify(rel, base, quiet)

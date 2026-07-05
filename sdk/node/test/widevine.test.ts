@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   WIDEVINE_APP_ID,
   OMAHA_URL,
@@ -9,6 +9,17 @@ import {
   widevineArgs,
 } from "../src/widevine.js";
 
+/** Force process.platform for a block of tests (widevineArgs reads it live), restoring after. */
+function withPlatform(plat: NodeJS.Platform) {
+  const original = Object.getOwnPropertyDescriptor(process, "platform");
+  beforeEach(() => {
+    Object.defineProperty(process, "platform", { value: plat, configurable: true });
+  });
+  afterEach(() => {
+    if (original) Object.defineProperty(process, "platform", original);
+  });
+}
+
 describe("widevine constants", () => {
   it("pin the Widevine component + Omaha endpoint", () => {
     expect(WIDEVINE_APP_ID).toBe("oimompecagnajdejgnnjijobebaeigek");
@@ -18,9 +29,10 @@ describe("widevine constants", () => {
 });
 
 describe("omahaRequestBody", () => {
-  it("targets Windows x64 + the latest CDM", () => {
+  it("targets the current-OS x64 CDM + the latest version", () => {
     const req = (omahaRequestBody() as any).request;
-    expect(req["@os"]).toBe("win");
+    // platform-aware: "win" on a Windows dev host, "Linux" on the Linux CI
+    expect(["win", "Linux"]).toContain(req["@os"]);
     expect(req.arch).toBe("x64");
     expect(req.acceptformat).toBe("crx3");
     expect(req.app[0].appid).toBe(WIDEVINE_APP_ID);
@@ -60,7 +72,7 @@ describe("parseUpdate", () => {
 describe("crx3ToZip", () => {
   it("strips the CRX3 header", () => {
     const header = Buffer.from([0x10, 0x20, 0x30, 0x40]);
-    const zip = Buffer.from("PK the zip", "latin1");
+    const zip = Buffer.from("PK the zip", "latin1");
     const crx = Buffer.concat([
       Buffer.from("Cr24", "latin1"),
       (() => { const b = Buffer.alloc(4); b.writeUInt32LE(3, 0); return b; })(),
@@ -71,7 +83,7 @@ describe("crx3ToZip", () => {
   });
 
   it("passes a plain zip through unchanged", () => {
-    const plain = Buffer.from("PK already a zip", "latin1");
+    const plain = Buffer.from("PK already a zip", "latin1");
     expect(crx3ToZip(plain).equals(plain)).toBe(true);
   });
 
@@ -85,7 +97,10 @@ describe("crx3ToZip", () => {
   });
 });
 
-describe("widevineArgs", () => {
+// The fast-update scan is Windows-only, so pin the platform to win32 for these arg assertions.
+describe("widevineArgs (Windows: un-suppress updater + force the scan)", () => {
+  withPlatform("win32");
+
   it("un-suppresses the component updater + forces the scan", () => {
     const { ignoreDefaultArgs, args } = widevineArgs(["--enable-automation"], []);
     expect(ignoreDefaultArgs).toContain("--disable-component-update");
@@ -118,5 +133,16 @@ describe("widevineArgs", () => {
     const { args } = widevineArgs([], ["--component-updater=test-request"]);
     expect(args).toContain("--component-updater=test-request");
     expect(args).not.toContain("--component-updater=fast-update");
+  });
+});
+
+describe("widevineArgs (Linux: un-suppress updater, but NO fast-update scan)", () => {
+  withPlatform("linux");
+
+  it("un-suppresses --disable-component-update but adds no component-updater flag", () => {
+    const { ignoreDefaultArgs, args } = widevineArgs(["--enable-automation"], []);
+    // The seeded hint file registers the CDM on Linux — the updater is un-suppressed, no scan flag.
+    expect(ignoreDefaultArgs).toContain("--disable-component-update");
+    expect(args.some((a) => a.includes("component-updater"))).toBe(false);
   });
 });

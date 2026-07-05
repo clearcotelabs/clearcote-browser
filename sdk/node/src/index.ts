@@ -35,7 +35,7 @@ import {
   webrtcDefaultDenyArgs,
   type PwProxy,
 } from "./launchopts.js";
-import { RELEASE } from "./release.js";
+import { RELEASE, platformRelease } from "./release.js";
 import { fetchWidevine, seedWidevine, widevineArgs } from "./widevine.js";
 import { emitCoherenceWarnings } from "./warnings.js";
 
@@ -115,10 +115,10 @@ async function applyGeoip(fp: FingerprintOptions, proxy: unknown): Promise<void>
 }
 
 function ensureRunnableHere(exe: string): void {
-  if (process.platform !== "win32") {
+  if (platformRelease() === undefined) {
     throw new Error(
-      `Clearcote ${RELEASE.version} ships a Windows x64 binary only — it cannot launch on '${process.platform}'.\n` +
-        `Run on Windows, or pass executablePath to a compatible binary.\n` +
+      `Clearcote ${RELEASE.version} ships Windows x64 and Linux x64 binaries — there is no build for '${process.platform}'.\n` +
+        `Run on Windows or Linux, or pass executablePath to a compatible binary.\n` +
         `(The binary downloaded and verified fine; it is cached at: ${exe})`
     );
   }
@@ -237,9 +237,10 @@ export async function launchPersistentContext(
   if (widevine) {
     try {
       await seedWidevine(userDataDir, { quiet });
-      // a user-supplied non-fast-update --component-updater mode wins but may not register the CDM
+      // The --component-updater=fast-update scan is Windows-only (on Linux the hint file registers
+      // the CDM). Only warn about a user-supplied non-fast-update mode where fast-update matters.
       const cu = userArgs.filter((a) => a.includes("component-updater"));
-      if (cu.length && !cu.some((a) => a.includes("fast-update")) && !quiet) {
+      if (process.platform !== "linux" && cu.length && !cu.some((a) => a.includes("fast-update")) && !quiet) {
         process.stderr.write("[clearcote] [widevine] note: your --component-updater mode may not register the CDM; --component-updater=fast-update is needed to scan the pre-installed component\n");
       }
       const tweak = widevineArgs(ignoreDefaultArgs, userArgs);
