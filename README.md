@@ -183,8 +183,10 @@ Clearcote ships a **Linux x64** binary, so it runs headless in a container. The 
 **`Dockerfile`**
 ```dockerfile
 FROM node:20-slim
-# 1) browser runtime libs + a base font set (coherent canvas/emoji/text fingerprints)
+# 1) xz-utils (unpacks the .tar.xz on first download) + browser runtime libs + a base font set
+#    (so canvas/emoji/text fingerprints are coherent)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      xz-utils \
       libnss3 libnspr4 libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
       libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libxfixes3 libxext6 libxrender1 \
       libpango-1.0-0 libcairo2 libx11-6 libxcb1 libexpat1 libdbus-1-3 ca-certificates \
@@ -194,11 +196,11 @@ WORKDIR /app
 RUN npm i clearcote@^0.11
 # 2) (optional) bake the verified browser into the image so there's no first-run download
 RUN node --input-type=module -e "import { download } from 'clearcote'; await download();"
-COPY run.js .
-CMD ["node", "run.js"]
+COPY run.mjs .
+CMD ["node", "run.mjs"]
 ```
 
-**`run.js`** — one coherent Linux persona with every stealth surface on:
+**`run.mjs`** — one coherent Linux persona with every stealth surface on (`.mjs` so `import` works):
 ```javascript
 import { launchPersistentContext } from "clearcote";
 
