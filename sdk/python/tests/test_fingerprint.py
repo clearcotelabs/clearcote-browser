@@ -2,6 +2,7 @@ import base64
 import gzip
 import json
 
+from clearcote import _fingerprint
 from clearcote._fingerprint import (
     FINGERPRINT_KEYS,
     clean_accept_language,
@@ -10,14 +11,25 @@ from clearcote._fingerprint import (
 )
 
 
-def test_default_persona_is_windows_chrome():
-    # clearcote presents as Windows + Google Chrome; the defaults keep navigator.platform and
-    # the UA-CH brand coherent (no seed-derived OS drift, no Chromium/Chrome UA-CH mismatch).
-    # A coherent Accept-Language is also always emitted (defaults to en-US,en) so the language
-    # never falls back to the build/OS locale and mismatches the proxy geo. --lang pins the UI/ICU
-    # locale to the primary tag so Intl (main thread + workers) matches navigator.language.
+def test_default_persona_on_windows_host(monkeypatch):
+    # On a Windows host the default persona is Windows + Google Chrome; the defaults keep
+    # navigator.platform and the UA-CH brand coherent. A coherent Accept-Language is always emitted
+    # (en-US,en) and --lang pins the UI/ICU locale so Intl matches navigator.language.
+    monkeypatch.setattr(_fingerprint.sys, "platform", "win32")
     assert fingerprint_args({}) == [
         "--fingerprint-platform=windows",
+        "--fingerprint-brand=chrome",
+        "--accept-lang=en-US,en",
+        "--lang=en-US",
+    ]
+
+
+def test_default_persona_on_linux_host(monkeypatch):
+    # On a Linux host the default persona is Linux — coherent with the Linux binary the SDK ships
+    # (its GPU/voices/audio-device values are Linux-native under --fingerprint-platform=linux).
+    monkeypatch.setattr(_fingerprint.sys, "platform", "linux")
+    assert fingerprint_args({}) == [
+        "--fingerprint-platform=linux",
         "--fingerprint-brand=chrome",
         "--accept-lang=en-US,en",
         "--lang=en-US",

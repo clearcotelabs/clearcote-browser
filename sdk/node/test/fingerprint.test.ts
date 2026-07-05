@@ -8,18 +8,38 @@ import {
 } from "../src/fingerprint.js";
 
 describe("fingerprintArgs", () => {
-  it("defaults the persona to Windows + Chrome and emits a coherent Accept-Language + UI locale", () => {
-    // clearcote presents as Windows + Google Chrome; the defaults keep navigator.platform and the
-    // UA-CH brand coherent (no seed-derived OS drift, no Chromium/Chrome UA-CH mismatch).
-    // A coherent Accept-Language is also always emitted (defaults to en-US,en) so the language
-    // never falls back to the build/OS locale and mismatches the proxy geo. --lang pins the UI/ICU
-    // locale to the primary tag so Intl (main thread + workers) matches navigator.language.
-    expect(fingerprintArgs({})).toEqual([
-      "--fingerprint-platform=windows",
-      "--fingerprint-brand=chrome",
-      "--accept-lang=en-US,en",
-      "--lang=en-US",
-    ]);
+  const withPlatform = (plat: string, fn: () => void) => {
+    const orig = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: plat, configurable: true });
+    try {
+      fn();
+    } finally {
+      if (orig) Object.defineProperty(process, "platform", orig);
+    }
+  };
+
+  it("defaults the persona to the HOST OS + Chrome, with a coherent Accept-Language + UI locale", () => {
+    // On a Windows host the default persona is Windows + Chrome; defaults keep navigator.platform
+    // and the UA-CH brand coherent, always emit en-US,en, and pin --lang so Intl matches.
+    withPlatform("win32", () => {
+      expect(fingerprintArgs({})).toEqual([
+        "--fingerprint-platform=windows",
+        "--fingerprint-brand=chrome",
+        "--accept-lang=en-US,en",
+        "--lang=en-US",
+      ]);
+    });
+  });
+
+  it("defaults the persona platform to linux on a Linux host (coherent with the Linux binary)", () => {
+    withPlatform("linux", () => {
+      expect(fingerprintArgs({})).toEqual([
+        "--fingerprint-platform=linux",
+        "--fingerprint-brand=chrome",
+        "--accept-lang=en-US,en",
+        "--lang=en-US",
+      ]);
+    });
   });
 
   it("derives --lang from the primary Accept-Language tag (Intl/locale coherence)", () => {

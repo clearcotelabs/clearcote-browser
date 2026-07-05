@@ -8,6 +8,7 @@ import base64
 import gzip
 import json
 import os
+import sys
 
 # kwargs accepted by launch()/launch_persistent_context() that are fingerprint options
 # (everything else is passed straight through to Playwright).
@@ -106,12 +107,12 @@ def fingerprint_args(opts):
         value = opts.get(key)
         if value is not None and value != "":
             args.append(f"--{flag}={value}")
-    # clearcote ships a Windows x64 binary and should always present a coherent Windows + Chrome
-    # identity by default. Default the persona platform to Windows when the caller doesn't pass one,
-    # rather than letting it fall back to a seed-derived OS that could vary (linux/macos). Override
-    # explicitly via platform="linux"/"macos".
+    # Default the persona platform to the HOST OS, so it's coherent with the binary the SDK ships for
+    # this machine (Windows binary -> windows persona, Linux binary -> linux persona) rather than a
+    # seed-derived OS that could vary. Override explicitly via platform="windows"/"linux"/"macos".
     if not opts.get("platform"):
-        args.append("--fingerprint-platform=windows")
+        host = {"win32": "windows", "linux": "linux", "darwin": "macos"}.get(sys.platform, "windows")
+        args.append(f"--fingerprint-platform={host}")
     # clearcote presents as Google Chrome (its UA string says "Chrome/<v>"), so default the
     # UA-CH brand to "chrome" — otherwise navigator.userAgentData advertises only "Chromium",
     # a UA/UA-CH mismatch some bot detectors flag. Override via brand="edge" etc.
