@@ -176,6 +176,56 @@ await ctx.close();
 
 It combines naturally with the fingerprint spoofing and `humanize` input above — an agent that *looks human while it works*. (Python: `launch_agent()` + `run_agent_task()`.)
 
+### Run in Docker (Linux) 🐧
+
+Clearcote ships a **Linux x64** binary, so it runs headless in a container. The image needs three things: the browser's runtime libraries, a **base font set** (so canvas/text hashes are coherent — the #1 Linux tell), and the SDK. On Linux the persona defaults to a coherent **native Linux** identity (GPU/voices/audio devices all Linux-shaped); WebRTC leak-proofing and Privacy-Sandbox-disable are on by default — so the example below *is* the full stealth config.
+
+**`Dockerfile`**
+```dockerfile
+FROM node:20-slim
+# 1) browser runtime libs + a base font set (coherent canvas/emoji/text fingerprints)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libnss3 libnspr4 libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+      libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libxfixes3 libxext6 libxrender1 \
+      libpango-1.0-0 libcairo2 libx11-6 libxcb1 libexpat1 libdbus-1-3 ca-certificates \
+      fontconfig fonts-liberation fonts-noto-color-emoji fonts-unifont fonts-ipafont-gothic fonts-wqy-zenhei \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+RUN npm i clearcote@^0.11
+# 2) (optional) bake the verified browser into the image so there's no first-run download
+RUN node --input-type=module -e "import { download } from 'clearcote'; await download();"
+COPY run.js .
+CMD ["node", "run.js"]
+```
+
+**`run.js`** — one coherent Linux persona with every stealth surface on:
+```javascript
+import { launchPersistentContext } from "clearcote";
+
+const ctx = await launchPersistentContext("/tmp/prof", {
+  headless: true,
+  fingerprint: "user-1",           // one stable, seed-derived identity (fonts, GPU, screen, audio…)
+  // platform defaults to the host OS -> "linux" here; pass "windows" to spoof Windows-on-Linux
+  proxy: { server: "http://gateway:8080", username: "u", password: "p" },
+  geoip: true,                     // timezone + languages + WebRTC IP matched to the proxy's exit region
+  humanize: true,                  // real, trusted bezier input; navigator.webdriver stays false
+  widevine: true,                  // opt-in DRM — fetches Google's CDM on first use (never bundled)
+  args: ["--no-sandbox"],          // required in most containers (no setuid sandbox)
+});
+const page = ctx.pages()[0] ?? (await ctx.newPage());
+await page.goto("https://abrahamjuliot.github.io/creepjs/");   // 0% headless / 0% stealth
+// … your automation …
+await ctx.close();
+```
+> Python is identical — `from clearcote import launch_persistent_context` with the same options (`snake_case`: `accept_language`, `webrtc_ip`, …).
+
+```bash
+docker build -t my-clearcote .
+docker run --rm --shm-size=1g my-clearcote
+```
+
+**Container notes:** pass `--no-sandbox` (or `chown root:root chrome-sandbox && chmod 4755 chrome-sandbox`); `--shm-size=1g` avoids `/dev/shm` crashes on heavy pages. On a slimmer base image the `apt` list above is the complete runtime set — if the browser fails to start with `error while loading shared libraries: libX.so`, add that library's package and re-run.
+
 ---
 
 ## Don't trust us — verify us
