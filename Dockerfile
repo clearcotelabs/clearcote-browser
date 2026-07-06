@@ -25,7 +25,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Windows SDK headers; xz-utils = unpack the Linux .tar.xz.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git python3 python3-pip curl ca-certificates \
-      ninja-build zip unzip xz-utils ciopfs patch \
+      ninja-build zip unzip xz-utils ciopfs patch binutils \
       sudo lsb-release file pkg-config \
  && rm -rf /var/lib/apt/lists/*
 
