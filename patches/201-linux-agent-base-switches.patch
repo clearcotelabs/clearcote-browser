@@ -1,0 +1,10 @@
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -87,6 +87,7 @@
+ #include "content/public/common/content_constants.h"
+ #include "content/public/common/content_paths.h"
+ #include "content/public/common/content_switches.h"
++#include "base/base_switches.h"  // clearcote: switches::kEnableFeatures (agent feature-merge) — was IS_WIN-only
+ #include "content/public/common/main_function_params.h"
+ #include "content/public/common/profiling.h"
+ #include "content/public/common/url_constants.h"

@@ -1,0 +1,63 @@
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -403,6 +403,36 @@
+ 
+ }  // namespace
+ 
++// clearcote: Linux (ANGLE-over-GL / Mesa) renderer equivalents of the Windows GPU pool, so a
++// Linux persona reports an OpenGL/Mesa UNMASKED_RENDERER instead of a Windows-only Direct3D11
++// string (which would contradict navigator.platform=Linux).
++std::string LinuxWebGLRenderer(const std::string& vendor) {
++  if (vendor.find("NVIDIA") != std::string::npos)
++    return "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.6.0 NVIDIA 535.146.02)";
++  if (vendor.find("AMD") != std::string::npos || vendor.find("Radeon") != std::string::npos)
++    return "ANGLE (AMD, AMD Radeon Graphics (radeonsi, raphael_mendocino, LLVM 15.0.7, DRM 3.54, "
++           "6.5.0-generic), OpenGL 4.6 (Core Profile) Mesa 23.2.1-1ubuntu3.1~22.04.2)";
++  return "ANGLE (Intel, Mesa Intel(R) UHD Graphics 770 (RPL-S), OpenGL 4.6 (Core Profile) "
++         "Mesa 23.2.1-1ubuntu3.1~22.04.2)";
++}
++
++template <typename Rng>
++std::vector<PersonaProfile::MediaDevice> LinuxMediaDevices(Rng& rng) {
++  const std::string grp = "cc-grp-" + base::NumberToString(rng());
++  const std::string mic = "cc-mic-" + base::NumberToString(rng());
++  const std::string spk = "cc-spk-" + base::NumberToString(rng());
++  const std::string mon = "cc-mon-" + base::NumberToString(rng());
++  // PulseAudio/PipeWire enumeration: a 'default' + one physical codec per direction, plus the
++  // characteristic Linux monitor source. No Windows 'Communications -' endpoint / Realtek codec.
++  return {
++      {"audioinput", "Default", "default", grp},
++      {"audioinput", "Built-in Audio Analog Stereo", mic, grp},
++      {"audioinput", "Monitor of Built-in Audio Analog Stereo", mon, grp},
++      {"audiooutput", "Default", "default", grp},
++      {"audiooutput", "Built-in Audio Analog Stereo", spk, grp},
++  };
++}
++
+ PersonaProfile DerivePersona(uint64_t seed) {
+   // SplitMix64 decorrelates weak seeds (1, 2, 3 otherwise produce visibly
+   // similar mt19937_64 streams).
+@@ -541,6 +571,23 @@
+   // clearcote: an explicit --fingerprint-gpu-vendor/-renderer overrides the seed-/profile-
+   // derived GPU (precedence: switch > imported profile > seed); WebGL getParameter reads these.
+   const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  // clearcote: the seed/profile persona defaults are Windows-shaped (ANGLE/D3D11 GPU, Microsoft
++  // SAPI voices, Realtek/WASAPI audio devices). On a Linux persona, swap each to its coherent
++  // Linux form so no field contradicts platform=Linux. Only rewrite a still-Windows default (an
++  // imported Linux/mac profile is left intact); an explicit --fingerprint-gpu-renderer wins below.
++  if (cmd->HasSwitch(switches::kFingerprintPlatform) &&
++      cmd->GetSwitchValueASCII(switches::kFingerprintPlatform) == "linux") {
++    if (p.webgl_renderer.find("Direct3D") != std::string::npos)
++      p.webgl_renderer = LinuxWebGLRenderer(p.webgl_vendor);
++    // A real Chrome-on-Linux with no speech-dispatcher reports getVoices()==[]; never Windows
++    // SAPI names. Empty is a common, coherent Linux state; drop only the Windows default.
++    if (!p.voices.empty() && p.voices.front().name.rfind("Microsoft", 0) == 0)
++      p.voices.clear();
++    // enumerateDevices: Pulse/PipeWire shape (no Windows 'Communications -' endpoint / Realtek).
++    if (!p.media_devices.empty() &&
++        p.media_devices.front().label.find("Realtek") != std::string::npos)
++      p.media_devices = LinuxMediaDevices(rng);
++  }
+   if (cmd->HasSwitch(switches::kFingerprintGpuVendor))
+     p.webgl_vendor = cmd->GetSwitchValueASCII(switches::kFingerprintGpuVendor);
+   if (cmd->HasSwitch(switches::kFingerprintGpuRenderer))
