@@ -1,0 +1,9 @@
+# keep the build context tiny + reproducible — the build fetches everything else itself
+.git
+**/node_modules
+**/dist
+**/__pycache__
+out
+release*/
+*.zip
+*.tar.xz

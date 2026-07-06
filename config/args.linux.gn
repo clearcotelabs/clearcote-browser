@@ -1,0 +1,53 @@
+# Clearcote reference build configuration — Linux x64, built natively on Linux.
+#
+# This is the effective build configuration used to produce the published Linux pre-release
+# (v0.1.0-pre.17). It is config/args.gn with the target flipped to Linux: target_os="linux",
+# use_sysroot=true (build against Chromium's bundled Debian bullseye sysroot -> glibc 2.31 floor),
+# and the Windows-only cross flags (rust_sysroot_absolute, dawn_use_built_dxc) dropped. Everything
+# else — the de-Google set and the release config — is identical to the Windows build.
+# scripts/04-configure-build.sh copies this to out/Default/args.gn when TARGET=linux.
+
+# --- De-Google (from ungoogled-chromium's flags.gn; kept explicit so this file is self-contained) ---
+clang_use_chrome_plugins = false
+disable_fieldtrial_testing_config = true
+enable_hangout_services_extension = false
+enable_mdns = false
+enable_remoting = false
+enable_reporting = false
+enable_service_discovery = false
+# Widevine EME *plumbing* only — clearcote does NOT bundle Google's proprietary CDM blob; the SDK
+# fetches it opt-in at runtime (Linux uses the CDM hint file, see sdk/python/clearcote/_widevine.py).
+enable_widevine = true
+exclude_unwind_tables = true
+google_api_key = ""
+google_default_client_id = ""
+google_default_client_secret = ""
+safe_browsing_mode = 0
+use_official_google_api_keys = false
+use_unofficial_version_number = false
+
+# --- Target + toolchain (Linux x64, native) ---
+target_os = "linux"
+target_cpu = "x64"
+is_clang = true
+clang_base_path = "//third_party/llvm-build/Release+Asserts"
+use_sysroot = true                    # Chromium's bundled amd64 bullseye sysroot -> glibc 2.31 floor
+
+# --- Release configuration (identical to the Windows build) ---
+is_debug = false
+is_official_build = false             # matches the published pre-release; see docs/RELEASING.md
+is_component_build = false            # single, shippable binary
+symbol_level = 0
+blink_symbol_level = 0
+chrome_pgo_phase = 0                  # no downloaded PGO profiles
+use_remoteexec = false
+
+# --- Media / codecs (match a normal desktop browser) ---
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+
+# --- Build hygiene ---
+enable_nacl = false
+treat_warnings_as_errors = false
+fatal_linker_warnings = false
+v8_drumbrake_bounds_checks = true

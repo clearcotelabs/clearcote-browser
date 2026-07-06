@@ -1,6 +1,6 @@
 # Building Clearcote from source
 
-Clearcote is meant to be rebuilt by anyone with a capable Linux box. This guide reproduces the published **Windows x64** binary by **cross-compiling on Linux** — no Windows machine required. **You should be able to produce a binary yourself and confirm it matches a published release** (see the reproducibility note at the end).
+Clearcote is meant to be rebuilt by anyone with a capable Linux box. This guide reproduces the published **Windows x64** (cross-compiled) and **Linux x64** (native) binaries on a Linux host — no Windows machine required. The easiest path is the pinned **[Docker build](#the-container-path--recommended--same-environment-for-everyone)** below. **You should be able to produce a binary yourself and confirm it matches a published release** (see the reproducibility note at the end).
 
 > Clearcote = Chromium → ungoogled-chromium (de-Google) → Windows overlay + Clearcote fingerprint patches → cross-build. Every layer is open and pinned.
 
@@ -20,24 +20,41 @@ Clearcote is meant to be rebuilt by anyone with a capable Linux box. This guide 
 - `git`, `python3`, `curl`, `ninja`, `zip`, and **`ciopfs`** (case-insensitive FUSE, for the MSVC headers). The rest of Chromium's system build packages are installed by `scripts/02` via `build/install-build-deps.py` (Debian/Ubuntu; run as root or with sudo — other distros: install the equivalents).
 - No system MSVC and no Windows machine — the toolchain is assembled from Microsoft's redistributable SDK packages via `xwin` (you accept Microsoft's license when xwin downloads them; Clearcote ships none of them).
 
-## The fast path (scripted)
+## The container path (recommended — same environment for everyone)
+
+The most reproducible way is to build inside the pinned [`Dockerfile`](../Dockerfile), so the OS + tools are identical to what we build with — you only need Docker (+ RAM/disk/time):
+
+```bash
+git clone https://github.com/clearcotelabs/clearcote-browser.git && cd clearcote-browser
+docker build -t clearcote-build .                                    # the build environment (fast)
+
+# then build a target — multi-hour; ~16 GB+ RAM, ~120 GB disk. Artifacts land in ./out:
+docker run --rm -v "$PWD/out:/clearcote-build/dist" clearcote-build linux     # -> chrome tar.xz
+docker run --rm -v "$PWD/out:/clearcote-build/dist" clearcote-build windows   # -> chrome.exe zip
+
+# verify against the release (see docs/VERIFY.md):
+sha256sum -c out/clearcote-149.0.7827.114-linux-x64.tar.xz.sha256
+gpg --verify out/SHA256SUMS.txt.asc out/SHA256SUMS.txt   # against the release's SHA256SUMS.txt.asc
+```
+
+## The fast path (scripted, on a bare Linux host)
 
 ```bash
 git clone https://github.com/clearcotelabs/clearcote-browser.git
 cd clearcote-browser
-WORK=~/clearcote-build ./build.sh
+WORK=~/clearcote-build ./build.sh linux       # or: ./build.sh windows   (default is windows)
 ```
 
-[`build.sh`](../build.sh) runs the six stages below in order and drops the packaged zip in `$WORK/dist`. You can also run the stages individually from [`scripts/`](../scripts):
+[`build.sh`](../build.sh) takes the target OS (`windows` | `linux`) and runs the stages below in order, dropping the packaged archive in `$WORK/dist`. Every stage reads `$TARGET`, so you can also run them individually from [`scripts/`](../scripts):
 
 | Stage | Script | What it does |
 |---|---|---|
 | 00 | `scripts/00-fetch-source.sh` | clone the pinned ungoogled tooling, retrieve + unpack Chromium 149, prune binaries |
-| 01 | `scripts/01-apply-patches.sh` | apply the patch series (ungoogled base + windows overlay + Clearcote fingerprint) |
-| 02 | `scripts/02-host-toolchain.sh` | fetch clang/rust/sysroot/node; build `gn` from in-tree source |
-| 03 | `scripts/03-windows-sdk.sh` | xwin → assemble the `package_from_installed`-style Windows SDK/CRT sysroot |
-| 04 | `scripts/04-configure-build.sh` | copy `config/args.gn`, `gn gen`, `ninja … chrome` |
-| 05 | `scripts/05-package.sh` | zip the runtime + bundle the VC++ DLLs → `$WORK/dist` |
+| 01 | `scripts/01-apply-patches.sh` | apply the patch series (ungoogled base + **windows overlay only on Windows** + Clearcote set; `900-windows-build-fixes` is skipped on Linux) |
+| 02 | `scripts/02-host-toolchain.sh` | fetch clang/rust/sysroot/node; build `gn` from in-tree source (both targets) |
+| 03 | `scripts/03-windows-sdk.sh` | **Windows only** — xwin → assemble the `package_from_installed`-style Windows SDK/CRT sysroot |
+| 04 | `scripts/04-configure-build.sh` | copy `config/args.gn` (Win) or `config/args.linux.gn` (Linux), `gn gen`, `ninja` (Linux also builds `chrome_sandbox` + `chrome_crashpad_handler`) |
+| 05 | `scripts/05-package.sh` | Windows → zip + VC++ DLLs; Linux → deterministic `tar.xz` (+ `chrome-sandbox`). Emits `.sha256` + `SHA256SUMS.txt` → `$WORK/dist` |
 
 ## 1. Source
 
@@ -94,4 +111,4 @@ These bit us; the scripts handle them, but know they exist:
 
 ## Reproducibility (honest scope)
 
-Same pinned revision + same patch set + same `config/args.gn` → a functionally identical build. Chromium cross-builds are **not yet bit-for-bit deterministic** (embedded build paths, timestamps, linker/PGO nondeterminism), so a byte-identical hash match is the *goal*, not a guarantee today — what you can fully audit now is that every change is a readable patch and the config is public. A reproducible/attested build is tracked in [ROADMAP.md](../ROADMAP.md), Phase 4. See [VERIFY.md](VERIFY.md).
+Same pinned revision + same patch set + same `config/args.gn` → a functionally identical build. Building inside the [`Dockerfile`](../Dockerfile) removes the single biggest source of drift — the build *environment* (OS, libc, tool versions) is then identical to ours — which is why the container is the recommended path. Even so, Chromium builds are **not yet bit-for-bit deterministic** (embedded build paths, timestamps, linker/PGO nondeterminism), so a byte-identical hash match is the *goal*, not a guarantee today — what you can fully audit now is that every change is a readable patch, the config is public, and the whole toolchain is pinned. A fully reproducible/attested build is tracked in [ROADMAP.md](../ROADMAP.md), Phase 4. See [VERIFY.md](VERIFY.md).
