@@ -19,6 +19,20 @@ export interface FingerprintOptions {
   brand?: "Chrome" | "Edge" | "Opera" | "Vivaldi" | (string & {});
   /** Brand version. */
   brandVersion?: string;
+  /**
+   * TLS network persona — keep the TLS ClientHello coherent with the persona's claimed Chrome
+   * version, so the network layer follows the UA instead of always emitting the build's native TLS.
+   * Only the version-variant ClientHello fields change (post-quantum key-share group, ALPS
+   * codepoint); the cipher list, version bounds, and per-connection extension permutation stay
+   * exactly real-Chrome. Chromium-core only (Chrome/Edge/Brave/Opera share the ClientHello; brand
+   * differs in headers/UA-CH, not TLS).
+   *
+   * - `"match-persona"` (default) / `"auto"`: follow `brandVersion`'s major; with no `brandVersion`
+   *   the persona claims the browser's native version, so this is a no-op (native TLS).
+   * - `"native"` / `"off"`: leave the build's native TLS unchanged.
+   * - `"chrome-<major>"` or a number (e.g. `120`): pin the TLS shape to that Chromium major.
+   */
+  tlsProfile?: "match-persona" | "auto" | "native" | "off" | `chrome-${number}` | (string & {}) | number;
   /** WebGL UNMASKED_VENDOR string. */
   gpuVendor?: string;
   /** WebGL UNMASKED_RENDERER string. */
@@ -117,6 +131,7 @@ export const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "fingerprintProfile",
   "storageQuota",
   "canvasBridge",
+  "tlsProfile",
 ];
 
 /** Split an options object into its fingerprint half and the remaining (Playwright) half. */
@@ -179,6 +194,37 @@ export function profileAcceptLanguage(value: string | Record<string, unknown>): 
 }
 
 /** Build the Chromium switches for a set of fingerprint options. */
+/** Parse the leading integer (the major) out of a version string like "120.0.6099.109" -> 120. */
+function majorFromVersion(value?: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const head = String(value).trim().split(".")[0];
+  return /^\d+$/.test(head) ? Number(head) : undefined;
+}
+
+/**
+ * Resolve `tlsProfile` to a concrete `--fingerprint-tls-profile` value, or undefined (native TLS).
+ * "match-persona"/"auto" (default) follows `brandVersion`; "native"/"off"/undefined -> native;
+ * "chrome-<major>" or a number -> pinned. Unrecognized values -> native (never break the handshake).
+ * Always resolves to `chrome-<major>` (Chromium-core; the brand lives in headers, not the ClientHello).
+ */
+export function resolveTlsProfile(
+  value: FingerprintOptions["tlsProfile"],
+  o: FingerprintOptions
+): string | undefined {
+  if (value === undefined || value === null || value === "" || value === "native" || value === "off") {
+    return undefined;
+  }
+  if (value === "match-persona" || value === "auto") {
+    const major = majorFromVersion(o.brandVersion);
+    return major ? `chrome-${major}` : undefined;
+  }
+  if (typeof value === "number") return `chrome-${value}`;
+  const text = String(value).trim().toLowerCase();
+  if (/^chrome-\d+$/.test(text)) return text;
+  if (/^\d+$/.test(text)) return `chrome-${text}`;
+  return undefined;
+}
+
 export function fingerprintArgs(o: FingerprintOptions): string[] {
   const args: string[] = [];
   const set = (flag: string, value: unknown) => {
@@ -244,5 +290,10 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
     if (cb.fallback) args.push(`--canvas-bridge-fallback=${cb.fallback}`);
     if (!args.includes("--no-sandbox")) args.push("--no-sandbox");
   }
+  // tlsProfile keeps the TLS ClientHello coherent with the persona's claimed Chrome version (the
+  // network layer follows the UA). Default "match-persona" follows brandVersion; "chrome-<major>"
+  // pins it; "native"/off/unset leaves native TLS. Only version-variant fields change.
+  const tlsSwitch = resolveTlsProfile(o.tlsProfile ?? "match-persona", o);
+  if (tlsSwitch) args.push(`--fingerprint-tls-profile=${tlsSwitch}`);
   return args;
 }

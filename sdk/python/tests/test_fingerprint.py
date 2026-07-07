@@ -72,6 +72,45 @@ def test_maps_every_option():
         assert expected in args
 
 
+def test_tls_profile_match_persona_follows_brand_version():
+    # Default tls_profile="match-persona" makes the TLS ClientHello follow the persona's claimed
+    # Chrome major (from brand_version). With no brand_version the persona claims the browser's
+    # native version, so nothing is emitted (native TLS).
+    assert "--fingerprint-tls-profile=chrome-120" in fingerprint_args(
+        {"brand_version": "120.0.6099.109"}
+    )
+    assert not any(
+        a.startswith("--fingerprint-tls-profile") for a in fingerprint_args({})
+    )
+
+
+def test_tls_profile_explicit_and_off():
+    assert "--fingerprint-tls-profile=chrome-124" in fingerprint_args({"tls_profile": "chrome-124"})
+    assert "--fingerprint-tls-profile=chrome-118" in fingerprint_args({"tls_profile": 118})
+    for off in ("native", "off"):
+        assert not any(
+            a.startswith("--fingerprint-tls-profile")
+            for a in fingerprint_args({"tls_profile": off, "brand_version": "120"})
+        )
+    # An unrecognized value resolves to native (never break the handshake).
+    assert not any(
+        a.startswith("--fingerprint-tls-profile")
+        for a in fingerprint_args({"tls_profile": "firefox-121"})
+    )
+
+
+def test_resolve_tls_profile_unit():
+    from clearcote._fingerprint import resolve_tls_profile
+
+    assert resolve_tls_profile("match-persona", {"brand_version": "131.0.1"}) == "chrome-131"
+    assert resolve_tls_profile("auto", {}) is None
+    assert resolve_tls_profile(None, {}) is None
+    assert resolve_tls_profile("chrome-120", {}) == "chrome-120"
+    assert resolve_tls_profile(125, {}) == "chrome-125"
+    assert resolve_tls_profile("off", {"brand_version": "120"}) is None
+    assert resolve_tls_profile("garbage", {}) is None
+
+
 def test_clean_accept_language():
     assert clean_accept_language("en-US, en ;q=0.8, , fr") == "en-US,en,fr"
     assert clean_accept_language("de-DE,de;q=0.7,en;q=0.3") == "de-DE,de,en"

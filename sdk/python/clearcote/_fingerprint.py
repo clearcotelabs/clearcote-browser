@@ -30,6 +30,7 @@ FINGERPRINT_KEYS = (
     "fingerprint_profile",
     "storage_quota",
     "canvas_bridge",
+    "tls_profile",
 )
 
 # kwarg -> switch name (without leading "--"). disable_gpu_fingerprint is a boolean flag,
@@ -97,6 +98,46 @@ def _profile_accept_language(value):
     langs = (obj.get("navigator") or {}).get("languages") if isinstance(obj, dict) else None
     if isinstance(langs, list) and langs:
         return ",".join(str(tag) for tag in langs)
+    return None
+
+
+def _major_from_version(value):
+    """Parse the leading integer (the major) out of a version string like '120.0.6099.109' -> 120.
+    Returns None if there's no leading integer."""
+    if value is None:
+        return None
+    head = str(value).strip().split(".")[0]
+    return int(head) if head.isdigit() else None
+
+
+def resolve_tls_profile(value, opts):
+    """Resolve the ``tls_profile`` option to a concrete ``--fingerprint-tls-profile`` value, or None.
+
+    Keeps the TLS ClientHello coherent with the persona's *claimed* Chromium major (the network layer
+    follows the UA instead of always emitting the build's native TLS):
+
+    - ``"match-persona"`` / ``"auto"`` (default): follow the persona's claimed Chrome major, taken
+      from ``brand_version``. With no ``brand_version`` set, the persona claims the browser's native
+      version, so this returns ``None`` (native TLS — already coherent).
+    - ``None`` / ``""`` / ``"native"`` / ``"off"``: ``None`` (native TLS, no switch).
+    - ``"chrome-<major>"`` or an int/str major (e.g. ``120``): pinned to that major.
+
+    Any unrecognized value resolves to ``None`` — the engine never breaks the handshake on a bad
+    value, and neither do we. Chromium-core only (Chrome/Edge/Brave/Opera share the ClientHello; the
+    brand differs only in headers/UA-CH, not TLS), so the resolved value is always ``chrome-<major>``.
+    """
+    if value in (None, "", "native", "off"):
+        return None
+    if value in ("match-persona", "auto"):
+        major = _major_from_version(opts.get("brand_version"))
+        return f"chrome-{major}" if major else None
+    if isinstance(value, int):
+        return f"chrome-{value}"
+    text = str(value).strip().lower()
+    if text.startswith("chrome-") and text[len("chrome-"):].isdigit():
+        return text
+    if text.isdigit():
+        return f"chrome-{text}"
     return None
 
 
@@ -180,4 +221,12 @@ def fingerprint_args(opts):
             args.append(f"--canvas-bridge-fallback={cb['fallback']}")
         if "--no-sandbox" not in args:
             args.append("--no-sandbox")
+    # tls_profile keeps the TLS ClientHello coherent with the persona's claimed Chrome version
+    # (the network layer follows the UA). Default "match-persona" follows brand_version; an explicit
+    # "chrome-<major>" pins it; "native"/off/unset leaves the build's native TLS. Only the
+    # version-variant ClientHello fields (post-quantum key-share group, ALPS codepoint) change —
+    # cipher list, version bounds, and per-connection extension permutation stay real-Chrome.
+    tls_switch = resolve_tls_profile(opts.get("tls_profile", "match-persona"), opts)
+    if tls_switch:
+        args.append(f"--fingerprint-tls-profile={tls_switch}")
     return args

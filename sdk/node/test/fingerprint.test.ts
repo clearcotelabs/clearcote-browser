@@ -5,6 +5,7 @@ import {
   cleanAcceptLanguage,
   splitFingerprintOptions,
   encodeProfile,
+  resolveTlsProfile,
 } from "../src/fingerprint.js";
 
 describe("fingerprintArgs", () => {
@@ -137,5 +138,36 @@ describe("encodeProfile", () => {
     const json = '{"a":1}';
     const b64 = encodeProfile(json);
     expect(gunzipSync(Buffer.from(b64, "base64")).toString()).toBe(json);
+  });
+});
+
+describe("tlsProfile (TLS network persona)", () => {
+  it("match-persona (default) follows brandVersion's major", () => {
+    expect(fingerprintArgs({ brandVersion: "120.0.6099.109" })).toContain(
+      "--fingerprint-tls-profile=chrome-120"
+    );
+  });
+  it("emits nothing with no brandVersion (native TLS)", () => {
+    expect(fingerprintArgs({}).some((a) => a.startsWith("--fingerprint-tls-profile"))).toBe(false);
+  });
+  it("explicit chrome-<major> / number pins it; native/off disables", () => {
+    expect(fingerprintArgs({ tlsProfile: "chrome-124" })).toContain("--fingerprint-tls-profile=chrome-124");
+    expect(fingerprintArgs({ tlsProfile: 118 })).toContain("--fingerprint-tls-profile=chrome-118");
+    for (const off of ["native", "off"] as const) {
+      expect(
+        fingerprintArgs({ tlsProfile: off, brandVersion: "120" }).some((a) =>
+          a.startsWith("--fingerprint-tls-profile")
+        )
+      ).toBe(false);
+    }
+  });
+  it("resolveTlsProfile handles every shape; unrecognized -> native", () => {
+    expect(resolveTlsProfile("match-persona", { brandVersion: "131.0.1" })).toBe("chrome-131");
+    expect(resolveTlsProfile("auto", {})).toBeUndefined();
+    expect(resolveTlsProfile(undefined, {})).toBeUndefined();
+    expect(resolveTlsProfile("chrome-120", {})).toBe("chrome-120");
+    expect(resolveTlsProfile(125, {})).toBe("chrome-125");
+    expect(resolveTlsProfile("off", { brandVersion: "120" })).toBeUndefined();
+    expect(resolveTlsProfile("garbage", {})).toBeUndefined();
   });
 });

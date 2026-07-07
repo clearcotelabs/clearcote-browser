@@ -1,0 +1,309 @@
+--- a/content/browser/service_host/utility_process_host.cc
++++ b/content/browser/service_host/utility_process_host.cc
+@@ -21,6 +21,7 @@
+ #include "base/threading/thread.h"
+ #include "build/build_config.h"
+ #include "components/network_session_configurator/common/network_switches.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "components/services/storage/public/mojom/storage_service.mojom.h"
+ #include "components/vrp_flags/buildflags.h"
+ #include "content/browser/browser_child_process_host_impl.h"
+@@ -389,6 +390,11 @@
+ 
+   // Browser command-line switches to propagate to the utility process.
+   static const char* const kSwitchNames[] = {
++      // Persona switches needed by the network service (net/ssl) to shape the
++      // TLS ClientHello. Both the seed and the TLS profile must be forwarded or
++      // the network fingerprint silently stays stock.
++      switches::kFingerprint,
++      switches::kFingerprintTlsProfile,
+       network::switches::kAdditionalTrustTokenKeyCommitments,
+       network::switches::kForceEffectiveConnectionType,
+       network::switches::kHostResolverRules,
+--- a/net/BUILD.gn
++++ b/net/BUILD.gn
+@@ -1120,6 +1120,8 @@
+     "ssl/client_cert_store_empty.h",
+     "ssl/crypto_private_key.cc",
+     "ssl/crypto_private_key.h",
++    "ssl/network_persona.cc",
++    "ssl/network_persona.h",
+     "ssl/openssl_private_key.cc",
+     "ssl/openssl_private_key.h",
+     "ssl/openssl_ssl_util.cc",
+@@ -1211,6 +1213,7 @@
+   deps = [
+     ":cronet_buildflags",
+     ":net_deps",
++    "//base/version_info",
+     "//components/network_time/time_tracker",
+     "//components/unexportable_keys",
+     "//net/http:transport_security_state_generated_files",
+--- a/net/socket/ssl_client_socket_impl.cc
++++ b/net/socket/ssl_client_socket_impl.cc
+@@ -38,6 +38,7 @@
+ #include "build/build_config.h"
+ #include "crypto/openssl_util.h"
+ #include "net/base/features.h"
++#include "net/ssl/network_persona.h"
+ #include "net/base/ip_address.h"
+ #include "net/base/ip_endpoint.h"
+ #include "net/base/net_errors.h"
+@@ -679,14 +680,41 @@
+     return ERR_UNEXPECTED;
+   }
+ 
+-  const std::vector<uint16_t> supported_groups =
++  // clearcote network persona: swap the version-variant ClientHello fields to
++  // match a claimed Chromium major, leaving the deterministic envelope and the
++  // per-connection extension permutation exactly as stock Chrome. An inactive
++  // or native plan leaves every branch below byte-identical to upstream.
++  const NetworkPersonaPlan network_persona = ComputeNetworkPersona();
++
++  std::vector<uint16_t> supported_groups =
+       context_->config().GetSupportedGroups();
++  std::vector<uint16_t> key_shares =
++      context_->config().GetSupportedGroups(/*key_shares_only=*/true);
++  if (network_persona.active &&
++      network_persona.pq != NetworkPersonaPlan::kNative) {
++    // Rebuild the ordered group + key_share vectors with the claimed major's
++    // post-quantum group. Classic-group ordering and key_share membership
++    // (X25519 shared, P-256/P-384 present without a share) mirror stock.
++    constexpr uint16_t kGroupX25519Kyber768 = 0x6399;
++    constexpr uint16_t kGroupX25519 = 0x001d;
++    constexpr uint16_t kGroupSecp256r1 = 0x0017;
++    constexpr uint16_t kGroupSecp384r1 = 0x0018;
++    supported_groups.clear();
++    key_shares.clear();
++    if (network_persona.pq == NetworkPersonaPlan::kKyber) {
++      supported_groups.push_back(kGroupX25519Kyber768);
++      key_shares.push_back(kGroupX25519Kyber768);
++    }
++    // kNone: emit no post-quantum group at all.
++    supported_groups.push_back(kGroupX25519);
++    key_shares.push_back(kGroupX25519);
++    supported_groups.push_back(kGroupSecp256r1);
++    supported_groups.push_back(kGroupSecp384r1);
++  }
+   if (!SSL_set1_group_ids(ssl_.get(), supported_groups.data(),
+                           supported_groups.size())) {
+     return ERR_UNEXPECTED;
+   }
+-  const std::vector<uint16_t> key_shares =
+-      context_->config().GetSupportedGroups(/*key_shares_only=*/true);
+   if (!key_shares.empty() &&
+       !SSL_set1_client_key_shares(ssl_.get(), key_shares.data(),
+                                   key_shares.size())) {
+@@ -805,7 +833,9 @@
+ 
+   SSL_set_alps_use_new_codepoint(
+       ssl_.get(),
+-      base::FeatureList::IsEnabled(features::kUseNewAlpsCodepointHttp2));
++      network_persona.active
++          ? network_persona.alps_new_codepoint
++          : base::FeatureList::IsEnabled(features::kUseNewAlpsCodepointHttp2));
+ 
+   if (!ssl_config_.alpn_protos.empty()) {
+     std::vector<uint8_t> wire_protos =
+@@ -850,7 +880,10 @@
+ 
+   if (context_->config().ech_enabled) {
+     // TODO(crbug.com/41482204): Enable this unconditionally.
+-    SSL_set_enable_ech_grease(ssl_.get(), 1);
++    // A network persona claiming an older major suppresses ECH GREASE to match.
++    SSL_set_enable_ech_grease(
++        ssl_.get(),
++        (network_persona.active && !network_persona.ech_grease) ? 0 : 1);
+   }
+   if (!ssl_config_.ech_config_list.empty()) {
+     DCHECK(context_->config().ech_enabled);
+--- /dev/null
++++ b/net/ssl/network_persona.cc
+@@ -0,0 +1,115 @@
++// Copyright 2024 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "net/ssl/network_persona.h"
++
++#include <string>
++#include <string_view>
++
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/version_info/version_info.h"
++
++namespace net {
++
++namespace {
++
++// Literal switch name. We intentionally use the string literal rather than
++// depending on //components/ungoogled so this low-level net target stays free
++// of that dependency. Must match `switches::kFingerprintTlsProfile`.
++constexpr char kFingerprintTlsProfileSwitch[] = "fingerprint-tls-profile";
++
++// Post-quantum key-share default-on boundaries in real Chrome:
++//   X25519Kyber768Draft00 (0x6399): default-on ~Chrome 124.
++//   X25519MLKEM768 (0x11EC): switched to the final group ~Chrome 131.
++// So a claimed major in [124, 131) uses Kyber; >= 131 uses ML-KEM;
++// < 124 ships no post-quantum group at all.
++constexpr int kKyberDefaultOnMajor = 124;
++constexpr int kMlkemSwitchMajor = 131;
++
++// ALPS moved to the new codepoint (0x44CD) around the same milestone as the
++// ML-KEM switch; older majors used the old codepoint (0x4469).
++constexpr int kNewAlpsCodepointMajor = 131;
++
++// ECH GREASE has been present since ECH shipped (~Chrome 117), i.e. across the
++// entire modeled range (120..149). It does not vary here, so it is never
++// suppressed in Phase 1 (a boundary of 0 keeps `ech_grease` always true).
++constexpr int kEchGreaseMajor = 0;
++
++// Parses "chrome-<major>" into `major`. Returns true on success. The brand
++// token is header-only and does not change the TLS envelope, but Phase 1 only
++// ever emits "chrome-<major>"; accept exactly that shape here.
++bool ParseChromeMajor(std::string_view value, int* major) {
++  constexpr std::string_view kPrefix = "chrome-";
++  if (value.size() <= kPrefix.size() ||
++      value.substr(0, kPrefix.size()) != kPrefix) {
++    return false;
++  }
++  int parsed = 0;
++  if (!base::StringToInt(value.substr(kPrefix.size()), &parsed) ||
++      parsed <= 0) {
++    return false;
++  }
++  *major = parsed;
++  return true;
++}
++
++}  // namespace
++
++NetworkPersonaPlan ComputeNetworkPersona() {
++  NetworkPersonaPlan plan;
++
++  const base::CommandLine* command_line =
++      base::CommandLine::ForCurrentProcess();
++  if (!command_line ||
++      !command_line->HasSwitch(kFingerprintTlsProfileSwitch)) {
++    return plan;  // inactive
++  }
++
++  const std::string value =
++      command_line->GetSwitchValueASCII(kFingerprintTlsProfileSwitch);
++
++  // Explicit no-op tokens. `auto` / `match-persona` are resolved SDK-side to a
++  // concrete `chrome-<major>`; if one leaks through to the engine, treat it as
++  // a no-op rather than guessing.
++  if (value.empty() || value == "off" || value == "native" ||
++      value == "auto" || value == "match-persona") {
++    return plan;  // inactive
++  }
++
++  int claimed_major = 0;
++  if (!ParseChromeMajor(value, &claimed_major)) {
++    // Unrecognized value (e.g. a raw-JA3 escape hatch, a Phase 4 concern):
++    // never break the handshake. Fall back to native.
++    return plan;  // inactive
++  }
++
++  // A claimed major equal to this build's own major is a no-op: stock already
++  // emits exactly the right bytes.
++  const int build_major = version_info::GetMajorVersionNumberAsInt();
++  if (claimed_major == build_major) {
++    return plan;  // inactive
++  }
++
++  plan.active = true;
++  plan.major = claimed_major;
++
++  if (claimed_major >= kMlkemSwitchMajor) {
++    // ML-KEM era: same PQ group as this build. No group/key_share delta needed;
++    // the plan is "active" only for the ALPS/ECH deltas (which for >= 131 also
++    // match this build, making the net effect byte-identical to stock).
++    plan.pq = NetworkPersonaPlan::kNative;
++  } else if (claimed_major >= kKyberDefaultOnMajor) {
++    plan.pq = NetworkPersonaPlan::kKyber;
++  } else {
++    plan.pq = NetworkPersonaPlan::kNone;
++  }
++
++  plan.alps_new_codepoint = (claimed_major >= kNewAlpsCodepointMajor);
++  plan.ech_grease = (claimed_major >= kEchGreaseMajor);
++
++  return plan;
++}
++
++}  // namespace net
+--- /dev/null
++++ b/net/ssl/network_persona.h
+@@ -0,0 +1,69 @@
++// Copyright 2024 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef NET_SSL_NETWORK_PERSONA_H_
++#define NET_SSL_NETWORK_PERSONA_H_
++
++#include "net/base/net_export.h"
++
++namespace net {
++
++// A "network persona" makes the TLS ClientHello's version-variant fields match
++// a claimed Chromium major, instead of the major this build was compiled from.
++// It is driven by the launch switch `--fingerprint-tls-profile=<value>`, read
++// in the network-service process (where net/ssl runs).
++//
++// This is coherence-first, not arbitrary spoofing: it only swaps the fields
++// that genuinely differ between real Chromium majors (the post-quantum
++// key-share group, the ALPS codepoint, ECH GREASE presence). The deterministic
++// envelope (cipher list, version bounds, signature algorithms, ALPN) and the
++// per-connection extension permutation are left exactly as stock Chromium.
++//
++// Value grammar (Phase 1):
++//   "chrome-<major>"     e.g. "chrome-149", "chrome-120" -> version override
++//   absent / "" / "off" / "native" / "auto" / "match-persona" -> NO override
++// A claimed major equal to this build's own Chromium major is also a no-op
++// (byte-identical to stock). `auto` / `match-persona` are resolved SDK-side to
++// a concrete `chrome-<major>`; the engine treats any unrecognized token as a
++// no-op and never breaks the handshake.
++struct NET_EXPORT NetworkPersonaPlan {
++  // How to shape the post-quantum key-share group for the claimed major.
++  enum PqMode {
++    // The claimed major uses the same PQ group as this build (X25519MLKEM768).
++    // No group/key_share override is needed; stock emits the correct bytes.
++    kNative,
++    // The claimed major (~124..130) predates ML-KEM: use X25519Kyber768Draft00.
++    kKyber,
++    // The claimed major (<124) predates default-on PQ: emit no PQ group at all
++    // (classic groups + a classic key_share only).
++    kNone,
++  };
++
++  // True when a concrete, non-native `chrome-<major>` override was requested.
++  // When false, callers MUST leave the stock ClientHello untouched.
++  bool active = false;
++
++  // The claimed Chromium major (only meaningful when `active` is true).
++  int major = 0;
++
++  // The post-quantum shaping to apply (only meaningful when `active` is true).
++  PqMode pq = kNative;
++
++  // Whether the claimed major sends the ALPS extension under the new codepoint
++  // (0x44CD, ~131+) rather than the old one (0x4469, older majors).
++  bool alps_new_codepoint = true;
++
++  // Whether the claimed major emits an ECH GREASE extension (present ~149,
++  // absent in older majors).
++  bool ech_grease = true;
++};
++
++// Computes the network persona plan from the current process command line
++// (`--fingerprint-tls-profile`). Cheap and side-effect free; safe to call once
++// per socket. Returns an inactive plan when no override is requested.
++NET_EXPORT NetworkPersonaPlan ComputeNetworkPersona();
++
++}  // namespace net
++
++#endif  // NET_SSL_NETWORK_PERSONA_H_
