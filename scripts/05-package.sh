@@ -10,7 +10,7 @@
 set -euo pipefail
 TARGET="${TARGET:-windows}"
 WORK="${WORK:-$HOME/clearcote-build}"
-SRC="$WORK/build/src"; OUT="$SRC/out/Default"
+SRC="$WORK/build/src"; OUT="${OUT:-$SRC/out/Default}"   # override OUT for a Linux build in out/Linux
 DIST="$WORK/dist"; mkdir -p "$DIST"
 V="${V:-149.0.7827.114}"
 
