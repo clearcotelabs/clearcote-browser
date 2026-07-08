@@ -46,5 +46,15 @@ while IFS= read -r line; do
   patch -p1 -s -d "$SRC" < "$REPO/patches/$p"
 done < "$REPO/patches/series"
 
+# Patch-integrity gate (Layer 1). Every patch we just applied MUST now reverse-apply cleanly
+# to the tree; if one silently rejected, fuzzed into the wrong place, or partially applied, this
+# catches it HERE — before a single object file is built — instead of quietly shipping a
+# de-stealthed binary. Same gate the release runbook re-runs against the packaged artifact.
+# See docs/PATCH-INTEGRITY.md. Set CLEARCOTE_SKIP_PATCH_VERIFY=1 only for local debugging.
+if [ "${CLEARCOTE_SKIP_PATCH_VERIFY:-0}" != "1" ]; then
+  echo "  verifying: patch integrity (reverse-apply gate)"
+  python3 "$REPO/scripts/verify_patches.py" --tree "$SRC" --target "$TARGET"
+fi
+
 echo "OK: patch series applied to $SRC (target=$TARGET)"
 echo "next -> scripts/02-host-toolchain.sh"

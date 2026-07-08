@@ -1,0 +1,62 @@
+# Patch-integrity gate: proves every Clearcote patch is correctly applied before a release.
+# Clearcote IS its patch set, and a lost stealth patch fails OPEN (the browser still runs, just
+# less stealthy), so this is enforced, not advisory. See docs/PATCH-INTEGRITY.md.
+#
+#   Layer 0 (integrity)  — series <-> patch files <-> manifest completeness. No tree/binary
+#                          needed, so it runs on every PR that touches the patch set.
+#   Layer 2 (binary)     — each patch's marker string(s) are present in the pinned, checksum-
+#                          verified release binary. Runs off-PR (release / dispatch / call).
+#   Layer 1 (source)     — reverse-apply against the BUILD TREE. Can't run here (no tree); it is
+#                          enforced at build time by scripts/01-apply-patches.sh and at release
+#                          time by docs/RELEASING.md §4a on the build host.
+name: Patch integrity
+
+on:
+  workflow_dispatch: {}
+  workflow_call: {} # callable as a release / promotion gate
+  push:
+    branches: [main]
+    paths:
+      - "patches/**"
+      - "scripts/verify_patches.py"
+      - "scripts/patch_markers.json"
+      - ".github/workflows/patch-integrity.yml"
+  pull_request:
+    paths:
+      - "patches/**"
+      - "scripts/verify_patches.py"
+      - "scripts/patch_markers.json"
+      - ".github/workflows/patch-integrity.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  integrity:
+    # Layer 0 — series/file/manifest consistency + manifest completeness. Cheap, total over the
+    # patch set, needs nothing external — so it gates every PR that touches patches.
+    name: Layer 0 — series + manifest integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python scripts/verify_patches.py # no --tree/--binary => Layer 0 only
+
+  binary:
+    # Layer 2 — every patch's code is actually in the pinned release binary. Byte-level string
+    # scan, so it runs fine on Linux even though the artifact is a Windows PE. Off-PR only
+    # (downloads the ~200 MB pinned zip); callable as a release gate.
+    name: Layer 2 — markers in the pinned release binary
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Fetch + checksum-verify the SDK-pinned release binary
+        run: python scripts/fetch_release_binary.py --dest "${{ runner.temp }}/rel"
+      - name: Verify every patch's code compiled into the binary
+        run: python scripts/verify_patches.py --binary "${{ runner.temp }}/rel"

@@ -104,6 +104,41 @@ EOF
 
 ---
 
+## 4a. Patch-integrity gate — MANDATORY (blocks packaging, signing, and publish)
+
+Clearcote *is* its patch set, and a lost stealth patch **fails open** — the browser still
+launches, just less stealthy — so before you package or sign anything, prove that **every patch
+is actually in the tree that built this binary AND compiled into the binary itself.** This is
+the standard; see [PATCH-INTEGRITY.md](PATCH-INTEGRITY.md). Run from your Clearcote repo checkout
+(the one whose `patches/` produced this build), against the build tree and the freshly-built
+`chrome.dll`:
+
+```bash
+# $SRC = the build tree (e.g. ~/clearcote-build/build/src on the build host)
+python3 scripts/verify_patches.py \
+  --tree "$SRC" --target windows \
+  --binary "$SRC/out/Default/chrome.dll"
+```
+
+**Acceptance:** exit 0 — *"every checked layer is clean."* Do **not** proceed to §5 (package),
+§6 (sign), or §10 (publish) until it does.
+
+- **Layer 1 (source)** proves the committed `patches/` reproduce the built tree, so a third party
+  rebuilding from the repo gets *this* binary (§0.4). If it fails, the tree drifted from the
+  committed set — run `gen_patches.sh` (§11.0) and commit the refreshed `patches/` **before
+  continuing**, then re-run this gate. Never skip a patch to make it pass.
+- **Layer 2 (binary)** proves each patch's code is in `chrome.dll`. If it fails, the artifact is
+  stale/mis-built (an incremental build that didn't recompile a touched file, or the wrong
+  `out/` dir) — rebuild (`ninja -C out/Default chrome`), re-stage (§4), and re-run.
+
+> The same gate runs automatically at build time in [`scripts/01-apply-patches.sh`](../scripts/01-apply-patches.sh)
+> (Layer 1, right after applying — a silent reject aborts before compiling) and in CI
+> ([`.github/workflows/patch-integrity.yml`](../.github/workflows/patch-integrity.yml): Layer 0
+> on every push, Layer 2 against the pinned release binary). This §4a run is the human-gated
+> release checkpoint that ties both to the exact artifact you are about to sign.
+
+---
+
 ## 5. Repackage to the public name + BUNDLE THE VC++ RUNTIME (easy to forget)
 
 A stock Chromium build does **not** include the MSVC runtime. Without it, `chrome.exe` fails to start on a clean Windows 10/11 box. These five DLLs **must** be inside the zip at the archive root, next to `chrome.exe`:
@@ -293,7 +328,7 @@ Every release MUST refresh `patches/` so a third party can rebuild the published
 ssh "$BOX" 'cd ~/clearcoat && bash gen_patches.sh'   # diffs tree vs pristine baseline, groups, self-validates
 ```
 
-`gen_patches.sh` reconstructs a pristine `149 → prune → ungoogled → windows-overlay` baseline, diffs the build tree against it (fetched toolchain **and** `*.cfbak*`/`*.bak`/`*.orig`/`*.rej` excluded), groups each changed file into exactly one concern-patch, writes `series`, then **self-validates that every patch re-applies with ZERO rejects** and leak-scans. **Acceptance:** `VALIDATION fail=0`, nothing left in `950-misc-REVIEW` (add a `group_for` mapping for any new file and re-run), and `leak scan clean`. Then copy `out_patches_full/*.patch` + `series` over `patches/`, update `patches/README.md`'s series table (new rows + revised descriptions), and commit them **in the same push** as the README banner below. Because each source file lives in exactly one patch, zero-reject per-patch equals a clean sequential apply — so applying the series to a fresh baseline reproduces this build's source tree.
+`gen_patches.sh` reconstructs a pristine `149 → prune → ungoogled → windows-overlay` baseline, diffs the build tree against it (fetched toolchain **and** `*.cfbak*`/`*.bak`/`*.orig`/`*.rej` excluded), groups each changed file into exactly one concern-patch, writes `series`, then **self-validates that every patch re-applies with ZERO rejects** and leak-scans. **Acceptance:** `VALIDATION fail=0`, nothing left in `950-misc-REVIEW` (add a `group_for` mapping for any new file and re-run), and `leak scan clean`. Then copy `out_patches_full/*.patch` + `series` over `patches/`, update `patches/README.md`'s series table (new rows + revised descriptions), and commit them **in the same push** as the README banner below. Because each source file lives in exactly one patch, zero-reject per-patch equals a clean sequential apply — so applying the series to a fresh baseline reproduces this build's source tree. After regenerating, **re-run the §4a patch-integrity gate**: Layer 1 must now be clean (the refreshed `patches/` reverse-apply to the build tree), which is the machine-checkable proof that the committed set reproduces this binary. `gen_patches.sh` validates re-apply against a *pristine* baseline; the §4a gate validates it against the *actual built tree* + the *actual binary* — keep both.
 
 1. **Update the EXISTING README status banner in place** (README already carries a `> [!NOTE]` banner) — change the tag and release link to this release; do not add a second banner.
 2. Commit + push (one line, no backticks, `$tag` in the message, no `Co-Authored-By: Claude`):
@@ -384,6 +419,7 @@ Drop the `-pre.N` suffix and `--prerelease` only when **all** hold:
 [ ] <repo>/UPSTREAM_REVISION == release Chromium version
 [ ] config/args.gn matches the artifact's actual args.gn (esp. is_official_build)
 [ ] built in out/Default; staged into clearcoat-win-x64.zip (full runtime, ~700 entries)
+[ ] PATCH-INTEGRITY GATE green (§4a): verify_patches.py --tree (Layer 1) + --binary (Layer 2) exit 0 — BLOCKS publish
 [ ] repackaged to clearcote-$V-windows-x64.zip WITH the 5 VC++ runtime DLLs (unzip -l | grep)
 [ ] SHA256SUMS.txt (zip+exe+dll) + per-asset .sha256 generated
 [ ] both signed; clearcote-signing-key.asc exported; codename leftovers removed from dist/

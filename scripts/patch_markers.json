@@ -1,0 +1,406 @@
+{
+  "_comment": "Per-patch witnesses for scripts/verify_patches.py. markers=strings validated present in a real built binary; runtime=Layer-3 behavioral witness. See docs/PATCH-INTEGRITY.md.",
+  "patches": {
+    "000-fingerprint-switches.patch": {
+      "surface": "Defines the clearcote fingerprint / canvas-bridge / TLS command-line switch value strings and forwards them from the browser process into the renderer process so downstream spoofing patches can read them.",
+      "windows_only": false,
+      "markers": [
+        "fingerprint-tls-profile",
+        "canvas-bridge-url",
+        "canvas-bridge-fallback",
+        "canvas-bridge-mode",
+        "fingerprint-gpu-renderer",
+        "fingerprint-hardware-concurrency",
+        "fingerprint-brand-version",
+        "disable-gpu-fingerprint",
+        "disable-fingerprint-noise",
+        "fingerprint-profile",
+        "fingerprint-webgpu-architecture",
+        "fingerprint-storage-quota"
+      ],
+      "runtime": {
+        "surface": "navigator.hardwareConcurrency (proves a fingerprint switch was forwarded browser-process -> renderer-process by this patch's kSwitchNames array)",
+        "probe": "Launch with the stated flags PLUS --fingerprint-hardware-concurrency=3, then evaluate navigator.hardwareConcurrency in a page.",
+        "expect": "Returns exactly 3. If this switch-forwarding patch is lost, the switch never reaches the renderer and navigator.hardwareConcurrency falls back to the host's real logical-core count (e.g. 8/16), so any value != 3 means the patch is missing. (Equivalently, under --fingerprint-platform=windows navigator.platform must be 'Win32' / UA must contain 'Windows NT 10.0' even on a non-Windows build host.)"
+      }
+    },
+    "001-farble-seed-core.patch": {
+      "surface": "Deterministic per-eTLD+1 farbling seed core: derives a per-site 64-bit seed from the global --fingerprint value mixed with the registrable domain (PersistentHash), and exposes a global noise on/off gate (--disable-fingerprint-noise) that all downstream farblers (canvas/WebGL/audio/client-rects) cons",
+      "windows_only": false,
+      "markers": [
+        "GeForce RTX 5090 Laptop GPU",
+        "GeForce RTX 3050 6GB Laptop GPU"
+      ],
+      "runtime": {
+        "surface": "Canvas 2D fingerprint (HTMLCanvasElement.toDataURL) farbled by the per-eTLD+1 farble seed",
+        "probe": "Run this identical snippet on two different registrable domains (e.g. https://a.example.com and https://b.example.org), each reloaded twice, launched with --fingerprint=seed --fingerprint-platform=windows: (()=>{const c=document.createElement('canvas');c.width=220;c.height=40;const x=c.getContext('2d');x.textBaseline='top';x.font='14px Arial';x.fillStyle='#f60';x.fillRect(0,0,220,40);x.fillStyle='#069';x.fillText('Cwm fjord \\u{1F600}',2,2);return c.toDataURL();})()  // compare the resulting data-URL strings",
+        "expect": "Correctly patched: the data-URL is byte-identical across reloads on the SAME domain (deterministic seed) but DIFFERS between the two registrable domains (the seed mixes eTLD+1, so the two sites decorrelate). Vanilla/unpatched build: the data-URL is identical across BOTH domains and equals the natural unperturbed render. (With --disable-fingerprint-noise added, output reverts to the identical/natural value on every domain, confirming the FingerprintNoiseEnabled() gate.)"
+      }
+    },
+    "002-persona-profile.patch": {
+      "surface": "Seed-derived, internally-coherent Windows browser persona: one --fingerprint seed drives navigator.hardwareConcurrency/deviceMemory, screen geometry/colorDepth, WebGL vendor+renderer+getParameter table, WebGPU adapter identity/limits, speechSynthesis voices, enumerateDevices roster, and MediaCapabil",
+      "windows_only": false,
+      "markers": [
+        "fingerprint-webgpu-vendor",
+        "fingerprint-webgpu-architecture",
+        "ANGLE (Intel, Intel(R) UHD Graphics 770 (0xA780) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        "Microsoft David - English (United States)",
+        "Microphone (Realtek(R) Audio)",
+        "cc-mic-"
+      ],
+      "runtime": {
+        "surface": "WebGL UNMASKED_RENDERER_WEBGL (getParameter via WEBGL_debug_renderer_info)",
+        "probe": "(()=>{const c=document.createElement('canvas');const gl=c.getContext('webgl');const e=gl.getExtension('WEBGL_debug_renderer_info');return gl.getParameter(e.UNMASKED_RENDERER_WEBGL);})()",
+        "expect": "Returns the hardcoded default persona GPU string 'ANGLE (Intel, Intel(R) UHD Graphics 770 (0xA780) Direct3D11 vs_5_0 ps_5_0, D3D11)' regardless of the build host's real GPU. A vanilla/unpatched build (or a build that lost this patch) returns the build machine's actual renderer instead (e.g. a Linux/Mesa or datacenter GPU string), so any value other than the Intel UHD 770 persona string means the persona is not being applied."
+      }
+    },
+    "010-user-agent-and-webdriver.patch": {
+      "surface": "Persona-coherent User-Agent and Client Hints (navigator.userAgent, navigator.userAgentData brands/platform/version, Sec-CH-UA) plus navigator.platform, navigator.hardwareConcurrency, and navigator.webdriver forced false (deletes the AutomationControlled->true branch), all driven by fingerprint seed/",
+      "windows_only": false,
+      "markers": [
+        " Vivaldi/",
+        " OPR/",
+        "149.0.3650.65",
+        "126.0.5748.0"
+      ],
+      "runtime": {
+        "surface": "navigator.webdriver (automation-controlled flag)",
+        "probe": "Read `navigator.webdriver` in a page in a session driven via CDP / --enable-automation (how the SDK launches it), with --fingerprint=seed --fingerprint-platform=windows.",
+        "expect": "false. Vanilla Chromium returns true whenever AutomationControlled is enabled (any CDP/automation-driven session); this patch removes the `if (RuntimeEnabledFeatures::AutomationControlledEnabled()) return true;` branch in Navigator::webdriver(), so it is always false. A build that silently lost the patch reports navigator.webdriver === true under automation. Corroborating checks under the same launch: navigator.platform === 'Win32' and navigator.userAgentData.brands contains a 'Chromium' brand but no 'Google Chrome' brand (chrome_brand is only added when --fingerprint-brand=chrome is set)."
+      }
+    },
+    "020-audio.patch": {
+      "surface": "WebAudio fingerprint spoofing: per-eTLD+1 uniform audio-sample farbling in AudioBuffer.getChannelData()/copyFromChannel(), plus Windows-persona-coherent AudioContext sampleRate / baseLatency / outputLatency (so the Linux build host's audio backend cannot leak).",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "AudioContext.sampleRate / baseLatency / outputLatency (WebAudio timing fingerprint) and per-origin audio-sample farbling",
+        "probe": "(() => { const c = new AudioContext(); const out = c.outputLatency; return { sampleRate: c.sampleRate, baseLatency: c.baseLatency, outputLatency: out, on8msGrid: Math.abs(out/0.008 - Math.round(out/0.008)) < 1e-9 }; })()",
+        "expect": "On a correctly-patched build launched with --fingerprint-platform=windows the values come from the fixed Windows-WASAPI persona, not the Linux build host's audio backend: outputLatency is a nonzero exact multiple of 0.008s (on8msGrid === true, the no-mic-permission 8ms grid the patch quantizes to), and sampleRate + baseLatency are stable persona constants identical across reloads and independent of the host (sampleRate pinned to the persona rate, typically 48000 WASAPI, rather than the host's 44100). Corroborating farbling check: render an OfflineAudioContext oscillator->DynamicsCompressor, sum abs(getChannelData(0)); the sum is deterministic/idempotent across repeated renders on one origin but shifts across different registrable domains and differs from vanilla Chrome's canonical constant. On an unpatched build baseLatency/outputLatency/sampleRate are derived from the actual host audio service and the compressor fingerprint equals the fixed vanilla value on every origin."
+      }
+    },
+    "030-hardware-concurrency.patch": {
+      "surface": "navigator.hardwareConcurrency and navigator.deviceMemory report the coherent session persona's CPU-core count and RAM bucket (correlated via the persona HW tier) instead of the real host's values, with an optional --fingerprint-hardware-concurrency=N override; deviceMemory is spec-clamped to <=8.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "navigator.hardwareConcurrency and navigator.deviceMemory",
+        "probe": "JSON.stringify([navigator.hardwareConcurrency, navigator.deviceMemory])",
+        "expect": "hardwareConcurrency is a plausible Windows core count drawn from the persona HW-tier set (an integer such as 4/8/12/16), deterministic and identical across reloads for a fixed --fingerprint seed and changing when the seed changes, and NOT equal to the build host's real physical processor count; deviceMemory is a coherent power-of-two bucket clamped to <=8 (typically 8, or 4 for a lower-tier persona). A vanilla/unpatched build instead returns the host's real base::SysInfo::NumberOfProcessors() and ApproximatedDeviceMemory value, which tracks the physical machine and does not vary with the fingerprint seed."
+      }
+    },
+    "040-fonts.patch": {
+      "surface": "Spoofs JS-observable local font enumeration: when --fingerprint is set, pins the detectable font set to a hardcoded canonical per-persona OS list and hides every host-installed font outside it (returns null), so font-based fingerprinting sees the claimed platform's fonts, not the real machine's.",
+      "windows_only": false,
+      "markers": [
+        "HoloLens MDL2 Assets",
+        "BM HANNA 11yrs old OTF",
+        "DejaVu Math TeX Gyre",
+        "Segoe Fluent Icons",
+        "Cascadia Code"
+      ],
+      "runtime": {
+        "surface": "Blink local-font resolution observed via canvas measureText width (same FontCache::GetFontPlatformData path): the detectable font set is pinned to the canonical Windows list, so a Windows font outside that list is hidden even though it is physically installed.",
+        "probe": "(() => { const has = (family) => { const ctx = document.createElement('canvas').getContext('2d'); ctx.font = '72px monospace'; const base = ctx.measureText('mmmmmmmmmmlliWi').width; ctx.font = `72px \"${family}\", monospace`; return ctx.measureText('mmmmmmmmmmlliWi').width !== base; }; return { georgia: has('Georgia'), calibriLight: has('Calibri Light') }; })()",
+        "expect": "Correctly patched (Windows persona): {georgia:true, calibriLight:false} — 'Georgia' is in the canonical Windows list so it resolves and its width differs from the monospace baseline, while 'Calibri Light' (installed on every modern Windows but NOT in the canonical list and not a basic font) is forced to null and falls back to monospace, so its width equals the baseline. Vanilla/unpatched Chrome on the same Windows host returns {georgia:true, calibriLight:true} because Calibri Light is actually installed. calibriLight:false is the patch-specific witness."
+      }
+    },
+    "050-shadow-dom.patch": {
+      "surface": "Exposes a non-standard Element.fakeShadowRoot DOM attribute that returns even closed shadow roots (bypassing the open-mode check); also migrates get*ClientRects farbling from Scale() to a per-site --fingerprint-gated Offset() model that is currently coherence-disabled to zero.",
+      "windows_only": false,
+      "markers": [
+        "fakeShadowRoot"
+      ],
+      "runtime": {
+        "surface": "Element.prototype.fakeShadowRoot (non-standard DOM attribute exposing closed shadow roots)",
+        "probe": "(() => { const el = document.createElement('div'); const sr = el.attachShadow({ mode: 'closed' }); return el.shadowRoot === null && el.fakeShadowRoot === sr; })()",
+        "expect": "true on a correctly-patched build (closed shadow root is hidden from standard .shadowRoot but returned by the patch-added .fakeShadowRoot); vanilla Chromium returns false because .fakeShadowRoot is undefined. A simpler existence check, 'fakeShadowRoot' in document.createElement('div'), is true patched / false vanilla."
+      }
+    },
+    "060-canvas.patch": {
+      "surface": "Canvas 2D fingerprint spoofing: deterministic per-eTLD+1, content-keyed sparse LSB perturbation of getImageData/toDataURL/toBlob pixel readback (FNV-1a content hash + xorshift64 keyed by the farble seed), plus optional real-GPU canvas-bridge pixel/metrics passthrough and measureText coherence (noise",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "Canvas 2D pixel readback (CanvasRenderingContext2D.getImageData / HTMLCanvasElement.toDataURL) — canvas fingerprint",
+        "probe": "(() => { const c=document.createElement('canvas'); c.width=200; c.height=200; const g=c.getContext('2d'); g.fillStyle='rgb(128,128,128)'; g.fillRect(0,0,200,200); const read=()=>Array.from(g.getImageData(0,0,200,200).data); const a=read(), b=read(); let diff=0, alphaChanged=0, maxDelta=0, stable=true; for(let i=0;i<a.length;i+=4){ const dr=Math.abs(a[i]-128),dg=Math.abs(a[i+1]-128),db=Math.abs(a[i+2]-128); if(dr||dg||db) diff++; maxDelta=Math.max(maxDelta,dr,dg,db); if(a[i+3]!==255) alphaChanged++; if(a[i]!==b[i]||a[i+1]!==b[i+1]||a[i+2]!==b[i+2]) stable=false; } return {diff, alphaChanged, maxDelta, stable}; })()",
+        "expect": "Correctly patched (launched with --fingerprint=seed --fingerprint-platform=windows): diff is a small NONZERO count (order tens; ~24-70 for a 200x200 canvas per the area/600 clamp), maxDelta === 1 (only the low bit of R/G/B is flipped), alphaChanged === 0 (alpha never touched), and stable === true (identical across repeated reads — deterministic content+site keyed, unlike the old base::RandDouble() impl). Vanilla / patch silently lost: diff === 0 (getImageData returns the exact drawn fill color). A stronger self-contained variant: rendering byte-identical canvas ops on two different eTLD+1 origins yields DIFFERENT toDataURL() (per-site seed) when patched, identical when unpatched."
+      }
+    },
+    "065-canvas-bridge.patch": {
+      "surface": "Real-GPU canvas/WebGL render bridge: a renderer-process singleton that forwards canvas 2D / WebGL readbacks and text metrics over an RFC6455 WebSocket to a remote real-GPU host and returns its authentic pixels, keeping the spoofed GPU persona coherent with what a page actually pixel-hashes.",
+      "windows_only": false,
+      "markers": [
+        "clearcote-canvas-bridge/1",
+        "CanvasBridge",
+        "canvas-bridge: connect failed; rendering stays local"
+      ],
+      "runtime": {
+        "surface": "Outbound WebSocket connection + Hello handshake from the renderer to the --canvas-bridge-url endpoint (canvas bridge client, warmed up at blink init)",
+        "probe": "Start a TCP listener on a local port, e.g. python -c \"import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',9099)); s.listen(); c,_=s.accept(); print(c.recv(65536))\" ; then launch the build with --fingerprint=seed --fingerprint-platform=windows --canvas-bridge-url=ws://127.0.0.1:9099 --no-sandbox and open any page so a renderer spawns.",
+        "expect": "Correctly patched: the renderer connects to 127.0.0.1:9099 and the listener receives an RFC6455 client handshake (GET / HTTP/1.1 ... Upgrade: websocket ... Sec-WebSocket-Key:); after a 101 reply it sends a binary frame whose payload contains the ASCII string clearcote-canvas-bridge/1 (the Hello client_version). Patch lost/unpatched: no inbound connection to the port ever arrives (Get() returns nullptr, rendering stays fully local)."
+      }
+    },
+    "070-webgl-gpu.patch": {
+      "surface": "WebGL GPU-identity spoofing: GL_VENDOR/GL_RENDERER and WEBGL_debug_renderer_info UNMASKED_VENDOR/RENDERER report a coherent hardcoded NVIDIA GeForce RTX persona (session-constant, per-eTLD+1 for the farble fallback) instead of the real/SwiftShader GPU, plus persona-coherent WebGL getParameter limits",
+      "windows_only": false,
+      "markers": [
+        "ANGLE (Apple, ANGLE Metal Renderer: Apple %s, Unspecified Version)",
+        "ANGLE (%s, NVIDIA %s%s)",
+        "Google Inc. (NVIDIA Corporation)"
+      ],
+      "runtime": {
+        "surface": "WebGL WEBGL_debug_renderer_info UNMASKED_RENDERER_WEBGL / UNMASKED_VENDOR_WEBGL",
+        "probe": "(()=>{const gl=document.createElement('canvas').getContext('webgl');const e=gl.getExtension('WEBGL_debug_renderer_info');return JSON.stringify({vendor:gl.getParameter(e.UNMASKED_VENDOR_WEBGL),renderer:gl.getParameter(e.UNMASKED_RENDERER_WEBGL)});})()",
+        "expect": "vendor === 'Google Inc. (NVIDIA)' and renderer matches /^ANGLE \\(NVIDIA, NVIDIA GeForce RTX .+ \\(0x0000[0-9A-F]+\\) Direct3D11 vs_5_0 ps_5_0, D3D11\\)$/ (a hardcoded RTX 30/40-series model from the patch's GPU DB, deterministic per origin). Unpatched/lost-patch reports the real host GPU or a SwiftShader/'Google Inc. (Google)' string and does NOT match this NVIDIA-GeForce-RTX + Direct3D11 pattern."
+      }
+    },
+    "075-webgpu-coherence.patch": {
+      "surface": "WebGPU adapter-identity coherence: navigator.gpu.requestAdapter() reports vendor/architecture/device/description and adapter limits spoofed to match the persona/WebGL GPU instead of the real host adapter.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "navigator.gpu.requestAdapter().info.vendor / .architecture (WebGPU GPUAdapterInfo), cross-checked against WebGL UNMASKED_VENDOR_WEBGL",
+        "probe": "(async()=>{const a=await navigator.gpu.requestAdapter();const gl=document.createElement('canvas').getContext('webgl');const d=gl.getExtension('WEBGL_debug_renderer_info');const glv=String(gl.getParameter(d.UNMASKED_VENDOR_WEBGL)).toLowerCase();return JSON.stringify({gpuVendor:a.info.vendor,arch:a.info.architecture,coheres:glv.includes(a.info.vendor)});})()",
+        "expect": "Correctly patched: info.vendor is a lowercase persona family derived from the spoofed WebGL vendor (one of nvidia|amd|intel, e.g. nvidia/ampere, amd/rdna2, intel/gen-12-lp) that is CONTAINED in the WebGL UNMASKED_VENDOR string, so coheres===true (e.g. {\"gpuVendor\":\"nvidia\",\"arch\":\"ampere\",\"coheres\":true}). Unpatched (075 lost, 000/002 still applied): info.vendor is the real host adapter's vendor, unrelated to the spoofed WebGL vendor, so coheres===false."
+      }
+    },
+    "080-client-rects.patch": {
+      "surface": "Adds QuadF::Offset (with a zero-width/height epsilon guard) — the geometry primitive that applies a per-seed sub-pixel offset to Element.getClientRects()/getBoundingClientRect() to defeat the client-rects fingerprint while leaving degenerate (zero-size) rects unshifted for coherence.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "Element.getClientRects()/getBoundingClientRect() sub-pixel coordinates",
+        "probe": "(() => { const d = document.createElement('div'); d.style.cssText='position:absolute;left:50px;top:50px;width:80px;height:20px'; document.body.appendChild(d); const r = d.getClientRects()[0]; d.remove(); return [r.x - 50, r.y - 50]; })()",
+        "expect": "Correctly patched (launched with --fingerprint=seed): both values are a tiny NON-ZERO sub-pixel offset (e.g. ~1e-3..1e-1 magnitude), identical on repeated reads within one seed and different for a different --fingerprint seed. Vanilla/unpatched (or a build that lost this patch): both are exactly 0 (rect x/y == 50/50). Coherence sanity check: a zero-size element (width:0 or height:0) must still return exact integer coordinates — its rect is NOT offset."
+      }
+    },
+    "090-timezone.patch": {
+      "surface": "Timezone spoofing: makes Blink's TimeZoneController honor a chosen IANA timezone from the --timezone switch, driving ICU/V8 so Intl timeZone and Date offsets report the fabricated zone instead of the host's.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "Intl.DateTimeFormat().resolvedOptions().timeZone and new Date().getTimezoneOffset()",
+        "probe": "Launch with --timezone=Asia/Tokyo added to --fingerprint=seed --fingerprint-platform=windows, then evaluate: JSON.stringify([Intl.DateTimeFormat().resolvedOptions().timeZone, new Date('2021-01-01T00:00:00Z').getTimezoneOffset()])",
+        "expect": "[\"Asia/Tokyo\",-540] on a correctly-patched build (honors --timezone; UTC+9 => -540 min offset). An unpatched/lost-patch build ignores --timezone (it is not a vanilla Chromium switch) and instead returns the host machine's real timezone id and offset."
+      }
+    },
+    "100-webrtc-leak.patch": {
+      "surface": "WebRTC IP-leak protection: forces the ICE server-reflexive candidate to the configured proxy egress IP (--webrtc-ip) and suppresses all real host candidates, so the real LAN/public IP never leaks via RTCPeerConnection and no STUN packet egresses the real interface.",
+      "windows_only": false,
+      "markers": [
+        "webrtc-ip"
+      ],
+      "runtime": {
+        "surface": "RTCPeerConnection ICE candidate gathering — server-reflexive (srflx) candidate IP and host-candidate suppression",
+        "probe": "Launch additionally with --webrtc-ip=203.0.113.7 (the fingerprint flags alone do NOT trigger this patch; the SDK sets --webrtc-ip when a proxy is configured). Then in the page evaluate: (async()=>{const pc=new RTCPeerConnection();pc.createDataChannel('c');const cands=[];await new Promise(r=>{pc.onicecandidate=e=>e.candidate?cands.push(e.candidate.candidate):r();pc.createOffer().then(o=>pc.setLocalDescription(o));setTimeout(r,3000);});return cands.filter(c=>c.includes('typ srflx'));})()",
+        "expect": "Correctly patched: returns a candidate line containing 'typ srflx' whose connection address is exactly 203.0.113.7 (the --webrtc-ip value), and no 'typ host' candidate exposes a real/LAN IPv4. Vanilla/unpatched: --webrtc-ip is an ignored unknown switch and, with no STUN/iceServers configured, WebRTC NEVER emits a srflx candidate — so an empty array (or a srflx carrying a non-forced IP) means the patch is missing."
+      }
+    },
+    "110-runtime-enable.patch": {
+      "surface": "Hides the CDP/automation Runtime.enable detection vector: skips Runtime binding registration, suppresses console-message reporting over CDP, and reports the V8 Runtime agent as never-enabled.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "CDP Runtime.enable console-preview getter leak: when a CDP/automation client has called Runtime.enable, console.log()ing an object with a property getter normally makes V8 generate a RemoteObject preview that enumerates properties and fires the getter. This patch makes V8RuntimeAgentImpl::messageAdded a no-op (and enabled() return false), so no message/preview is ever produced.",
+        "probe": "Attach an automation/CDP client and call Runtime.enable, then in the page evaluate: (()=>{let leaked=false;const o={};Object.defineProperty(o,'a',{enumerable:true,get(){leaked=true;return 1;}});console.log(o);return leaked;})()",
+        "expect": "Correctly patched: returns false (the getter never fires because console messages are not reported to CDP and no RemoteObject preview enumerates the object). Unpatched automated Chromium with Runtime.enable active: returns true. Note: only diverges while a CDP client is attached with Runtime enabled; standalone (no debugger) both return false."
+      }
+    },
+    "120-headless.patch": {
+      "surface": "Rewrites the headless default User-Agent product token from \"HeadlessChrome\" to \"Chrome\" (kHeadlessProductName in headless_browser_impl.cc), so navigator.userAgent and the UA HTTP header no longer leak the headless tell.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "navigator.userAgent (headless default User-Agent product token)",
+        "probe": "Launch headless (e.g. --headless=new) with --fingerprint=seed --fingerprint-platform=windows and evaluate: navigator.userAgent",
+        "expect": "UA contains a normal 'Chrome/<version>' token and does NOT contain the substring 'HeadlessChrome'. A vanilla/unpatched headless build reports 'HeadlessChrome/<version>' instead; presence of 'HeadlessChrome' means the patch was lost."
+      }
+    },
+    "130-humanized-input.patch": {
+      "surface": "Humanized mouse input for anti-automation: browser-level CDP commands Browser.humanizedClick / humanizedClickSelector that move the cursor along a cubic-bezier + min-jerk path with Gaussian position/timing jitter and dispatch REAL WebMouseEvents (no kFromDebugger marker so MouseEvent.isTrusted===tru",
+      "windows_only": false,
+      "markers": [
+        "humanizedClick",
+        "humanizedClickSelector",
+        "agentRunTask"
+      ],
+      "runtime": {
+        "surface": "Browser.humanizedClick CDP command (browser-level; emits a curved, jittered sequence of isTrusted mouse events; absent in vanilla Chromium)",
+        "probe": "Over the browser-level DevTools websocket send {\"method\":\"Browser.humanizedClick\",\"params\":{\"targetId\":<pageId>,\"x\":150,\"y\":150,\"duration\":0.3}}. In the target page pre-install: let n=0,trusted=true; addEventListener('mousemove',e=>{n++; if(!e.isTrusted) trusted=false}); addEventListener('click',e=>window.__clk=e.isTrusted); then read n, trusted, window.__clk.",
+        "expect": "Correctly patched: the command resolves with a success result (NOT a JSON-RPC error -32601 \"'Browser.humanizedClick' wasn't found\"); the page records n>1 intermediate mousemove events tracing a curved path, all with isTrusted===true, followed by a click at ~(150,150) whose isTrusted===true. Vanilla/unpatched: the command returns method-not-found (-32601) and no such events fire."
+      }
+    },
+    "140-screen.patch": {
+      "surface": "Spoofs window/screen geometry (screen.width/height/color/avail*, window.outerWidth/outerHeight/screenX/screenY/devicePixelRatio, and ScreenDetailed left/top/isPrimary/isInternal/DPR/label) to a coherent per-persona single-monitor display when --fingerprint is set, so the host's real display never le",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "window.outerHeight/outerWidth vs innerHeight/innerWidth, window.screenX/screenY, and screen.availLeft/availTop (persona window-frame geometry)",
+        "probe": "JSON.stringify([window.outerHeight - window.innerHeight, window.outerWidth - window.innerWidth, window.screenX, window.screenY, screen.availLeft, screen.availTop])",
+        "expect": "On a correctly-patched build launched with --fingerprint=seed --fingerprint-platform=windows (a normal, non-maximized persona window): outerHeight-innerHeight === 88 and outerWidth-innerWidth === 16 (the fixed Chrome tab+urlbar / window-frame chrome deltas this patch adds), window.screenX >= 16 and window.screenY >= 16 (deterministic non-zero window origin derived from persona_seed: screenX=16+(seed%160), screenY=16+((seed>>16)%120)), and screen.availLeft === 0 && screen.availTop === 0. Vanilla/unpatched Chrome yields variable or zero outer-vs-inner deltas (headless returns 0) and commonly pins the window at screenX/screenY 0, so the lost-patch build fails all five assertions. (Caveat: if the window is forced fully maximized to the persona's avail size the +16/+88 deltas and non-zero origin clamp down — run the probe against a default, non-maximized window.)"
+      }
+    },
+    "141-media-queries.patch": {
+      "surface": "CSS media-query evaluation (window.matchMedia): device-width/height, resolution/DPR, color depth, color-gamut, and pointer/hover features are forced to a coherent Windows desktop-with-mouse persona so media queries can't unmask the real display or a headless/touchless environment.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "CSS media queries via window.matchMedia (pointer/hover/any-pointer/any-hover and device-width media features)",
+        "probe": "matchMedia('(any-pointer: fine)').matches && matchMedia('(any-hover: hover)').matches && !matchMedia('(any-pointer: coarse)').matches && matchMedia('(hover: none)').matches===false && matchMedia('(device-width: '+screen.width+'px)').matches",
+        "expect": "true on a correctly-patched build: pointer/hover are forced to fine+hover (unconditional in this patch) and the CSS device-width media feature equals the persona/spoofed screen.width. If patch 141 is silently dropped, a headless/virtual gate host reports (any-pointer: fine)=false / (hover: none)=true, and/or the device-width media feature reflects the real host display and diverges from the spoofed screen.width, so the expression returns false."
+      }
+    },
+    "145-storage-quota.patch": {
+      "surface": "Overrides navigator.storage.estimate().quota via --fingerprint-storage-quota=<MB> so an ephemeral/quota-capped context is not read as incognito.",
+      "windows_only": false,
+      "markers": [
+        "fingerprint-storage-quota"
+      ],
+      "runtime": {
+        "surface": "navigator.storage.estimate().quota",
+        "probe": "In a build launched additionally with --fingerprint-storage-quota=50000, run: (await navigator.storage.estimate()).quota",
+        "expect": "Exactly 52428800000 (= 50000 * 1024 * 1024), i.e. quota equals the switch MB value times 1024*1024 with no rounding. A vanilla/unpatched build ignores the switch and returns a disk-derived or quota-capped value that does not equal MB*1024*1024 exactly."
+      }
+    },
+    "146-perf-memory.patch": {
+      "surface": "window.performance.memory.jsHeapSizeLimit is reported from the fingerprint persona (a fixed, realistic, non-power-of-two heap limit, left un-quantized) instead of the host V8/RAM-derived, QuantizeMemorySize-bucketed value.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "window.performance.memory.jsHeapSizeLimit",
+        "probe": "performance.memory.jsHeapSizeLimit",
+        "expect": "Exactly 4395630592 (bytes, ~4192 MiB — a deliberately non-round, non-power-of-two persona constant) for the default persona with no imported profile. An unpatched/vanilla build returns a host-RAM-derived value passed through QuantizeMemorySize (commonly 2172649472, or a round power-of-two-adjacent bucket that varies by machine) and never this exact figure; also verify it is NOT re-quantized (equals 4395630592 exactly, not a snapped rounder value)."
+      }
+    },
+    "147-media-capabilities.patch": {
+      "surface": "Pins navigator.mediaCapabilities decodingInfo/encodingInfo results (supported/smooth/powerEfficient) to the persona for H.264/VP8/VP9/AV1/HEVC across the GPU, EME/worker-DB, and WebRTC paths, hiding the host GPU's real HW-decode capability and the per-machine VideoDecodePerfHistory.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "navigator.mediaCapabilities.decodingInfo() -> {supported, smooth, powerEfficient}",
+        "probe": "const q=(type)=>navigator.mediaCapabilities.decodingInfo({type,video:{contentType:'video/mp4; codecs=\"avc1.42E01E\"',width:1920,height:1080,bitrate:3000000,framerate:30}}); Promise.all([q('media-source'),q('webrtc')]).then(([a,b])=>({ms:a,rtc:b,coherent:a.powerEfficient===b.powerEfficient&&a.smooth===b.smooth}))",
+        "expect": "Correctly patched: both query types return the SAME persona-pinned triple (coherent:true), and the values are deterministic per --fingerprint seed and independent of the host GPU (for a Windows persona, powerEfficient:true and smooth:true for mainstream H.264 1080p even on a software/GPU-less host). Vanilla/unpatched: powerEfficient reflects the real host GPU (false on a software-rendering or GPU-less build) and the media-source vs webrtc results are drawn from independent perf histories, so they can disagree (coherent:false)."
+      }
+    },
+    "148-media-devices.patch": {
+      "surface": "Replaces the real OS media-device list with a deterministic per-persona roster before anonymization, so navigator.mediaDevices.enumerateDevices() reports a stable set of cameras/mics/speakers instead of leaking (or, on a headless host, under-reporting) the host's actual devices.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "navigator.mediaDevices.enumerateDevices()",
+        "probe": "(await navigator.mediaDevices.enumerateDevices()).map(d=>d.kind).sort().join(',')",
+        "expect": "A correctly patched build returns a deterministic, non-empty persona roster whose kinds include a videoinput plus audioinput/audiooutput (e.g. 'audioinput,audiooutput,videoinput'), identical across reloads for the same --fingerprint seed and independent of the host's real hardware. On a headless/server host, vanilla (unpatched) Chromium returns [] (no devices) or a set lacking any videoinput; also, with the patch the entries have non-empty stable hashed deviceIds and empty labels before mic/camera permission is granted."
+      }
+    },
+    "150-device-sensors.patch": {
+      "surface": "Coherent Windows-desktop persona for device/sensor surfaces: forces navigator.maxTouchPoints=0 (under --fingerprint), a no-battery-on-AC BatteryManager (charging/level/times), a fixed US-QWERTY keyboard.getLayoutMap() (bypassing the platform IPC), and constant residential NetworkInformation (4g / 50",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "navigator.connection (NetworkInformation API) — effectiveType / rtt / downlink / saveData",
+        "probe": "[navigator.connection.effectiveType, navigator.connection.rtt, navigator.connection.downlink, navigator.connection.saveData].join(',')",
+        "expect": "Exactly \"4g,50,10,false\" on a correctly-patched build. The patch forces these constants unconditionally (bypassing NetworkStateNotifier), so rtt is ALWAYS 50, downlink ALWAYS 10, saveData ALWAYS false regardless of the real link. An unpatched build returns host-derived values — most reliably rtt != 50 (e.g. 0 or 25 on a fast/datacenter CI link) — so a silently-lost patch yields a different tuple. Corroborating checks from the same patch: (await navigator.getBattery()) gives {charging:true, chargingTime:0, dischargingTime:Infinity, level:1}, and navigator.keyboard.getLayoutMap() resolves to a 47-entry Map with .get('KeyA')==='a' and no Numpad/Space/Intl keys."
+      }
+    },
+    "160-coherence-misc.patch": {
+      "surface": "Coherence misc: (a) exposes the Web Share API (navigator.share/canShare) on the Linux persona build, and (b) unconditionally rewrites `new URL(\"<letter>:/\")` so its protocol resolves to \"file:\" (Windows-host tell) instead of the opaque \"c:\" scheme.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "URL parsing of a Windows drive-letter path via new URL(\"C:/\").protocol",
+        "probe": "new URL(\"C:/\").protocol",
+        "expect": "Correctly-patched build returns \"file:\" (MaybeRewriteDriveLetter prepends file:/// unconditionally); a vanilla/unpatched build parses it as an opaque scheme and returns \"c:\". Assert the value is exactly \"file:\". Independent of --fingerprint-platform since the rewrite has no platform guard."
+      }
+    },
+    "170-speech-voices.patch": {
+      "surface": "speechSynthesis.getVoices() — under --fingerprint, replaces the build host's real SAPI/TTS voices (and backfills an empty list) with the deterministic persona voice set: Windows \"Microsoft …\" voices with a single en-US default, coherent with the persona locale.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "window.speechSynthesis.getVoices()",
+        "probe": "(() => { const vs = speechSynthesis.getVoices(); const d = vs.find(v => v.default); return JSON.stringify({ n: vs.length, defLang: d && d.lang, allMicrosoft: vs.length > 0 && vs.every(v => /^Microsoft/.test(v.name)), langs: [...new Set(vs.map(v => v.lang))] }); })()",
+        "expect": "Correctly patched (Windows persona): getVoices() returns a NON-EMPTY list (n > 0) of Windows SAPI-style voices whose names all start with 'Microsoft', with exactly one default voice whose lang is 'en-US' (coherent en-US default, no en-GB/host-locale default). Vanilla / patch-lost build on the Linux build host returns an empty array (n === 0) or non-Windows/host voices, and does NOT synthesize the persona set — so an empty getVoices() or a non-'Microsoft', non-en-US-default list means this patch is missing."
+      }
+    },
+    "180-geolocation.patch": {
+      "surface": "Geolocation override: fabricates navigator.geolocation position from --fingerprint-location and delivers it directly, bypassing the real device location provider.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "navigator.geolocation.getCurrentPosition() coords",
+        "probe": "With geolocation permission granted and the browser launched with --fingerprint=seed --fingerprint-platform=windows --fingerprint-location=40.7128,-74.0060, run: await new Promise(res => navigator.geolocation.getCurrentPosition(p => res([p.coords.latitude, p.coords.longitude, p.coords.accuracy]), e => res(['err', e.code]), {timeout:5000}))",
+        "expect": "Resolves to exactly [40.7128, -74.006, 100] — the fabricated lat/lng echoed verbatim with accuracy exactly 100 — and does so even when the machine has no real location provider (the patch posts the position without querying the device service). A vanilla/unpatched build ignores --fingerprint-location and instead returns the real OS/network position or a POSITION_UNAVAILABLE/timeout error (['err', 2] or ['err', 3]), never these exact fabricated values with accuracy 100."
+      }
+    },
+    "200-agent-and-humanized-input.patch": {
+      "surface": "Native in-browser AI agent that drives page actions through a humanized mouse-click path (Bézier + jitter, routed via the cross-process input router, no kFromDebugger marker) so automated input is indistinguishable from a real user; configured by --agent-llm-* switches and auto-enabling Chrome's Act",
+      "windows_only": false,
+      "markers": [
+        "agent-llm-url",
+        "agent-llm-key",
+        "agent-tool-mode",
+        "agent-log-file",
+        "agent-model",
+        "Clearcote Agent",
+        "[ai_agent]",
+        "autonomous web-browsing agent operating directly inside the",
+        "__cf_rip_kf"
+      ],
+      "runtime": {
+        "surface": "chrome://version Command Line — auto-enable of Actor framework (features::kGlicActor) + relaxed actor safety checks when --agent-llm-url is present (chrome_main_delegate.cc mutates ForCurrentProcess())",
+        "probe": "Launch additionally with --agent-llm-url=http://127.0.0.1:9/v1 (plus --fingerprint=seed --fingerprint-platform=windows), navigate to chrome://version, and evaluate document.getElementById('command_line').textContent",
+        "expect": "In a correctly-patched build the returned command-line string contains both 'GlicActor' (appended to --enable-features) and '--disable-actor-safety-checks', even though neither was passed at launch. A build that lost the patch leaves the command line unchanged (no GlicActor, no disable-actor-safety-checks)."
+      }
+    },
+    "201-linux-agent-base-switches.patch": {
+      "surface": "Linux/non-Windows build fix: adds #include \"base/base_switches.h\" in chrome_main_delegate.cc so switches::kEnableFeatures (the agent \"--enable-features\" feature-merge) compiles on non-Windows. Pure compile-time plumbing — no new switch, no string literal, no runtime logic; on the Windows binary it i",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "chrome://version 'Command Line' row — agent-merged --enable-features (non-Windows build)",
+        "probe": "On a Linux build, open chrome://version and read the 'Command Line' field (or chrome://version/?show-variations-cmd): the agent feature-merge appends its features onto --enable-features. The primary proof this patch is applied is upstream of runtime — the non-Windows build must COMPILE and the browser must launch at all; without this include chrome/app/chrome_main_delegate.cc fails to build (undeclared switches::kEnableFeatures) on non-Windows.",
+        "expect": "Linux build compiles and the browser launches, applying the agent-merged --enable-features on the command line. On the Windows chrome.exe/chrome.dll target there is NO observable difference (the include was already present via the IS_WIN guard), so this patch produces no Windows-side witness and no gettable binary marker — the gate must verify it via the Linux build/link step, not by grepping the Windows binary."
+      }
+    },
+    "202-linux-persona-coherence.patch": {
+      "surface": "When --fingerprint-platform=linux, rewrites Windows-shaped persona defaults (ANGLE/D3D11 WebGL renderer, Microsoft SAPI voices, Realtek/WASAPI media devices) into coherent Linux equivalents (Mesa/OpenGL renderer, empty getVoices(), PulseAudio device labels) so no fingerprint field contradicts naviga",
+      "windows_only": false,
+      "markers": [
+        "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.6.0 NVIDIA 535.146.02)",
+        "Mesa Intel(R) UHD Graphics 770 (RPL-S)",
+        "radeonsi, raphael_mendocino, LLVM 15.0.7",
+        "Monitor of Built-in Audio Analog Stereo",
+        "cc-grp-"
+      ],
+      "runtime": {
+        "surface": "WebGL UNMASKED_RENDERER_WEBGL (WEBGL_debug_renderer_info), launched with --fingerprint-platform=linux",
+        "probe": "IMPORTANT: this patch is a no-op under platform=windows; launch with --fingerprint=<seed> --fingerprint-platform=linux. Then in JS: (()=>{const gl=document.createElement('canvas').getContext('webgl');const e=gl.getExtension('WEBGL_debug_renderer_info');return gl.getParameter(e.UNMASKED_RENDERER_WEBGL);})()",
+        "expect": "Correctly-patched: an OpenGL/Mesa Linux renderer string starting with 'ANGLE (' and containing 'OpenGL 4.6' plus 'Mesa' or 'NVIDIA 535' (e.g. the Intel 'Mesa Intel(R) UHD Graphics 770 (RPL-S)...' string), with NO 'Direct3D11' substring, coherent with navigator.platform='Linux'. Unpatched / patch-lost: the same launch still returns a Windows 'ANGLE (... Direct3D11 ...)' renderer, contradicting platform=Linux."
+      }
+    },
+    "210-tls-network-persona.patch": {
+      "surface": "Shapes the TLS ClientHello's version-variant fields (post-quantum key-share group, ALPS codepoint, ECH GREASE) to match a claimed Chrome major so JA3/JA4 matches the persona's Chrome version instead of the build's, driven by --fingerprint-tls-profile in the network-service process.",
+      "windows_only": false,
+      "markers": [
+        "fingerprint-tls-profile",
+        "match-persona"
+      ],
+      "runtime": {
+        "surface": "TLS ClientHello supported_groups / key_share extension (JA3/JA4 fingerprint)",
+        "probe": "Launch additionally with --fingerprint-tls-profile=chrome-120, then from a page hit a TLS-reflection endpoint and read the offered groups, e.g. fetch('https://tls.peet.ws/api/all').then(r=>r.json()).then(j=>j.tls) and inspect the supported_groups extension (and JA4).",
+        "expect": "With chrome-120 the offered supported_groups contains ONLY X25519 (0x001d/29), secp256r1 (0x0017/23) and secp384r1 (0x0018/24) with NO post-quantum hybrid group (no X25519MLKEM768 0x11EC/4588 and no X25519Kyber768 0x6399/25497), and the key_share offers only X25519. A build that silently lost the patch instead claims its own build major (>=131) and offers X25519MLKEM768 (0x11EC) as the first group AND includes it as a key_share."
+      }
+    },
+    "900-windows-build-fixes.patch": {
+      "surface": "Windows-cross-build enabler only: makes the cross-compiled Windows chrome.exe/chrome.dll actually compile and link (routes .rc through rc/rc.py in tool_wrapper.py, sets clang_rt.builtins libname for is_win, defines the missing UIAutomationCore CLSID_CUIAutomationClientInfoSource so uuid.lib links, a",
+      "windows_only": true,
+      "markers": [],
+      "runtime": {
+        "surface": "Existence and launchability of the cross-compiled Windows chrome.exe/chrome.dll build artifact (this patch is a build-fix with no JS-observable stealth surface; its effect is that the Windows build compiles and links at all).",
+        "probe": "CLI: run the produced binary on Windows, e.g. `chrome.exe --headless=new --disable-gpu --dump-dom \"data:text/html,ok\"` (or `chrome.exe --version`).",
+        "expect": "The binary starts and prints nonempty DOM/version output and exits 0 — proving resources compiled through rc.py, clang_rt.builtins linked, and CLSID_CUIAutomationClientInfoSource resolved. Without this patch the Windows cross-build fails to link (undefined CLSID / rc.exe 'Must run on Windows' error), so no chrome.exe is produced and there is nothing to release — i.e. this patch cannot be silently lost while still yielding a runnable Windows build."
+      }
+    }
+  }
+}
