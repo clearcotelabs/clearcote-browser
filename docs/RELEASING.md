@@ -134,8 +134,9 @@ python3 scripts/verify_patches.py \
 > The same gate runs automatically at build time in [`scripts/01-apply-patches.sh`](../scripts/01-apply-patches.sh)
 > (Layer 1, right after applying — a silent reject aborts before compiling) and in CI
 > ([`.github/workflows/patch-integrity.yml`](../.github/workflows/patch-integrity.yml): Layer 0
-> on every push, Layer 2 against the pinned release binary). This §4a run is the human-gated
-> release checkpoint that ties both to the exact artifact you are about to sign.
+> on every push; Layer 2 against the pinned release binary is an on-demand post-release check).
+> This §4a run is the human-gated release checkpoint that ties both to the exact artifact you are
+> about to sign.
 
 ---
 

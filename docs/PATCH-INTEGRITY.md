@@ -70,9 +70,13 @@ what forces the standard to stay honest as patches are added:
    staged `chrome.dll`) as a mandatory step. Layer 1 here proves the *committed* patch set
    reproduces the built tree; Layer 2 proves that tree's code is in the artifact being signed.
 3. **CI** — [`.github/workflows/patch-integrity.yml`](../.github/workflows/patch-integrity.yml)
-   runs Layer 0 on every push (integrity + manifest completeness, no tree needed) and Layer 2
-   against the pinned release binary, so a release can't be published with a marker missing from
-   the artifact.
+   runs Layer 0 on every push/PR (integrity + manifest completeness, no tree needed). Layer 2
+   against the pinned release binary is an **on-demand** job (the "Run workflow" button, on a
+   Windows runner): dispatch it right after a release — when the pin matches the patch set — as a
+   post-publish check on the artifact users actually download. It is intentionally *not*
+   per-push, because between releases `patches/` runs ahead of the pin, so a marker for a
+   not-yet-released patch would be legitimately absent from the older pinned binary. The
+   authoritative *pre-publish* Layer 2 is §4a below, against the freshly-built binary.
 
 ## Adding a patch — the maintenance contract
 
