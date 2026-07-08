@@ -28,7 +28,7 @@
    const display::ScreenInfo& screen_info =
        frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
    int device_height = screen_info.rect.height();
-@@ -193,6 +200,8 @@
+@@ -193,12 +200,19 @@
  }
  
  float MediaValues::CalculateDevicePixelRatio(LocalFrame* frame) {
@@ -37,7 +37,18 @@
    return frame->DevicePixelRatio();
  }
  
-@@ -208,6 +217,8 @@
+ bool MediaValues::CalculateDeviceSupportsHDR(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
++  // clearcote persona: report the persona's dynamic-range coherently (mirrors
++  // CalculateColorGamut). Desktop personas default to SDR (closing a host-HDR
++  // leak); the OLED Android devices report high dynamic range.
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++    return ungoogled::CurrentPersona().dynamic_range_high;
+   return frame->GetPage()
+       ->GetChromeClient()
+       .GetScreenInfo(*frame)
+@@ -208,6 +222,8 @@
  int MediaValues::CalculateColorBitsPerComponent(LocalFrame* frame) {
    DCHECK(frame);
    DCHECK(frame->GetPage());
@@ -46,7 +57,7 @@
    const display::ScreenInfo& screen_info =
        frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
    if (screen_info.is_monochrome) {
-@@ -219,6 +230,8 @@
+@@ -219,6 +235,8 @@
  int MediaValues::CalculateMonochromeBitsPerComponent(LocalFrame* frame) {
    DCHECK(frame);
    DCHECK(frame->GetPage());
@@ -55,12 +66,15 @@
    const display::ScreenInfo& screen_info =
        frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
    if (!screen_info.is_monochrome) {
-@@ -353,20 +366,23 @@
+@@ -353,20 +371,31 @@
      LocalFrame* frame) {
    DCHECK(frame);
    DCHECK(frame->GetSettings());
 -  return frame->GetSettings()->GetPrimaryPointerType();
-+  // clearcote persona: Win desktop has a mouse -> fine pointer (anti-headless).
++  // clearcote persona: Win/Linux/mac desktop has a mouse -> fine pointer; the
++  // Android persona has a touchscreen -> coarse (else it contradicts touch).
++  if (ungoogled::CurrentPersona().pointer_coarse)
++    return mojom::blink::PointerType::kPointerCoarseType;
 +  return mojom::blink::PointerType::kPointerFineType;
  }
  
@@ -68,7 +82,10 @@
    DCHECK(frame);
    DCHECK(frame->GetSettings());
 -  return frame->GetSettings()->GetAvailablePointerTypes();
-+  // clearcote persona: non-touch desktop -> only the fine-pointer bit.
++  // clearcote persona: non-touch desktop -> fine-pointer bit; Android touch
++  // device -> coarse-pointer bit only (so (any-pointer:fine) is false).
++  if (ungoogled::CurrentPersona().pointer_coarse)
++    return static_cast<int>(mojom::blink::PointerType::kPointerCoarseType);
 +  return static_cast<int>(mojom::blink::PointerType::kPointerFineType);
  }
  
@@ -77,17 +94,22 @@
    DCHECK(frame);
    DCHECK(frame->GetSettings());
 -  return frame->GetSettings()->GetPrimaryHoverType();
-+  // clearcote persona: Win desktop with mouse hovers.
++  // clearcote persona: desktop mouse hovers; Android touchscreen -> hover:none.
++  if (ungoogled::CurrentPersona().hover_none)
++    return mojom::blink::HoverType::kHoverNone;
 +  return mojom::blink::HoverType::kHoverHoverType;
  }
  
  mojom::blink::OutputDeviceUpdateAbilityType
-@@ -379,12 +395,19 @@
+@@ -379,12 +408,22 @@
  int MediaValues::CalculateAvailableHoverTypes(LocalFrame* frame) {
    DCHECK(frame);
    DCHECK(frame->GetSettings());
 -  return frame->GetSettings()->GetAvailableHoverTypes();
-+  // clearcote persona: desktop with mouse -> hover bit only.
++  // clearcote persona: desktop mouse -> hover bit; Android touch -> none bit
++  // only (so (any-hover:hover) is false).
++  if (ungoogled::CurrentPersona().hover_none)
++    return static_cast<int>(mojom::blink::HoverType::kHoverNone);
 +  return static_cast<int>(mojom::blink::HoverType::kHoverHoverType);
  }
  
@@ -103,6 +125,42 @@
    const MediaFeatureOverrides* overrides =
        frame->GetPage()->GetMediaFeatureOverrides();
    std::optional<ColorSpaceGamut> override_value =
+--- a/third_party/blink/renderer/core/css/media_values_cached.cc
++++ b/third_party/blink/renderer/core/css/media_values_cached.cc
+@@ -4,13 +4,32 @@
+ 
+ #include "third_party/blink/renderer/core/css/media_values_cached.h"
+ 
++#include "components/ungoogled/persona_profile.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "ui/base/mojom/window_show_state.mojom-blink.h"
+ 
+ namespace blink {
+ 
+-MediaValuesCached::MediaValuesCachedData::MediaValuesCachedData() = default;
++MediaValuesCached::MediaValuesCachedData::MediaValuesCachedData() {
++  // clearcote: the frameless (default-constructed) MediaValues must match the
++  // active persona's input class so a parse-thread media query can't disagree
++  // with the frame path. Desktop keeps the header defaults (fine pointer /
++  // hover); the Android persona flips to coarse / none / HDR.
++  const ungoogled::PersonaProfile& persona = ungoogled::CurrentPersona();
++  if (persona.pointer_coarse) {
++    primary_pointer_type = mojom::blink::PointerType::kPointerCoarseType;
++    available_pointer_types =
++        static_cast<int>(mojom::blink::PointerType::kPointerCoarseType);
++  }
++  if (persona.hover_none) {
++    primary_hover_type = mojom::blink::HoverType::kHoverNone;
++    available_hover_types =
++        static_cast<int>(mojom::blink::HoverType::kHoverNone);
++  }
++  if (persona.dynamic_range_high)
++    device_supports_hdr = true;
++}
+ 
+ MediaValuesCached::MediaValuesCachedData::MediaValuesCachedData(
+     Document& document)
 --- a/third_party/blink/renderer/core/css/media_values_cached.h
 +++ b/third_party/blink/renderer/core/css/media_values_cached.h
 @@ -44,17 +44,21 @@

@@ -904,7 +904,7 @@
      case GL_IMPLEMENTATION_COLOR_READ_FORMAT:
        return GetIntParameter(script_state, pname);
      case GL_IMPLEMENTATION_COLOR_READ_TYPE:
-@@ -3971,25 +4215,43 @@
+@@ -3971,27 +4215,53 @@
      case GL_LINE_WIDTH:
        return GetFloatParameter(script_state, pname);
      case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
@@ -945,6 +945,8 @@
        return GetIntParameter(script_state, pname);
 -    case GL_MAX_VERTEX_UNIFORM_VECTORS:
 -      return GetIntParameter(script_state, pname);
+-    case GL_MAX_VIEWPORT_DIMS:
+-      return GetWebGLIntArrayParameter(script_state, pname);
 +    case GL_MAX_VERTEX_UNIFORM_VECTORS: {
 +      // clearcote persona: coherent GPU limit. ANGLE's skipVSConstantRegisterZero
 +      // workaround makes NVIDIA drivers report one fewer (4095), so match per-renderer.
@@ -953,10 +955,20 @@
 +        vuv -= 1;
 +      return WebGLAny(script_state, static_cast<GLint>(vuv));
 +    }
-     case GL_MAX_VIEWPORT_DIMS:
-       return GetWebGLIntArrayParameter(script_state, pname);
++    case GL_MAX_VIEWPORT_DIMS: {
++      // clearcote: MAX_VIEWPORT_DIMS is an ANGLE-backend constant (32767 on D3D11),
++      // independent of the physical GPU. Report the persona value instead of the real
++      // host GL so a SwiftShader/Mesa [8192,8192] never contradicts a claimed
++      // hardware/D3D11 renderer string (a getParameter-level render-vs-string tell).
++      const GLint dim =
++          static_cast<GLint>(ungoogled::CurrentPersona().webgl_max_viewport_dim);
++      const std::array<GLint, 2> vp_vals = {dim, dim};
++      return WebGLAny(script_state, DOMInt32Array::Create(base::span(vp_vals)));
++    }
      case GL_PACK_ALIGNMENT:
-@@ -4001,7 +4263,8 @@
+       return GetIntParameter(script_state, pname);
+     case GL_POLYGON_OFFSET_FACTOR:
+@@ -4001,7 +4271,8 @@
      case GL_POLYGON_OFFSET_UNITS:
        return GetFloatParameter(script_state, pname);
      case GL_RED_BITS:
@@ -966,7 +978,7 @@
      case GL_RENDERBUFFER_BINDING:
        return WebGLAny(script_state, renderbuffer_binding_.Get());
      case GL_RENDERER:
-@@ -4009,7 +4272,8 @@
+@@ -4009,7 +4280,8 @@
      case GL_SAMPLE_ALPHA_TO_COVERAGE:
        return GetBooleanParameter(script_state, pname);
      case GL_SAMPLE_BUFFERS:
@@ -976,7 +988,7 @@
      case GL_SAMPLE_COVERAGE:
        return GetBooleanParameter(script_state, pname);
      case GL_SAMPLE_COVERAGE_INVERT:
-@@ -4017,7 +4281,8 @@
+@@ -4017,7 +4289,8 @@
      case GL_SAMPLE_COVERAGE_VALUE:
        return GetFloatParameter(script_state, pname);
      case GL_SAMPLES:
@@ -986,7 +998,7 @@
      case GL_SCISSOR_BOX:
        return GetWebGLIntArrayParameter(script_state, pname);
      case GL_SCISSOR_TEST:
-@@ -4045,7 +4310,8 @@
+@@ -4045,7 +4318,8 @@
      case GL_STENCIL_BITS:
        if (!framebuffer_binding_ && !CreationAttributes().stencil)
          return WebGLAny(script_state, kIntZero);
@@ -996,7 +1008,7 @@
      case GL_STENCIL_CLEAR_VALUE:
        return GetIntParameter(script_state, pname);
      case GL_STENCIL_FAIL:
-@@ -4065,7 +4331,8 @@
+@@ -4065,7 +4339,8 @@
      case GL_STENCIL_WRITEMASK:
        return GetUnsignedIntParameter(script_state, pname);
      case GL_SUBPIXEL_BITS:
@@ -1006,7 +1018,7 @@
      case GL_TEXTURE_BINDING_2D:
        return WebGLAny(
            script_state,
-@@ -4101,6 +4368,27 @@
+@@ -4101,6 +4376,27 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedRendererWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
@@ -1034,7 +1046,7 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLRendererParam.Get()));
          return WebGLAny(script_state,
-@@ -4112,6 +4400,17 @@
+@@ -4112,6 +4408,17 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case WebGLDebugRendererInfo::kUnmaskedVendorWebgl:
        if (ExtensionEnabled(kWebGLDebugRendererInfoName)) {
@@ -1052,7 +1064,7 @@
          if (base::FeatureList::IsEnabled(blink::features::kSpoofWebGLInfo))
            return WebGLAny(script_state, String(blink::features::kSpoofWebGLVendorParam.Get()));
          return WebGLAny(script_state,
-@@ -4133,8 +4432,9 @@
+@@ -4133,8 +4440,9 @@
        return ScriptValue::CreateNull(script_state->GetIsolate());
      case GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT:  // EXT_texture_filter_anisotropic
        if (ExtensionEnabled(kEXTTextureFilterAnisotropicName)) {
@@ -1064,7 +1076,40 @@
        }
        SynthesizeGLError(
            GL_INVALID_ENUM, "getParameter",
-@@ -4438,6 +4738,15 @@
+@@ -4411,6 +4719,32 @@
+       return nullptr;
+   }
+ 
++  // clearcote: an Android (Mali/Adreno GLES) persona reports the mobile shader
++  // precision profile instead of the real desktop GPU's. Mediump/lowp float are
++  // true fp16 on mobile ([15,15] precision 10) vs the desktop's promoted highp
++  // ([127,127],23) -- a probed mediump-float precision of 10 is a mobile signal.
++  // Ints: highp [31,30]/0, mediump/lowp [15,14]/0. NOTE: string/limit-level only
++  // (rasterized pixels stay desktop); verify per-driver captures before ship.
++  if (ungoogled::CurrentPersona().mobile &&
++      !ungoogled::CurrentPersona().webgl_real) {
++    GLint r0 = 127, r1 = 127, p = 23;
++    switch (precision_type) {
++      case GL_HIGH_FLOAT:
++        r0 = 127; r1 = 127; p = 23; break;
++      case GL_MEDIUM_FLOAT:
++      case GL_LOW_FLOAT:
++        r0 = 15; r1 = 15; p = 10; break;
++      case GL_HIGH_INT:
++        r0 = 31; r1 = 30; p = 0; break;
++      case GL_MEDIUM_INT:
++      case GL_LOW_INT:
++        r0 = 15; r1 = 14; p = 0; break;
++      default:
++        break;
++    }
++    return MakeGarbageCollected<WebGLShaderPrecisionFormat>(r0, r1, p);
++  }
++
+   GLint range[2] = {0, 0};
+   GLint precision = 0;
+   ContextGL()->GetShaderPrecisionFormat(shader_type, precision_type, range,
+@@ -4438,6 +4772,15 @@
      }
    }
  
@@ -1080,7 +1125,7 @@
    return result;
  }
  
-@@ -4751,7 +5060,19 @@
+@@ -4751,7 +5094,19 @@
        ObjectOrZero(program), name.Utf8().c_str());
    if (uniform_location == -1)
      return nullptr;
@@ -1101,7 +1146,7 @@
  }
  
  ScriptValue WebGLRenderingContextBase::getVertexAttrib(
-@@ -4971,6 +5292,10 @@
+@@ -4971,6 +5326,10 @@
      return;
    }
  
@@ -1112,7 +1157,7 @@
    GLuint query = 0u;
    if (ExtensionEnabled(kKHRParallelShaderCompileName)) {
      ContextGL()->GenQueriesEXT(1, &query);
-@@ -5260,6 +5585,61 @@
+@@ -5260,6 +5619,61 @@
        return;
      }
      ContextGL()->ReadPixels(x, y, width, height, format, type, data);
@@ -1174,7 +1219,7 @@
    }
  }
  
-@@ -5371,6 +5751,10 @@
+@@ -5371,6 +5785,10 @@
      return;
    String ascii_string = ReplaceNonASCII(string).Result();
    shader->SetSource(string);
@@ -1185,7 +1230,7 @@
    DCHECK(ascii_string.Is8Bit() && ascii_string.ContainsOnlyAsciiOrEmpty());
    const GLchar* shader_data = base::as_chars(ascii_string.Span8()).data();
    const GLint shader_length = ascii_string.length();
-@@ -5673,6 +6057,11 @@
+@@ -5673,6 +6091,11 @@
                                   params.type, pixels);
        break;
    }
@@ -1197,7 +1242,7 @@
  }
  
  void WebGLRenderingContextBase::TexImageStaticBitmapImage(
-@@ -5949,6 +6338,33 @@
+@@ -5949,6 +6372,33 @@
      return;
    }
  
@@ -1231,7 +1276,7 @@
    ScopedUnpackParametersResetRestore temporary_reset_unpack(
        this, change_unpack_params);
    TexImageBase(params, data.data());
-@@ -6842,12 +7258,21 @@
+@@ -6842,12 +7292,21 @@
  void WebGLRenderingContextBase::texParameterf(GLenum target,
                                                GLenum pname,
                                                GLfloat param) {
@@ -1253,7 +1298,7 @@
    TexParameter(target, pname, 0, param, false);
  }
  
-@@ -7095,6 +7520,9 @@
+@@ -7095,6 +7554,9 @@
      return;
    }
  
@@ -1263,7 +1308,7 @@
    ContextGL()->Uniform1f(location->Location(), x);
  }
  
-@@ -7120,6 +7548,11 @@
+@@ -7120,6 +7582,11 @@
      return;
    }
  
@@ -1275,7 +1320,7 @@
    ContextGL()->Uniform1i(location->Location(), x);
  }
  
-@@ -7146,6 +7579,9 @@
+@@ -7146,6 +7613,9 @@
      return;
    }
  
@@ -1285,7 +1330,7 @@
    ContextGL()->Uniform2f(location->Location(), x, y);
  }
  
-@@ -7199,6 +7635,9 @@
+@@ -7199,6 +7669,9 @@
      return;
    }
  
@@ -1295,7 +1340,7 @@
    ContextGL()->Uniform3f(location->Location(), x, y, z);
  }
  
-@@ -7254,6 +7693,9 @@
+@@ -7254,6 +7727,9 @@
      return;
    }
  
@@ -1305,7 +1350,7 @@
    ContextGL()->Uniform4f(location->Location(), x, y, z, w);
  }
  
-@@ -7337,6 +7779,18 @@
+@@ -7337,6 +7813,18 @@
                                         v, 16, 0, v.size(), &data, &length)) {
      return;
    }
@@ -1324,7 +1369,7 @@
    ContextGL()->UniformMatrix4fv(location->Location(), length, transpose, data);
  }
  
-@@ -7348,6 +7802,10 @@
+@@ -7348,6 +7836,10 @@
      return;
    }
  
@@ -1335,7 +1380,7 @@
    if (current_program_ != program) {
      if (current_program_)
        current_program_->OnDetached(ContextGL());
-@@ -7477,6 +7935,12 @@
+@@ -7477,6 +7969,12 @@
      return;
    }
  
@@ -1348,7 +1393,7 @@
    bound_vertex_array_object_->SetArrayBufferForAttrib(
        index, bound_array_buffer_.Get());
    ContextGL()->VertexAttribPointer(
-@@ -7504,6 +7968,9 @@
+@@ -7504,6 +8002,9 @@
                                           GLsizei height) {
    if (isContextLost())
      return;

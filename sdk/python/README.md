@@ -273,7 +273,7 @@ All optional. Anything not listed here is passed straight through to Playwright
 | Kwarg | Switch | Meaning |
 |---|---|---|
 | `fingerprint` | `--fingerprint` | Master seed (per-eTLD+1 farbling root). `str` or `int`. |
-| `platform` | `--fingerprint-platform` | `"windows"` \| `"linux"` \| `"macos"`. |
+| `platform` | `--fingerprint-platform` | `"windows"` \| `"linux"` \| `"macos"` \| `"android"` (best-effort mobile persona). |
 | `platform_version` | `--fingerprint-platform-version` | UA-CH platform version. |
 | `brand` | `--fingerprint-brand` | `"Chrome"` \| `"Edge"` \| `"Opera"` \| `"Vivaldi"`. |
 | `brand_version` | `--fingerprint-brand-version` | Brand version. |
@@ -295,6 +295,43 @@ All optional. Anything not listed here is passed straight through to Playwright
 > **Headed launches** default to `no_viewport=True` so `window.innerWidth` tracks the real OS window — an emulated `1280×720` on a real window is an impossible-window tell. Pass an explicit `viewport` to override.
 >
 > **Proxies:** a `socks5://user:pass@host:port` proxy is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor). Chromium can't authenticate SOCKS5, so the credentials are dropped with a warning — put the auth on a local relay.
+
+## Personas & Client Hints coherence
+
+A persona's Client Hints are coherent across **JavaScript and HTTP by construction** — clearcote rewrites a single `blink::UserAgentMetadata` (brand list, full-version list, platform, mobile, arch/bitness) that feeds *both* the browser path that attaches the `Sec-CH-UA*` request headers **and** the renderer path that builds `navigator.userAgentData`. There aren't two sides to keep in sync; they read the same source. So `getHighEntropyValues(['fullVersionList', …])` in JS matches `Sec-CH-UA-Full-Version-List` on the wire, `userAgentData.platform` matches `Sec-CH-UA-Platform`, and so on.
+
+**Chrome — the default and the recommendation** (most coherent: clearcote *is* Chromium, so the claim matches the engine's real behavior):
+
+```python
+browser = launch(fingerprint="p1")   # brand defaults to Chrome; platform defaults to the host OS
+# HTTP:  sec-ch-ua: "Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="…"
+#        sec-ch-ua-mobile: ?0    sec-ch-ua-platform: "Windows"
+# JS:    navigator.userAgentData.brands == that same list; mobile=False; platform="Windows"
+```
+
+**Edge** — a coherent Edge string surface (UA + UA-CH), for targets that specifically expect the Edge brand:
+
+```python
+browser = launch(fingerprint="p1", brand="Edge")
+# UA:    …Chrome/149.0.0.0 Safari/537.36 Edg/149.0.0.0
+# HTTP:  sec-ch-ua: "Microsoft Edge";v="149", "Chromium";v="149", "Not)A;Brand";v="…"
+#        sec-ch-ua-full-version-list: "Microsoft Edge";v="149.0.3650.65", "Chromium";v="149.0.7827.114", …
+# JS:    userAgentData.brands include "Microsoft Edge"; getHighEntropyValues(['fullVersionList'])
+#        carries that same distinct Edge build — JS and HTTP identical, from one metadata.
+```
+
+`brand` (`"Chrome"` \| `"Edge"` \| `"Opera"` \| `"Vivaldi"`) is a **string-level** persona: it changes the UA + UA-CH brand, but the engine still behaves like Chromium. Chrome is the most coherent default (nothing to contradict); reach for `brand="Edge"` only when a target expects it. If you also set `brand_version` to an older major, the network `tls_profile` (default `match-persona`) shifts the TLS shape to that major while the JS engine stays at the build version — so **Chrome ≈ the build version, everything aligned** is the strongest persona.
+
+**Android** — a best-effort mobile persona (seed-selected Pixel/Galaxy):
+
+```python
+browser = launch(fingerprint="p1", platform="android")   # auto-sets a phone --window-size
+# UA:    …(Linux; Android 10; K) … Chrome/149.0.0.0 Mobile Safari/537.36
+# JS/HTTP: sec-ch-ua-mobile: ?1, platform="Android", model + platformVersion; maxTouchPoints=5,
+#          pointer:coarse / hover:none, mobile screen + DPR, Mali/Adreno WebGL, plugins=0.
+```
+
+Android is **best-effort on a desktop engine**: the JS/header surface is coherent, but the GPU *render* and fine page geometry (`innerWidth` floors at ~500px) stay desktop — documented residual tells. Pair with `canvas_bridge` for render coherence.
 
 ## Saved profiles (`Profile`)
 

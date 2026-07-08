@@ -53,6 +53,21 @@ else
   find "$STAGE" -type f \( -name '*.so' -o -name '*.so.*' \) -exec strip {} \; 2>/dev/null || true
   chmod 0755 "$STAGE/chrome" "$STAGE/chrome-sandbox" "$STAGE/chrome_crashpad_handler"
   find "$STAGE" -type f \( -name '*.pak' -o -name '*.dat' -o -name '*.bin' -o -name '*.json' \) -exec chmod 0644 {} +
+  # Bundle the metric-compatible font clones + the self-contained fontconfig template. The SDK
+  # points FONTCONFIG_FILE at it on Linux launch so Segoe UI/Arial/Times/... resolve to their
+  # clones on bare servers/containers (no host fonts). See assets/fonts/ATTRIBUTION.md.
+  FONTS_SRC="${FONTS_SRC:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/assets/fonts}"
+  if [ -d "$FONTS_SRC" ] && ls "$FONTS_SRC"/*.ttf >/dev/null 2>&1; then
+    mkdir -p "$STAGE/fonts"
+    # .ttf + .otf (Comic Neue / Inconsolata ship as OpenType/CFF; fontconfig reads both)
+    cp -a "$FONTS_SRC"/*.ttf "$FONTS_SRC/fonts.conf.template" "$STAGE/fonts/"
+    ls "$FONTS_SRC"/*.otf >/dev/null 2>&1 && cp -a "$FONTS_SRC"/*.otf "$STAGE/fonts/"
+    [ -e "$FONTS_SRC/ATTRIBUTION.md" ] && cp -a "$FONTS_SRC/ATTRIBUTION.md" "$STAGE/fonts/"
+    find "$STAGE/fonts" -type f -exec chmod 0644 {} +
+    echo "  bundled $(ls "$STAGE/fonts"/*.ttf "$STAGE/fonts"/*.otf 2>/dev/null | wc -l) font clones + fonts.conf.template"
+  else
+    echo "WARN: $FONTS_SRC has no fonts — NOT bundled; Segoe UI/Arial may be absent on bare Linux."
+  fi
   rm -f "$DIST/$ASSET"
   ( cd "$STAGE" && tar --sort=name --owner=root:0 --group=root:0 --mtime=@0 -cf - . ) | xz -9 -T0 > "$DIST/$ASSET"
   INNER="chrome"

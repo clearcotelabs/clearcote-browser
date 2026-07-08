@@ -1,0 +1,61 @@
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<!--
+  clearcote self-contained font configuration (ships with the Linux release).
+
+  The SDK substitutes @FONTS_DIR@ / @CACHE_DIR@ at launch and points FONTCONFIG_FILE
+  at the result. It is DELIBERATELY self-contained (it does NOT <include> the host's
+  /etc/fonts) so that on a bare Docker/server image — where the Windows families and
+  even the standard metric-alias rules are absent — a page asking for "Segoe UI" /
+  "Arial" / "Times New Roman" still renders with the bundled metric-compatible clone
+  instead of collapsing to a single default (which is what made Segoe UI go absent).
+-->
+<fontconfig>
+  <dir>@FONTS_DIR@</dir>
+  <cachedir>@CACHE_DIR@</cachedir>
+
+  <!-- Windows family -> bundled metric-compatible clone (force so the requested family
+       renders with the clone's metrics; binding="strong" wins over weak fallbacks). -->
+
+  <!-- sans: Arial family -> Arimo -->
+  <match target="pattern"><test name="family"><string>Arial</string></test><edit name="family" mode="assign" binding="strong"><string>Arimo</string></edit></match>
+  <match target="pattern"><test name="family"><string>Helvetica</string></test><edit name="family" mode="assign" binding="strong"><string>Arimo</string></edit></match>
+  <!-- Segoe UI -> Selawik (the key fix; non-standard alias, must be explicit) -->
+  <match target="pattern"><test name="family"><string>Segoe UI</string></test><edit name="family" mode="assign" binding="strong"><string>Selawik</string></edit></match>
+  <!-- Calibri -> Carlito -->
+  <match target="pattern"><test name="family"><string>Calibri</string></test><edit name="family" mode="assign" binding="strong"><string>Carlito</string></edit></match>
+  <!-- distinct metric-compatible clones: each a DIFFERENT advance width, so a reference-free
+       equality check like width(Verdana)==width(Arial) no longer fires (that was a real tell).
+       Mirrors the engine's MetricCompatibleSubstitute map; belt-and-suspenders for any request
+       that reaches fontconfig with the raw Windows family name. -->
+  <match target="pattern"><test name="family"><string>Verdana</string></test><edit name="family" mode="assign" binding="strong"><string>DejaVu Sans</string></edit></match>
+  <match target="pattern"><test name="family"><string>Tahoma</string></test><edit name="family" mode="assign" binding="strong"><string>DejaVu Sans Condensed</string></edit></match>
+  <match target="pattern"><test name="family"><string>Trebuchet MS</string></test><edit name="family" mode="assign" binding="strong"><string>Comic Neue</string></edit></match>
+  <match target="pattern"><test name="family"><string>Comic Sans MS</string></test><edit name="family" mode="assign" binding="strong"><string>Noto Sans</string></edit></match>
+  <match target="pattern"><test name="family"><string>Impact</string></test><edit name="family" mode="assign" binding="strong"><string>Anton</string></edit></match>
+
+  <!-- serif: Times New Roman -> Tinos, Cambria -> Caladea, Georgia -> Gelasio -->
+  <match target="pattern"><test name="family"><string>Times New Roman</string></test><edit name="family" mode="assign" binding="strong"><string>Tinos</string></edit></match>
+  <match target="pattern"><test name="family"><string>Times</string></test><edit name="family" mode="assign" binding="strong"><string>Tinos</string></edit></match>
+  <match target="pattern"><test name="family"><string>Cambria</string></test><edit name="family" mode="assign" binding="strong"><string>Caladea</string></edit></match>
+  <match target="pattern"><test name="family"><string>Georgia</string></test><edit name="family" mode="assign" binding="strong"><string>Gelasio</string></edit></match>
+
+  <!-- mono: Courier New -> Cousine (exact); Consolas -> Inconsolata (distinct mono, so it no
+       longer collapses onto Courier's width — the residual is Consolas's absolute width, since
+       no open mono clone matches it exactly). -->
+  <match target="pattern"><test name="family"><string>Courier New</string></test><edit name="family" mode="assign" binding="strong"><string>Cousine</string></edit></match>
+  <match target="pattern"><test name="family"><string>Courier</string></test><edit name="family" mode="assign" binding="strong"><string>Cousine</string></edit></match>
+  <match target="pattern"><test name="family"><string>Consolas</string></test><edit name="family" mode="assign" binding="strong"><string>Inconsolata</string></edit></match>
+
+  <!-- CSS generics resolve to bundled clones so a bare machine still renders sans/serif/mono -->
+  <alias><family>sans-serif</family><prefer><family>Arimo</family></prefer></alias>
+  <alias><family>serif</family><prefer><family>Tinos</family></prefer></alias>
+  <alias><family>monospace</family><prefer><family>Cousine</family></prefer></alias>
+
+  <!-- typical Linux desktop rendering defaults (coherent hinting/AA rather than fontconfig bare) -->
+  <match target="font"><edit name="antialias" mode="assign"><bool>true</bool></edit></match>
+  <match target="font"><edit name="hinting" mode="assign"><bool>true</bool></edit></match>
+  <match target="font"><edit name="hintstyle" mode="assign"><const>hintslight</const></edit></match>
+  <match target="font"><edit name="rgba" mode="assign"><const>rgb</const></edit></match>
+  <match target="font"><edit name="lcdfilter" mode="assign"><const>lcddefault</const></edit></match>
+</fontconfig>

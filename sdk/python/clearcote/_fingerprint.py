@@ -141,6 +141,38 @@ def resolve_tls_profile(value, opts):
     return None
 
 
+# Primary Accept-Language tag -> a plausible IANA timezone, so the default persona's timezone is
+# coherent with its locale instead of leaking the host's (often UTC on servers/containers). Not
+# geo-truth — set geoip=True (resolve the proxy exit-IP) or an explicit timezone= for accuracy.
+_LOCALE_TZ = {
+    "en-US": "America/New_York", "en-CA": "America/Toronto", "en-GB": "Europe/London",
+    "en-AU": "Australia/Sydney", "en-NZ": "Pacific/Auckland", "en-IE": "Europe/Dublin",
+    "de-DE": "Europe/Berlin", "de-AT": "Europe/Vienna", "fr-FR": "Europe/Paris",
+    "es-ES": "Europe/Madrid", "es-MX": "America/Mexico_City", "it-IT": "Europe/Rome",
+    "nl-NL": "Europe/Amsterdam", "pt-BR": "America/Sao_Paulo", "pt-PT": "Europe/Lisbon",
+    "pl-PL": "Europe/Warsaw", "sv-SE": "Europe/Stockholm", "ja-JP": "Asia/Tokyo",
+    "ko-KR": "Asia/Seoul", "zh-CN": "Asia/Shanghai", "zh-TW": "Asia/Taipei",
+    "ru-RU": "Europe/Moscow", "tr-TR": "Europe/Istanbul", "ar-SA": "Asia/Riyadh",
+    "hi-IN": "Asia/Kolkata", "id-ID": "Asia/Jakarta",
+}
+
+
+def _default_timezone(primary_lang):
+    """A plausible IANA timezone for a primary Accept-Language tag (``en-US`` -> ``America/New_York``),
+    so the default persona's timezone is coherent with its locale rather than leaking the host's UTC.
+    Falls back by language subtag, then to America/New_York (matching the en-US Accept-Language default)."""
+    if not primary_lang:
+        return None
+    tag = primary_lang.strip()
+    if tag in _LOCALE_TZ:
+        return _LOCALE_TZ[tag]
+    lang = tag.split("-")[0].lower()
+    for key, tz in _LOCALE_TZ.items():
+        if key.lower().startswith(lang + "-"):
+            return tz
+    return "America/New_York"
+
+
 def fingerprint_args(opts):
     """Build the Chromium switches for a dict of fingerprint options."""
     args = []
@@ -177,6 +209,13 @@ def fingerprint_args(opts):
     primary_lang = clean_lang.split(",")[0]
     if primary_lang:
         args.append(f"--lang={primary_lang}")
+    # Default the timezone to one coherent with the persona locale when none is set (and geoip didn't
+    # resolve one), so a server/container run doesn't leak the host's UTC (a datacenter tell) while
+    # navigator.language says e.g. en-US. geoip=True or an explicit timezone= override this.
+    if not opts.get("timezone"):
+        default_tz = _default_timezone(primary_lang)
+        if default_tz:
+            args.append(f"--timezone={default_tz}")
     # disable_gpu_fingerprint=True presents the machine's REAL GPU instead of a spoofed one: WebGL
     # UNMASKED_VENDOR/RENDERER, the getParameter table, and the canvas/WebGL render all report the
     # genuine host backend. The most coherent setting vs strict tampering classifiers — the GPU
@@ -229,4 +268,11 @@ def fingerprint_args(opts):
     tls_switch = resolve_tls_profile(opts.get("tls_profile", "match-persona"), opts)
     if tls_switch:
         args.append(f"--fingerprint-tls-profile={tls_switch}")
+    # platform="android" is a best-effort MOBILE persona (Android UA + Sec-CH-UA-Mobile, touch,
+    # pointer:coarse, mobile screen/DPR, Mali/Adreno WebGL, plugins=0, mobile viewport). The mobile
+    # viewport needs a phone-sized window (Chromium's ~500px min width floor still applies); auto-set
+    # one — a caller-supplied --window-size (in args) overrides it. On a desktop engine the GPU
+    # render + fine geometry stay desktop (documented residual tells); pair with canvas_bridge.
+    if opts.get("platform") == "android":
+        args.append("--window-size=412,915")
     return args

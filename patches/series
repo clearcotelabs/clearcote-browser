@@ -27,7 +27,5 @@
 170-speech-voices.patch
 180-geolocation.patch
 200-agent-and-humanized-input.patch
-201-linux-agent-base-switches.patch
-202-linux-persona-coherence.patch
 210-tls-network-persona.patch
 900-windows-build-fixes.patch

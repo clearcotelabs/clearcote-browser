@@ -38,6 +38,7 @@ import {
 import { RELEASE, platformRelease } from "./release.js";
 import { fetchWidevine, seedWidevine, widevineArgs } from "./widevine.js";
 import { emitCoherenceWarnings } from "./warnings.js";
+import { fontLaunchEnv } from "./fonts.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
@@ -225,12 +226,15 @@ export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
   const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
+  // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …).
+  const launchEnv = fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env);
   const browser = await winAvRetry((exePath) => chromium.launch({
     // Drop Playwright's default --enable-automation so the engine's AutomationControlled feature
     // stays off (it flips webdriver-adjacent tells). Caller can override via ignoreDefaultArgs.
     ignoreDefaultArgs: ["--enable-automation"],
     ...(pwOptions as PlaywrightLaunchOptions),
     executablePath: exePath,
+    ...(launchEnv ? { env: launchEnv } : {}),
     args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined),
   }), exe);
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
@@ -286,10 +290,12 @@ export async function launchPersistentContext(
   delete (opts as Record<string, unknown>).ignoreDefaultArgs;  // passed explicitly below
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
+  const ctxEnv = fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env);
   const context = await winAvRetry((exePath) => chromium.launchPersistentContext(userDataDir, {
     ...opts,
     ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
     executablePath: exePath,
+    ...(ctxEnv ? { env: ctxEnv } : {}),
     args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined),
   }), exe);
   installHumanizeOnContext(context, { humanize, showCursor });

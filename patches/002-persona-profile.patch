@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.cc
-@@ -0,0 +1,592 @@
+@@ -0,0 +1,748 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -133,6 +133,38 @@
 +      "ANGLE (AMD, AMD Radeon(TM) Graphics (0x000015D8) Direct3D11 vs_5_0 "
 +      "ps_5_0, D3D11)"},
 +     0.15},
++}};
++
++// clearcote: Android device table. Each row is an ATOMIC, mutually-consistent
++// phone profile -- model, Android version, portrait screen + DPR, GPU IHV +
++// ANGLE-wrapped GLES renderer, and color gamut are drawn TOGETHER so no surface
++// can contradict another (e.g. a Pixel model never pairs with an Adreno string).
++// Seed-weighted: Pixel 7 0.50, Galaxy S23 0.30, Galaxy A54 0.20. All three are
++// OLED P3 (color-gamut:p3, dynamic-range:high).
++struct AndroidDevice {
++  const char* model;             // UA-CH model, e.g. "Pixel 7"
++  const char* platform_version;  // UA-CH platformVersion, e.g. "14.0.0"
++  int screen_w;                  // CSS px (portrait)
++  int screen_h;
++  double dpr;                    // devicePixelRatio
++  int max_touch;                 // navigator.maxTouchPoints
++  int hc;                        // hardwareConcurrency
++  int mem_gb;                    // deviceMemory (clamped to 8)
++  const char* gl_vendor;         // WebGL UNMASKED_VENDOR_WEBGL
++  const char* gl_renderer;       // WebGL UNMASKED_RENDERER_WEBGL (ANGLE-wrapped)
++  int gl_max_texture_size;       // GL_MAX_TEXTURE_SIZE (flagship 16384, mid 8192)
++  const char* color_gamut;       // CSS color-gamut
++};
++constexpr std::array<WeightedEntry<AndroidDevice>, 3> kAndroidDevices = {{
++    {{"Pixel 7", "14.0.0", 412, 915, 2.625, 5, 8, 8, "Google Inc. (ARM)",
++      "ANGLE (ARM, Mali-G710, OpenGL ES 3.2)", 16384, "p3"},
++     0.50},
++    {{"SM-S911B", "14.0.0", 360, 780, 3.0, 5, 8, 8, "Google Inc. (Qualcomm)",
++      "ANGLE (Qualcomm, Adreno (TM) 740, OpenGL ES 3.2)", 16384, "p3"},
++     0.30},
++    {{"SM-A546B", "14.0.0", 412, 892, 2.625, 5, 8, 8, "Google Inc. (ARM)",
++      "ANGLE (ARM, Mali-G68 MC4, OpenGL ES 3.2)", 8192, "p3"},
++     0.20},
 +}};
 +
 +// Parse the persona seed from the existing --fingerprint switch. Numeric values
@@ -406,6 +438,55 @@
 +
 +}  // namespace
 +
++// clearcote: Linux (ANGLE-over-GL / Mesa) renderer equivalents of the Windows GPU pool, so a
++// Linux persona reports an OpenGL/Mesa UNMASKED_RENDERER instead of a Windows-only Direct3D11
++// string (which would contradict navigator.platform=Linux).
++std::string LinuxWebGLRenderer(const std::string& vendor) {
++  if (vendor.find("NVIDIA") != std::string::npos)
++    return "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.6.0 NVIDIA 535.146.02)";
++  if (vendor.find("AMD") != std::string::npos || vendor.find("Radeon") != std::string::npos)
++    return "ANGLE (AMD, AMD Radeon Graphics (radeonsi, raphael_mendocino, LLVM 15.0.7, DRM 3.54, "
++           "6.5.0-generic), OpenGL 4.6 (Core Profile) Mesa 23.2.1-1ubuntu3.1~22.04.2)";
++  return "ANGLE (Intel, Mesa Intel(R) UHD Graphics 770 (RPL-S), OpenGL 4.6 (Core Profile) "
++         "Mesa 23.2.1-1ubuntu3.1~22.04.2)";
++}
++
++template <typename Rng>
++std::vector<PersonaProfile::MediaDevice> LinuxMediaDevices(Rng& rng) {
++  const std::string grp = "cc-grp-" + base::NumberToString(rng());
++  const std::string mic = "cc-mic-" + base::NumberToString(rng());
++  const std::string spk = "cc-spk-" + base::NumberToString(rng());
++  const std::string mon = "cc-mon-" + base::NumberToString(rng());
++  // PulseAudio/PipeWire enumeration: a 'default' + one physical codec per direction, plus the
++  // characteristic Linux monitor source. No Windows 'Communications -' endpoint / Realtek codec.
++  return {
++      {"audioinput", "Default", "default", grp},
++      {"audioinput", "Built-in Audio Analog Stereo", mic, grp},
++      {"audioinput", "Monitor of Built-in Audio Analog Stereo", mon, grp},
++      {"audiooutput", "Default", "default", grp},
++      {"audiooutput", "Built-in Audio Analog Stereo", spk, grp},
++  };
++}
++
++// clearcote: Android enumerateDevices() roster -- a default mic + speaker plus a
++// back/front camera pair with the real Chrome-on-Android "camera2 N, facing ..."
++// label format. No Windows Realtek/Communications endpoints. Raw ids are seed-
++// derived; the per-origin HMAC hashes them and blanks labels pre-permission.
++template <typename Rng>
++std::vector<PersonaProfile::MediaDevice> AndroidMediaDevices(Rng& rng) {
++  const std::string agrp = "cc-agrp-" + base::NumberToString(rng());
++  const std::string cam_b = "cc-cam-" + base::NumberToString(rng());
++  const std::string cam_f = "cc-cam-" + base::NumberToString(rng());
++  const std::string cgrp_b = "cc-cgrp-" + base::NumberToString(rng());
++  const std::string cgrp_f = "cc-cgrp-" + base::NumberToString(rng());
++  return {
++      {"audioinput", "Default", "default", agrp},
++      {"audiooutput", "Default", "default", agrp},
++      {"videoinput", "camera2 0, facing back", cam_b, cgrp_b},
++      {"videoinput", "camera2 1, facing front", cam_f, cgrp_f},
++  };
++}
++
 +PersonaProfile DerivePersona(uint64_t seed) {
 +  // SplitMix64 decorrelates weak seeds (1, 2, 3 otherwise produce visibly
 +  // similar mt19937_64 streams).
@@ -544,6 +625,72 @@
 +  // clearcote: an explicit --fingerprint-gpu-vendor/-renderer overrides the seed-/profile-
 +  // derived GPU (precedence: switch > imported profile > seed); WebGL getParameter reads these.
 +  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  // clearcote: the seed/profile persona defaults are Windows-shaped (ANGLE/D3D11 GPU, Microsoft
++  // SAPI voices, Realtek/WASAPI audio devices). On a Linux persona, swap each to its coherent
++  // Linux form so no field contradicts platform=Linux. Only rewrite a still-Windows default (an
++  // imported Linux/mac profile is left intact); an explicit --fingerprint-gpu-renderer wins below.
++  if (cmd->HasSwitch(switches::kFingerprintPlatform) &&
++      cmd->GetSwitchValueASCII(switches::kFingerprintPlatform) == "linux") {
++    if (p.webgl_renderer.find("Direct3D") != std::string::npos)
++      p.webgl_renderer = LinuxWebGLRenderer(p.webgl_vendor);
++    // A real Chrome-on-Linux with no speech-dispatcher reports getVoices()==[]; never Windows
++    // SAPI names. Empty is a common, coherent Linux state; drop only the Windows default.
++    if (!p.voices.empty() && p.voices.front().name.rfind("Microsoft", 0) == 0)
++      p.voices.clear();
++    // enumerateDevices: Pulse/PipeWire shape (no Windows 'Communications -' endpoint / Realtek).
++    if (!p.media_devices.empty() &&
++        p.media_devices.front().label.find("Realtek") != std::string::npos)
++      p.media_devices = LinuxMediaDevices(rng);
++  }
++  // clearcote: Android persona. Unlike linux (which rewrites only GPU/voices/
++  // devices and keeps the Windows screen/pointer/touch), android inverts the
++  // desktop shape structurally, so it overwrites screen/DPR/mobile/touch/GPU +
++  // the GLES limit table from one atomic device row.
++  if (cmd->HasSwitch(switches::kFingerprintPlatform) &&
++      cmd->GetSwitchValueASCII(switches::kFingerprintPlatform) == "android") {
++    const AndroidDevice& dev = WeightedPick(rng, kAndroidDevices);
++    // Portrait screen; Android reports availWidth/Height == the full screen.
++    p.screen_width = dev.screen_w;
++    p.screen_height = dev.screen_h;
++    p.avail_screen_width = dev.screen_w;
++    p.avail_screen_height = dev.screen_h;
++    p.color_depth = 24;
++    p.device_pixel_ratio = dev.dpr;
++    p.mobile = true;
++    p.max_touch_points = dev.max_touch;
++    p.pointer_coarse = true;
++    p.hover_none = true;
++    p.orientation_type = "portrait-primary";
++    p.orientation_angle = 0;
++    p.dynamic_range_high = true;
++    p.hardware_concurrency = dev.hc;
++    p.device_memory_gb = static_cast<float>(dev.mem_gb);
++    p.webgl_vendor = dev.gl_vendor;
++    p.webgl_renderer = dev.gl_renderer;
++    p.android_model = dev.model;
++    p.android_platform_version = dev.platform_version;
++    p.css_color_gamut = dev.color_gamut;
++    // Mobile GLES 3.2 getParameter limit table (WebGL getParameter reads these).
++    // NOTE: raises the bar but does NOT change rendered pixels (still desktop GPU
++    // / SwiftShader). Values are common mobile-GLES; verify vs a real-device
++    // capture before ship (see report).
++    p.webgl_max_texture_size = dev.gl_max_texture_size;
++    p.webgl_max_cube_map_texture_size = dev.gl_max_texture_size;
++    p.webgl_max_renderbuffer_size = dev.gl_max_texture_size;
++    p.webgl_max_viewport_dim = dev.gl_max_texture_size;
++    p.webgl_max_vertex_uniform_vectors = 1024;
++    p.webgl_max_fragment_uniform_vectors = 1024;
++    p.webgl_max_varying_vectors = 31;
++    p.webgl_max_combined_texture_image_units = 96;
++    p.webgl_max_samples = 4;
++    p.webgl_max_uniform_buffer_bindings = 24;
++    // TTS: a Chrome-on-Android with no bound local engine reports getVoices()==[]
++    // (mirror the linux fix); never leak the Windows SAPI default.
++    if (!p.voices.empty() && p.voices.front().name.rfind("Microsoft", 0) == 0)
++      p.voices.clear();
++    // enumerateDevices: phone-shaped roster.
++    p.media_devices = AndroidMediaDevices(rng);
++  }
 +  if (cmd->HasSwitch(switches::kFingerprintGpuVendor))
 +    p.webgl_vendor = cmd->GetSwitchValueASCII(switches::kFingerprintGpuVendor);
 +  if (cmd->HasSwitch(switches::kFingerprintGpuRenderer))
@@ -572,6 +719,15 @@
 +               p.webgl_vendor.find("ATI") != std::string::npos ||
 +               p.webgl_vendor.find("Radeon") != std::string::npos) {
 +      cc_v = "amd"; cc_a = "rdna2";
++    } else if (p.webgl_vendor.find("ARM") != std::string::npos ||
++               p.webgl_vendor.find("Mali") != std::string::npos) {
++      // clearcote: Android Mali persona -> ARM Valhall (Mali-G710/G68), so
++      // navigator.gpu stays coherent with the WebGL ARM string instead of
++      // falling through to "intel" (a direct contradiction).
++      cc_v = "arm"; cc_a = "valhall";
++    } else if (p.webgl_vendor.find("Qualcomm") != std::string::npos ||
++               p.webgl_vendor.find("Adreno") != std::string::npos) {
++      cc_v = "qualcomm"; cc_a = "adreno";
 +    } else {
 +      cc_v = "intel"; cc_a = "gen-12-lp";
 +    }
@@ -595,7 +751,7 @@
 +}  // namespace ungoogled
 --- /dev/null
 +++ b/components/ungoogled/persona_profile.h
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,207 @@
 +// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -622,8 +778,11 @@
 +// across the browser process and every renderer in the session (the seed is
 +// forwarded to all child processes), so no surface can contradict another.
 +//
-+// Windows-only by design: clearcote ships a Windows binary, so every persona
-+// claims Windows. There is deliberately no OS-family switch.
++// OS-family divergence is a supported, deliberate axis: --fingerprint-platform
++// selects windows/linux/macos/android, and DerivePersona() fixes up the OS-
++// specific fields (WebGL renderer, voices, media devices, and -- for android --
++// screen/DPR/touch/pointer/mobile) so the whole persona stays coherent for the
++// claimed OS. The struct defaults are Windows-shaped; other platforms override.
 +struct COMPONENT_EXPORT(UNGOOGLED) PersonaProfile {
 +  // SplitMix64-mixed seed, kept so downstream per-seed routines can mix it in.
 +  uint64_t persona_seed = 0;
@@ -651,6 +810,21 @@
 +  int avail_screen_height = 1040;  // minus a realistic Windows taskbar
 +  unsigned color_depth = 24;
 +  double device_pixel_ratio = 1.0;
++
++  // ---- Mobile / touch / orientation (Android persona). Desktop-safe defaults
++  // so windows/linux/macos are entirely unaffected. ----
++  bool mobile = false;               // Mobile UA token + UA-CH mobile bit + web-prefs
++  int max_touch_points = 0;          // navigator.maxTouchPoints (5 on phones)
++  bool pointer_coarse = false;       // CSS (pointer/any-pointer:coarse) when true
++  bool hover_none = false;           // CSS (hover/any-hover:none) when true
++  const char* orientation_type = "landscape-primary";  // "portrait-primary" on phones
++  int orientation_angle = 0;         // screen.orientation.angle
++  bool dynamic_range_high = false;   // CSS (dynamic-range:high) / DeviceSupportsHDR
++  // UA-CH high-entropy identity for the Android persona, carried here so the
++  // reported model / platformVersion stay ATOMIC with the WebGL renderer chosen
++  // from the same device row. Empty on desktop personas.
++  std::string android_model;
++  std::string android_platform_version;
 +
 +  // ---- WebGL (Windows + ANGLE/D3D11) ----
 +  std::string webgl_vendor;    // e.g. "Google Inc. (Intel)"
@@ -785,3 +959,102 @@
 +}  // namespace ungoogled
 +
 +#endif  // COMPONENTS_UNGOOGLED_PERSONA_PROFILE_H_
+
+--- a/chrome/browser/chrome_content_browser_client.cc
++++ b/chrome/browser/chrome_content_browser_client.cc
+@@ -20,6 +20,7 @@
+ #include "base/check_deref.h"
+ #include "base/check_op.h"
+ #include "base/command_line.h"
++#include "components/ungoogled/persona_profile.h"
+ #include "base/containers/fixed_flat_map.h"
+ #include "base/containers/fixed_flat_set.h"
+ #include "base/containers/to_vector.h"
+@@ -4988,6 +4989,33 @@
+   web_prefs->is_indigo_onboarding =
+       indigo::IndigoOnboardingDialog::IsOnboardingWebContents(web_contents);
+ #endif
++
++  // clearcote: Android persona mobile-layout path. When the persona is mobile
++  // (--fingerprint-platform=android sets CurrentPersona().mobile), turn on
++  // Chromium's mobile viewport + touch/pointer web-prefs so page layout,
++  // (pointer:coarse)/(hover:none), and viewport handling match the Android
++  // UA/JS surface. Applied last so it wins over the desktop defaults above.
++  // NOTE: the fork computes no viewport itself -- for layout to fully match the
++  // persona the launcher must ALSO pass a phone-sized --window-size (see report);
++  // this block sets the *preferences*, not the window geometry.
++  if (ungoogled::CurrentPersona().mobile) {
++    const ungoogled::PersonaProfile& cc_p = ungoogled::CurrentPersona();
++    web_prefs->viewport_enabled = true;
++    web_prefs->viewport_meta_enabled = true;
++    web_prefs->viewport_style = blink::mojom::ViewportStyle::kMobile;
++    web_prefs->shrinks_viewport_contents_to_fit = true;
++    web_prefs->main_frame_resizes_are_orientation_changes = true;
++    web_prefs->double_tap_to_zoom_enabled = true;
++    web_prefs->touch_event_feature_detection_enabled = true;
++    web_prefs->pointer_events_max_touch_points = cc_p.max_touch_points;
++    web_prefs->primary_pointer_type =
++        blink::mojom::PointerType::kPointerCoarseType;
++    web_prefs->available_pointer_types =
++        static_cast<int>(blink::mojom::PointerType::kPointerCoarseType);
++    web_prefs->primary_hover_type = blink::mojom::HoverType::kHoverNone;
++    web_prefs->available_hover_types =
++        static_cast<int>(blink::mojom::HoverType::kHoverNone);
++  }
+ }
+ 
+ bool ChromeContentBrowserClientParts::OverrideWebPreferencesAfterNavigation(
+--- a/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
++++ b/third_party/blink/renderer/modules/plugins/dom_plugin_array.cc
+@@ -20,6 +20,7 @@
+ 
+ #include "third_party/blink/renderer/modules/plugins/dom_plugin_array.h"
+ 
++#include "components/ungoogled/persona_profile.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+@@ -135,6 +136,13 @@
+ }
+ 
+ bool DOMPluginArray::IsPdfViewerAvailable() {
++  // clearcote: a mobile (Chrome-Android) persona ships no PDF-viewer plugin, so
++  // navigator.plugins and navigator.mimeTypes are empty and pdfViewerEnabled is
++  // false. This one gate cascades to all three surfaces (the constructor skips
++  // populating dom_plugins_, GetFixedMimeTypeArray() returns empty, and
++  // NavigatorPlugins::pdfViewerEnabled reads this).
++  if (ungoogled::CurrentPersona().mobile)
++    return false;
+   auto* data = GetPluginData();
+   if (!data)
+     return false;
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+@@ -16,6 +16,7 @@
+ #include "third_party/blink/renderer/modules/event_target_modules.h"
+ #include "third_party/blink/renderer/modules/screen_orientation/lock_orientation_callback.h"
+ #include "third_party/blink/renderer/modules/screen_orientation/screen_orientation_controller.h"
++#include "components/ungoogled/persona_profile.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/wtf/assertions.h"
+ 
+@@ -88,10 +89,19 @@
+ }
+ 
+ V8OrientationType ScreenOrientation::type() const {
++  // clearcote: a mobile persona (--fingerprint-platform=android) reports portrait-primary, coherent
++  // with its portrait screen; desktop personas keep the real orientation.
++  if (ungoogled::CurrentPersona().mobile) {
++    return V8OrientationType(V8OrientationType::Enum::kPortraitPrimary);
++  }
+   return V8OrientationType(OrientationTypeToV8Enum(type_));
+ }
+ 
+ uint16_t ScreenOrientation::angle() const {
++  // clearcote: portrait-primary is angle 0 on a mobile persona.
++  if (ungoogled::CurrentPersona().mobile) {
++    return 0;
++  }
+   return angle_;
+ }
+ 

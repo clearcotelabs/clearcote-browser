@@ -6,6 +6,7 @@ import {
   splitFingerprintOptions,
   encodeProfile,
   resolveTlsProfile,
+  defaultTimezone,
 } from "../src/fingerprint.js";
 
 describe("fingerprintArgs", () => {
@@ -28,6 +29,7 @@ describe("fingerprintArgs", () => {
         "--fingerprint-brand=chrome",
         "--accept-lang=en-US,en",
         "--lang=en-US",
+        "--timezone=America/New_York",
       ]);
     });
   });
@@ -39,6 +41,7 @@ describe("fingerprintArgs", () => {
         "--fingerprint-brand=chrome",
         "--accept-lang=en-US,en",
         "--lang=en-US",
+        "--timezone=America/New_York",
       ]);
     });
   });
@@ -97,8 +100,9 @@ describe("fingerprintArgs", () => {
   it("skips empty / undefined / null values", () => {
     const args = fingerprintArgs({ fingerprint: "", timezone: undefined, gpuVendor: null as unknown as string });
     expect(args.some((a) => a.startsWith("--fingerprint="))).toBe(false);
-    expect(args.some((a) => a.startsWith("--timezone="))).toBe(false);
     expect(args.some((a) => a.startsWith("--fingerprint-gpu-vendor="))).toBe(false);
+    // timezone is special-cased: unset/empty falls back to the locale default (no host-UTC leak).
+    expect(args).toContain("--timezone=America/New_York");
   });
 
   it("encodes a fingerprint profile (gzip+base64, lossless round-trip)", () => {
@@ -169,5 +173,34 @@ describe("tlsProfile (TLS network persona)", () => {
     expect(resolveTlsProfile(125, {})).toBe("chrome-125");
     expect(resolveTlsProfile("off", { brandVersion: "120" })).toBeUndefined();
     expect(resolveTlsProfile("garbage", {})).toBeUndefined();
+  });
+});
+
+describe("default timezone (locale-coherent, no UTC leak)", () => {
+  it("derives a plausible timezone from the persona locale", () => {
+    expect(defaultTimezone("en-US")).toBe("America/New_York");
+    expect(defaultTimezone("de-DE")).toBe("Europe/Berlin");
+    expect(defaultTimezone("ja-JP")).toBe("Asia/Tokyo");
+    expect(defaultTimezone("en-ZA")).toBe("America/New_York"); // en-* subtag fallback -> the en default
+    expect(defaultTimezone("xx-YY")).toBe("America/New_York"); // ultimate fallback
+  });
+  it("emits a locale-coherent --timezone by default; explicit + geoip win", () => {
+    expect(fingerprintArgs({ acceptLanguage: "fr-FR,fr" })).toContain("--timezone=Europe/Paris");
+    expect(fingerprintArgs({ timezone: "Asia/Dubai" }).filter((a) => a.startsWith("--timezone="))).toEqual([
+      "--timezone=Asia/Dubai",
+    ]);
+  });
+});
+
+describe("android persona (best-effort mobile)", () => {
+  it("emits the android platform + a phone window-size", () => {
+    const args = fingerprintArgs({ platform: "android" });
+    expect(args).toContain("--fingerprint-platform=android");
+    expect(args).toContain("--window-size=412,915");
+  });
+  it("never auto-adds a window-size for desktop platforms", () => {
+    for (const plat of ["windows", "linux", "macos"] as const) {
+      expect(fingerprintArgs({ platform: plat }).some((a) => a.startsWith("--window-size"))).toBe(false);
+    }
   });
 });

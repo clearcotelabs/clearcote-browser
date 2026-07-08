@@ -1,6 +1,14 @@
 --- a/chrome/app/chrome_main_delegate.cc
 +++ b/chrome/app/chrome_main_delegate.cc
-@@ -1087,6 +1087,28 @@
+@@ -87,6 +87,7 @@
+ #include "content/public/common/content_constants.h"
+ #include "content/public/common/content_paths.h"
+ #include "content/public/common/content_switches.h"
++#include "base/base_switches.h"  // clearcote: switches::kEnableFeatures (agent feature-merge) — was IS_WIN-only
+ #include "content/public/common/main_function_params.h"
+ #include "content/public/common/profiling.h"
+ #include "content/public/common/url_constants.h"
+@@ -1087,6 +1088,28 @@
    // The DevTools remote debugging pipe file descriptors need to be checked
    // before any other files are opened, see https://crbug.com/40259890.
    const bool is_browser = !command_line.HasSwitch(switches::kProcessType);

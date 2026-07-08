@@ -1,38 +1,44 @@
 --- a/third_party/blink/renderer/core/events/navigator_events.cc
 +++ b/third_party/blink/renderer/core/events/navigator_events.cc
-@@ -30,6 +30,8 @@
+@@ -30,6 +30,9 @@
  
  #include "third_party/blink/renderer/core/events/navigator_events.h"
  
 +#include "base/command_line.h"
++#include "components/ungoogled/persona_profile.h"
 +#include "components/ungoogled/ungoogled_switches.h"
  #include "third_party/blink/renderer/core/frame/local_dom_window.h"
  #include "third_party/blink/renderer/core/frame/local_frame.h"
  #include "third_party/blink/renderer/core/frame/navigator.h"
-@@ -38,6 +40,11 @@
+@@ -38,6 +41,14 @@
  namespace blink {
  
  int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
 +  // clearcote: the Windows desktop persona is mouse-only (coherent with CSS
 +  // pointer:fine / hover:hover); report 0 touch points instead of the host's real
 +  // value (e.g. 2 from a pen/precision-touchpad), which would contradict it.
++  // clearcote: return the persona's touch-point count -- 0 for the mouse-only
++  // desktop personas (unchanged), 5 for the Android persona. This keeps
++  // maxTouchPoints coherent with CSS pointer:coarse and userAgentData.mobile.
 +  if (base::CommandLine::ForCurrentProcess()->HasSwitch(::switches::kFingerprint))
-+    return 0;
++    return ungoogled::CurrentPersona().max_touch_points;
    LocalDOMWindow* window = navigator.DomWindow();
    return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
  }
 --- a/third_party/blink/renderer/modules/battery/battery_manager.cc
 +++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
-@@ -4,6 +4,8 @@
+@@ -4,6 +4,10 @@
  
  #include "third_party/blink/renderer/modules/battery/battery_manager.h"
  
 +#include <limits>
 +
++#include "components/ungoogled/persona_profile.h"
++
  #include "third_party/blink/public/mojom/frame/lifecycle.mojom-blink.h"
  #include "third_party/blink/renderer/core/dom/dom_exception.h"
  #include "third_party/blink/renderer/core/dom/events/event.h"
-@@ -79,20 +81,28 @@
+@@ -79,20 +83,41 @@
    return battery_property_->Promise(script_state->World());
  }
  
@@ -46,22 +52,35 @@
 +// constants (not seed-derived): every no-battery desktop reports the same.
  bool BatteryManager::charging() {
 -  return battery_status_.Charging();
-+  return true;
++  // clearcote: a phone persona is on battery (discharging); desktop stays on AC.
++  return !ungoogled::CurrentPersona().mobile;
  }
  
  double BatteryManager::chargingTime() {
 -  return battery_status_.charging_time().InSecondsF();
-+  return 0.0;
++  // Discharging phone: chargingTime is +Infinity per spec; desktop on AC: 0.
++  return ungoogled::CurrentPersona().mobile
++             ? std::numeric_limits<double>::infinity()
++             : 0.0;
  }
  
  double BatteryManager::dischargingTime() {
 -  return battery_status_.discharging_time().InSecondsF();
-+  return std::numeric_limits<double>::infinity();
++  // Phone on battery: a finite, granularity-rounded estimate; desktop
++  // no-battery: +Infinity.
++  return ungoogled::CurrentPersona().mobile
++             ? 13680.0
++             : std::numeric_limits<double>::infinity();
  }
  
  double BatteryManager::level() {
 -  return battery_status_.Level();
-+  return 1.0;
++  // Phone: a plausible partial charge (seed-derived, 0.55..0.98, rounded to 0.01
++  // like real Chrome); desktop: 1.0 (full, on AC).
++  if (!ungoogled::CurrentPersona().mobile)
++    return 1.0;
++  uint64_t s = ungoogled::CurrentPersona().persona_seed;
++  return (55 + static_cast<int>(s % 44)) / 100.0;
  }
  
  void BatteryManager::DidUpdateData() {
@@ -215,7 +234,16 @@
  }  // namespace blink
 --- a/third_party/blink/renderer/modules/netinfo/network_information.cc
 +++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
-@@ -51,23 +51,6 @@
+@@ -6,6 +6,8 @@
+ 
+ #include <algorithm>
+ 
++#include "components/ungoogled/persona_profile.h"
++
+ #include "base/time/time.h"
+ #include "third_party/blink/public/mojom/devtools/console_message.mojom-blink.h"
+ #include "third_party/blink/public/platform/task_type.h"
+@@ -51,23 +53,6 @@
    NOTREACHED();
  }
  
@@ -239,7 +267,23 @@
  String GetConsoleLogStringForWebHoldback() {
    return "Network quality values are overridden using a holdback experiment, "
           "and so may be inaccurate";
-@@ -111,63 +94,33 @@
+@@ -88,6 +73,15 @@
+     return V8ConnectionType(V8ConnectionType::Enum::kUnknown);
+   }
+ 
++  // clearcote: a phone persona reports a coherent mobile link type (wifi) rather
++  // than the host's real (datacenter/ethernet) connection. NOTE: the `type`
++  // attribute is only web-exposed when the NetInfoDownlinkMax runtime feature is
++  // enabled (Android/ChromeOS); on the desktop binary this stays coherent but is
++  // not exposed unless that feature is flipped (see report).
++  if (ungoogled::CurrentPersona().mobile) {
++    return V8ConnectionType(V8ConnectionType::Enum::kWifi);
++  }
++
+   // type_ is only updated when listening for events, so ask
+   // networkStateNotifier if not listening (crbug.com/379841).
+   if (!IsObserving()) {
+@@ -111,63 +105,33 @@
  }
  
  V8EffectiveConnectionType NetworkInformation::effectiveType() {

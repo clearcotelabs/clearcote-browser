@@ -21,6 +21,7 @@ def test_default_persona_on_windows_host(monkeypatch):
         "--fingerprint-brand=chrome",
         "--accept-lang=en-US,en",
         "--lang=en-US",
+        "--timezone=America/New_York",
     ]
 
 
@@ -33,6 +34,7 @@ def test_default_persona_on_linux_host(monkeypatch):
         "--fingerprint-brand=chrome",
         "--accept-lang=en-US,en",
         "--lang=en-US",
+        "--timezone=America/New_York",
     ]
 
 
@@ -40,6 +42,22 @@ def test_lang_derived_from_primary_accept_language():
     # Intl/locale coherence: --lang = the primary Accept-Language tag.
     assert "--lang=fr-FR" in fingerprint_args({"accept_language": "fr-FR,fr"})
     assert "--lang=de-DE" in fingerprint_args({"accept_language": "de-DE,de;q=0.7,en;q=0.3"})
+
+
+def test_default_timezone_is_locale_coherent():
+    # A server/container run shouldn't leak the host's UTC while navigator.language says en-US:
+    # the default timezone is derived from the persona locale, and geoip / explicit timezone win.
+    from clearcote._fingerprint import _default_timezone
+
+    assert _default_timezone("en-US") == "America/New_York"
+    assert _default_timezone("de-DE") == "Europe/Berlin"
+    assert _default_timezone("ja-JP") == "Asia/Tokyo"
+    assert _default_timezone("en-ZA") == "America/New_York"  # en-* subtag fallback -> the en default
+    assert _default_timezone("xx-YY") == "America/New_York"  # ultimate fallback
+    assert "--timezone=Europe/Paris" in fingerprint_args({"accept_language": "fr-FR,fr"})
+    # an explicit timezone always wins over the locale default
+    tz = [a for a in fingerprint_args({"timezone": "Asia/Dubai"}) if a.startswith("--timezone=")]
+    assert tz == ["--timezone=Asia/Dubai"]
 
 
 def test_maps_every_option():
@@ -132,8 +150,10 @@ def test_noise_disabled_only_when_false():
 def test_skips_empty_and_none():
     args = fingerprint_args({"fingerprint": "", "timezone": None, "gpu_vendor": ""})
     assert not any(a.startswith("--fingerprint=") for a in args)
-    assert not any(a.startswith("--timezone=") for a in args)
     assert not any(a.startswith("--fingerprint-gpu-vendor=") for a in args)
+    # timezone is special-cased: an unset/empty timezone now falls back to the locale default
+    # (no host-UTC leak), rather than being skipped.
+    assert "--timezone=America/New_York" in args
 
 
 def test_profile_roundtrip_dict_and_string():
@@ -150,3 +170,17 @@ def test_fingerprint_keys_cover_known_options():
     for k in ("fingerprint", "platform", "brand", "timezone", "webrtc_ip",
               "fingerprint_noise", "fingerprint_profile"):
         assert k in FINGERPRINT_KEYS
+
+
+def test_android_persona_emits_platform_and_phone_window():
+    # platform="android" is a best-effort mobile persona; it must forward the platform switch and
+    # auto-set a phone window-size (the mobile viewport needs one).
+    args = fingerprint_args({"platform": "android"})
+    assert "--fingerprint-platform=android" in args
+    assert "--window-size=412,915" in args
+
+
+def test_window_size_only_for_android():
+    # desktop personas never get an auto window-size.
+    for plat in ("windows", "linux", "macos"):
+        assert not any(a.startswith("--window-size") for a in fingerprint_args({"platform": plat}))

@@ -11,8 +11,15 @@ export interface FingerprintOptions {
    * is accepted (non-numeric seeds are hashed engine-side — they will not crash the renderer).
    */
   fingerprint?: string | number;
-  /** Spoofed OS family for UA / UA-CH / navigator.platform. */
-  platform?: "windows" | "linux" | "macos";
+  /**
+   * Spoofed OS family for UA / UA-CH / navigator.platform. `"android"` is a best-effort **mobile**
+   * persona (seed-selected from a Pixel/Galaxy device pool): Android UA + `Sec-CH-UA-Mobile: ?1`,
+   * touch (`maxTouchPoints`), `pointer:coarse`/`hover:none`, mobile screen/DPR, Mali/Adreno WebGL,
+   * `plugins=0`, and a mobile viewport (auto-sets a phone `--window-size`). On a desktop engine the
+   * GPU *render* and fine page geometry stay desktop (documented residual tells) — pair with
+   * `canvasBridge` for render coherence.
+   */
+  platform?: "windows" | "linux" | "macos" | "android";
   /** Spoofed platform version (UA-CH high-entropy). */
   platformVersion?: string;
   /** Browser brand for UA / UA-CH. */
@@ -225,6 +232,37 @@ export function resolveTlsProfile(
   return undefined;
 }
 
+// Primary Accept-Language tag -> a plausible IANA timezone, so the default persona's timezone is
+// coherent with its locale instead of leaking the host's (often UTC on servers/containers). Not
+// geo-truth — set geoip=true (resolve the proxy exit-IP) or an explicit timezone for accuracy.
+const LOCALE_TZ: Record<string, string> = {
+  "en-US": "America/New_York", "en-CA": "America/Toronto", "en-GB": "Europe/London",
+  "en-AU": "Australia/Sydney", "en-NZ": "Pacific/Auckland", "en-IE": "Europe/Dublin",
+  "de-DE": "Europe/Berlin", "de-AT": "Europe/Vienna", "fr-FR": "Europe/Paris",
+  "es-ES": "Europe/Madrid", "es-MX": "America/Mexico_City", "it-IT": "Europe/Rome",
+  "nl-NL": "Europe/Amsterdam", "pt-BR": "America/Sao_Paulo", "pt-PT": "Europe/Lisbon",
+  "pl-PL": "Europe/Warsaw", "sv-SE": "Europe/Stockholm", "ja-JP": "Asia/Tokyo",
+  "ko-KR": "Asia/Seoul", "zh-CN": "Asia/Shanghai", "zh-TW": "Asia/Taipei",
+  "ru-RU": "Europe/Moscow", "tr-TR": "Europe/Istanbul", "ar-SA": "Asia/Riyadh",
+  "hi-IN": "Asia/Kolkata", "id-ID": "Asia/Jakarta",
+};
+
+/**
+ * A plausible IANA timezone for a primary Accept-Language tag (`en-US` -> `America/New_York`), so the
+ * default persona's timezone is coherent with its locale rather than leaking the host's UTC. Falls
+ * back by language subtag, then to America/New_York (matching the en-US Accept-Language default).
+ */
+export function defaultTimezone(primaryLang: string): string | undefined {
+  if (!primaryLang) return undefined;
+  const tag = primaryLang.trim();
+  if (LOCALE_TZ[tag]) return LOCALE_TZ[tag];
+  const lang = tag.split("-")[0].toLowerCase();
+  for (const [key, tz] of Object.entries(LOCALE_TZ)) {
+    if (key.toLowerCase().startsWith(lang + "-")) return tz;
+  }
+  return "America/New_York";
+}
+
 export function fingerprintArgs(o: FingerprintOptions): string[] {
   const args: string[] = [];
   const set = (flag: string, value: unknown) => {
@@ -268,6 +306,13 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // en-US persona) — a locale-incoherence tell auditors flag (navigator.language=en-US but Intl=en-GB).
   const primaryLang = cleanLang.split(",")[0];
   if (primaryLang) args.push(`--lang=${primaryLang}`);
+  // Default the timezone to one coherent with the persona locale when none is set (and geoip didn't
+  // resolve one), so a server/container run doesn't leak the host's UTC (a datacenter tell) while
+  // navigator.language says e.g. en-US. geoip=True or an explicit timezone= override this.
+  if (!o.timezone) {
+    const tz = defaultTimezone(primaryLang);
+    if (tz) args.push(`--timezone=${tz}`);
+  }
   set("webrtc-ip", o.webrtcIp);
   if (o.disableGpuFingerprint) args.push("--disable-gpu-fingerprint");
   // fingerprintNoise=false turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects)
@@ -295,5 +340,11 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // pins it; "native"/off/unset leaves native TLS. Only version-variant fields change.
   const tlsSwitch = resolveTlsProfile(o.tlsProfile ?? "match-persona", o);
   if (tlsSwitch) args.push(`--fingerprint-tls-profile=${tlsSwitch}`);
+  // The Android persona lays the page out as a mobile viewport, which needs a phone-sized window
+  // (Chromium's ~500px minimum width floor still applies). Auto-set one; a caller-supplied
+  // --window-size in `args` overrides this (Chromium takes the last --window-size).
+  if (o.platform === "android") {
+    args.push("--window-size=412,915");
+  }
   return args;
 }

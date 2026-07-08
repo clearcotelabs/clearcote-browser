@@ -20,7 +20,7 @@
  #include "build/build_config.h"
  #include "skia/ext/font_utils.h"
  #include "third_party/blink/public/common/features.h"
-@@ -123,6 +128,131 @@
+@@ -123,6 +128,174 @@
  }
  #endif
  
@@ -106,19 +106,12 @@
 +
 +    // 基础西文字体
 +    "Arial",
-+    "Calibri",
 +    "Courier New",
 +    "Courier",
 +    "Helvetica",
 +    "Helvetica Neue",
-+    "Lucida Grande",
-+    "Microsoft Sans Serif",
-+    "MS Sans Serif",
-+    "MS Serif",
-+    "MS UI Gothic",
 +    "Roboto",
 +    "Sans",
-+    "Segoe UI",
 +    "Times New Roman",
 +    "Times",
 +
@@ -149,10 +142,60 @@
 +}
 +
 +
++// clearcote: metric-compatible substitute for a persona-OS font on a host that lacks it.
++// A Windows/macOS persona running on a Linux build has no Segoe UI / Calibri / etc. font
++// files, so a page that requests one would render absent or fall back -- the classic "font
++// list says Windows, advance-widths say Linux" tell. We ship metric-compatible open clones
++// (Carlito=Calibri, Arimo=Arial, Tinos=Times New Roman, Cousine=Courier New/Consolas,
++// Caladea=Cambria, Gelasio=Georgia, Selawik=Segoe UI) and map each persona font to its clone,
++// so the family renders PRESENT with the persona OS's advance widths. Returns "" when no
++// substitution is needed (the real host already has the fonts).
++static std::string MetricCompatibleSubstitute(const std::string& family,
++                                              const std::string& host_os) {
++  if (host_os != "linux")
++    return std::string();  // Windows/macOS hosts already have the real fonts.
++
++  struct Sub {
++    const char* persona_font;
++    const char* clone;
++  };
++  static const Sub kSubs[] = {
++      // --- Windows sans / UI ---
++      {"Segoe UI", "Selawik"}, {"Segoe UI Semibold", "Selawik"},
++      {"Segoe UI Semilight", "Selawik"}, {"Segoe UI Light", "Selawik"},
++      {"Segoe UI Black", "Selawik"}, {"Segoe UI Variable", "Selawik"},
++      {"Calibri", "Carlito"}, {"Calibri Light", "Carlito"},
++      {"Candara", "Carlito"}, {"Corbel", "Carlito"},
++      {"Arial", "Arimo"}, {"Arial Black", "Arimo"}, {"Arial Narrow", "Arimo"},
++      {"Trebuchet MS", "Comic Neue"}, {"Verdana", "DejaVu Sans"}, {"Tahoma", "DejaVu Sans Condensed"},
++      {"Microsoft Sans Serif", "Arimo"}, {"MS Sans Serif", "Arimo"},
++      {"Franklin Gothic Medium", "Arimo"}, {"Bahnschrift", "Arimo"},
++      {"Ebrima", "Arimo"}, {"Gadugi", "Arimo"}, {"Leelawadee UI", "Arimo"},
++      {"Nirmala UI", "Arimo"}, {"Lucida Sans Unicode", "Arimo"},
++      {"Segoe UI Emoji", "Arimo"}, {"Segoe UI Symbol", "Arimo"},
++      {"Impact", "Anton"}, {"Comic Sans MS", "Noto Sans"},
++      // --- Windows serif ---
++      {"Cambria", "Caladea"}, {"Cambria Math", "Caladea"}, {"Constantia", "Caladea"},
++      {"Palatino Linotype", "Caladea"}, {"Book Antiqua", "Caladea"},
++      {"Georgia", "Gelasio"},
++      {"Times New Roman", "Tinos"},
++      // --- Windows monospace ---
++      {"Courier New", "Cousine"}, {"Consolas", "Inconsolata"}, {"Lucida Console", "Cousine"},
++      {"Cascadia Code", "Cousine"}, {"Cascadia Mono", "Cousine"},
++  };
++  for (const Sub& sub : kSubs) {
++    if (base::EqualsCaseInsensitiveASCII(sub.persona_font, family))
++      return std::string(sub.clone);
++  }
++  // Any other persona font we lack an exact clone for: fall back to the sans clone so it is
++  // still PRESENT (better than an absent tell) with plausible sans metrics.
++  return std::string("Arimo");
++}
++
  const FontPlatformData* FontCache::GetFontPlatformData(
      const FontDescription& font_description,
      const FontFaceCreationParams& creation_params,
-@@ -141,6 +271,80 @@
+@@ -141,6 +314,78 @@
    }
  #endif
  
@@ -163,12 +206,6 @@
 +      alternate_font_name != AlternateFontName::kLastResort) {
 +
 +    const std::string requested_family = creation_params.Family().Utf8();
-+
-+    // 基础字体直接返回，不进行任何处理
-+    if (IsBasicFont(requested_family)) {
-+      return font_platform_data_cache_.GetOrCreateFontPlatformData(
-+          this, font_description, creation_params, alternate_font_name);
-+    }
 +
 +    // 检测当前操作系统
 +    const char* current_os =
@@ -188,7 +225,6 @@
 +      spoofed_platform = current_os;
 +    }
 +
-+    std::vector<std::string> current_os_fonts = GetPlatformFonts(current_os);
 +    std::vector<std::string> platform_fonts = GetPlatformFonts(spoofed_platform);
 +    // clearcote: an imported profile's detected-font list overrides the canonical
 +    // platform set, so the page sees the donor machine's exact font enumeration.
@@ -196,33 +232,38 @@
 +    if (!persona_fonts.empty())
 +      platform_fonts = persona_fonts;
 +
-+    std::string fingerprint = command_line->GetSwitchValueASCII(switches::kFingerprint);
-+    uint32_t hash = std::hash<std::string>{}(fingerprint + requested_family);
-+
 +    if (spoofed_platform != current_os) {
-+      // 获取伪装平台的字体列表
-+      bool is_platform_font = std::find(platform_fonts.begin(), platform_fonts.end(),
-+                                        requested_family) != platform_fonts.end();
-+      if (is_platform_font) {
-+        // 伪装平台的字体，用当前系统的字体替代
-+        size_t index = hash % current_os_fonts.size();
-+        FontFaceCreationParams substitute_params(AtomicString(current_os_fonts[index].c_str()));
-+        return font_platform_data_cache_.GetOrCreateFontPlatformData(
-+            this, font_description, substitute_params, alternate_font_name);
-+      } else {
-+        // 非平台字体处理：95%概率隐藏
-+        float probability = static_cast<float>(hash) / static_cast<float>(std::numeric_limits<uint32_t>::max());
-+        if (probability < 0.95) {
-+          return nullptr;
++      // Cross-OS persona: this host physically lacks the persona OS's fonts, so a requested
++      // persona font would otherwise render absent/mismatched. Render each persona font
++      // through a metric-compatible clone that IS installed here, so the family is present
++      // with the persona OS's advance widths (closes the render-vs-string font tell).
++      if (FontInListCaseInsensitive(platform_fonts, requested_family)) {
++        std::string substitute = MetricCompatibleSubstitute(requested_family, current_os);
++        if (!substitute.empty()) {
++          FontFaceCreationParams substitute_params(AtomicString(substitute.c_str()));
++          return font_platform_data_cache_.GetOrCreateFontPlatformData(
++              this, font_description, substitute_params, alternate_font_name);
 +        }
-+        // 5%概率显示，继续默认流程
++        return font_platform_data_cache_.GetOrCreateFontPlatformData(
++            this, font_description, creation_params, alternate_font_name);
 +      }
++      // Basic cross-platform families (Arial/Times/Courier/CSS generics) exist on every OS
++      // and resolve to the correct metric clone via fontconfig -- let them through.
++      if (IsBasicFont(requested_family)) {
++        return font_platform_data_cache_.GetOrCreateFontPlatformData(
++            this, font_description, creation_params, alternate_font_name);
++      }
++      // Not part of the persona's font set: report it absent (deterministic -- the old
++      // probabilistic 95% hide was itself a cross-event inconsistency tell).
++      return nullptr;
 +    } else {
-+      // clearcote: enforce the canonical platform font set deterministically -- every
-+      // persona reports the SAME fonts regardless of what is physically installed,
-+      // instead of leaking the host's real font list (and instead of probabilistic
-+      // hiding, which is itself a tell). Canonical fonts ship with the OS so they
-+      // resolve normally; anything else is reported absent.
++      // Same-OS persona: basic fonts pass through; everything else must be in the canonical
++      // platform set or it is reported absent, so the host's real (possibly unusual) font
++      // list never leaks.
++      if (IsBasicFont(requested_family)) {
++        return font_platform_data_cache_.GetOrCreateFontPlatformData(
++            this, font_description, creation_params, alternate_font_name);
++      }
 +      if (!FontInListCaseInsensitive(platform_fonts, requested_family)) {
 +        return nullptr;
 +      }

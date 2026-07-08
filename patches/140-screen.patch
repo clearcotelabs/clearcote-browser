@@ -9,7 +9,7 @@
  #include "base/metrics/histogram_macros.h"
  #include "base/task/single_thread_task_runner.h"
  #include "base/trace_event/trace_id_helper.h"
-@@ -1571,10 +1573,25 @@
+@@ -1571,10 +1573,29 @@
    return true;
  }
  
@@ -27,6 +27,10 @@
      return 0;
  
 +  if (PersonaWindowActive()) {
++    // clearcote: a phone browser has no desktop window chrome, so outerHeight
++    // equals innerHeight (no +88 tab/url delta).
++    if (ungoogled::CurrentPersona().mobile)
++      return innerHeight();
 +    int ah = ungoogled::CurrentPersona().avail_screen_height;
 +    int oh = innerHeight() + 88;  // realistic Chrome tab+url chrome height
 +    return oh < ah ? oh : ah;
@@ -35,11 +39,15 @@
    LocalFrame* frame = GetFrame();
  
    // FencedFrames should return innerHeight to prevent passing
-@@ -1600,6 +1617,14 @@
+@@ -1600,6 +1621,18 @@
    if (!GetFrame())
      return 0;
  
 +  if (PersonaWindowActive()) {
++    // clearcote: a phone browser has no desktop window frame, so outerWidth
++    // equals innerWidth (no +16 delta).
++    if (ungoogled::CurrentPersona().mobile)
++      return innerWidth();
 +    // clearcote: horizontal window-frame delta (like outerHeight's +88) so outerWidth
 +    // != innerWidth -- a real Chrome window is wider than its viewport.
 +    int aw = ungoogled::CurrentPersona().avail_screen_width;
@@ -50,11 +58,14 @@
    LocalFrame* frame = GetFrame();
  
    // FencedFrames should return innerWidth to prevent passing
-@@ -1673,6 +1698,15 @@
+@@ -1673,6 +1706,18 @@
    if (!frame)
      return 0;
  
 +  if (PersonaWindowActive()) {
++    // clearcote: a phone browser fills the screen -> the window origin is 0.
++    if (ungoogled::CurrentPersona().mobile)
++      return 0;
 +    // clearcote: realistic non-zero window position (a real WM never pins a sub-screen
 +    // window at exactly 0,0). Deterministic per persona, clamped on-screen.
 +    uint64_t s = ungoogled::CurrentPersona().persona_seed;
@@ -66,11 +77,14 @@
    Page* page = frame->GetPage();
    if (!page)
      return 0;
-@@ -1691,6 +1725,14 @@
+@@ -1691,6 +1736,17 @@
    if (!frame)
      return 0;
  
 +  if (PersonaWindowActive()) {
++    // clearcote: a phone browser fills the screen -> the window origin is 0.
++    if (ungoogled::CurrentPersona().mobile)
++      return 0;
 +    // clearcote: realistic non-zero window position (see screenX).
 +    uint64_t s = ungoogled::CurrentPersona().persona_seed;
 +    int room = ungoogled::CurrentPersona().avail_screen_height - outerHeight();
@@ -81,7 +95,7 @@
    Page* page = frame->GetPage();
    if (!page)
      return 0;
-@@ -1803,6 +1845,9 @@
+@@ -1803,6 +1859,9 @@
    if (!GetFrame())
      return 0.0;
  
@@ -218,7 +232,7 @@
  ScreenDetailed::ScreenDetailed(LocalDOMWindow* window, int64_t display_id)
      : Screen(window, display_id) {}
  
-@@ -104,36 +118,54 @@
+@@ -104,36 +118,55 @@
  int ScreenDetailed::left() const {
    if (!DomWindow())
      return 0;
@@ -247,8 +261,9 @@
    if (!DomWindow())
      return false;
 +  if (PersonaScreenActive())
-+    return false;  // persona: desktop with an external monitor (coherent
-+                   // with DPR 1.0 / 1920x1080), not a laptop-internal panel
++    // persona: a phone has an internal panel; a desktop has an external monitor
++    // (coherent with DPR 1.0 / 1920x1080).
++    return ungoogled::CurrentPersona().mobile;
    return GetScreenInfo().is_internal;
  }
  

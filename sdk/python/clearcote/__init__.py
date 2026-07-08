@@ -20,6 +20,7 @@ import time
 
 from ._agent import AGENT_KEYS, OPENROUTER_BASE_URL, agent_args, run_agent_task
 from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args
+from ._fonts import apply_font_env
 from ._humanize import install_humanize, install_humanize_on_context
 from ._launchopts import (
     extension_args,
@@ -259,6 +260,7 @@ def launch(**kwargs):
     args, timeout, ...) pass through to Playwright's chromium.launch().
     """
     exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
+    apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
     browser = _win_av_retry(
         lambda e: _playwright().chromium.launch(executable_path=e, args=args, **pw_kwargs), exe
@@ -283,6 +285,7 @@ def launch_persistent_context(user_data_dir, **kwargs):
     if kwargs.get("widevine"):
         apply_widevine_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
     exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
+    apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
     context = _win_av_retry(

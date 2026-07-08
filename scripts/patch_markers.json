@@ -353,32 +353,6 @@
         "expect": "In a correctly-patched build the returned command-line string contains both 'GlicActor' (appended to --enable-features) and '--disable-actor-safety-checks', even though neither was passed at launch. A build that lost the patch leaves the command line unchanged (no GlicActor, no disable-actor-safety-checks)."
       }
     },
-    "201-linux-agent-base-switches.patch": {
-      "surface": "Linux/non-Windows build fix: adds #include \"base/base_switches.h\" in chrome_main_delegate.cc so switches::kEnableFeatures (the agent \"--enable-features\" feature-merge) compiles on non-Windows. Pure compile-time plumbing — no new switch, no string literal, no runtime logic; on the Windows binary it i",
-      "windows_only": false,
-      "markers": [],
-      "runtime": {
-        "surface": "chrome://version 'Command Line' row — agent-merged --enable-features (non-Windows build)",
-        "probe": "On a Linux build, open chrome://version and read the 'Command Line' field (or chrome://version/?show-variations-cmd): the agent feature-merge appends its features onto --enable-features. The primary proof this patch is applied is upstream of runtime — the non-Windows build must COMPILE and the browser must launch at all; without this include chrome/app/chrome_main_delegate.cc fails to build (undeclared switches::kEnableFeatures) on non-Windows.",
-        "expect": "Linux build compiles and the browser launches, applying the agent-merged --enable-features on the command line. On the Windows chrome.exe/chrome.dll target there is NO observable difference (the include was already present via the IS_WIN guard), so this patch produces no Windows-side witness and no gettable binary marker — the gate must verify it via the Linux build/link step, not by grepping the Windows binary."
-      }
-    },
-    "202-linux-persona-coherence.patch": {
-      "surface": "When --fingerprint-platform=linux, rewrites Windows-shaped persona defaults (ANGLE/D3D11 WebGL renderer, Microsoft SAPI voices, Realtek/WASAPI media devices) into coherent Linux equivalents (Mesa/OpenGL renderer, empty getVoices(), PulseAudio device labels) so no fingerprint field contradicts naviga",
-      "windows_only": false,
-      "markers": [
-        "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.6.0 NVIDIA 535.146.02)",
-        "Mesa Intel(R) UHD Graphics 770 (RPL-S)",
-        "radeonsi, raphael_mendocino, LLVM 15.0.7",
-        "Monitor of Built-in Audio Analog Stereo",
-        "cc-grp-"
-      ],
-      "runtime": {
-        "surface": "WebGL UNMASKED_RENDERER_WEBGL (WEBGL_debug_renderer_info), launched with --fingerprint-platform=linux",
-        "probe": "IMPORTANT: this patch is a no-op under platform=windows; launch with --fingerprint=<seed> --fingerprint-platform=linux. Then in JS: (()=>{const gl=document.createElement('canvas').getContext('webgl');const e=gl.getExtension('WEBGL_debug_renderer_info');return gl.getParameter(e.UNMASKED_RENDERER_WEBGL);})()",
-        "expect": "Correctly-patched: an OpenGL/Mesa Linux renderer string starting with 'ANGLE (' and containing 'OpenGL 4.6' plus 'Mesa' or 'NVIDIA 535' (e.g. the Intel 'Mesa Intel(R) UHD Graphics 770 (RPL-S)...' string), with NO 'Direct3D11' substring, coherent with navigator.platform='Linux'. Unpatched / patch-lost: the same launch still returns a Windows 'ANGLE (... Direct3D11 ...)' renderer, contradicting platform=Linux."
-      }
-    },
     "210-tls-network-persona.patch": {
       "surface": "Shapes the TLS ClientHello's version-variant fields (post-quantum key-share group, ALPS codepoint, ECH GREASE) to match a claimed Chrome major so JA3/JA4 matches the persona's Chrome version instead of the build's, driven by --fingerprint-tls-profile in the network-service process.",
       "windows_only": false,
