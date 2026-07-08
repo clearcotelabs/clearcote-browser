@@ -72,6 +72,26 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
+def warm_files(dirpath):
+    """Read every file in ``dirpath`` once so on-access antivirus finishes scanning the
+    freshly-extracted, unsigned binaries BEFORE the browser is launched.
+
+    Windows-only concern: launching a just-extracted ``chrome.exe`` can race the real-time AV
+    scan of ``chrome_elf.dll`` (the SxS assembly member the exe's manifest depends on). If the DLL
+    is still locked / being scanned at launch, Windows reports "spawn UNKNOWN" / "side-by-side
+    configuration is incorrect" AND caches that negative activation context against the path, so
+    every later launch from that path keeps failing. Forcing a sequential read here makes the AV
+    scan happen up front and closes the race. Cheap, best-effort, and safe to call anywhere."""
+    for root, _dirs, files in os.walk(dirpath):
+        for name in files:
+            try:
+                with open(os.path.join(root, name), "rb") as fh:
+                    while fh.read(1 << 20):
+                        pass
+            except OSError:
+                pass
+
+
 def _http_get(url):
     req = urllib.request.Request(url, headers={"User-Agent": "clearcote-sdk"})
     # timeout is the socket idle timeout (max wait per read), so a stalled connection fails fast
@@ -277,13 +297,20 @@ def _fetch_and_verify(rel, base, quiet):
     _log(quiet, "extracting")
     if os.path.isdir(browser_dir):
         shutil.rmtree(browser_dir, ignore_errors=True)
+    # Extract to a sibling temp dir, then atomically move it into place, so `browser/` only ever
+    # appears once fully written (no partial tree a concurrent launch could pick up), and — on
+    # Windows — we can force an on-access AV scan of the finished tree before any launch (below).
+    incoming = os.path.join(base, ".incoming")
+    if os.path.isdir(incoming):
+        shutil.rmtree(incoming, ignore_errors=True)
     if rel["asset"].endswith(".tar.xz") or rel.get("archive") == "tar.xz":
         import tarfile
         with tarfile.open(zip_path) as t:
-            t.extractall(browser_dir)
+            t.extractall(incoming)
     else:
         with zipfile.ZipFile(zip_path) as z:
-            z.extractall(browser_dir)
+            z.extractall(incoming)
+    os.replace(incoming, browser_dir)
 
     binary = rel.get("binary", "chrome.exe")
     exe = _find(browser_dir, binary)
@@ -312,6 +339,12 @@ def _fetch_and_verify(rel, base, quiet):
                 os.chmod(sandbox, 0o4755)
             except OSError:
                 pass
+
+    if sys.platform == "win32":
+        # Pre-scan the whole tree so real-time AV finishes with the freshly-extracted binaries
+        # before the first launch — closes the chrome_elf.dll scan race that otherwise poisons the
+        # path (see warm_files). One-time cost on install; later cached launches skip it.
+        warm_files(browser_dir)
 
     with open(os.path.join(base, ".verified"), "w", encoding="utf-8") as f:
         f.write(rel["sha256"] + "\n")

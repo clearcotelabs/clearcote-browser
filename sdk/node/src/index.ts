@@ -11,16 +11,16 @@
 // as engine switches.
 
 import { chromium } from "playwright-core";
-import { mkdtempSync } from "node:fs";
+import { cpSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type {
   Browser,
   BrowserContext,
   BrowserContextOptions,
   LaunchOptions as PlaywrightLaunchOptions,
 } from "playwright-core";
-import { ensureBinary, type DownloadOptions } from "./download.js";
+import { ensureBinary, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
 import { resolveGeo, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
@@ -173,6 +173,39 @@ function assembleArgs(
   return mergeFeatureFlags([...base, ...userArgs]);
 }
 
+export function isWinLaunchRace(err: unknown): boolean {
+  const m = String((err as Error)?.message ?? err).toLowerCase();
+  return m.includes("spawn unknown") || m.includes("side-by-side") || m.includes("side by side");
+}
+
+/**
+ * Launch via `doLaunch(exePath)`, working around the Windows first-launch antivirus-scan race.
+ *
+ * A just-extracted, unsigned chrome.exe can fail with "spawn UNKNOWN" / "side-by-side configuration
+ * is incorrect" while real-time AV scans chrome_elf.dll (the SxS assembly member), and Windows
+ * caches that negative activation context against the *path* — so retrying the same path keeps
+ * failing. `warmFiles` (in ensureBinary) pre-scans to prevent it; here we (1) re-scan + back off +
+ * retry a couple times, then (2) as a last resort relaunch from a pristine copy on a fresh temp
+ * path, which always gets a clean SxS evaluation. Pass-through on non-Windows.
+ */
+export async function winAvRetry<T>(doLaunch: (exe: string) => Promise<T>, exe: string): Promise<T> {
+  if (process.platform !== "win32") return doLaunch(exe);
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await doLaunch(exe);
+    } catch (err) {
+      if (!isWinLaunchRace(err)) throw err;
+      warmFiles(dirname(exe));
+      await new Promise((resolve) => setTimeout(resolve, 800 * (i + 1)));
+    }
+  }
+  // The in-place SxS activation-context poison never clears; relaunch from a fresh copy.
+  const recover = join(mkdtempSync(join(tmpdir(), "clearcote-recover-")), "browser");
+  cpSync(dirname(exe), recover, { recursive: true });
+  warmFiles(recover);
+  return doLaunch(join(recover, basename(exe)));
+}
+
 /** Launch Clearcote and return a standard Playwright {@link Browser}. */
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   // profile= a saved persona: its options are the base, explicit options override.
@@ -192,14 +225,14 @@ export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
   const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
-  const browser = await chromium.launch({
+  const browser = await winAvRetry((exePath) => chromium.launch({
     // Drop Playwright's default --enable-automation so the engine's AutomationControlled feature
     // stays off (it flips webdriver-adjacent tells). Caller can override via ignoreDefaultArgs.
     ignoreDefaultArgs: ["--enable-automation"],
     ...(pwOptions as PlaywrightLaunchOptions),
-    executablePath: exe,
+    executablePath: exePath,
     args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined),
-  });
+  }), exe);
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
   installHumanize(browser, { humanize, showCursor });
   return browser;
@@ -253,12 +286,12 @@ export async function launchPersistentContext(
   delete (opts as Record<string, unknown>).ignoreDefaultArgs;  // passed explicitly below
   const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
   ensureRunnableHere(exe);
-  const context = await chromium.launchPersistentContext(userDataDir, {
+  const context = await winAvRetry((exePath) => chromium.launchPersistentContext(userDataDir, {
     ...opts,
     ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
-    executablePath: exe,
+    executablePath: exePath,
     args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined),
-  });
+  }), exe);
   installHumanizeOnContext(context, { humanize, showCursor });
   return context;
 }

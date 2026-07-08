@@ -14,7 +14,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -22,6 +22,46 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import extract from "extract-zip";
 import { RELEASE, REPO, SIGNING_KEY_FPR, platformRelease, type ReleaseInfo } from "./release.js";
+
+/**
+ * Read every file under `dir` so on-access antivirus finishes scanning the freshly-extracted,
+ * unsigned binaries BEFORE the browser is launched. Windows-only concern: launching a just-extracted
+ * chrome.exe can race the real-time AV scan of chrome_elf.dll (the SxS assembly member the exe's
+ * manifest depends on) — surfacing as "spawn UNKNOWN" / "side-by-side configuration is incorrect",
+ * which Windows then caches against the path so every later launch from it keeps failing. Forcing a
+ * sequential read here makes the scan happen up front and closes the race. Best-effort, safe anywhere.
+ */
+export function warmFiles(dir: string): void {
+  const buf = Buffer.allocUnsafe(1 << 20);
+  const walk = (d: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      const p = path.join(d, ent.name);
+      if (ent.isDirectory()) {
+        walk(p);
+        continue;
+      }
+      try {
+        const fd = openSync(p, "r");
+        try {
+          while (readSync(fd, buf, 0, buf.length, null) > 0) {
+            /* discard — the read forces the AV scan */
+          }
+        } finally {
+          closeSync(fd);
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
+  };
+  walk(dir);
+}
 
 export interface DownloadOptions {
   /** Override the cache directory (default: per-OS user cache dir). */
@@ -307,13 +347,19 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
 
   log(opts.quiet, "extracting");
   await rm(browserDir, { recursive: true, force: true });
-  mkdirSync(browserDir, { recursive: true });
+  // Extract to a sibling temp dir, then atomically move it into place so `browser/` only ever
+  // appears once fully written (no partial tree a launch could race), and — on Windows — we can
+  // pre-scan the finished tree before any launch (below).
+  const incoming = path.join(base, ".incoming");
+  await rm(incoming, { recursive: true, force: true });
+  mkdirSync(incoming, { recursive: true });
   if (rel.asset.endsWith(".tar.xz") || rel.archive === "tar.xz") {
     // Node has no stdlib xz; the system `tar` (always present on Linux) auto-detects .xz.
-    execFileSync("tar", ["-xf", zipPath, "-C", browserDir]);
+    execFileSync("tar", ["-xf", zipPath, "-C", incoming]);
   } else {
-    await extract(zipPath, { dir: browserDir });
+    await extract(zipPath, { dir: incoming });
   }
+  renameSync(incoming, browserDir);
 
   const binaryName = rel.binary || "chrome.exe";
   const exe = findFile(browserDir, binaryName);
@@ -344,6 +390,11 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
     }
   }
 
+  if (process.platform === "win32") {
+    // Pre-scan so real-time AV finishes with the freshly-extracted binaries before the first launch
+    // — closes the chrome_elf.dll scan race that otherwise poisons the path (see warmFiles).
+    warmFiles(browserDir);
+  }
   writeFileSync(path.join(base, ".verified"), `${rel.sha256}\n`);
   await rm(zipPath, { force: true }); // reclaim ~250 MB; keep only the extracted tree
   log(opts.quiet, `ready: ${exe}`);

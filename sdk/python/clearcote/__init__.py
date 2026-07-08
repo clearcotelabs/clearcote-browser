@@ -16,6 +16,7 @@ engine switches.
 import atexit
 import os
 import sys
+import time
 
 from ._agent import AGENT_KEYS, OPENROUTER_BASE_URL, agent_args, run_agent_task
 from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args
@@ -32,7 +33,7 @@ from ._profile import Profile, list_profiles, load_profile, resolve_profile_opti
 from ._render import check_render_coherence
 from ._warnings import emit_coherence_warnings
 from ._widevine import apply_widevine_launch, fetch_widevine, seed_widevine
-from .download import ensure_binary
+from .download import ensure_binary, warm_files
 from .geoip import resolve_geo
 from .release import RELEASE
 
@@ -54,7 +55,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.12.0"
+__version__ = "0.12.1"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -213,6 +214,41 @@ def _install_headed_viewport(browser):
     browser.new_page, browser.new_context = new_page, new_context
 
 
+def _is_win_launch_race(exc):
+    m = str(exc).lower()
+    return "spawn unknown" in m or "side-by-side" in m or "side by side" in m
+
+
+def _win_av_retry(do_launch, exe):
+    """Launch via ``do_launch(exe_path)``, working around the Windows first-launch AV-scan race.
+
+    A just-extracted, unsigned chrome.exe can fail with "spawn UNKNOWN" / "side-by-side
+    configuration is incorrect" while real-time antivirus is still scanning chrome_elf.dll (the SxS
+    assembly member the exe's manifest depends on). Worse, Windows caches that negative activation
+    context against the *path*, so retrying the same path keeps failing. ``warm_files`` (in
+    ``ensure_binary``) pre-scans to prevent it; here we (1) re-scan + back off + retry a couple
+    times, then (2) as a last resort relaunch from a pristine copy on a fresh temp path, which
+    always gets a clean SxS evaluation. Pass-through on non-Windows."""
+    if sys.platform != "win32":
+        return do_launch(exe)
+    for i in range(3):
+        try:
+            return do_launch(exe)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_win_launch_race(exc):
+                raise
+            warm_files(os.path.dirname(exe))
+            time.sleep(0.8 * (i + 1))
+    # The in-place SxS activation-context poison never clears; relaunch from a fresh copy.
+    import shutil
+    import tempfile
+
+    recover = os.path.join(tempfile.mkdtemp(prefix="clearcote-recover-"), "browser")
+    shutil.copytree(os.path.dirname(exe), recover)
+    warm_files(recover)
+    return do_launch(os.path.join(recover, os.path.basename(exe)))
+
+
 def launch(**kwargs):
     """Launch Clearcote and return a standard Playwright sync ``Browser``.
 
@@ -224,7 +260,9 @@ def launch(**kwargs):
     """
     exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
-    browser = _playwright().chromium.launch(executable_path=exe, args=args, **pw_kwargs)
+    browser = _win_av_retry(
+        lambda e: _playwright().chromium.launch(executable_path=e, args=args, **pw_kwargs), exe
+    )
     if headed:
         _install_headed_viewport(browser)
     install_humanize(browser, humanize, show_cursor)
@@ -247,8 +285,11 @@ def launch_persistent_context(user_data_dir, **kwargs):
     exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
-    context = _playwright().chromium.launch_persistent_context(
-        user_data_dir, executable_path=exe, args=args, **pw_kwargs
+    context = _win_av_retry(
+        lambda e: _playwright().chromium.launch_persistent_context(
+            user_data_dir, executable_path=e, args=args, **pw_kwargs
+        ),
+        exe,
     )
     install_humanize_on_context(context, humanize, show_cursor)
     return context
