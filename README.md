@@ -22,7 +22,7 @@
 <sub>**Blink · V8 · BoringSSL** patched in-tree · **ANGLE / D3D11**-backed WebGL · **JA3/JA4-coherent** TLS · **Windows + Linux** · signed, checksummed, **reproducible** releases</sub>
 
 <table align="center"><tr>
-<td align="center" width="150"><h3>31</h3><sub>single-surface<br/>C++ patches</sub></td>
+<td align="center" width="150"><h3>32</h3><sub>single-surface<br/>C++ patches</sub></td>
 <td align="center" width="150"><h3>0%</h3><sub>headless /<br/>stealth (audited)</sub></td>
 <td align="center" width="160"><h3><code>[native&nbsp;code]</code></h3><sub>across every<br/>realm</sub></td>
 <td align="center" width="150"><h3>BSD-3</h3><sub>open engine,<br/>free forever</sub></td>
@@ -63,7 +63,7 @@ A single `--fingerprint` seed derives a whole **internally-consistent** identity
 <td width="33%" valign="top">
 
 #### Auditable patches
-**31** small single-purpose diffs in [`patches/`](patches/). Read one in a minute; rebuild the engine with one script. No opaque binary, no phone-home.
+**32** small single-purpose diffs in [`patches/`](patches/). Read one in a minute; rebuild the engine with one script. No opaque binary, no phone-home.
 
 </td>
 <td width="33%" valign="top">
@@ -75,7 +75,7 @@ Every release is **GPG-signed, checksummed, and reproducible from source**. Rebu
 </tr>
 </table>
 
-> **🆕 What's new — [v0.1.0-pre.19](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.19) + SDK `clearcote` 0.13.0.** **Render-vs-string font coherence:** a Windows/macOS persona on the Linux build now renders common Windows font families (Segoe UI, Calibri, Cambria, Georgia, …) **present with the correct advance widths** via bundled metric-compatible open clones — each a *distinct* clone, so a reference-free width check (`width(Verdana) == width(Arial)`, impossible on real Windows) no longer fires; a Linux persona reports the Windows-only families **absent**. Also new: a best-effort **mobile (Android) persona** (`platform="android"`), **Edge** brand coherence (JS UA-CH + HTTP `Sec-CH-UA` aligned), a locale-coherent **default timezone** (no host-UTC leak), and coherent WebGL `MAX_VIEWPORT_DIMS`. Prior surfaces remain: **TLS network persona** (`tlsProfile`), **Widevine / EME (DRM)**, the per-origin **[canvas bridge](docs/CANVAS-BRIDGE.md)**, the **humanized cursor**, real-fingerprint import, and the **[stealth-coherence gate](docs/STEALTH-COHERENCE.md)** that runs every release. Experimental pre-release.
+> **🆕 What's new — [v0.1.0-pre.20](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.20) + SDK `clearcote` 0.14.1.** **Locale coherence:** the renderer's Intl locale now follows the persona `Accept-Language`, so `Intl.DateTimeFormat` / `Number.toLocaleString()` / date formatting agree with `navigator.language` (previously stuck at `en-US`). **Drive it from anywhere:** `clearcote.serve()` (Python **and** Node) returns a `.cdp_url` any **Playwright / Puppeteer / browser-use / Crawl4AI / Stagehand** client attaches to over CDP — with `navigator.webdriver` staying **false** — plus a **`clearcote-mcp`** server to drive Clearcote from Claude / Cursor / Cline, and an official **Docker** image for one-command CDP-endpoint deploys. Prior surfaces remain: render-vs-string **font coherence**, mobile/Android persona, **Edge** coherence, **TLS network persona** (`tlsProfile`), **Widevine / EME (DRM)**, the per-origin **[canvas bridge](docs/CANVAS-BRIDGE.md)**, the **humanized cursor**, real-fingerprint import, and the **[stealth-coherence gate](docs/STEALTH-COHERENCE.md)** that runs every release. Experimental pre-release.
 
 ---
 
@@ -388,7 +388,7 @@ git clone https://github.com/clearcotelabs/clearcote-browser.git
 cd clearcote-browser && WORK=~/clearcote-build ./build.sh
 ```
 
-- **[docs/BUILDING.md](docs/BUILDING.md)** — full build-from-source guide · **[patches/](patches/)** — the 31 diffs · **[docs/PATCHES.md](docs/PATCHES.md)** — what each one does.
+- **[docs/BUILDING.md](docs/BUILDING.md)** — full build-from-source guide · **[patches/](patches/)** — the 32 diffs · **[docs/PATCHES.md](docs/PATCHES.md)** — what each one does.
 
 ## Reference
 
