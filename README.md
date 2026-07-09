@@ -1,112 +1,136 @@
 <div align="center">
 
-<img src="docs/assets/clyde.svg" alt="Clyde — the Clearcote chameleon" width="170" />
+<img src="docs/assets/clyde.svg" alt="Clyde — the Clearcote chameleon" width="150" />
 
 # Clearcote Browser
 
 ### Blend in. Stay clear.
 
-**The open-source, verifiable anti-detect Chromium.** One coherent browser identity — controlled inside the engine, free forever, and a drop-in for Playwright/Puppeteer.
-
-<br />
-
 [![Release](https://img.shields.io/github/v/release/clearcotelabs/clearcote-browser?include_prereleases&label=release&style=flat-square&labelColor=07080a&color=38e0d6)](https://github.com/clearcotelabs/clearcote-browser/releases)
 [![Chromium](https://img.shields.io/badge/Chromium-149-6ee7ff?style=flat-square&labelColor=07080a)](https://www.chromium.org/)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Linux%20x64-a78bfa?style=flat-square&labelColor=07080a)](https://github.com/clearcotelabs/clearcote-browser/releases)
+[![npm](https://img.shields.io/npm/v/clearcote?style=flat-square&logo=npm&logoColor=white&label=npm&labelColor=07080a&color=CB3837)](https://www.npmjs.com/package/clearcote)
+[![PyPI](https://img.shields.io/pypi/v/clearcote?style=flat-square&logo=pypi&logoColor=white&label=pip&labelColor=07080a&color=3776AB)](https://pypi.org/project/clearcote/)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-38e0d6?style=flat-square&labelColor=07080a)](LICENSE)
-[![Open source](https://img.shields.io/badge/100%25-open%20source-54d39b?style=flat-square&labelColor=07080a)](#license)
-[![Discord](https://img.shields.io/badge/Discord-join%20the%20community-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=07080a)](https://discord.gg/WxvCjAnXZm)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=07080a)](https://discord.gg/WxvCjAnXZm)
+[![Copy for agent](https://img.shields.io/badge/Copy%20for%20agent-24292f?style=flat-square&logo=readme&logoColor=white)](https://raw.githubusercontent.com/clearcotelabs/clearcote-browser/main/AGENTS.md)
+[![llms.txt](https://img.shields.io/badge/llms.txt-24292f?style=flat-square&logo=readme&logoColor=white)](https://raw.githubusercontent.com/clearcotelabs/clearcote-browser/main/llms.txt)
 
-<sub><i>Meet <b>Clyde</b> — chameleons blend in to stay unseen. So does your browser.</i></sub>
+**Clearcote is an open-source stealth Chromium that stops your scrapers and browser agents from getting blocked.** Bot detectors flag automation by reading the browser fingerprint; Clearcote corrects that fingerprint **inside Chromium's C++** — so the browser presents as one ordinary, coherent Chrome install, all the way down to the TLS handshake. Point your existing **Playwright or Puppeteer** at it over the same API, and nothing else in your code changes.
 
-<sub>💬 Questions, ideas, or want to get involved? <b><a href="https://discord.gg/WxvCjAnXZm">Join us on Discord</a></b>.</sub>
+<sub>**Blink · V8 · BoringSSL** patched in-tree · **ANGLE / D3D11**-backed WebGL · **JA3/JA4-coherent** TLS · **Windows + Linux** · signed, checksummed, **reproducible** releases</sub>
+
+<table align="center"><tr>
+<td align="center" width="150"><h3>31</h3><sub>single-surface<br/>C++ patches</sub></td>
+<td align="center" width="150"><h3>0%</h3><sub>headless /<br/>stealth (audited)</sub></td>
+<td align="center" width="160"><h3><code>[native&nbsp;code]</code></h3><sub>across every<br/>realm</sub></td>
+<td align="center" width="150"><h3>BSD-3</h3><sub>open engine,<br/>free forever</sub></td>
+</tr></table>
+
+<sub><i>Meet <b>Clyde</b> — chameleons blend in to stay unseen. So does your browser.</i> · 💬 <a href="https://discord.gg/WxvCjAnXZm"><b>Join us on Discord</b></a></sub>
 
 </div>
 
-> **Status:** [**v0.1.0-pre.19**](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.19) is live — Chromium 149, **Windows x64 + Linux x64**, signed + checksummed ([verify it](docs/VERIFY.md)). **New — render-vs-string font coherence + a mobile persona:** a Windows/macOS persona on the Linux build now renders common Windows font families (Segoe UI, Calibri, Cambria, Georgia, …) **present with correct advance widths** via bundled metric-compatible open clones — each a *distinct* clone, so a reference-free width-equality check (`width(Verdana) == width(Arial)`, impossible on real Windows) no longer fires. The clones ship with the Linux release and the SDK wires them in on launch, so they resolve on bare servers/containers; a Linux persona correctly reports the Windows-only families **absent**. Also new: a best-effort **mobile (Android) persona** (`platform="android"` — mobile UA/UA-CH, touch, viewport, portrait, no-PDF-plugin, Mali/Adreno GPU), **Edge** brand coherence, a locale-coherent **default timezone** (no host-UTC datacenter leak), and coherent WebGL `MAX_VIEWPORT_DIMS`. All prior surfaces remain: coherence-first **TLS network persona** (`--fingerprint-tls-profile`, SDK `tlsProfile`), native **Windows + Linux** personas (Linux-native GPU/voice/audio-device values), opt-in **Widevine / EME (DRM)** (`widevine=True`), the per-origin **[canvas bridge](docs/CANVAS-BRIDGE.md)** (`--canvas-bridge-mode`), the continuous **humanized cursor** (`Browser.humanizedClick`), real-fingerprint import, and the **[stealth-coherence regression gate](docs/STEALTH-COHERENCE.md)** that runs every release. The SDK (`clearcote` ≥ 0.13.0) auto-downloads the right binary per OS. macOS is on the [Roadmap](ROADMAP.md). An experimental pre-release.
+<table>
+<tr>
+<td width="33%" valign="top">
+
+#### Native-code parity
+Every spoofed getter *is* a C++ getter: `toString` returns `[native code]`, **realm-invariant** across the main frame, iframes, and Web Workers. No JavaScript shim to self-reveal.
+
+</td>
+<td width="33%" valign="top">
+
+#### Coherent to the network
+One real Chromium keeps the JS identity, the **UA / UA-CH** headers, and the **TLS JA3/JA4 + HTTP/2** stack in agreement. No spoofed-JS-over-real-TLS seam for a cross-check to catch.
+
+</td>
+<td width="33%" valign="top">
+
+#### Drop-in Playwright / Puppeteer
+`launch()` returns a **standard Playwright `Browser`**. Swap the executable, keep your code. Node **and** Python SDKs auto-download + SHA-256-verify the right binary per OS.
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+#### One seed → one machine
+A single `--fingerprint` seed derives a whole **internally-consistent** identity — canvas, WebGL, audio, fonts, locale, hardware, GPU — stable across launches, unlinkable across seeds. Or import a **real** machine.
+
+</td>
+<td width="33%" valign="top">
+
+#### Auditable patches
+**31** small single-purpose diffs in [`patches/`](patches/). Read one in a minute; rebuild the engine with one script. No opaque binary, no phone-home.
+
+</td>
+<td width="33%" valign="top">
+
+#### Don't trust us — verify us
+Every release is **GPG-signed, checksummed, and reproducible from source**. Rebuild it yourself and diff the hash. Trust the math, not the vendor.
+
+</td>
+</tr>
+</table>
+
+> **🆕 What's new — [v0.1.0-pre.19](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.19) + SDK `clearcote` 0.13.0.** **Render-vs-string font coherence:** a Windows/macOS persona on the Linux build now renders common Windows font families (Segoe UI, Calibri, Cambria, Georgia, …) **present with the correct advance widths** via bundled metric-compatible open clones — each a *distinct* clone, so a reference-free width check (`width(Verdana) == width(Arial)`, impossible on real Windows) no longer fires; a Linux persona reports the Windows-only families **absent**. Also new: a best-effort **mobile (Android) persona** (`platform="android"`), **Edge** brand coherence (JS UA-CH + HTTP `Sec-CH-UA` aligned), a locale-coherent **default timezone** (no host-UTC leak), and coherent WebGL `MAX_VIEWPORT_DIMS`. Prior surfaces remain: **TLS network persona** (`tlsProfile`), **Widevine / EME (DRM)**, the per-origin **[canvas bridge](docs/CANVAS-BRIDGE.md)**, the **humanized cursor**, real-fingerprint import, and the **[stealth-coherence gate](docs/STEALTH-COHERENCE.md)** that runs every release. Experimental pre-release.
 
 ---
 
-## Why Clearcote — instead of the others?
+## Contents
 
-Most "anti-detect" / stealth browsers are **closed, paid binaries** that rewrite your fingerprint with **injected JavaScript or CDP hooks** — brittle, self-revealing, and asking you to trust code you can't read. Clearcote inverts every one of those choices:
-
-| | **Clearcote** | Typical anti-detect browser |
-|---|---|---|
-| **Source** | ✅ 100% open — every change is a readable patch | ❌ Closed binary |
-| **Price** | ✅ **Free** | 💸 Paid subscription |
-| **How signals change** | ✅ Compiled **into the C++ engine** — invisible to the page | ⚠️ Injected JS / CDP hooks (detectable artifacts) |
-| **Coherence** | ✅ One seed → a whole consistent machine; the **JS identity and the real Chromium TLS/JA3/JA4 + HTTP/2 stack agree** | ⚠️ Per-surface values that disagree — with each other or with the network layer |
-| **Trust model** | ✅ Signed, checksummed, **reproducible from source** | ❌ "Trust us" |
-| **Automation** | ✅ **Drop-in Playwright / Puppeteer** — returns a standard `Browser` | ⚠️ Proprietary API / GUI profiles |
-| **Real identities** | ✅ Import a real machine (or the curated [profile library](https://github.com/clearcotelabs/clearcote-profiles)) and **verify it loaded** | ⚠️ Rare / unverifiable |
-| **Privacy** | ✅ De-Googled, **zero telemetry / phone-home** | ⚠️ Varies |
-
-### The thing that matters most
-
-Because the controls live **in the engine**, *the JavaScript a page sees and the network handshake underneath it come from one real Chromium.* There is **no spoofed-JS-over-real-TLS seam** for a cross-check to catch — the exact failure mode that gives injection-based tools away. One `--fingerprint` seed produces a single, internally consistent machine across **canvas, WebGL, audio, fonts, locale, hardware — and the TLS/HTTP-2 fingerprint underneath**.
-
-And when the *noise itself* is the tell, switch it off (`fingerprintNoise: false`): canvas/WebGL/audio return their natural, unperturbed values while the identity spoof stays on. Your call, per session.
+- [What it is](#what-it-is) · [The 12-second tour](#the-12-second-tour)
+- [Quick start](#quick-start) — [SDK](#sdk--playwright-drop-in) · [Direct](#direct--any-cdp-client) · [Docker](#run-in-docker-)
+- [Why patch the engine, not the page](#why-patch-the-engine-not-the-page)
+- [Why Clearcote instead of the others](#why-clearcote-instead-of-the-others)
+- [Configure the persona](#configure-the-persona--what-you-control)
+- [Drive a page with an AI agent](#drive-a-page-with-an-ai-agent)
+- [Proof & verify](#proof--verify)
+- [Build from source](#build-from-source) · [Reference](#reference) · [Credits · License](#credits)
 
 ---
 
-## What is Clearcote?
+## What it is
 
-An open-source [Chromium](https://www.chromium.org/) distribution built on [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium) (Google services + telemetry removed) plus a transparent stack of source patches that move fingerprint control **into the engine**. Two promises:
+An open-source [Chromium](https://www.chromium.org/) distribution built on [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium) (Google services + telemetry removed) plus a transparent stack of **31 source patches** that move fingerprint control **into the engine**. Two promises:
 
-- **A coherent, private identity** — one plausible machine per session instead of an accidentally hyper-unique one, coherent *down to the network layer* and across long-tail surfaces: WebGL `getParameter` limits, `navigator.getBattery()` / `connection` / `keyboard.getLayoutMap()`, AudioContext, `getScreenDetails()`, and CSS `@media`.
-- **Radical verifiability** — no magic binary. Read every patch, rebuild it yourself, and confirm what you run matches what's published. **Don't trust us — [verify us](docs/VERIFY.md).**
+- **A coherent, private identity** — one plausible machine per session instead of an accidentally hyper-unique one, coherent *down to the network layer* and across the long-tail surfaces detectors love: WebGL `getParameter` limits, `navigator.getBattery()` / `connection` / `keyboard.getLayoutMap()`, AudioContext, `getScreenDetails()`, and CSS `@media`.
+- **Radical verifiability** — no magic binary. Read every patch, rebuild it yourself, and confirm what you run matches what's published.
 
 It's a **drop-in for [Playwright](https://playwright.dev/) / [Puppeteer](https://pptr.dev/)** — the same APIs you already use, pointed at the Clearcote binary.
 
-## What you control
+### The 12-second tour
 
-From **one `--fingerprint` seed** *or* an **imported real-machine profile**, all kept coherent together:
+```bash
+pip install clearcote      # or:  npm install clearcote
+```
+```python
+from clearcote import launch
 
-- **Identity** — UA + UA-CH brand / platform / version + high-entropy hints (`bitness` / `wow64` / `model`); a real "Google Chrome" brand set, not bare "Chromium"
-- **GPU** — WebGL unmasked vendor/renderer + the full `getParameter` table & extension list, **and WebGPU (`navigator.gpu`) limits/features kept coherent with that same GPU**; session-constant (never a per-origin tell)
-- **Rendering** — deterministic per-site canvas / WebGL / audio noise, *or off* — plus an experimental **[real-GPU canvas bridge](docs/CANVAS-BRIDGE.md)** that renders on a real GPU host for hardware-accurate readbacks
-- **Hardware & screen** — `hardwareConcurrency`, `deviceMemory`, **`storageQuota`** (a realistic on-disk size, not an incognito-looking one), screen geometry / depth / DPR + `getScreenDetails()`, a realistic `jsHeapSizeLimit`, touch points
-- **Locale & network** — timezone + `navigator.languages` + `Accept-Language` + the **ICU / `Intl` locale all pinned to one language** (no `en-GB`-on-a-US-IP leak), geolocation, and a coherent WebRTC egress IP (no STUN/LAN leak) — all auto-matched to your proxy via `geoip`
-- **Long-tail** — speech-synthesis voices, installed fonts, `MediaCapabilities.decodingInfo()` codecs, `enumerateDevices()`, CSS `@media` (pointer / hover / color-gamut), battery, connection, keyboard layout
-- **Behavior** — humanized, *trusted* bezier mouse input that keeps `navigator.webdriver = false`
+browser = launch(fingerprint="user-7423", platform="windows")   # returns a standard Playwright Browser
+page = browser.new_page()
+page.goto("https://example.com")
+browser.close()
+```
+
+Same `fingerprint` seed ⇒ a stable identity across launches; a new seed ⇒ a fresh, unlinkable one. The SDK auto-downloads + SHA-256-verifies the right binary for your OS on first use, then caches it.
 
 ---
 
-## Quickstart
+## Quick start
 
-Download the signed build from the **[Releases page](https://github.com/clearcotelabs/clearcote-browser/releases)**, unzip, and either run `chrome.exe` directly or drive it from stock Playwright:
+### SDK — Playwright drop-in
 
-```python
-from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(
-        executable_path=r"C:\clearcote\chrome.exe",
-        args=["--fingerprint=seed-123", "--fingerprint-platform=windows"],
-    )
-    page = browser.new_page()
-    page.goto("https://example.com")
-    browser.close()
-```
-
-Same `--fingerprint=<seed>` ⇒ a stable identity across launches; a new seed ⇒ a fresh, unlinkable one.
-
-### SDK — Playwright drop-in (Node + Python)
-
-Published on **npm** and **PyPI**. Each `launch()` returns a standard Playwright `Browser` and auto-downloads + SHA-256-verifies the binary on first use, then caches it.
-
-```bash
-npm install clearcote      #  Node / TypeScript
-pip install clearcote      #  Python
-```
+Published on **[npm](https://www.npmjs.com/package/clearcote)** and **[PyPI](https://pypi.org/project/clearcote/)**. Each `launch()` returns a standard Playwright `Browser`.
 
 ```javascript
 import { launch } from "clearcote";
 
 const browser = await launch({
-  fingerprint: "user-7423",        // same seed ⇒ same identity, different ⇒ unlinkable
-  platform: "windows",
+  fingerprint: "user-7423",         // same seed ⇒ same identity, different ⇒ unlinkable
+  platform: "windows",              // "windows" | "linux" | "macos" | "android"
+  brand: "Edge",                    // Chrome (default) | Edge — UA-CH + Sec-CH-UA kept coherent
   timezone: "America/New_York",
 });
 const page = await browser.newPage();
@@ -116,6 +140,7 @@ await browser.close();
 
 ```python
 from clearcote import launch
+# inside an asyncio loop, use:  from clearcote.async_api import launch
 
 browser = launch(fingerprint="user-7423", platform="windows", timezone="America/New_York")
 page = browser.new_page()
@@ -123,51 +148,139 @@ page.goto("https://example.com")
 browser.close()
 ```
 
-Inside an asyncio loop, use the async API (same options, returns Playwright async objects):
+**Match a proxy automatically** — `geoip: true` resolves the proxy's exit region and sets a coherent timezone + `navigator.languages` + `Accept-Language` + WebRTC egress:
 
-```python
-import asyncio
-from clearcote.async_api import launch
-
-async def main():
-    browser = await launch(fingerprint="user-7423", platform="windows", timezone="America/New_York")
-    page = await browser.new_page()
-    await page.goto("https://example.com")
-    await browser.close()
-
-asyncio.run(main())
+```javascript
+await launch({ fingerprint: "u1", proxy: { server: "http://host:8080", username: "u", password: "p" }, geoip: true });
 ```
-
-### Key SDK options
-
-- **Match a proxy automatically** — `geoip: true` resolves the proxy's exit region and sets a coherent timezone + languages + `Accept-Language`:
-  ```javascript
-  await launch({ fingerprint: "u1", proxy: { server: "http://host:8080", username: "u", password: "p" }, geoip: true });
-  ```
-- **Human-like input + coherent WebRTC** — `humanize: true` moves the pointer along real, *trusted* bezier paths (engine-level, `webdriver` stays `false`); `webrtcIp` fabricates a coherent srflx candidate (no STUN/LAN leak).
-- **Import a real machine** — adopt the *exact* identity of a real Chrome (GPU + `getParameter` table, screen, fonts, voices, audio). Grab one from the curated **[clearcote-profiles](https://github.com/clearcotelabs/clearcote-profiles)** library, capture your own with the [collector](tools/fingerprint-collect), or convert any record from the open [10k-profile dataset](https://github.com/Vinyzu/chrome-fingerprints):
-  ```javascript
-  await launch({ fingerprint: "u1", fingerprintProfile: "./profile.json" });
-  ```
-  …then **prove it loaded** with [`verify_profile.py`](tools/fingerprint-collect/verify_profile.py) (probes the live surfaces, prints a PASS/FAIL table).
-- **Widevine / DRM** — `widevine: true` on a persistent context makes EME work like a real Chrome (`requestMediaKeySystemAccess('com.widevine.alpha')` resolves). The CDM is **opt-in**: clearcote never bundles Google's blob — the SDK fetches it once from Google's own component server, on your call:
-  ```javascript
-  await launchPersistentContext("./profile-drm", { widevine: true });
-  ```
 
 Full option list: [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python).
 
-### Drive a page with an AI agent
+### Direct — any CDP client
 
-Clearcote ships an **in-browser AI agent**: it runs *inside* the browser process, perceives the live page, asks an LLM what to do, and executes steps as **real, trusted input** via Chrome's native Actor framework — not a synthetic-event shim. Point it at [OpenRouter](https://openrouter.ai) (default) and switch any model — GPT, Claude, Gemini, Llama — with one slug.
+Download the signed build from the **[Releases page](https://github.com/clearcotelabs/clearcote-browser/releases)**, unzip, and drive `chrome` / `chrome.exe` from stock Playwright (or any CDP client) via `executable_path` + `--fingerprint` switches:
+
+```python
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(
+        executable_path=r"C:\clearcote\chrome.exe",
+        args=["--fingerprint=seed-123", "--fingerprint-platform=windows"],
+    )
+    page = browser.new_page(); page.goto("https://example.com"); browser.close()
+```
+
+### Run in Docker 🐧
+
+Clearcote ships a **Linux x64** binary, so it runs headless in a container. The image needs the browser's runtime libraries, a **base font set** (so canvas/text hashes are coherent — the #1 Linux tell), and the SDK. On Linux the persona defaults to a coherent **native Linux** identity; WebRTC leak-proofing and Privacy-Sandbox-disable are on by default.
+
+```dockerfile
+FROM node:20-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      xz-utils libnss3 libnspr4 libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+      libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libxfixes3 libxext6 libxrender1 \
+      libpango-1.0-0 libcairo2 libx11-6 libxcb1 libexpat1 libdbus-1-3 ca-certificates \
+      fontconfig fonts-liberation fonts-noto-color-emoji fonts-unifont fonts-ipafont-gothic fonts-wqy-zenhei \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+RUN npm i clearcote
+RUN node --input-type=module -e "import { download } from 'clearcote'; await download();"   # bake the binary in
+COPY run.mjs .
+CMD ["node", "run.mjs"]
+```
+
+```javascript
+// run.mjs — one coherent Linux persona, every stealth surface on
+import { launchPersistentContext } from "clearcote";
+const ctx = await launchPersistentContext("/tmp/prof", {
+  headless: true,
+  fingerprint: "user-1",
+  proxy: { server: "http://gateway:8080", username: "u", password: "p" },
+  geoip: true,          // timezone + languages + WebRTC IP matched to the proxy exit
+  humanize: true,       // real, trusted bezier input; navigator.webdriver stays false
+  args: ["--no-sandbox"],
+});
+const page = ctx.pages()[0] ?? (await ctx.newPage());
+await page.goto("https://example.com");
+await ctx.close();
+```
+
+> `--shm-size=1g` avoids `/dev/shm` crashes on heavy pages. Python is identical (`from clearcote import launch_persistent_context`, `snake_case` options).
+
+---
+
+## Why patch the engine, not the page
+
+The usual approach patches `navigator.webdriver`, spoofs the WebGL vendor, and overrides `navigator.plugins` **from script**. Detectors still flag it — and the reason is **structural**, not one more property left uncovered. A JavaScript spoof is a function standing where a native one belongs. A detector sets the returned value aside and interrogates whether the thing returning it is native:
+
+| The tell | Why it catches a JS spoof |
+|---|---|
+| `toString` self-reveal | A native method stringifies to `function get vendor() { [native code] }`; an override stringifies to its own source — one `.toString()` catches it. |
+| Descriptor / `hasOwnProperty` | `getOwnPropertyDescriptor` exposes redefined props, and `hasOwnProperty('toString')` returns `true` on a tampered function where a native one returns `false`. |
+| Wrong-`this` `TypeError` | Native getters throw a specific `TypeError` on the wrong receiver; a naive shim stays quiet, and the silence is the signal. |
+| **Realm re-acquisition** | A detector grabs a pristine `Function.prototype.toString` from a fresh iframe or Web Worker and turns it on your getter — a different realm from your main-world patch. It returns your source. Caught. |
+
+Clearcote has **no such layer**. The getter for `navigator.vendor` **is** the C++ getter: it reports `[native code]` because it *is* native code, identical across every realm — main frame, iframe, and worker. There is no JavaScript hijacking to detect.
+
+### The three layers of bot detection — and where Clearcote fits
+
+Modern anti-bot systems read three structurally different surfaces, in three separate places. One tool rarely fixes all three:
+
+| Layer | The tells | Where the fix lives | Clearcote |
+|---|---|---|:--|
+| **A · driver / binary artifacts** | `cdc_` ChromeDriver vars, the WebDriver protocol surface | Drive raw CDP, skip chromedriver | ✅ a plain Chromium binary — no driver artifacts |
+| **B · CDP side-effects** | `Runtime.enable` leaks, injected init-scripts, main-world execution, automation-default viewport | The control / CDP-client layer | ✅ the SDK's launch defaults hold these back (isolated worlds, non-default viewport) |
+| **C · fingerprint surface** | canvas, WebGL, audio, fonts, `navigator`, TLS — across main frame, iframes, workers | **The engine (C++)**, because JS overrides self-reveal (above) | ✅ **this is Clearcote** |
+
+### The thing that matters most
+
+Because the controls live **in the engine**, *the JavaScript a page sees and the network handshake underneath it come from one real Chromium.* There is **no spoofed-JS-over-real-TLS seam** for a cross-check to catch — the exact failure mode that gives injection-based tools away. One `--fingerprint` seed produces a single, internally consistent machine across canvas, WebGL, audio, fonts, locale, hardware — **and the TLS/HTTP-2 fingerprint underneath**. And when the *noise itself* is the tell, switch it off (`fingerprintNoise: false`): canvas/WebGL/audio return their natural values while the identity spoof stays on.
+
+---
+
+## Why Clearcote instead of the others?
+
+Most "anti-detect" / stealth browsers are **closed, paid binaries** that rewrite your fingerprint with **injected JavaScript or CDP hooks** — brittle, self-revealing, and asking you to trust code you can't read. Clearcote inverts every one of those choices:
+
+| | **Clearcote** | Typical anti-detect browser |
+|---|---|---|
+| **Source** | ✅ 100% open — every change is a readable patch | ❌ Closed binary |
+| **Price** | ✅ **Free** | 💸 Paid subscription |
+| **How signals change** | ✅ Compiled **into the C++ engine** — invisible to the page | ⚠️ Injected JS / CDP hooks (detectable artifacts) |
+| **Coherence** | ✅ One seed → a whole consistent machine; the **JS identity and the real TLS/JA3/JA4 + HTTP/2 stack agree** | ⚠️ Per-surface values that disagree — with each other or with the network |
+| **Trust model** | ✅ Signed, checksummed, **reproducible from source** | ❌ "Trust us" |
+| **Automation** | ✅ **Drop-in Playwright / Puppeteer** — returns a standard `Browser` | ⚠️ Proprietary API / GUI profiles |
+| **Real identities** | ✅ Import a real machine (or the curated [profile library](https://github.com/clearcotelabs/clearcote-profiles)) and **verify it loaded** | ⚠️ Rare / unverifiable |
+| **Privacy** | ✅ De-Googled, **zero telemetry / phone-home** | ⚠️ Varies |
+
+---
+
+## Configure the persona — what you control
+
+From **one `--fingerprint` seed** *or* an **imported real-machine profile**, all kept coherent together:
+
+- **Identity** — UA + UA-CH brand / platform / version + high-entropy hints (`bitness` / `wow64` / `model`); a real "Google Chrome" **or "Microsoft Edge"** brand set — JS `navigator.userAgentData` and the HTTP `Sec-CH-UA` headers aligned.
+- **GPU** — WebGL unmasked vendor/renderer + the full `getParameter` table & extension list, **and WebGPU (`navigator.gpu`) limits/features kept coherent with that same GPU**; session-constant.
+- **Rendering** — deterministic per-site canvas / WebGL / audio noise, *or off* — plus an experimental **[real-GPU canvas bridge](docs/CANVAS-BRIDGE.md)** that renders on a real GPU host for hardware-accurate readbacks.
+- **Fonts** — the claimed OS's font families render **present with correct advance widths** (metric-compatible clones bundled with the Linux release), so a Windows persona on a Linux server has no absent-font or wrong-width tell.
+- **Hardware & screen** — `hardwareConcurrency`, `deviceMemory`, `storageQuota`, screen geometry / depth / DPR + `getScreenDetails()`, a realistic `jsHeapSizeLimit`, touch points.
+- **Locale & network** — timezone + `navigator.languages` + `Accept-Language` + the **ICU / `Intl` locale all pinned to one language**, geolocation, a coherent WebRTC egress IP (no STUN/LAN leak), and the **TLS/HTTP-2** shape following the claimed Chrome version — all auto-matched to your proxy via `geoip`.
+- **Long-tail** — speech-synthesis voices, installed fonts, `MediaCapabilities.decodingInfo()` codecs, `enumerateDevices()`, CSS `@media` (pointer / hover / color-gamut), battery, connection, keyboard layout.
+- **Behavior** — humanized, *trusted* bezier mouse input that keeps `navigator.webdriver = false`.
+
+**Import a real machine** — adopt the *exact* identity of a real Chrome (GPU + `getParameter` table, screen, fonts, voices, audio). Grab one from the curated **[clearcote-profiles](https://github.com/clearcotelabs/clearcote-profiles)** library or capture your own with the [collector](tools/fingerprint-collect) — then **prove it loaded** with [`verify_profile.py`](tools/fingerprint-collect/verify_profile.py).
+
+---
+
+## Drive a page with an AI agent
+
+Clearcote ships an **in-browser AI agent**: it runs *inside* the browser process, perceives the live page, asks an LLM what to do, and executes steps as **real, trusted input** via Chrome's native Actor framework — not a synthetic-event shim. Point it at [OpenRouter](https://openrouter.ai) (default) and switch any model with one slug.
 
 ```javascript
 import { launchAgent, runAgentTask } from "clearcote";
 
-const ctx = await launchAgent({
-  agentLlmKey: process.env.OPENROUTER_API_KEY,   // turns the agent on
-  agentModel: "openai/gpt-4o-mini",
-});
+const ctx = await launchAgent({ agentLlmKey: process.env.OPENROUTER_API_KEY, agentModel: "openai/gpt-4o-mini" });
 const page = ctx.pages()[0] ?? (await ctx.newPage());
 await page.goto("https://news.ycombinator.com");
 const result = await runAgentTask(page, "Open the top story and summarize it.", { maxSteps: 12 });
@@ -176,159 +289,76 @@ await ctx.close();
 
 It combines naturally with the fingerprint spoofing and `humanize` input above — an agent that *looks human while it works*. (Python: `launch_agent()` + `run_agent_task()`.)
 
-### Run in Docker (Linux) 🐧
+---
 
-Clearcote ships a **Linux x64** binary, so it runs headless in a container. The image needs three things: the browser's runtime libraries, a **base font set** (so canvas/text hashes are coherent — the #1 Linux tell), and the SDK. On Linux the persona defaults to a coherent **native Linux** identity (GPU/voices/audio devices all Linux-shaped); WebRTC leak-proofing and Privacy-Sandbox-disable are on by default — so the example below *is* the full stealth config.
+## Proof & verify
 
-**`Dockerfile`**
-```dockerfile
-FROM node:20-slim
-# 1) xz-utils (unpacks the .tar.xz on first download) + browser runtime libs + a base font set
-#    (so canvas/emoji/text fingerprints are coherent)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      xz-utils \
-      libnss3 libnspr4 libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-      libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libxfixes3 libxext6 libxrender1 \
-      libpango-1.0-0 libcairo2 libx11-6 libxcb1 libexpat1 libdbus-1-3 ca-certificates \
-      fontconfig fonts-liberation fonts-noto-color-emoji fonts-unifont fonts-ipafont-gothic fonts-wqy-zenhei \
- && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-RUN npm i clearcote@^0.11
-# 2) (optional) bake the verified browser into the image so there's no first-run download
-RUN node --input-type=module -e "import { download } from 'clearcote'; await download();"
-COPY run.mjs .
-CMD ["node", "run.mjs"]
+### Per-build fingerprint audit
+
+Every build is audited with [`scripts/creepjs_audit.py`](scripts/creepjs_audit.py) — it reads the signals the browser actually exposes, cross-checks them for internal consistency (e.g. **UA vs UA-CH**), confirms the WebRTC mock leaks no LAN address, and checks it isn't flagged as headless/automated.
+
+<!-- CREEPJS_RESULTS:START -->
+**Build `149.0.7827.114` · seed `demo` · platform `windows`**
+
+| Signal | Value | Verdict |
+|---|---|---|
+| `navigator.webdriver` | False | ✅ hidden |
+| User-Agent ↔ UA-CH | `Chrome/149` ↔ `149.0.7827.x` | ✅ consistent |
+| UA-CH platform | Windows 19.0.0 | ✅ |
+| WebGL vendor / renderer | Google Inc. (Intel) / ANGLE (Intel, Intel(R) UHD Graphics 770 … Direct3D11 …) | ✅ spoofed |
+| Canvas 2D | deterministic per seed | ✅ noised |
+| Timezone | America/New_York | ✅ |
+| WebRTC host (LAN) candidate | none | ✅ no LAN leak |
+| WebRTC srflx (public) | = mocked egress IP | ✅ |
+| Headless (hard) / Stealth-detect | 0% / 0% | ✅ |
+<!-- CREEPJS_RESULTS:END -->
+
+Beyond the per-build audit, Clearcote is exercised against **independent, third-party detection services** and comes back clean across every category below. *Service names are omitted by policy; the categories are what matter.*
+
+| Detection category | What it verifies | Result |
+|---|---|:--|
+| 🤖 **Webdriver / headless suites** | `navigator.webdriver`, headless heuristics, plugin / UA tells | ✅ Hidden · normal headful Chrome |
+| 🧩 **Automation-framework leaks** | CDP `Runtime.enable` leak, injected init-scripts, main-world execution | ✅ No leaks · isolated world |
+| 🔒 **TLS / JA4 client fingerprint** | Handshake matches a real Chrome — no spoofed-JS-over-tooling-TLS seam | ✅ Genuine Chrome 149 JA4 |
+| 📡 **WebRTC leak tests** | STUN / host candidates exposing a real LAN or ISP IP | ✅ Only the egress IP |
+| 🎨 **Canvas / WebGL / fonts / audio** | Per-surface fingerprints render coherently and deterministically per seed | ✅ Coherent GPU + font metrics |
+| 🌐 **Locale / timezone coherence** | JS `Intl` / timezone ↔ `navigator.languages` ↔ network egress all agree | ✅ Aligned end-to-end via `geoip` |
+
+> **Honest scope.** This is an **experimental pre-release**. The above is open-source, adversarial *coherence* auditing (a persona measured against a real Chrome on the same probe) — **not** published pass-rates against commercial services. And detection is only half the picture: a clean fingerprint over a **burned proxy IP** can still be blocked on IP reputation alone. Treat IP quality as a separate axis from browser identity.
+
+### Don't trust us — verify us
+
+Every release is **GPG-signed, SHA-256-checksummed, and reproducible from source**. Pin the **Clearcote release signing key** (it does not change between releases) and check every download against it:
+
+```
+CA96 F185 F96A 693A EDB3  AC1F CB00 D851 B7A8 6B0F
 ```
 
-**`run.mjs`** — one coherent Linux persona with every stealth surface on (`.mjs` so `import` works):
-```javascript
-import { launchPersistentContext } from "clearcote";
-
-const ctx = await launchPersistentContext("/tmp/prof", {
-  headless: true,
-  fingerprint: "user-1",           // one stable, seed-derived identity (fonts, GPU, screen, audio…)
-  // platform defaults to the host OS -> "linux" here; pass "windows" to spoof Windows-on-Linux
-  proxy: { server: "http://gateway:8080", username: "u", password: "p" },
-  geoip: true,                     // timezone + languages + WebRTC IP matched to the proxy's exit region
-  humanize: true,                  // real, trusted bezier input; navigator.webdriver stays false
-  widevine: true,                  // opt-in DRM — fetches Google's CDM on first use (never bundled)
-  args: ["--no-sandbox"],          // required in most containers (no setuid sandbox)
-});
-const page = ctx.pages()[0] ?? (await ctx.newPage());
-await page.goto("https://abrahamjuliot.github.io/creepjs/");   // 0% headless / 0% stealth
-// … your automation …
-await ctx.close();
-```
-> Python is identical — `from clearcote import launch_persistent_context` with the same options (`snake_case`: `accept_language`, `webrtc_ip`, …).
-
-```bash
-docker build -t my-clearcote .
-docker run --rm --shm-size=1g my-clearcote
-```
-
-**Container notes:** pass `--no-sandbox` (or `chown root:root chrome-sandbox && chmod 4755 chrome-sandbox`); `--shm-size=1g` avoids `/dev/shm` crashes on heavy pages. On a slimmer base image the `apt` list above is the complete runtime set — if the browser fails to start with `error while loading shared libraries: libX.so`, add that library's package and re-run.
+- **[docs/VERIFY.md](docs/VERIFY.md)** — verify a release: signature, checksums, reproducibility, and diffing the patch set against pinned upstream.
+- **[docs/STEALTH-COHERENCE.md](docs/STEALTH-COHERENCE.md)** — the regression gate that launches the shipped binary on every release.
 
 ---
 
-## Don't trust us — verify us
+## Build from source
 
-Every release is **GPG-signed, SHA-256-checksummed, and reproducible from source**. Build the Windows (cross-compiled) or Linux (native) binary yourself on a Linux host in one command:
+Build the Windows (cross-compiled) or Linux (native) binary yourself on a Linux host:
 
 ```bash
 git clone https://github.com/clearcotelabs/clearcote-browser.git
 cd clearcote-browser && WORK=~/clearcote-build ./build.sh
 ```
 
-- **[docs/VERIFY.md](docs/VERIFY.md)** — verify a release: signature, checksums, reproducibility, and diffing the patch set against pinned upstream.
-- **[docs/BUILDING.md](docs/BUILDING.md)** — full build-from-source guide.
+- **[docs/BUILDING.md](docs/BUILDING.md)** — full build-from-source guide · **[patches/](patches/)** — the 31 diffs · **[docs/PATCHES.md](docs/PATCHES.md)** — what each one does.
 
-Pin the **Clearcote release signing key** and check every download against it (it does not change between releases):
+## Reference
 
-```
-CA96 F185 F96A 693A EDB3  AC1F CB00 D851 B7A8 6B0F
-```
-
-## Proof: fingerprint audit
-
-Every build is audited with [`scripts/creepjs_audit.py`](scripts/creepjs_audit.py) — it reads the signals the browser actually exposes, cross-checks them for internal consistency (e.g. **UA vs UA-CH**), confirms the WebRTC mock leaks no LAN address, and checks it isn't flagged as headless/automated.
-
-<!-- CREEPJS_RESULTS:START -->
-**Build `149.0.7827.114` · audited 2026-06-18 · seed `demo` · platform `windows`**
-
-| Signal | Value | Verdict |
-|---|---|---|
-| `navigator.webdriver` | False | ✅ hidden |
-| User-Agent | `Chrome/149` | ✅ |
-| UA-CH Chromium version | 149.0.7827.66 | ✅ matches UA |
-| UA-CH platform | Windows 19.0.0 | ✅ |
-| WebGL vendor / renderer | Google Inc. (Intel) / ANGLE (Intel, Intel(R) UHD Graphics 770 (0xA780) Direct3D11 … | ✅ spoofed |
-| Canvas 2D | `1ca291c12d74236f` (deterministic per seed) | ✅ noised |
-| hardwareConcurrency | 8 | ✅ |
-| deviceMemory | 8 | ✅ |
-| Timezone | America/New_York | ✅ |
-| WebRTC host (LAN) candidate | none | ✅ no LAN leak |
-| WebRTC srflx (public) | 203.0.113.45 | ✅ = mocked IP |
-| Headless (hard) | 0% | ✅ |
-| Stealth-detect | 0% | ✅ |
-
-_UA ↔ UA-CH version consistency: ✅ (UA major `149`, UA-CH major `149`). WebRTC srflx mocked to the proxy/egress IP; real host candidates suppressed._
-<!-- CREEPJS_RESULTS:END -->
-
-> Spoofed per-seed identity (synthetic, not real machine data); a demo timezone and a documentation WebRTC IP are used so no real PII appears here. Regenerated each release.
-
----
-
-## Independent detection coverage
-
-<div align="center">
-
-Beyond the per-build audit above, Clearcote is exercised against **independent, third-party detection services** — and comes back clean across every category we check automatically. *Service names are omitted by policy; the categories are what matter.*
-
-<br />
-
-[![categories verified](https://img.shields.io/badge/categories%20verified-6%20%2F%206-54d39b?style=for-the-badge&labelColor=07080a)](#independent-detection-coverage)
-
-![navigator.webdriver](https://img.shields.io/badge/navigator.webdriver-hidden-54d39b?style=flat-square&labelColor=07080a)
-![headless](https://img.shields.io/badge/headless-0%25-54d39b?style=flat-square&labelColor=07080a)
-![CDP leaks](https://img.shields.io/badge/CDP%20automation%20leaks-none-54d39b?style=flat-square&labelColor=07080a)
-![TLS / JA4](https://img.shields.io/badge/TLS%20%2F%20JA4-genuine%20Chrome-38e0d6?style=flat-square&labelColor=07080a)
-![WebRTC](https://img.shields.io/badge/WebRTC-no%20IP%20leak-38e0d6?style=flat-square&labelColor=07080a)
-![locale coherence](https://img.shields.io/badge/locale%20%E2%86%94%20timezone%20%E2%86%94%20network-coherent-a78bfa?style=flat-square&labelColor=07080a)
-
-<sub>Method: driven headful through the SDK with <code>geoip</code> + a residential proxy + humanized input, a fresh per-seed identity per check · build <code>149.x</code> · 2026-06-24.</sub>
-
-</div>
-
-```mermaid
-flowchart LR
-  S([" 🎲 one --fingerprint seed "]):::seed
-  subgraph SURF [" 🧬 one coherent machine — every layer agrees "]
-    direction TB
-    JS["🎨 JS identity<br/>canvas · WebGL · audio · fonts · locale"]
-    NET["🔒 network<br/>TLS / JA4 · HTTP&#47;2"]
-    RTC["📡 WebRTC egress"]
-    BEH["🖱️ humanized input"]
-  end
-  S --> JS & NET & RTC & BEH
-  JS --> R
-  NET --> R
-  RTC --> R
-  BEH --> R
-  R["✅ passes webdriver · headless · CDP-leak<br/>· TLS · WebRTC · locale checks"]:::ok
-  classDef seed fill:#07080a,stroke:#38e0d6,color:#6ee7ff;
-  classDef ok fill:#0b1a14,stroke:#54d39b,color:#54d39b;
-```
-
-| Detection category | What it verifies | Result |
-|---|---|:--|
-| 🤖 **Webdriver / headless suites** | `navigator.webdriver`, headless heuristics, plugin / UA tells | ✅ Hidden · normal headful Chrome |
-| 🧩 **Automation-framework leak detectors** | CDP `Runtime.enable` leak, injected init-scripts, main-world execution, automation-default viewport | ✅ No leaks · isolated world · non-default viewport |
-| 🔒 **TLS / JA4 client fingerprint** | Handshake matches a real Chrome — no spoofed-JS-over-tooling-TLS seam | ✅ Genuine Chrome 149 JA4 |
-| 📡 **WebRTC leak tests** | STUN / host candidates exposing a real LAN or ISP IP | ✅ Only the egress IP — no LAN/host leak |
-| 🎨 **Canvas / WebGL / fonts / audio** | Per-surface fingerprints render coherently and deterministically per seed | ✅ Coherent · consistent GPU strings |
-| 🌐 **Locale / timezone coherence** | JS `Intl` / timezone ↔ `navigator.languages` ↔ network egress all agree | ✅ Aligned end-to-end via `geoip` |
-
-> Scope: the categories above are what we verify automatically. Aggregate "trust score" scanners that require interactive runs aren't covered by this automated pass. And detection is only half the picture — a clean fingerprint over a **burned proxy IP** can still be blocked on IP reputation alone; treat IP quality as a separate axis from browser identity.
+| | |
+|---|---|
+| **SDK options** | [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python) |
+| **Docs** | [VERIFY](docs/VERIFY.md) · [BUILDING](docs/BUILDING.md) · [CANVAS-BRIDGE](docs/CANVAS-BRIDGE.md) · [STEALTH-COHERENCE](docs/STEALTH-COHERENCE.md) · [PATCHES](docs/PATCHES.md) |
+| **For agents** | [AGENTS.md](AGENTS.md) · [llms.txt](llms.txt) |
+| **Profiles** | [clearcote-profiles](https://github.com/clearcotelabs/clearcote-profiles) library · [collector](tools/fingerprint-collect) |
+| **Roadmap** | [ROADMAP.md](ROADMAP.md) — macOS, ARM64, more coherence |
 
 ---
 
@@ -340,9 +370,9 @@ Clearcote stands on excellent open-source work: **[Chromium](https://www.chromiu
 
 - **[ROADMAP.md](ROADMAP.md)** — what's next (macOS, ARM64, more coherence, profile manager). ⭐ Star + watch to follow along.
 - **License** — Clearcote's code and patches are **BSD-3-Clause** ([LICENSE](LICENSE)); upstream components keep their licenses ([CREDITS.md](CREDITS.md)).
-- **Responsible use** — a privacy + automation tool for **lawful** purposes (privacy, QA/testing, research, authorized automation). You are responsible for how you use it; respect site terms and the law. Provided "as is." See [DISCLAIMER.md](DISCLAIMER.md).
+- **Responsible use** — a privacy + automation tool for **lawful** purposes (privacy, QA/testing, research, authorized automation). Respect site terms and the law. Provided "as is." See [DISCLAIMER.md](DISCLAIMER.md).
 
-Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md). The repo is laid out so **humans and automated contributors** alike can navigate and build it.
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
 
 ## Community
 
