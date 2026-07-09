@@ -11,6 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Linux%20x64-a78bfa?style=flat-square&labelColor=07080a)](https://github.com/clearcotelabs/clearcote-browser/releases)
 [![npm](https://img.shields.io/npm/v/clearcote?style=flat-square&logo=npm&logoColor=white&label=npm&labelColor=07080a&color=CB3837)](https://www.npmjs.com/package/clearcote)
 [![PyPI](https://img.shields.io/pypi/v/clearcote?style=flat-square&logo=pypi&logoColor=white&label=pip&labelColor=07080a&color=3776AB)](https://pypi.org/project/clearcote/)
+[![Docker](https://img.shields.io/docker/pulls/teamflatearth/clearcote?style=flat-square&logo=docker&logoColor=white&label=docker&labelColor=07080a&color=2496ED)](https://hub.docker.com/r/teamflatearth/clearcote)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-38e0d6?style=flat-square&labelColor=07080a)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=07080a)](https://discord.gg/WxvCjAnXZm)
 [![Copy for agent](https://img.shields.io/badge/Copy%20for%20agent-24292f?style=flat-square&logo=readme&logoColor=white)](https://raw.githubusercontent.com/clearcotelabs/clearcote-browser/main/AGENTS.md)
@@ -192,7 +193,27 @@ Point Claude Desktop / Cursor / Cline at the **[Clearcote MCP server](mcp/)** �
 
 ### Run in Docker 🐧
 
-Clearcote ships a **Linux x64** binary, so it runs headless in a container. The image needs the browser's runtime libraries, a **base font set** (so canvas/text hashes are coherent — the #1 Linux tell), and the SDK. On Linux the persona defaults to a coherent **native Linux** identity; WebRTC leak-proofing and Privacy-Sandbox-disable are on by default.
+**Official image — a stealth browser as a CDP endpoint.** Pull it and go; any **Playwright / Puppeteer / browser-use / Crawl4AI / Stagehand** client attaches over CDP, no code change:
+
+```bash
+docker run -d --rm -p 9222:9222 teamflatearth/clearcote      # CDP on http://localhost:9222
+```
+```python
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    browser = p.chromium.connect_over_cdp("http://localhost:9222")   # your code, unchanged
+    page = browser.new_page(); page.goto("https://example.com"); print(page.title())
+```
+
+The image bakes in the signed Linux binary (SHA-256 verified), a base font set **and** the Windows metric-clone fonts, and defaults to a coherent **native Linux** persona. Configure it with env vars — `CC_PLATFORM` (`windows`/`linux`/`macos`/`android`), `CC_FINGERPRINT` (seed), `CC_BRAND` (`Edge`…), `CC_ACCEPT_LANGUAGE`, `CC_TIMEZONE`, `CC_TLS_PROFILE`:
+
+```bash
+docker run -d -p 9222:9222 -e CC_PLATFORM=windows -e CC_FINGERPRINT=user-7423 -e CC_BRAND=Edge teamflatearth/clearcote
+```
+
+> **Security:** the CDP endpoint is full browser control — publish it only to trusted networks (`-p 127.0.0.1:9222:9222` keeps it host-local). The [`docker/`](docker/) `Dockerfile` is auditable — rebuild + verify it yourself.
+
+**Or build your own image** (SDK-driven, run your own script). Clearcote ships a **Linux x64** binary, so it runs headless in a container. The image needs the browser's runtime libraries, a **base font set** (so canvas/text hashes are coherent — the #1 Linux tell), and the SDK. On Linux the persona defaults to a coherent **native Linux** identity; WebRTC leak-proofing and Privacy-Sandbox-disable are on by default.
 
 ```dockerfile
 FROM node:20-slim
