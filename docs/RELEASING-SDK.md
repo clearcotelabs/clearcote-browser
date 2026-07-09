@@ -77,6 +77,29 @@ the same fields — it converts on first upload and does not reserve the name, s
 > A single `sdk-v*` tag publishes **both** packages (they share one version today). If you ever need
 > to release them at different versions, split into per-package tag namespaces.
 
+## MCP server (`clearcote-mcp`) — its own tag line
+
+The MCP server in [`mcp/`](../mcp/) publishes on a dedicated **`mcp-v*`** tag (workflow
+[`mcp.yml`](../.github/workflows/mcp.yml)), independent of the SDK's `sdk-v*` line — it versions
+separately (starts at `0.1.0`). One `mcp-v*` tag publishes **both** the Python package
+(`clearcote-mcp` → PyPI) and the npm launcher (`clearcote-mcp` → npm), via OIDC.
+
+1. Bump the **same** version in **all three** spots: `mcp/pyproject.toml`,
+   `mcp/clearcote_mcp/__init__.py` (`__version__`), and `mcp/npm/package.json`.
+2. Commit + push, then:
+   ```bash
+   git tag mcp-v0.1.0
+   git push origin mcp-v0.1.0
+   ```
+3. The push runs `mcp.yml` — a version-consistency guard + the MCP harness tests, then pauses at the
+   `pypi` and `npm` environment gates. Approve each; both publish via OIDC.
+
+**One-time trusted-publisher registration** (like the SDK, but pointing at `mcp.yml`):
+- PyPI: project `clearcote-mcp` → Publishing → add repo `clearcotelabs/clearcote-browser`, workflow
+  `mcp.yml`, environment `pypi`.
+- npm: `clearcote-mcp` → Settings → Trusted Publisher → GitHub Actions, workflow `mcp.yml`,
+  environment `npm`.
+
 ## Auth fallback (only if OIDC is unavailable)
 If you ever must publish before OIDC is configured: `npm publish --access public` from a logged-in
 machine (or a temporary `NODE_AUTH_TOKEN` automation token), and `twine upload` with a PyPI API

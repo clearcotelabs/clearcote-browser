@@ -1,0 +1,118 @@
+# Publishes the Clearcote MCP server on an `mcp-v<version>` tag:
+#   * Python `clearcote-mcp`      -> PyPI  via OIDC trusted publishing (no token)
+#   * npm    `clearcote-mcp`      -> npm   via OIDC trusted publishing (no token)
+#
+# Register the trusted publishers first (one-time), pointing at THIS filename (mcp.yml):
+#   PyPI: project clearcote-mcp -> Publishing -> Add a GitHub Actions publisher
+#         (repo clearcotelabs/clearcote-browser, workflow mcp.yml, environment pypi)
+#   npm : clearcote-mcp -> Settings -> Trusted Publisher -> GitHub Actions
+#         (repo clearcotelabs/clearcote-browser, workflow mcp.yml, environment npm)
+# Keep the three version fields + the tag in sync (mcp/pyproject.toml,
+# mcp/clearcote_mcp/__init__.py, mcp/npm/package.json). See docs/RELEASING-SDK.md.
+name: Publish MCP server
+
+on:
+  push:
+    tags:
+      - 'mcp-v*'          # PRIMARY: fires only on MCP tags (mcp-v0.1.0)
+  workflow_dispatch:       # MANUAL fallback (re-run a failed publish)
+    inputs:
+      version:
+        description: 'clearcote-mcp version (informational; source of truth is mcp/pyproject.toml).'
+        required: false
+
+concurrency:
+  group: publish-mcp
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Gate: versions must agree + the MCP tests must pass before any publish.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Verify versions match the mcp-v* tag (pyproject == __init__ == npm)
+        if: github.event_name == 'push'
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#mcp-v}"
+          PY_VER="$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('mcp/pyproject.toml').read_text())['project']['version'])")"
+          INIT_VER="$(python -c "import re,pathlib;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"',pathlib.Path('mcp/clearcote_mcp/__init__.py').read_text()).group(1))")"
+          NPM_VER="$(python -c "import json,pathlib;print(json.loads(pathlib.Path('mcp/npm/package.json').read_text())['version'])")"
+          echo "pyproject=$PY_VER  __init__=$INIT_VER  npm=$NPM_VER  tag=$TAG_VER"
+          if [ "$PY_VER" != "$TAG_VER" ] || [ "$INIT_VER" != "$TAG_VER" ] || [ "$NPM_VER" != "$TAG_VER" ]; then
+            echo "::error::version mismatch — keep mcp/pyproject.toml, mcp/clearcote_mcp/__init__.py, mcp/npm/package.json, and the mcp-v* tag in sync"
+            exit 1
+          fi
+
+      - name: Run MCP tests (harness — no browser needed)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ./sdk/python ./mcp pytest pytest-asyncio
+          python -m pytest mcp/tests -q
+
+  build-python:
+    needs: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcp-dist
+          path: mcp/dist/
+
+  publish-pypi:
+    needs: build-python
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/clearcote-mcp
+    permissions:
+      id-token: write               # OIDC trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mcp-dist
+          path: dist/
+      - name: Publish to PyPI (OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+
+  publish-npm:
+    needs: check
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write               # OIDC trusted publishing (npm >= 11.5.1)
+      contents: read
+    defaults:
+      run:
+        working-directory: mcp/npm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Ensure npm >= 11.5.1 (required for OIDC trusted publishing)
+        run: npm install -g npm@latest
+      - name: Publish to npm (OIDC + provenance)
+        run: npm publish --access public --provenance

@@ -11,7 +11,9 @@
 // as engine switches.
 
 import { chromium } from "playwright-core";
-import { cpSync, mkdtempSync } from "node:fs";
+import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type {
@@ -331,12 +333,191 @@ export async function launchAgent(options: LaunchAgentOptions = {}): Promise<Bro
   return launchPersistentContext(dir, rest);
 }
 
+/** A free ephemeral TCP port on loopback. */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const s = createServer();
+    s.once("error", reject);
+    s.listen(0, "127.0.0.1", () => {
+      const addr = s.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      s.close(() => resolve(port));
+    });
+  });
+}
+
+export interface ServeOptions extends LaunchOptions {
+  /** CDP port (default: a free ephemeral port; pass 9222 for the conventional one). */
+  port?: number;
+  /** Bind address — keep it loopback (default 127.0.0.1) for stealth + safety. */
+  host?: string;
+  /** `--remote-allow-origins` value (default: the loopback origins only; "*" for trusted local use). */
+  allowOrigins?: string;
+  /** Persistent profile dir (default: a fresh temp dir, removed on close). */
+  userDataDir?: string;
+  /** Run headless (default true; false for a visible window). */
+  headless?: boolean;
+  /** How long to wait for the CDP endpoint to come up (ms; default 30000). */
+  readyTimeoutMs?: number;
+}
+
+/** Handle for a standing clearcote CDP endpoint. Use `.cdpUrl` with any CDP client. */
+export class Server {
+  constructor(
+    private readonly proc: ChildProcess,
+    readonly host: string,
+    readonly port: number,
+    private readonly userDataDir: string,
+    private readonly ownUdd: boolean,
+  ) {}
+  /** HTTP CDP base — pass to `connectOverCDP` / `puppeteer.connect({ browserURL })`. */
+  get cdpUrl(): string {
+    return `http://${this.host}:${this.port}`;
+  }
+  /** The browser-level WebSocket URL (for clients that want `connect({ browserWSEndpoint })`). */
+  async wsUrl(): Promise<string | undefined> {
+    try {
+      const r = await fetch(`${this.cdpUrl}/json/version`);
+      return ((await r.json()) as { webSocketDebuggerUrl?: string }).webSocketDebuggerUrl;
+    } catch {
+      return undefined;
+    }
+  }
+  isAlive(): boolean {
+    return this.proc.exitCode === null && !this.proc.killed;
+  }
+  async close(): Promise<void> {
+    try {
+      this.proc.kill("SIGTERM");
+    } catch {
+      /* ignore */
+    }
+    if (this.ownUdd) {
+      try {
+        rmSync(this.userDataDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/**
+ * Launch Clearcote with a RAW CDP endpoint and return a {@link Server} — the drop-in-for-the-whole-
+ * ecosystem mode. Unlike {@link launch} (which spawns and *owns* a Playwright browser), `serve`
+ * leaves a standing browser any client attaches to with no code change:
+ * ```ts
+ * const srv = await serve({ fingerprint: "seed-1", platform: "windows" });
+ * const browser = await chromium.connectOverCDP(srv.cdpUrl);        // Playwright
+ * // or: await puppeteer.connect({ browserURL: srv.cdpUrl });        // Puppeteer
+ * // or: point browser-use / Crawl4AI / Stagehand at srv.cdpUrl
+ * await srv.close();
+ * ```
+ * Stays stealthy: the binary is launched **directly** (not through Playwright/Puppeteer), so the
+ * `--enable-automation` flag those frameworks add is never present and `navigator.webdriver` stays
+ * `false`; the engine's `Runtime.enable` neutralization keeps the attached CDP client undetectable
+ * to the page; the port binds to loopback with an origin allowlist; attaching over CDP adds no
+ * launch flags, so the served persona is preserved end to end.
+ */
+export async function serve(options: ServeOptions = {}): Promise<Server> {
+  const {
+    port,
+    host = "127.0.0.1",
+    allowOrigins,
+    userDataDir: uddOption,
+    headless = true,
+    readyTimeoutMs = 30000,
+    humanize: _humanize, // Playwright-only; not applicable to a direct launch
+    showCursor: _showCursor,
+    ...launchOpts
+  } = options;
+
+  // Build the same stealth arg set as launch(), then launch the binary ourselves.
+  const merged = launchOpts.profile
+    ? { ...resolveProfileOptions(launchOpts.profile), ...launchOpts }
+    : launchOpts;
+  const {
+    profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption,
+    args: userArgs, geoip, autoUpdate, cacheDir, quiet, ...rest
+  } = merged;
+  const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
+  const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
+  const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined;
+  if (geoip) await applyGeoip(fingerprint, proxyOpt);
+  const { args: proxyArgs } = resolveProxy(proxyOpt);
+  emitCoherenceWarnings(
+    { ...fingerprint, proxy: proxyOpt, geoip, headless, _userArgs: userArgs ?? [] },
+    quiet, process.platform, String(RELEASE.version).split(".")[0]);
+  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
+  ensureRunnableHere(exe);
+  const engineArgs = assembleArgs(
+    fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions),
+    proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs ?? [], proxyOpt);
+
+  const resolvedPort = port ?? (await freePort());
+  const ownUdd = !uddOption;
+  const userDataDir = uddOption ?? mkdtempSync(join(tmpdir(), "clearcote-serve-"));
+  const origins = allowOrigins ?? `http://${host}:${resolvedPort},http://localhost:${resolvedPort}`;
+  const cdpArgs = [
+    `--remote-debugging-port=${resolvedPort}`,
+    `--remote-debugging-address=${host}`,
+    `--remote-allow-origins=${origins}`,
+    `--user-data-dir=${userDataDir}`,
+  ];
+  if (headless) cdpArgs.push("--headless=new");
+  if (proxyOpt?.server) cdpArgs.push(`--proxy-server=${proxyOpt.server}`);
+
+  const env = { ...process.env, ...(fontLaunchEnv(exe, undefined) ?? {}) };
+  // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
+  // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
+  // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
+  const proc = await winAvRetry(
+    (exePath) => new Promise<ChildProcess>((resolve, reject) => {
+      let settled = false;
+      const p = spawn(exePath, [...engineArgs, ...cdpArgs], { env, stdio: "ignore" });
+      p.once("error", (err) => { if (!settled) { settled = true; reject(err); } });
+      p.once("spawn", () => { if (!settled) { settled = true; resolve(p); } });
+    }),
+    exe,
+  );
+
+  const deadline = Date.now() + readyTimeoutMs;
+  let ready = false;
+  while (Date.now() < deadline) {
+    if (proc.exitCode !== null) break;
+    try {
+      await fetch(`http://${host}:${resolvedPort}/json/version`);
+      ready = true;
+      break;
+    } catch {
+      /* not up yet */
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  if (!ready) {
+    try { proc.kill(); } catch { /* ignore */ }
+    if (ownUdd) { try { rmSync(userDataDir, { recursive: true, force: true }); } catch { /* ignore */ } }
+    throw new Error(
+      `clearcote serve: CDP endpoint at http://${host}:${resolvedPort} did not come up within ${readyTimeoutMs}ms`);
+  }
+  const srv = new Server(proc, host, resolvedPort, userDataDir, ownUdd);
+  process.once("exit", () => { void srv.close(); });
+  if (!quiet) {
+    process.stderr.write(
+      `[clearcote] CDP endpoint ready: ${srv.cdpUrl}\n` +
+      `            attach any client: connectOverCDP(${JSON.stringify(srv.cdpUrl)}) / puppeteer.connect({ browserURL })\n`);
+  }
+  return srv;
+}
+
 import { runAgentTask } from "./agent.js";
 import { listProfiles, loadProfile } from "./profile.js";
 export default {
   launch,
   launchPersistentContext,
   launchAgent,
+  serve,
+  Server,
   executablePath,
   download,
   runAgentTask,

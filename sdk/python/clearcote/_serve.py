@@ -110,7 +110,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     ``launch()`` accepts.
     """
     # Lazy import to avoid a circular import at module load (this module is imported by __init__).
-    from . import _prepare
+    from . import _prepare, _win_av_retry
     from ._fonts import linux_font_env
 
     kwargs.pop("headless", None)  # serve() drives headless directly via --headless=new
@@ -143,8 +143,13 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     env = dict(os.environ)
     env.update(linux_font_env(exe))  # Linux: FONTCONFIG_FILE -> bundled font clones (no-op elsewhere)
 
-    proc = subprocess.Popen([exe] + args + cdp, env=env,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Launched DIRECTLY (no automation framework) -> no --enable-automation -> webdriver stays false.
+    # Wrap in _win_av_retry so a just-extracted binary survives the Windows SxS/AV first-launch race
+    # ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
+    proc = _win_av_retry(
+        lambda e: subprocess.Popen([e] + args + cdp, env=env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
+        exe)
 
     deadline = time.time() + ready_timeout
     ready = False
