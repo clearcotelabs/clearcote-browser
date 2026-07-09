@@ -74,6 +74,39 @@ Same options as the sync `launch` (fingerprint/persona/proxy/`geoip`/`profile`/`
 `run_agent_task`, `executable_path`, `download`, plus `Profile` (use `launch(profile="name")`). Each
 launched browser owns its Playwright driver and stops it on `await browser.close()`.
 
+### Standing CDP endpoint (`serve()`)
+
+Run Clearcote as a **stealthy CDP endpoint** that any existing automation attaches to unchanged —
+Playwright's `connect_over_cdp`, `puppeteer.connect`, or browser-use / Crawl4AI / Stagehand. Where
+`launch()` spawns a Playwright-owned browser, `serve()` launches the binary **directly** — so
+`--enable-automation` is never added and `navigator.webdriver` stays `false`; the port binds to
+loopback (`127.0.0.1`) behind an origin allowlist.
+
+```python
+from clearcote import serve
+
+srv = serve(fingerprint="seed-123", platform="windows")   # same persona/proxy/geoip options as launch()
+print(srv.cdp_url)                                        # http://127.0.0.1:<port>
+
+from playwright.sync_api import sync_playwright
+browser = sync_playwright().start().chromium.connect_over_cdp(srv.cdp_url)   # your code, unchanged
+# ... or puppeteer.connect / browser-use / Crawl4AI / Stagehand, pointed at srv.cdp_url ...
+srv.close()                                               # or: `with serve(...) as srv:`
+```
+
+Or from the shell:
+
+```bash
+clearcote-serve --port 9222 --fingerprint seed-123 --platform windows   # prints http://127.0.0.1:9222
+```
+
+The returned `Server` exposes `.cdp_url`, `.ws_url()`, and `.close()`, and works as a context manager.
+
+**Drive it from an AI agent (MCP).** Point Claude Desktop / Cursor / Cline at the
+[`clearcote-mcp`](https://github.com/clearcotelabs/clearcote-browser/tree/main/mcp) server
+(`pip install clearcote-mcp` or `npx -y clearcote-mcp`) — ~20 tools over one shared stealth browser,
+persona set via `CLEARCOTE_*` env.
+
 ### Through a proxy (report the proxy's IP, not your host's)
 
 ```python
@@ -361,6 +394,7 @@ Profiles are JSON at `~/.clearcote/profiles/<name>.json` (set `CLEARCOTE_PROFILE
 
 - `launch(**options)` → Playwright `Browser`. Pass `profile=` (a name, path, or `Profile`) to launch a saved persona.
 - `launch_persistent_context(user_data_dir, **options)` → Playwright `BrowserContext`.
+- `serve(**options)` → `Server` — a standing, stealthy CDP endpoint (`.cdp_url` / `.ws_url()` / `.close()`; context manager) any Playwright/Puppeteer/CDP client attaches to. Also exposed as the `clearcote-serve` CLI.
 - `executable_path(executable_path=None, cache_dir=None, quiet=False)` → `str` — resolve (download/verify if needed) the chrome.exe path.
 - `download(cache_dir=None, quiet=False)` → `str` — pre-fetch + verify without launching.
 - `Profile` — `Profile(name, options)`, `.save(path=None)`, `Profile.load(name)`, `.launch(**overrides)`, `.launch_persistent_context(dir, **overrides)`; plus `list_profiles()`, `load_profile(name)`.

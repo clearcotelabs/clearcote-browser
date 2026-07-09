@@ -47,6 +47,33 @@ await browser.close();
 Already using Playwright? Swap `chromium.launch(...)` for `launch(...)` from `clearcote` — the
 returned object is a normal Playwright `Browser`.
 
+### Standing CDP endpoint (`serve()`)
+
+Run Clearcote as a **stealthy CDP endpoint** any existing automation attaches to unchanged —
+Playwright's `connectOverCDP`, `puppeteer.connect`, or browser-use / Crawl4AI / Stagehand. Where
+`launch()` spawns a Playwright-owned browser, `serve()` launches the binary **directly** — so
+`--enable-automation` is never added and `navigator.webdriver` stays `false`; the port binds to
+loopback (`127.0.0.1`) behind an origin allowlist.
+
+```js
+import { serve } from "clearcote";
+import { chromium } from "playwright";
+
+const srv = await serve({ fingerprint: "seed-123", platform: "windows" });  // same options as launch()
+console.log(srv.cdpUrl);                                                    // http://127.0.0.1:<port>
+
+const browser = await chromium.connectOverCDP(srv.cdpUrl);                  // your code, unchanged
+// ... or puppeteer.connect({ browserURL: srv.cdpUrl }) / browser-use / Crawl4AI / Stagehand ...
+await srv.close();
+```
+
+The returned `Server` exposes `.cdpUrl`, `.wsUrl()`, and `.close()`. (For a no-code CDP endpoint, the
+official Docker image also works: `docker run -d --rm -p 9222:9222 teamflatearth/clearcote`.)
+
+**Drive it from an AI agent (MCP).** Point Claude Desktop / Cursor / Cline at the
+[`clearcote-mcp`](https://github.com/clearcotelabs/clearcote-browser/tree/main/mcp) server
+(`npx -y clearcote-mcp` or `pip install clearcote-mcp`) — ~20 tools over one shared stealth browser.
+
 ### Through a proxy (report the proxy's IP, not your host's)
 
 ```ts
@@ -290,6 +317,7 @@ Profiles are JSON at `~/.clearcote/profiles/<name>.json` (set `CLEARCOTE_PROFILE
 
 - `launch(options?)` → `Promise<Browser>` — launch and get a Playwright `Browser`. Pass `profile` (a name, path, or `Profile`) to launch a saved persona.
 - `launchPersistentContext(userDataDir, options?)` → `Promise<BrowserContext>`.
+- `serve(options?)` → `Promise<Server>` — a standing, stealthy CDP endpoint (`.cdpUrl` / `.wsUrl()` / `.close()`) any Playwright/Puppeteer/CDP client attaches to via `connectOverCDP`.
 - `executablePath(options?)` → `Promise<string>` — resolve (download/verify if needed) the chrome.exe path, e.g. for raw `chromium.launch({ executablePath })`.
 - `download(options?)` → `Promise<string>` — pre-fetch + verify the binary without launching.
 - `Profile` — `new Profile(name, options)`, `.save(path?)`, `Profile.load(name)`, `.launch(overrides?)`, `.launchPersistentContext(dir, overrides?)`.
