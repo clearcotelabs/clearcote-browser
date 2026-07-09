@@ -377,3 +377,15 @@ Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md]
 ## Community
 
 Questions, feedback, or want to get involved? **[Join the Clearcote Discord](https://discord.gg/WxvCjAnXZm).**
+
+---
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=clearcotelabs%2Fclearcote-browser&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=clearcotelabs/clearcote-browser&type=date&theme=dark&legend=top-left&sealed_token=uiWIVjXO781jFWSbU622576w1qicxtE9c7h7KwDue1SAX34vcnVbYMSeelttKoASKjl2v1ILrc1Bdd17aRXWAsZjFmEPMGr9j2OTJmyyEuB3i7YC-ke8sQ" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=clearcotelabs/clearcote-browser&type=date&legend=top-left&sealed_token=uiWIVjXO781jFWSbU622576w1qicxtE9c7h7KwDue1SAX34vcnVbYMSeelttKoASKjl2v1ILrc1Bdd17aRXWAsZjFmEPMGr9j2OTJmyyEuB3i7YC-ke8sQ" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=clearcotelabs/clearcote-browser&type=date&legend=top-left&sealed_token=uiWIVjXO781jFWSbU622576w1qicxtE9c7h7KwDue1SAX34vcnVbYMSeelttKoASKjl2v1ILrc1Bdd17aRXWAsZjFmEPMGr9j2OTJmyyEuB3i7YC-ke8sQ" />
+ </picture>
+</a>
