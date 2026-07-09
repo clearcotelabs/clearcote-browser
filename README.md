@@ -171,6 +171,25 @@ with sync_playwright() as p:
     page = browser.new_page(); page.goto("https://example.com"); browser.close()
 ```
 
+**Or run a standing CDP endpoint** any existing framework attaches to unchanged — `connect_over_cdp`, `puppeteer.connect`, browser-use / Crawl4AI / Stagehand. It launches the binary directly (no `--enable-automation`), so `navigator.webdriver` stays `false` — stealthy by construction:
+
+```bash
+clearcote-serve --port 9222 --fingerprint seed-123 --platform windows   # prints http://127.0.0.1:9222
+```
+```python
+from clearcote import serve
+srv = serve(fingerprint="seed-123", platform="windows")   # -> srv.cdp_url; attach any CDP client
+```
+
+### Drive it from an AI agent (MCP) 🤖
+
+Point Claude Desktop / Cursor / Cline at the **[Clearcote MCP server](mcp/)** — ~20 tools (`read_page`, `page_elements`, `click`, `fill_field`, `screenshot`, `save_profile`, `get_cdp_endpoint`, …) over one shared stealth browser. The persona is set via env, so the tool surface stays clean:
+
+```json
+{ "mcpServers": { "clearcote": { "command": "npx", "args": ["-y", "clearcote-mcp"],
+    "env": { "CLEARCOTE_FINGERPRINT": "acct-1", "CLEARCOTE_PLATFORM": "windows" } } } }
+```
+
 ### Run in Docker 🐧
 
 Clearcote ships a **Linux x64** binary, so it runs headless in a container. The image needs the browser's runtime libraries, a **base font set** (so canvas/text hashes are coherent — the #1 Linux tell), and the SDK. On Linux the persona defaults to a coherent **native Linux** identity; WebRTC leak-proofing and Privacy-Sandbox-disable are on by default.

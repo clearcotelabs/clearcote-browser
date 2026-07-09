@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clearcote-mcp"
+version = "0.1.0"
+description = "MCP server for Clearcote — drive the open-source stealth Chromium from Claude Desktop, Cursor, Cline, and any MCP client."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+dependencies = [
+    "clearcote>=0.13",
+    "mcp[cli]>=1.2",
+    "markdownify>=0.11",
+]
+
+[project.scripts]
+clearcote-mcp = "clearcote_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/clearcotelabs/clearcote-browser"
+Source = "https://github.com/clearcotelabs/clearcote-browser/tree/main/mcp"
+
+[tool.setuptools]
+packages = ["clearcote_mcp"]

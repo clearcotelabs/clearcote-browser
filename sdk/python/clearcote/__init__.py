@@ -37,11 +37,14 @@ from ._widevine import apply_widevine_launch, fetch_widevine, seed_widevine
 from .download import ensure_binary, warm_files
 from .geoip import resolve_geo
 from .release import RELEASE
+from ._serve import Server, serve
 
 __all__ = [
     "launch",
     "launch_persistent_context",
     "launch_agent",
+    "serve",
+    "Server",
     "executable_path",
     "download",
     "run_agent_task",
@@ -56,7 +59,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.13.1"
+__version__ = "0.14.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
