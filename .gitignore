@@ -22,3 +22,6 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Local-only working directories (never published)
+patches-private/
