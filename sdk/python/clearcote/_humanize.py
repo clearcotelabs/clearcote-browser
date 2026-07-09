@@ -25,9 +25,10 @@ Design notes:
     fat-finger-then-correct chance.
 """
 
-import math
 import random
 import time
+
+from ._motion import make_persona, plan_move, drag_dwell, click_hold, key_dwell, click_point, plan_ambient
 
 # IIFE so it runs both as an add_init_script source AND when passed to page.evaluate().
 CURSOR_OVERLAY = """(() => {
@@ -72,8 +73,10 @@ def _nearby_key(ch):
     return ch
 
 
-def attach_humanize(browser, page, humanize=False, show_cursor=False):
-    """Wrap one page's input methods + (optionally) inject the cursor overlay."""
+def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None):
+    """Wrap one page's input methods + (optionally) inject the cursor overlay.
+
+    ``seed`` (the fingerprint seed) selects a stable per-identity motor persona; unset ⇒ random."""
     if show_cursor:
         def inject():
             try:
@@ -86,6 +89,12 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
     if not humanize:
         return
 
+    # Per-identity motor persona (cadence, tremor, overshoot, handedness) seeded from the fingerprint
+    # so behavior is consistent within a session and unlinkable across seeds. Stored on the page so
+    # the module-level Locator.drag_to patch can reach it too.
+    persona = make_persona(seed)
+    page._clearcote_persona = persona
+
     # Tracked cursor position so each move continues from where the last one ended.
     # Seed at a plausible on-page spot (not 0,0) so the first glide doesn't start in the corner.
     st = {"pos": (_rand(140, 380), _rand(90, 240))}
@@ -93,55 +102,22 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
     mouse = page.mouse
     native_move, native_click, native_wheel = mouse.move, mouse.click, mouse.wheel
 
-    def _submove(x0, y0, x1, y1, jitter):
-        """One ballistic sub-movement to (x1,y1): a slightly bowed bezier walked with a MIN-JERK
-        velocity profile (the human reach profile: fast rise, slow settle). Native (trusted) moves
-        the whole way, so a button held via mouse.down() stays pressed across it (drag). Returns
-        False if a native move raised (page gone)."""
-        dx, dy = x1 - x0, y1 - y0
-        dist = math.hypot(dx, dy)
-        steps = int(max(6, min(30, dist / 16)))
-        # unit perpendicular, to bow the path off the straight line
-        nx, ny = (-dy / dist, dx / dist) if dist > 1e-6 else (0.0, 0.0)
-        bow = (random.random() * 0.18 - 0.09) * dist
-        cp1 = (x0 + dx * 0.33 + nx * bow, y0 + dy * 0.33 + ny * bow)
-        cp2 = (x0 + dx * 0.66 + nx * bow, y0 + dy * 0.66 + ny * bow)
-        for i in range(1, steps + 1):
-            t = i / steps
-            e = t * t * t * (10 - 15 * t + 6 * t * t)   # min-jerk easing (not symmetric smoothstep)
-            mt = 1.0 - e
-            bx = mt*mt*mt*x0 + 3*mt*mt*e*cp1[0] + 3*mt*e*e*cp2[0] + e*e*e*x1
-            by = mt*mt*mt*y0 + 3*mt*mt*e*cp1[1] + 3*mt*e*e*cp2[1] + e*e*e*y1
+    def _dispatch(steps):
+        """Walk a planned trajectory (list of (x, y, sleep_ms)) via native trusted mouse.move +
+        off-protocol time.sleep. Native input carries button state, so a button held via
+        mouse.down() stays pressed across the whole path (drag)."""
+        for sx, sy, sl in steps:
             try:
-                native_move(bx + random.gauss(0, jitter), by + random.gauss(0, jitter))
+                native_move(sx, sy)
             except Exception:  # noqa: BLE001
-                return False
-            time.sleep(_rand(7, 18) / 1000.0)  # off-protocol pacing, ~60fps-ish
-        return True
+                break
+            time.sleep(sl / 1000.0)
 
-    def _glide(x, y, jitter=0.6):
-        """Move to (x, y) as a SUM OF SUB-MOVEMENTS — a ballistic primary that slightly over/under-
-        shoots, then a corrective sub-movement onto the target — so the velocity profile is
-        multi-peak (real neuromotor motion) instead of one symmetric bell. Continuous (starts at the
-        last tracked position, lands exactly on target). Native input the whole way, so a button held
-        via mouse.down() stays pressed across the glide — the same path powers a free move and a
-        held-button drag."""
-        x0, y0 = st["pos"]
-        dist = math.hypot(x - x0, y - y0)
-        if dist > 60:
-            frac = _rand(0.82, 0.96)                       # primary covers ~82-96% of the distance
-            spread = min(14.0, dist * 0.05)                # with a small over/undershoot
-            ox = x0 + (x - x0) * frac + random.gauss(0, spread)
-            oy = y0 + (y - y0) * frac + random.gauss(0, spread)
-            if _submove(x0, y0, ox, oy, jitter):
-                time.sleep(_rand(12, 40) / 1000.0)         # inter-submovement gap (motor re-planning)
-                _submove(ox, oy, x, y, jitter * 0.6)       # corrective sub-movement
-        else:
-            _submove(x0, y0, x, y, jitter)
-        try:
-            native_move(x, y)                              # exact landing (no jitter)
-        except Exception:  # noqa: BLE001
-            pass
+    def _glide(x, y, settle=False, target_w=24):
+        """Move to (x, y) as a minimum-jerk sum-of-submovements path (primary ballistic + corrective
+        homing) with colored sub-pixel noise and Fitts-scaled duration (see _motion.plan_move).
+        Continuous (starts at the tracked position, lands exactly on target)."""
+        _dispatch(plan_move(st["pos"], (x, y), persona, target_w=target_w, settle=settle))
         st["pos"] = (x, y)
 
     def hmove(x, y, **kw):
@@ -151,9 +127,28 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
         _glide(x, y)
         time.sleep(_rand(40, 130) / 1000.0)    # brief dwell before pressing, like a human
         try:
-            native_click(x, y)
+            # delay = mousedown->mouseup HOLD (human ~60-150ms); without it Playwright releases in ~2ms.
+            native_click(x, y, delay=click_hold(persona))
         except Exception:  # noqa: BLE001
             pass
+
+    def _held_glide(x, y):
+        _glide(x, y, settle=True)                # held-button drag leg + seating jiggle
+    page._clearcote_held_glide = _held_glide
+
+    def hambient(ms=1200):
+        """Opt-in ambient / pre-challenge cursor activity (idle drift + non-goal moves) so a
+        behavioral collector sees pointer entropy BEFORE the first goal action. page.ambient_motion(ms)."""
+        try:
+            vp = page.viewport_size or {"width": 1280, "height": 800}
+            steps = plan_ambient(st["pos"], {"width": vp["width"], "height": vp["height"]}, persona, ms)
+            _dispatch(steps)
+            if steps:
+                st["pos"] = (steps[-1][0], steps[-1][1])
+        except Exception:  # noqa: BLE001
+            pass
+
+    page.ambient_motion = hambient
 
     def hwheel(delta_x, delta_y):
         steps = max(5, min(24, round((abs(delta_x) + abs(delta_y)) / 60)))
@@ -179,6 +174,17 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
     kb = page.keyboard
     native_kb_type, native_kb_press = kb.type, kb.press
 
+    def _emit_key(ch):
+        """Emit one character with a human keydown->keyup DWELL. keyboard.press's `delay` IS the hold
+        (keyboard.type's delay is only inter-key flight). Fall back to type() for chars press can't map."""
+        try:
+            native_kb_press(ch, delay=key_dwell(persona))
+        except Exception:  # noqa: BLE001
+            try:
+                native_kb_type(ch)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _human_type_text(text):
         """Type text key-by-key with human timing. Each char goes through Playwright's native
         keyboard (trusted; shift/symbols handled by the engine), so this stays isTrusted=True."""
@@ -187,14 +193,14 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
             # occasional fat-finger on alnum chars, then notice + correct
             if ch.isascii() and ch.isalnum() and random.random() < 0.02:
                 try:
-                    native_kb_type(_nearby_key(ch))
+                    _emit_key(_nearby_key(ch))
                     time.sleep(_rand(120, 300) / 1000.0)
-                    native_kb_press("Backspace")
+                    native_kb_press("Backspace", delay=key_dwell(persona))
                     time.sleep(_rand(80, 200) / 1000.0)
                 except Exception:  # noqa: BLE001
                     pass
             try:
-                native_kb_type(ch)
+                _emit_key(ch)
             except Exception:  # noqa: BLE001
                 break
             if i < n - 1:
@@ -237,8 +243,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
         if not box2 or abs(box2["x"] - box["x"]) > 1 or abs(box2["y"] - box["y"]) > 1:
             return None
         box = box2
-        return (box["x"] + box["width"] * _rand(0.3, 0.7),
-                box["y"] + box["height"] * _rand(0.3, 0.7))
+        return click_point(box, st["pos"], persona)  # 2D gaussian toward center, nudged to approach side
 
     def _focus_click(selector, timeout):
         pt = _point_for(selector, timeout)
@@ -246,7 +251,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
             return False
         _glide(pt[0], pt[1])
         time.sleep(_rand(40, 130) / 1000.0)
-        native_click(pt[0], pt[1])
+        native_click(pt[0], pt[1], delay=click_hold(persona))
         return True
 
     native_page_type = page.type
@@ -340,8 +345,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
                 if not box2 or abs(box2["x"] - box["x"]) > 1 or abs(box2["y"] - box["y"]) > 1:
                     return orig(selector, **options)
                 box = box2
-                x = box["x"] + box["width"] * _rand(0.3, 0.7)
-                y = box["y"] + box["height"] * _rand(0.3, 0.7)
+                x, y = click_point(box, st["pos"], persona)
                 # covered-by: don't fire a trusted click at a point some overlay owns
                 try:
                     handle = loc.element_handle()
@@ -356,7 +360,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False):
                 _glide(x, y)
                 if not no_click:
                     time.sleep(_rand(40, 130) / 1000.0)
-                    native_click(x, y)
+                    native_click(x, y, delay=click_hold(persona))
                 return None
             except Exception:  # noqa: BLE001
                 return orig(selector, **options)
@@ -523,12 +527,20 @@ def _patch_locator_class():
                 if sb and tb:
                     sx, sy = sb["x"] + sb["width"] / 2, sb["y"] + sb["height"] / 2
                     tx, ty = tb["x"] + tb["width"] / 2, tb["y"] + tb["height"] / 2
+                    # Human endpoint dynamics (the two worst slider tells): grab hesitation AFTER
+                    # pressing + a settle dwell BEFORE releasing, from the page's motor persona.
+                    persona = getattr(page, "_clearcote_persona", None)
+                    grab_ms, release_ms = drag_dwell(persona) if persona else (_rand(130, 360), _rand(90, 230))
                     page.mouse.move(sx, sy)
                     time.sleep(_rand(100, 200) / 1000.0)
                     page.mouse.down()                     # native -> button held across the glide
-                    time.sleep(_rand(80, 150) / 1000.0)
-                    page.mouse.move(tx, ty)               # humanized, held-button drag
-                    time.sleep(_rand(80, 150) / 1000.0)
+                    time.sleep(grab_ms / 1000.0)          # grab hesitation
+                    held_glide = getattr(page, "_clearcote_held_glide", None)
+                    if held_glide:
+                        held_glide(tx, ty)                # humanized held-button drag + seating jiggle (settle)
+                    else:
+                        page.mouse.move(tx, ty)
+                    time.sleep(release_ms / 1000.0)       # pre-release settle before letting go
                     page.mouse.up()
                     return None
             except Exception:  # noqa: BLE001
@@ -549,7 +561,7 @@ def _patch_locator_class():
     Locator.drag_to = drag_to
 
 
-def install_humanize_on_context(context, humanize=False, show_cursor=False, browser=None):
+def install_humanize_on_context(context, humanize=False, show_cursor=False, browser=None, seed=None):
     """Install humanize/show_cursor on a single context (used for launch_persistent_context)."""
     if not humanize and not show_cursor:
         return
@@ -560,13 +572,15 @@ def install_humanize_on_context(context, humanize=False, show_cursor=False, brow
         except Exception:  # noqa: BLE001
             pass
     if b is not None:
-        context.on("page", lambda p: attach_humanize(b, p, humanize, show_cursor))
+        context.on("page", lambda p: attach_humanize(b, p, humanize, show_cursor, seed))
         for p in context.pages:
-            attach_humanize(b, p, humanize, show_cursor)
+            attach_humanize(b, p, humanize, show_cursor, seed)
 
 
-def install_humanize(browser, humanize=False, show_cursor=False):
-    """Install humanize/show_cursor on a browser: wrap new_page/new_context so every page is covered."""
+def install_humanize(browser, humanize=False, show_cursor=False, seed=None):
+    """Install humanize/show_cursor on a browser: wrap new_page/new_context so every page is covered.
+
+    ``seed`` (the fingerprint seed) selects the stable per-identity motor persona."""
     if not humanize and not show_cursor:
         return
     orig_new_page = browser.new_page
@@ -574,12 +588,12 @@ def install_humanize(browser, humanize=False, show_cursor=False):
 
     def new_page(**kw):
         page = orig_new_page(**kw)
-        attach_humanize(browser, page, humanize, show_cursor)
+        attach_humanize(browser, page, humanize, show_cursor, seed)
         return page
 
     def new_context(**kw):
         ctx = orig_new_context(**kw)
-        install_humanize_on_context(ctx, humanize, show_cursor, browser)
+        install_humanize_on_context(ctx, humanize, show_cursor, browser, seed)
         return ctx
 
     browser.new_page = new_page

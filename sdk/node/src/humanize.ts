@@ -19,12 +19,16 @@
 // special binary command required.
 
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
+import { makePersona, planMove, dragDwell, clickHold, keyDwell, clickPoint, planAmbient, type Persona, type Step } from "./motion.js";
 
 export interface HumanizeOptions {
   /** Humanize all input (move/click/drag/scroll/type) as native trusted events. */
   humanize?: boolean;
   /** Show a red cursor dot that tracks the motion (visualization). */
   showCursor?: boolean;
+  /** @internal Fingerprint seed → a stable per-identity motor persona (cadence, tremor, overshoot,
+   * handedness). Threaded from `fingerprint` by launch(); unset ⇒ a random persona per session. */
+  seed?: string | number;
 }
 
 /** Overlay: a red dot that follows real mousemove events. Idempotent IIFE so it works both as
@@ -48,14 +52,6 @@ export const CURSOR_OVERLAY = `(() => {
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-// Standard-normal sample (Box–Muller) for sub-pixel path jitter.
-function gauss(): number {
-  let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-}
 
 // Compact keyboard-adjacency map for realistic fat-finger typos.
 const NEARBY: Record<string, string> = {
@@ -85,6 +81,12 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   }
   if (!opts.humanize) return;
 
+  // Per-identity motor persona (cadence, tremor, overshoot, handedness) — stable across the session,
+  // seeded from the fingerprint so behavior is consistent within an identity and unlinkable across
+  // seeds. Stored on the page so the module-level Locator.dragTo patch can reach it too.
+  const persona: Persona = makePersona(opts.seed);
+  (page as any)._clearcotePersona = persona;
+
   // Tracked cursor position so each move continues from where the last one ended.
   const st = { x: rand(140, 380), y: rand(90, 240) };
 
@@ -93,29 +95,20 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   const nativeClick = mouse.click.bind(mouse);
   const nativeWheel = mouse.wheel.bind(mouse);
 
-  // Move from the tracked position to (x, y) along an eased, slightly bowed cubic-bezier path,
-  // emitting native (trusted) mousemove events the whole way. Native input means a button pressed
-  // via mouse.down() stays pressed across the glide — so the same code powers move AND drag.
-  const glide = async (x: number, y: number, jitter = 0.6): Promise<void> => {
-    const x0 = st.x, y0 = st.y;
-    const dx = x - x0, dy = y - y0;
-    const dist = Math.hypot(dx, dy);
-    const steps = Math.floor(Math.max(10, Math.min(38, dist / 14)));
-    const nx = dist > 1e-6 ? -dy / dist : 0;
-    const ny = dist > 1e-6 ? dx / dist : 0;
-    const bow = (Math.random() * 0.22 - 0.11) * dist;
-    const cp1x = x0 + dx * 0.33 + nx * bow, cp1y = y0 + dy * 0.33 + ny * bow;
-    const cp2x = x0 + dx * 0.66 + nx * bow, cp2y = y0 + dy * 0.66 + ny * bow;
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const e = t * t * (3 - 2 * t); // smoothstep: slow out of start, slow into target
-      const mt = 1 - e;
-      const bx = mt*mt*mt*x0 + 3*mt*mt*e*cp1x + 3*mt*e*e*cp2x + e*e*e*x;
-      const by = mt*mt*mt*y0 + 3*mt*mt*e*cp1y + 3*mt*e*e*cp2y + e*e*e*y;
-      try { await nativeMove(bx + gauss() * jitter, by + gauss() * jitter); } catch { break; }
-      await sleep(rand(7, 20)); // off-protocol pacing, ~60fps-ish
+  // Walk a planned trajectory (motion.ts) with native (trusted) mouse.move + off-protocol sleeps.
+  // Native input carries the button state, so a button pressed via mouse.down() stays held across
+  // the whole path — the same code powers a free move AND a held-button drag.
+  const dispatch = async (steps: Step[]): Promise<void> => {
+    for (const s of steps) {
+      try { await nativeMove(s.x, s.y); } catch { break; }
+      await sleep(s.sleepMs);
     }
-    try { await nativeMove(x, y); } catch { /* exact landing best-effort */ }
+  };
+
+  // Move to (x, y) as a minimum-jerk sum-of-submovements path (primary ballistic + corrective homing)
+  // with colored sub-pixel noise and Fitts-scaled duration. `settle` adds a seating jiggle (drag).
+  const glide = async (x: number, y: number, o: { settle?: boolean; targetW?: number } = {}): Promise<void> => {
+    await dispatch(planMove(st, { x, y }, persona, { settle: o.settle, targetW: o.targetW }));
     st.x = x; st.y = y;
   };
 
@@ -123,8 +116,25 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   mouse.click = async (x: number, y: number) => {
     await glide(x, y);
     await sleep(rand(40, 130)); // brief dwell before pressing, like a human
-    try { await nativeClick(x, y); } catch { /* best-effort */ }
+    // delay = the mousedown→mouseup HOLD (human ~60–150 ms); without it Playwright releases in ~2 ms.
+    try { await nativeClick(x, y, { delay: clickHold(persona) }); } catch { /* best-effort */ }
   };
+
+  // Opt-in ambient / pre-challenge cursor activity: idle drift + a few non-goal moves so a behavioral
+  // collector sees non-zero pointer entropy BEFORE the first goal action (the biggest reason a
+  // challenge/slider is shown to headless automation). `await page.ambientMotion(ms)`.
+  (page as any).ambientMotion = async (ms = 1200): Promise<void> => {
+    try {
+      const vp = (page.viewportSize && page.viewportSize()) || { width: 1280, height: 800 };
+      const steps = planAmbient(st, { width: vp.width, height: vp.height }, persona, ms);
+      await dispatch(steps);
+      if (steps.length) { st.x = steps[steps.length - 1].x; st.y = steps[steps.length - 1].y; }
+    } catch { /* best-effort ambient */ }
+  };
+
+  // Held-button drag leg with the seating jiggle (settle), reachable from the module-level
+  // Locator.dragTo patch (which can't see this closure) via the page object.
+  (page as any)._clearcoteHeldGlide = async (x: number, y: number) => { await glide(x, y, { settle: true }); };
   // scroll easing: break into eased chunks of native wheel deltas
   mouse.wheel = async (dx: number, dy: number) => {
     const steps = Math.max(5, Math.min(24, Math.round((Math.abs(dx) + Math.abs(dy)) / 60)));
@@ -148,6 +158,14 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   const nativeKbType = keyboard.type.bind(keyboard);
   const nativeKbPress = keyboard.press.bind(keyboard);
 
+  // Emit one character with a human keydown→keyup DWELL. keyboard.press's `delay` IS the hold
+  // (keyboard.type's delay is only inter-key flight), so per-char press gives the missing dwell.
+  // Fall back to type() for anything press can't map (some symbols / composed chars).
+  const emitKey = async (ch: string): Promise<void> => {
+    try { await nativeKbPress(ch, { delay: keyDwell(persona) }); }
+    catch { try { await nativeKbType(ch); } catch { /* best-effort */ } }
+  };
+
   // Type text key-by-key with human timing. Each char goes through the native keyboard (trusted;
   // shift/symbols handled by the engine), so this stays isTrusted===true.
   const humanTypeText = async (text: string): Promise<void> => {
@@ -156,13 +174,13 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
       const ch = text[i];
       if (/[a-zA-Z0-9]/.test(ch) && Math.random() < 0.02) {
         try {
-          await nativeKbType(nearbyKey(ch));
+          await emitKey(nearbyKey(ch));
           await sleep(rand(120, 300));
-          await nativeKbPress("Backspace");
+          await nativeKbPress("Backspace", { delay: keyDwell(persona) });
           await sleep(rand(80, 200));
         } catch { /* typo path best-effort */ }
       }
-      try { await nativeKbType(ch); } catch { break; }
+      try { await emitKey(ch); } catch { break; }
       if (i < n - 1) {
         if (Math.random() < 0.06) await sleep(rand(180, 450)); // brief thinking pause
         else await sleep(rand(45, 150));
@@ -193,7 +211,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
     const box2 = await loc.boundingBox();
     if (!box2 || Math.abs(box2.x - box.x) > 1 || Math.abs(box2.y - box.y) > 1) return null;
     box = box2;
-    return { x: box.x + box.width * rand(0.3, 0.7), y: box.y + box.height * rand(0.3, 0.7) };
+    return clickPoint(box, st, persona); // 2D gaussian toward center, nudged to the approach side
   };
 
   const focusClick = async (selector: string, timeout: number): Promise<boolean> => {
@@ -201,7 +219,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
     if (!pt) return false;
     await glide(pt.x, pt.y);
     await sleep(rand(40, 130));
-    await nativeClick(pt.x, pt.y);
+    await nativeClick(pt.x, pt.y, { delay: clickHold(persona) });
     return true;
   };
 
@@ -288,8 +306,8 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
           return orig(selector, options);
         }
         box = box2;
-        const x = box.x + box.width * rand(0.3, 0.7);
-        const y = box.y + box.height * rand(0.3, 0.7);
+        const cp = clickPoint(box, st, persona);
+        const x = cp.x, y = cp.y;
         try {
           const handle = await loc.elementHandle();
           const covered =
@@ -304,7 +322,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
           if (covered) return orig(selector, options); // covered -> let PW wait for it on top
         } catch { /* covered-by check best-effort */ }
         await glide(x, y);
-        if (!noClick) { await sleep(rand(40, 130)); await nativeClick(x, y); }
+        if (!noClick) { await sleep(rand(40, 130)); await nativeClick(x, y, { delay: clickHold(persona) }); }
         return;
       } catch {
         return orig(selector, options);
@@ -402,9 +420,15 @@ function patchLocatorClass(sample: Locator): void {
         if (sb && tb) {
           const sx = sb.x + sb.width / 2, sy = sb.y + sb.height / 2;
           const tx = tb.x + tb.width / 2, ty = tb.y + tb.height / 2;
+          // Human endpoint dynamics (the two worst slider tells): a grab hesitation AFTER pressing and
+          // a settle dwell BEFORE releasing, drawn from the page's motor persona.
+          const persona: Persona | undefined = pg._clearcotePersona;
+          const { grabMs, releaseMs } = persona ? dragDwell(persona) : { grabMs: rand(130, 360), releaseMs: rand(90, 230) };
           await pg.mouse.move(sx, sy); await sleep(rand(100, 200));
-          await pg.mouse.down(); await sleep(rand(80, 150)); // native -> button held across glide
-          await pg.mouse.move(tx, ty); await sleep(rand(80, 150)); // humanized held-button drag
+          await pg.mouse.down(); await sleep(grabMs);   // grab hesitation (native -> button held across glide)
+          const heldGlide = pg._clearcoteHeldGlide;     // humanized held-button drag + seating jiggle (settle)
+          if (heldGlide) await heldGlide(tx, ty); else await pg.mouse.move(tx, ty);
+          await sleep(releaseMs);                       // pre-release settle before letting go
           await pg.mouse.up();
           return;
         }

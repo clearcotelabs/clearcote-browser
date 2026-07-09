@@ -125,7 +125,9 @@ async def test_humanize_typing_is_per_character_not_paste():
     page = _FakePage()
     await attach_humanize(None, page, humanize=True)
     await page.fill("#email", "abc")
-    assert page.keyboard.typed == ["a", "b", "c"]        # per-character key events
+    # per-character key events — now via keyboard.press so each key has a keydown->keyup DWELL
+    # (keyboard.type has no hold). Intent unchanged: one key per char, not a bulk paste.
+    assert [p for p in page.keyboard.presses if p in ("a", "b", "c")] == ["a", "b", "c"]
     assert page.fill_fallback == []                       # native bulk fill (paste) NOT used
     assert "ControlOrMeta+a" in page.keyboard.presses     # field cleared first
     assert page.loc.clicked == 1                           # field focused via a click

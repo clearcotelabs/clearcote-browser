@@ -116,7 +116,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     kwargs.pop("headless", None)  # serve() drives headless directly via --headless=new
     # Build the full stealth arg set exactly like launch() does (fingerprint + privacy-sandbox +
     # webrtc leak-proofing + proxy + feature-merge + geoip), then launch the binary ourselves.
-    exe, args, pw_kwargs, _humanize, _show = _prepare(kwargs)
+    exe, args, pw_kwargs, _humanize, _show, _seed = _prepare(kwargs)
 
     port = int(port) if port else _free_port()
     own_udd = user_data_dir is None

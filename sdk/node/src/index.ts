@@ -240,7 +240,7 @@ export async function launch(options: LaunchOptions = {}): Promise<Browser> {
     args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined),
   }), exe);
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
-  installHumanize(browser, { humanize, showCursor });
+  installHumanize(browser, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   return browser;
 }
 
@@ -300,7 +300,7 @@ export async function launchPersistentContext(
     ...(ctxEnv ? { env: ctxEnv } : {}),
     args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined),
   }), exe);
-  installHumanizeOnContext(context, { humanize, showCursor });
+  installHumanizeOnContext(context, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   return context;
 }
 

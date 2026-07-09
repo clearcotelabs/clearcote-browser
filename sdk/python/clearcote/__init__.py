@@ -59,7 +59,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.14.1"
+__version__ = "0.15.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -189,7 +189,10 @@ def _prepare(kwargs):
         {**fp, "proxy": proxy_opt, "geoip": geoip, "headless": kwargs.get("headless"),
          "_user_args": user},
         quiet=quiet, build_major=str(RELEASE["version"]).split(".")[0])
-    return exe, args, kwargs, humanize, show_cursor
+    # The motor-persona seed is the EFFECTIVE fingerprint (after the profile= merge above), i.e. the
+    # same value that becomes --fingerprint — not the raw pre-merge kwarg. A profile-based launch
+    # thus gets the profile's stable persona instead of a random one.
+    return exe, args, kwargs, humanize, show_cursor, fp.get("fingerprint")
 
 
 def _headed_no_viewport(pw_kwargs):
@@ -262,7 +265,8 @@ def launch(**kwargs):
     auto-fill any unset timezone/accept_language/location. All other kwargs (headless, proxy,
     args, timeout, ...) pass through to Playwright's chromium.launch().
     """
-    exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
+    # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
+    exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare(kwargs)
     apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
     browser = _win_av_retry(
@@ -270,7 +274,7 @@ def launch(**kwargs):
     )
     if headed:
         _install_headed_viewport(browser)
-    install_humanize(browser, humanize, show_cursor)
+    install_humanize(browser, humanize, show_cursor, seed=seed)
     return browser
 
 
@@ -287,7 +291,8 @@ def launch_persistent_context(user_data_dir, **kwargs):
     kwargs.setdefault("ignore_default_args", ["--enable-automation"])
     if kwargs.get("widevine"):
         apply_widevine_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
-    exe, args, pw_kwargs, humanize, show_cursor = _prepare(kwargs)
+    # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
+    exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare(kwargs)
     apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
@@ -297,7 +302,7 @@ def launch_persistent_context(user_data_dir, **kwargs):
         ),
         exe,
     )
-    install_humanize_on_context(context, humanize, show_cursor)
+    install_humanize_on_context(context, humanize, show_cursor, seed=seed)
     return context
 
 
