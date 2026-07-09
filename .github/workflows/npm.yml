@@ -50,8 +50,19 @@ jobs:
           registry-url: 'https://registry.npmjs.org' # writes .npmrc; harmless under OIDC
           # NOTE: deliberately NO `cache:` - do not publish stale artifacts from a cache.
 
-      - name: Ensure npm >= 11.5.1 (required for OIDC trusted publishing)
-        run: npm install -g npm@latest
+      - name: Ensure npm >= 11.5.1 (OIDC) without breaking provenance deps
+        # `npm install -g npm@latest` has shipped versions whose bundled `sigstore` module is
+        # missing -> `npm publish` provenance dies with "Cannot find module 'sigstore'" (this is
+        # what failed the sdk-v0.13.1 npm publish). The node-bundled npm has sigstore intact, so
+        # use it when it is already >= 11.5.1; only pin to a known-good version otherwise (never
+        # @latest, which reintroduces the regression).
+        run: |
+          echo "node $(node -v) / bundled npm $(npm -v)"
+          if [ "$(printf '%s\n11.5.1\n' "$(npm -v)" | sort -V | head -1)" != "11.5.1" ]; then
+            echo "bundled npm < 11.5.1 -> pinning to 11.5.1"
+            npm install -g npm@11.5.1
+          fi
+          npm -v
 
       - name: Install dependencies
         run: npm ci

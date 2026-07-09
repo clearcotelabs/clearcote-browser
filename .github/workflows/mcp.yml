@@ -112,7 +112,14 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-      - name: Ensure npm >= 11.5.1 (required for OIDC trusted publishing)
-        run: npm install -g npm@latest
+      - name: Ensure npm >= 11.5.1 (OIDC) without breaking provenance deps
+        # Never `npm install -g npm@latest` — some versions self-install without the bundled
+        # `sigstore` module, breaking `npm publish` provenance ("Cannot find module 'sigstore'").
+        run: |
+          echo "node $(node -v) / bundled npm $(npm -v)"
+          if [ "$(printf '%s\n11.5.1\n' "$(npm -v)" | sort -V | head -1)" != "11.5.1" ]; then
+            npm install -g npm@11.5.1
+          fi
+          npm -v
       - name: Publish to npm (OIDC + provenance)
         run: npm publish --access public --provenance
