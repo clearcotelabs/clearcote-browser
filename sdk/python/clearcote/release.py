@@ -12,34 +12,34 @@ import sys
 # signed asset + its SHA-256 (the trust anchor) + the inner-binary hash (defence in depth) + how to
 # unpack it. Windows and Linux ship from their own release tags.
 _WINDOWS = {
-    "tag": "v0.1.0-pre.19",
+    "tag": "v0.1.0-pre.20",
     "version": "149.0.7827.114",
     "asset": "clearcote-149.0.7827.114-windows-x64.zip",
     "url": (
         "https://github.com/clearcotelabs/clearcote-browser/releases/download/"
-        "v0.1.0-pre.19/clearcote-149.0.7827.114-windows-x64.zip"
+        "v0.1.0-pre.20/clearcote-149.0.7827.114-windows-x64.zip"
     ),
     # SHA-256 of the archive — verified after download; a mismatch is a hard failure.
-    "sha256": "da47f325053a98130baf6f4907e13ba5135d37645fb5c150e59c8081e7df48b3",
+    "sha256": "94701098015c56edd8fac0bf2f767e383c7be89615a1731820de3fa7c71a2f10",
     # SHA-256 of the inner browser binary — verified after extraction (defence in depth).
     "exe_sha256": "09a9f5ed46be45b54babc91872256fcdd5ef61cef6bf65cbec3928cbb38ee17a",
-    "size": 242656951,
+    "size": 242658604,
     "os": "win32",
     "archive": "zip",
     "binary": "chrome.exe",
     "asset_glob": "windows-x64",
 }
 _LINUX = {
-    "tag": "v0.1.0-pre.19",
+    "tag": "v0.1.0-pre.20",
     "version": "149.0.7827.114",
     "asset": "clearcote-149.0.7827.114-linux-x64.tar.xz",
     "url": (
         "https://github.com/clearcotelabs/clearcote-browser/releases/download/"
-        "v0.1.0-pre.19/clearcote-149.0.7827.114-linux-x64.tar.xz"
+        "v0.1.0-pre.20/clearcote-149.0.7827.114-linux-x64.tar.xz"
     ),
-    "sha256": "1be5a9f83f8f8217d97caf52553b5fe8e24a3360dfc83c471ba91d2d95a97ac1",
-    "exe_sha256": "7c5ea6ce563bd6c12642f12b1c85d308c09096814e9d7fcd59dd360fdfe6bb63",
-    "size": 146861776,
+    "sha256": "d8ec083ee9c21e55cde406cc3a633f8bbba779690f56a60c38d216f11d9ce735",
+    "exe_sha256": "386a47899d28297639de4d7cef134c2341ad203bc92e13f21f62a083d8694c51",
+    "size": 146841832,
     "os": "linux",
     "archive": "tar.xz",
     "binary": "chrome",
