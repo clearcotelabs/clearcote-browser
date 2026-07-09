@@ -24,26 +24,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-      - name: Resolve SDK + browser versions
+      - name: Resolve SDK version, wait for PyPI, read its pinned browser tag
         id: v
         run: |
           SDK="${{ github.event.inputs.version }}"
           [ -z "$SDK" ] && SDK=$(grep -m1 -oP '^version\s*=\s*"\K[^"]+' sdk/python/pyproject.toml)
-          BROWSER=$(grep -m1 -oP '"tag":\s*"v\K[^"]+' sdk/python/clearcote/release.py)
+          # wait for the exact SDK version to be installable on PyPI (up to 5 min)
+          for i in $(seq 1 30); do
+            curl -sfL "https://pypi.org/pypi/clearcote/${SDK}/json" >/dev/null && break
+            echo "waiting for PyPI clearcote ${SDK} ($i/30)..."; sleep 10
+            [ "$i" = 30 ] && { echo "::error::clearcote ${SDK} never appeared on PyPI"; exit 1; }
+          done
+          # the browser tag MUST come from the SDK we install (so the image tag == the baked binary),
+          # not from the repo checkout (which may be ahead of the published SDK).
+          pip install --quiet "clearcote==${SDK}"
+          BROWSER=$(python -c "from clearcote.release import platform_release; print(platform_release('linux')['tag'][1:])")
           echo "sdk=$SDK" >> "$GITHUB_OUTPUT"
           echo "browser=$BROWSER" >> "$GITHUB_OUTPUT"
-          echo "clearcote SDK=$SDK  browser=v$BROWSER"
-
-      - name: Wait for clearcote ${{ steps.v.outputs.sdk }} on PyPI
-        run: |
-          for i in $(seq 1 30); do
-            if curl -sfL "https://pypi.org/pypi/clearcote/${{ steps.v.outputs.sdk }}/json" >/dev/null; then
-              echo "clearcote ${{ steps.v.outputs.sdk }} is on PyPI"; exit 0
-            fi
-            echo "waiting for PyPI ($i/30)..."; sleep 10
-          done
-          echo "::error::clearcote ${{ steps.v.outputs.sdk }} never appeared on PyPI"; exit 1
+          echo "clearcote SDK=$SDK -> browser v$BROWSER"
 
       - uses: docker/setup-buildx-action@v3
 
