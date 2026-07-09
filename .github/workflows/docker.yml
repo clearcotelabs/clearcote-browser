@@ -1,0 +1,72 @@
+name: Publish Docker image
+
+# Rebuild + push teamflatearth/clearcote whenever a new SDK version lands on PyPI. A new SDK
+# release is exactly when `pip install clearcote` resolves to a new pinned browser binary, so
+# the image must be rebuilt then. Runs AFTER "Publish PyPI SDK" succeeds (so the version is
+# actually installable), or manually via workflow_dispatch.
+on:
+  workflow_run:
+    workflows: ["Publish PyPI SDK"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "clearcote SDK version to bake in (blank = current pyproject version)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # only after a SUCCESSFUL PyPI publish (or a manual run)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve SDK + browser versions
+        id: v
+        run: |
+          SDK="${{ github.event.inputs.version }}"
+          [ -z "$SDK" ] && SDK=$(grep -m1 -oP '^version\s*=\s*"\K[^"]+' sdk/python/pyproject.toml)
+          BROWSER=$(grep -m1 -oP '"tag":\s*"v\K[^"]+' sdk/python/clearcote/release.py)
+          echo "sdk=$SDK" >> "$GITHUB_OUTPUT"
+          echo "browser=$BROWSER" >> "$GITHUB_OUTPUT"
+          echo "clearcote SDK=$SDK  browser=v$BROWSER"
+
+      - name: Wait for clearcote ${{ steps.v.outputs.sdk }} on PyPI
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sfL "https://pypi.org/pypi/clearcote/${{ steps.v.outputs.sdk }}/json" >/dev/null; then
+              echo "clearcote ${{ steps.v.outputs.sdk }} is on PyPI"; exit 0
+            fi
+            echo "waiting for PyPI ($i/30)..."; sleep 10
+          done
+          echo "::error::clearcote ${{ steps.v.outputs.sdk }} never appeared on PyPI"; exit 1
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build + push teamflatearth/clearcote
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            CLEARCOTE_SPEC===${{ steps.v.outputs.sdk }}
+          tags: |
+            teamflatearth/clearcote:latest
+            teamflatearth/clearcote:${{ steps.v.outputs.browser }}
+            teamflatearth/clearcote:sdk-${{ steps.v.outputs.sdk }}
+
+      - name: Summary
+        run: |
+          echo "### Pushed \`teamflatearth/clearcote\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`latest\`, \`${{ steps.v.outputs.browser }}\`, \`sdk-${{ steps.v.outputs.sdk }}\` (browser binary v${{ steps.v.outputs.browser }})" >> "$GITHUB_STEP_SUMMARY"

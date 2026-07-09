@@ -27,9 +27,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # Install the SDK + bake the signed clearcote Linux binary into the image (SHA-256 verified).
+# CLEARCOTE_SPEC pins the SDK version: default ">=0.13.1" for standalone builds; CI passes
+# "==<version>" so the image is built from the exact SDK release that fired the workflow.
 ENV XDG_CACHE_HOME=/opt/xdg-cache
+ARG CLEARCOTE_SPEC=">=0.13.1"
 RUN mkdir -p /opt/xdg-cache \
- && pip install --no-cache-dir "clearcote>=0.13.1" \
+ && pip install --no-cache-dir "clearcote${CLEARCOTE_SPEC}" \
  && python -c "from clearcote import download; print('binary:', download())" \
  && useradd -m -u 10001 cc && chown -R cc /opt/xdg-cache
 
