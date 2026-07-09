@@ -94,7 +94,7 @@ Every release is **GPG-signed, checksummed, and reproducible from source**. Rebu
 
 ## What it is
 
-An open-source [Chromium](https://www.chromium.org/) distribution built on [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium) (Google services + telemetry removed) plus a transparent stack of **31 source patches** that move fingerprint control **into the engine**. Two promises:
+An open-source [Chromium](https://www.chromium.org/) distribution built on [ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium) (Google services + telemetry removed) plus a transparent stack of **32 source patches** that move fingerprint control **into the engine**. Two promises:
 
 - **A coherent, private identity** — one plausible machine per session instead of an accidentally hyper-unique one, coherent *down to the network layer* and across the long-tail surfaces detectors love: WebGL `getParameter` limits, `navigator.getBattery()` / `connection` / `keyboard.getLayoutMap()`, AudioContext, `getScreenDetails()`, and CSS `@media`.
 - **Radical verifiability** — no magic binary. Read every patch, rebuild it yourself, and confirm what you run matches what's published.
