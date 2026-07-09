@@ -375,6 +375,15 @@
         "probe": "CLI: run the produced binary on Windows, e.g. `chrome.exe --headless=new --disable-gpu --dump-dom \"data:text/html,ok\"` (or `chrome.exe --version`).",
         "expect": "The binary starts and prints nonempty DOM/version output and exits 0 — proving resources compiled through rc.py, clang_rt.builtins linked, and CLSID_CUIAutomationClientInfoSource resolved. Without this patch the Windows cross-build fails to link (undefined CLSID / rc.exe 'Must run on Windows' error), so no chrome.exe is produced and there is nothing to release — i.e. this patch cannot be silently lost while still yielding a runnable Windows build."
       }
+    },
+    "092-language-locale-coherence.patch": {
+      "surface": "Renderer ICU/Intl default locale follows the persona Accept-Language (navigator.languages) so Intl.DateTimeFormat/Number.toLocaleString/date formatting are coherent with navigator.language; stock Chrome derives this from --lang but the renderer path did not.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "Intl locale coherence",
+        "probe": "Launch with --lang=de-DE; assert Intl.DateTimeFormat().resolvedOptions().locale starts with 'de' AND (12345.6).toLocaleString()=='12.345,6' AND navigator.language=='de-DE' (all agree). Regression: any drift where navigator.languages!=Intl.locale."
+      }
     }
   }
 }

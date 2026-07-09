@@ -1,0 +1,54 @@
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -5,6 +5,10 @@
+ #include "third_party/blink/renderer/core/frame/navigator_language.h"
+ 
+ #include "base/command_line.h"
++#include "base/i18n/rtl.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/wtf/wtf.h"
++#include "v8/include/v8-isolate.h"
+ #include "services/network/public/cpp/features.h"
+ #include "third_party/blink/public/common/switches.h"
+ #include "third_party/blink/renderer/core/frame/web_feature.h"
+@@ -68,6 +72,24 @@
+   languages_ = ParseAndSanitize(languages);
+ }
+ 
++namespace {
++// clearcote: align the process ICU default locale + flush V8's cached Intl locale so
++// Intl.DateTimeFormat()/Number.toLocaleString() and friends follow the persona's primary
++// Accept-Language tag (navigator.languages.front()). Without this the renderer's Intl locale
++// stays at the build default (en-US) while navigator.languages reports e.g. de-DE -- a
++// locale-coherence contradiction that stock Chrome does not have (it derives the renderer ICU
++// locale from --lang). icu::Locale::setDefault is process-global and NOT thread-safe, so only
++// touch it on the main thread; worker scopes read the value the main thread already aligned.
++void AlignIcuDefaultLocale(ExecutionContext* context,
++                           const Vector<String>& languages) {
++  if (languages.empty() || !IsMainThread())
++    return;
++  base::i18n::SetICUDefaultLocale(languages.front().Utf8());
++  if (context && context->GetIsolate())
++    context->GetIsolate()->LocaleConfigurationChangeNotification();
++}
++}  // namespace
++
+ void NavigatorLanguage::EnsureUpdatedLanguage() {
+   String accept_languages_override;
+   probe::ApplyAcceptLanguageOverride(execution_context_,
+@@ -80,6 +102,7 @@
+     // Mark the language as dirty, so that if the override is removed, the
+     // language will be updated.
+     languages_dirty_ = true;
++    AlignIcuDefaultLocale(execution_context_, languages_);
+     return;
+   }
+ 
+@@ -98,6 +121,7 @@
+       languages_ = Vector<String>({languages_.front()});
+     }
+     languages_dirty_ = false;
++    AlignIcuDefaultLocale(execution_context_, languages_);
+   }
+ }
+ 
