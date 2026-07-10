@@ -9,7 +9,7 @@ import urllib.error
 import pytest
 
 import clearcote
-from clearcote._license import resolve_license_key
+from clearcote._license import resolve_instance_id, resolve_license_key
 
 # NB: clearcote.download is shadowed by the public `download()` function in __init__, so pull the
 # submodule from sys.modules explicitly (this is the module pro_ensure_binary actually lives in).
@@ -26,6 +26,22 @@ def test_resolve_license_key_falls_back_to_env(monkeypatch):
     monkeypatch.setenv("CLEARCOTE_LICENSE_KEY", "cc_lic_from_env")
     assert resolve_license_key() == "cc_lic_from_env"
     assert resolve_license_key("   ") == "cc_lic_from_env"  # blank explicit is ignored
+
+
+# ── resolve_instance_id: stable per-machine id (env > file > generated+persisted) ──
+def test_resolve_instance_id_env_override(monkeypatch):
+    monkeypatch.setenv("CLEARCOTE_INSTANCE_ID", "  machine-7  ")
+    assert resolve_instance_id() == "machine-7"
+
+
+def test_resolve_instance_id_persists_and_is_stable(monkeypatch, tmp_path):
+    monkeypatch.delenv("CLEARCOTE_INSTANCE_ID", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))       # POSIX
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows
+    first = resolve_instance_id()
+    second = resolve_instance_id()
+    assert first == second and len(first) >= 8  # same id across calls (a restart reuses its slot)
+    assert (tmp_path / ".clearcote" / "instance_id").read_text().strip() == first
 
 
 # ── _resolve_binary precedence: explicit path > CLEARCOTE_BINARY > pro > free ──

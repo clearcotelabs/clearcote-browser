@@ -64,6 +64,34 @@ export function resolveLicenseKey(explicit?: string): string | undefined {
   return undefined;
 }
 
+/** A STABLE per-machine id so a restart REUSES its concurrency slot instead of spawning a second
+ * lease (the backend dedupes a machine's own prior live lease on re-checkout). Order:
+ * CLEARCOTE_INSTANCE_ID env > ~/.clearcote/instance_id file > a freshly generated id (persisted).
+ * Falls back to an ephemeral id if the file can't be written — in containers with an ephemeral
+ * filesystem, set CLEARCOTE_INSTANCE_ID per replica to keep it stable. */
+export function resolveInstanceId(): string {
+  const env = process.env.CLEARCOTE_INSTANCE_ID;
+  if (env && env.trim()) return env.trim();
+  const dir = join(homedir(), ".clearcote");
+  const p = join(dir, "instance_id");
+  try {
+    if (existsSync(p)) {
+      const v = readFileSync(p, "utf8").trim();
+      if (v) return v;
+    }
+  } catch {
+    /* ignore */
+  }
+  const id = randomUUID();
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(p, id + "\n");
+  } catch {
+    /* ephemeral fallback — set CLEARCOTE_INSTANCE_ID to persist across restarts */
+  }
+  return id;
+}
+
 function apiBase(opts: LicenseOptions): string {
   return (opts.licenseApiBase || process.env.CLEARCOTE_LICENSE_API || DEFAULT_API_BASE).replace(/\/$/, "");
 }
@@ -143,7 +171,7 @@ export async function acquireLease(
   if (!licenseKey) return null; // free mode — inert
 
   const base = apiBase(opts);
-  const instanceId = randomUUID();
+  const instanceId = resolveInstanceId();
   const warn = (m: string) => {
     if (!opts.quiet) process.stderr.write(`[clearcote] [license] ${m}\n`);
   };

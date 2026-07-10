@@ -57,6 +57,32 @@ def resolve_license_key(explicit: str | None = None) -> str | None:
     return None
 
 
+def resolve_instance_id() -> str:
+    """A STABLE per-machine id so a restart REUSES its concurrency slot instead of spawning a
+    second lease (the backend dedupes a machine's own prior live lease on re-checkout). Order:
+    CLEARCOTE_INSTANCE_ID env > ~/.clearcote/instance_id file > a freshly generated id (persisted
+    for next time). Falls back to an ephemeral id if the file can't be written — in containers with
+    an ephemeral filesystem, set CLEARCOTE_INSTANCE_ID per replica to keep it stable."""
+    env = os.environ.get("CLEARCOTE_INSTANCE_ID", "")
+    if env.strip():
+        return env.strip()
+    p = Path.home() / ".clearcote" / "instance_id"
+    try:
+        if p.exists():
+            v = p.read_text().strip()
+            if v:
+                return v
+    except OSError:
+        pass
+    new_id = str(uuid.uuid4())
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(new_id + "\n")
+    except OSError:
+        pass  # ephemeral fallback — this run gets a fresh id; set CLEARCOTE_INSTANCE_ID to persist
+    return new_id
+
+
 def _api_base(api_base: str | None) -> str:
     return (api_base or os.environ.get("CLEARCOTE_LICENSE_API") or DEFAULT_API_BASE).rstrip("/")
 
@@ -174,7 +200,7 @@ def acquire_lease(license_key: str | None = None, api_base: str | None = None,
         return None  # free mode — inert
 
     base = _api_base(api_base)
-    instance_id = str(uuid.uuid4())
+    instance_id = resolve_instance_id()
     try:
         status, body = _post(f"{base}/api/v1/lease/checkout", key,
                              {"instance_id": instance_id, "os": _os_tag(), "sdk_version": sdk_version})

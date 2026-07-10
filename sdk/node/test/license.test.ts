@@ -3,9 +3,43 @@
 // call). These tests are hermetic — the only network is a mocked `fetch`.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { resolveLicenseKey } from "../src/license.js";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resolveLicenseKey, resolveInstanceId } from "../src/license.js";
 import { proEnsureBinary } from "../src/download.js";
 import { executablePath } from "../src/index.js";
+
+describe("resolveInstanceId (stable per-machine id: env > file > generated+persisted)", () => {
+  const OLD = {
+    id: process.env.CLEARCOTE_INSTANCE_ID,
+    home: process.env.HOME,
+    profile: process.env.USERPROFILE,
+  };
+  afterEach(() => {
+    for (const [k, v] of [["CLEARCOTE_INSTANCE_ID", OLD.id], ["HOME", OLD.home], ["USERPROFILE", OLD.profile]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it("prefers CLEARCOTE_INSTANCE_ID and trims it", () => {
+    process.env.CLEARCOTE_INSTANCE_ID = "  machine-7  ";
+    expect(resolveInstanceId()).toBe("machine-7");
+  });
+
+  it("persists to ~/.clearcote/instance_id and is stable across calls (a restart reuses its slot)", () => {
+    delete process.env.CLEARCOTE_INSTANCE_ID;
+    const home = mkdtempSync(join(tmpdir(), "cc-home-"));
+    process.env.HOME = home; // POSIX
+    process.env.USERPROFILE = home; // Windows
+    const a = resolveInstanceId();
+    const b = resolveInstanceId();
+    expect(a).toBe(b);
+    expect(a.length).toBeGreaterThanOrEqual(8);
+    expect(readFileSync(join(home, ".clearcote", "instance_id"), "utf8").trim()).toBe(a);
+  });
+});
 
 describe("resolveLicenseKey (explicit > env > file)", () => {
   const OLD = process.env.CLEARCOTE_LICENSE_KEY;
