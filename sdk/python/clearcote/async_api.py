@@ -106,8 +106,7 @@ async def launch(**kwargs):
     """Launch Clearcote and return a Playwright **async** ``Browser``. Same kwargs as the sync
     ``clearcote.launch`` (fingerprint, platform, brand, gpu_*, timezone, accept_language, proxy,
     geoip, profile, canvas_bridge, humanize, ... + any Playwright launch option)."""
-    seed = kwargs.get("fingerprint")  # capture before _prepare consumes it -> stable motor persona
-    exe, args, pw_kwargs, humanize, show_cursor = await asyncio.to_thread(_prepare, kwargs)
+    exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(_prepare, kwargs)
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
     pw = await _start_driver()
     try:
@@ -133,8 +132,7 @@ async def launch_persistent_context(user_data_dir, **kwargs):
     if kwargs.get("widevine"):
         from ._widevine import apply_widevine_launch
         await asyncio.to_thread(apply_widevine_launch, user_data_dir, kwargs, kwargs.get("quiet", False))
-    seed = kwargs.get("fingerprint")  # capture before _prepare consumes it -> stable motor persona
-    exe, args, pw_kwargs, humanize, show_cursor = await asyncio.to_thread(_prepare, kwargs)
+    exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(_prepare, kwargs)
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
     pw = await _start_driver()
