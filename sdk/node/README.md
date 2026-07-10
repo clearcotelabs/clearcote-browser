@@ -369,6 +369,32 @@ audited baked-in hashes are used. Each build is cached per tag, so this only dow
 version actually ships. (For locked-down/reproducible deployments, leave `autoUpdate` off and bump
 the package deliberately.)
 
+## PRO tier (license key)
+
+Everything above is the **free** build. A PRO license adds **floating-concurrency licensing** and
+pulls a separate, license-gated browser build. It's opt-in and entirely additive — **with no
+license key the SDK is byte-for-byte the free client** (free binary from GitHub, and it never
+contacts the license backend).
+
+Pass a `licenseKey` (or set `CLEARCOTE_LICENSE_KEY`, or drop it in `~/.clearcote/license.key`):
+
+```ts
+const browser = await launch({ fingerprint: "seed-123", licenseKey: "cc_lic_..." });
+```
+
+When a key is present the SDK:
+
+1. **downloads the PRO binary** via the site's authenticated `GET /api/v1/download/pro` route
+   (short-lived signed URL), verified against its SHA-256 exactly like the free pin, then cached;
+2. **checks out one concurrency slot** — a background heartbeat keeps it alive and rotates a
+   short-lived run-token, and the slot is released when the browser closes.
+
+The PRO engine refuses to launch without a valid run-token, so a copied binary alone won't run.
+Resolution order for the binary is **`executablePath` → `CLEARCOTE_BINARY` → PRO (licensed) →
+free** — an explicit binary always wins. A revoked/expired key raises (`ConcurrencyLimitError` /
+`LicenseRevokedError` / `LicenseError`); it never silently downgrades to the free binary. Override
+the backend with `licenseApiBase` or `CLEARCOTE_LICENSE_API`.
+
 ## License
 
 BSD-3-Clause. See [LICENSE](../../LICENSE).

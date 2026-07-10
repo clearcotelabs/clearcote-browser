@@ -23,7 +23,8 @@ import asyncio
 import json
 import tempfile
 
-from . import _headed_no_viewport, _prepare  # shared sync arg-building (run off the loop)
+from . import _headed_no_viewport, _prepare, _acquire_lease_from_kwargs  # shared sync helpers
+from ._license import inject_run_token
 from ._humanize_async import install_humanize, install_humanize_on_context
 from ._profile import Profile, list_profiles, load_profile
 from ._render_async import check_render_coherence
@@ -107,15 +108,22 @@ async def launch(**kwargs):
     ``clearcote.launch`` (fingerprint, platform, brand, gpu_*, timezone, accept_language, proxy,
     geoip, profile, canvas_bridge, humanize, ... + any Playwright launch option)."""
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
+    lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
     exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(_prepare, kwargs)
+    if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
+        inject_run_token(pw_kwargs, lease.token)
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
     pw = await _start_driver()
     try:
         browser = await pw.chromium.launch(executable_path=exe, args=args, **pw_kwargs)
     except BaseException:
+        if lease:
+            lease.stop()
         await pw.stop()
         raise
     _bind_driver(browser, pw)
+    if lease:  # release the concurrency slot when the browser closes
+        browser.on("disconnected", lambda _b=None: lease.stop())
     if headed:
         _install_headed_viewport(browser)
     await install_humanize(browser, humanize, show_cursor, seed=seed)
@@ -134,7 +142,10 @@ async def launch_persistent_context(user_data_dir, **kwargs):
         from ._widevine import apply_widevine_launch
         await asyncio.to_thread(apply_widevine_launch, user_data_dir, kwargs, kwargs.get("quiet", False))
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
+    lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
     exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(_prepare, kwargs)
+    if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
+        inject_run_token(pw_kwargs, lease.token)
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
     pw = await _start_driver()
@@ -142,9 +153,13 @@ async def launch_persistent_context(user_data_dir, **kwargs):
         context = await pw.chromium.launch_persistent_context(
             user_data_dir, executable_path=exe, args=args, **pw_kwargs)
     except BaseException:
+        if lease:
+            lease.stop()
         await pw.stop()
         raise
     _bind_driver(context, pw)
+    if lease:  # release the concurrency slot when the context closes
+        context.on("close", lambda _c=None: lease.stop())
     await install_humanize_on_context(context, humanize, show_cursor, seed=seed)
     return context
 

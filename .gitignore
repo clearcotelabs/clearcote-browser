@@ -25,3 +25,6 @@ __pycache__/
 
 # Local-only working directories (never published)
 patches-private/
+
+# PRO-tier held patches (never publish)
+pro-patches/

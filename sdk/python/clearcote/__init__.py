@@ -34,6 +34,14 @@ from ._profile import Profile, list_profiles, load_profile, resolve_profile_opti
 from ._render import check_render_coherence
 from ._warnings import emit_coherence_warnings
 from ._widevine import apply_widevine_launch, fetch_widevine, seed_widevine
+from ._license import (
+    ConcurrencyLimitError,
+    LicenseError,
+    LicenseRevokedError,
+    acquire_lease,
+    inject_run_token,
+    resolve_license_key,
+)
 from .download import ensure_binary, warm_files
 from .geoip import resolve_geo
 from .release import RELEASE
@@ -55,6 +63,11 @@ __all__ = [
     "check_render_coherence",
     "fetch_widevine",
     "seed_widevine",
+    "resolve_license_key",
+    "acquire_lease",
+    "LicenseError",
+    "ConcurrencyLimitError",
+    "LicenseRevokedError",
     "OPENROUTER_BASE_URL",
     "RELEASE",
     "__version__",
@@ -86,12 +99,15 @@ def _playwright():
     return _pw
 
 
-def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_update=None):
+def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_update=None, pro=None):
     if executable_path:
         return executable_path
     env = os.environ.get("CLEARCOTE_BINARY")
     if env:
         return env
+    if pro:  # (license_key, api_base) -> the PRO (license-gated) build via the site
+        from .download import pro_ensure_binary
+        return pro_ensure_binary(pro[0], api_base=pro[1], cache_dir=cache_dir, quiet=quiet)
     return ensure_binary(cache_dir=cache_dir, quiet=quiet, auto_update=auto_update)
 
 
@@ -138,6 +154,7 @@ def _prepare(kwargs):
     fp = {k: kwargs.pop(k) for k in list(kwargs) if k in FINGERPRINT_KEYS}
     agent = {k: kwargs.pop(k) for k in list(kwargs) if k in AGENT_KEYS}
     exe_path = kwargs.pop("executable_path", None)
+    _cc_pro = kwargs.pop("_cc_pro", None)  # (license_key, api_base) or None -> pick PRO vs free binary
     extra_args = kwargs.pop("args", None)
     extensions = kwargs.pop("extensions", None)
     # de-Googled-coherence default: disable Privacy Sandbox + intrusive APIs (Topics/FLEDGE/WebUSB/
@@ -158,7 +175,7 @@ def _prepare(kwargs):
             # fabricates the srflx candidate at this IP; no real STUN leaves the host).
             if geo.get("ip") and fp.get("webrtc_ip") is None:
                 fp["webrtc_ip"] = geo["ip"]
-    exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update)
+    exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update, pro=_cc_pro)
     _guard(exe)
     # SOCKS5-with-credentials must go through --proxy-server (Playwright rejects creds in its SOCKS
     # proxy descriptor); resolve_proxy returns proxy=None for that case so we drop it from Playwright.
@@ -256,22 +273,46 @@ def _win_av_retry(do_launch, exe):
     return do_launch(os.path.join(recover, os.path.basename(exe)))
 
 
+def _acquire_lease_from_kwargs(kwargs):
+    """Pop license kwargs and acquire a concurrency lease (opt-in; None in free mode).
+
+    Uses kwargs.get for quiet (leave it for _prepare to pop). Injects nothing here —
+    the caller injects CLEARCOTE_RUN_TOKEN into pw_kwargs after apply_font_env.
+    """
+    license_key = kwargs.pop("license_key", None)
+    license_api_base = kwargs.pop("license_api_base", None)
+    # Stash the effective license (explicit > env > file) so _prepare selects the
+    # PRO (gated) binary with the SAME key: licensed run -> gated build, free -> public.
+    key = resolve_license_key(license_key)
+    kwargs["_cc_pro"] = (key, license_api_base) if key else None
+    return acquire_lease(
+        license_key=license_key, api_base=license_api_base,
+        sdk_version=str(RELEASE["version"]), quiet=kwargs.get("quiet", False),
+    )
+
+
 def launch(**kwargs):
     """Launch Clearcote and return a standard Playwright sync ``Browser``.
 
     Fingerprint kwargs: fingerprint, platform, platform_version, brand, brand_version,
     gpu_vendor, gpu_renderer, hardware_concurrency, location, timezone, accept_language,
     webrtc_ip, disable_gpu_fingerprint. Pass geoip=True to resolve the proxy's exit-IP geo and
-    auto-fill any unset timezone/accept_language/location. All other kwargs (headless, proxy,
-    args, timeout, ...) pass through to Playwright's chromium.launch().
+    auto-fill any unset timezone/accept_language/location. Pass license_key=... (or set
+    CLEARCOTE_LICENSE_KEY) to check out a concurrency slot for the PRO engine. All other kwargs
+    (headless, proxy, args, timeout, ...) pass through to Playwright's chromium.launch().
     """
+    lease = _acquire_lease_from_kwargs(kwargs)  # opt-in; None in free mode
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare(kwargs)
     apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
+    if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
+        inject_run_token(pw_kwargs, lease.token)
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
     browser = _win_av_retry(
         lambda e: _playwright().chromium.launch(executable_path=e, args=args, **pw_kwargs), exe
     )
+    if lease:  # release the concurrency slot when the browser closes
+        browser.on("disconnected", lambda _b=None: lease.stop())
     if headed:
         _install_headed_viewport(browser)
     install_humanize(browser, humanize, show_cursor, seed=seed)
@@ -291,9 +332,12 @@ def launch_persistent_context(user_data_dir, **kwargs):
     kwargs.setdefault("ignore_default_args", ["--enable-automation"])
     if kwargs.get("widevine"):
         apply_widevine_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
+    lease = _acquire_lease_from_kwargs(kwargs)  # opt-in; None in free mode
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare(kwargs)
     apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
+    if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
+        inject_run_token(pw_kwargs, lease.token)
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
     context = _win_av_retry(
@@ -302,6 +346,8 @@ def launch_persistent_context(user_data_dir, **kwargs):
         ),
         exe,
     )
+    if lease:  # release the concurrency slot when the context closes
+        context.on("close", lambda _c=None: lease.stop())
     install_humanize_on_context(context, humanize, show_cursor, seed=seed)
     return context
 

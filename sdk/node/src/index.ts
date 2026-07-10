@@ -22,7 +22,7 @@ import type {
   BrowserContextOptions,
   LaunchOptions as PlaywrightLaunchOptions,
 } from "playwright-core";
-import { ensureBinary, warmFiles, type DownloadOptions } from "./download.js";
+import { ensureBinary, proEnsureBinary, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
 import { resolveGeo, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
@@ -41,9 +41,11 @@ import { RELEASE, platformRelease } from "./release.js";
 import { fetchWidevine, seedWidevine, widevineArgs } from "./widevine.js";
 import { emitCoherenceWarnings } from "./warnings.js";
 import { fontLaunchEnv } from "./fonts.js";
+import { acquireLease, resolveLicenseKey, withRunToken, type LicenseOptions, type LeaseSession } from "./license.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
+export { proEnsureBinary, type ProDownloadOptions } from "./download.js";
 export { resolveGeo, type Geo } from "./geoip.js";
 export type { HumanizeOptions } from "./humanize.js";
 export { Profile, listProfiles, loadProfile, PROFILE_DIR, type ProfileOptions } from "./profile.js";
@@ -59,6 +61,15 @@ export {
 export { RELEASE } from "./release.js";
 export { fetchWidevine, seedWidevine } from "./widevine.js";
 export { checkRenderCoherence, type RenderVerdict } from "./render.js";
+export {
+  resolveLicenseKey,
+  acquireLease,
+  LicenseError,
+  ConcurrencyLimitError,
+  LicenseRevokedError,
+  type LicenseOptions,
+  type LeaseSession,
+} from "./license.js";
 
 /** When true (and a proxy is set), resolve the proxy's exit-IP geo and auto-fill any unset
  * `timezone` + `acceptLanguage` (+ `location`) so they match the proxy region. */
@@ -83,7 +94,7 @@ interface ExtensionsOption {
 }
 
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, HumanizeOptions, DownloadOptions {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, HumanizeOptions, DownloadOptions, LicenseOptions {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
@@ -95,7 +106,8 @@ export interface PersistentContextOptions
     ProfileOption,
     ExtensionsOption,
     HumanizeOptions,
-    DownloadOptions {
+    DownloadOptions,
+    LicenseOptions {
   /**
    * Seed + enable the opt-in Widevine CDM in this profile so DRM/EME works
    * (`requestMediaKeySystemAccess('com.widevine.alpha')` resolves) and the EME surface matches a
@@ -129,14 +141,33 @@ function ensureRunnableHere(exe: string): void {
 
 /**
  * Resolve the Clearcote chrome.exe path, downloading + verifying it if needed.
- * Order: explicit `executablePath` > `CLEARCOTE_BINARY` env > auto-download.
+ * Order: explicit `executablePath` > `CLEARCOTE_BINARY` env > PRO (when licensed) > free auto-download.
+ *
+ * `pro` (a resolved license key + optional API base) selects the license-gated PRO binary via the
+ * site's authenticated download route. When it's absent — the free path — behaviour is unchanged.
  */
 export async function executablePath(
-  options: { executablePath?: string } & DownloadOptions = {}
+  options: { executablePath?: string; pro?: { licenseKey: string; licenseApiBase?: string } } & DownloadOptions = {}
 ): Promise<string> {
   if (options.executablePath) return options.executablePath;
   if (process.env.CLEARCOTE_BINARY) return process.env.CLEARCOTE_BINARY;
+  if (options.pro) {
+    return proEnsureBinary(options.pro.licenseKey, {
+      apiBase: options.pro.licenseApiBase,
+      cacheDir: options.cacheDir,
+      quiet: options.quiet,
+    });
+  }
   return ensureBinary({ cacheDir: options.cacheDir, quiet: options.quiet, autoUpdate: options.autoUpdate });
+}
+
+/** A resolved license key + API base for PRO-binary selection, or undefined in free mode. */
+function proSelector(
+  licenseKey: string | undefined,
+  licenseApiBase: string | undefined,
+): { licenseKey: string; licenseApiBase?: string } | undefined {
+  const key = resolveLicenseKey(licenseKey);
+  return key ? { licenseKey: key, licenseApiBase } : undefined;
 }
 
 /** Pre-fetch + verify the Clearcote binary without launching it. Returns the chrome.exe path. */
@@ -213,7 +244,7 @@ export async function winAvRetry<T>(doLaunch: (exe: string) => Promise<T>, exe: 
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   // profile= a saved persona: its options are the base, explicit options override.
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, ...rest } = merged;
+  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -225,20 +256,27 @@ export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless, _userArgs: args ?? [] },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
-  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
+  // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
+  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
   ensureRunnableHere(exe);
   const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
+  // License (opt-in): check out a concurrency slot and inject CLEARCOTE_RUN_TOKEN so the PRO
+  // engine gate lets the browser launch. Inert (null) in free mode / when no key is set.
+  const lease = await acquireLease({ licenseKey, licenseApiBase, sdkVersion: String(RELEASE.version), quiet });
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …).
   const launchEnv = fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env);
+  const runtimeEnv = lease ? withRunToken(lease.token, launchEnv) : launchEnv;
   const browser = await winAvRetry((exePath) => chromium.launch({
     // Drop Playwright's default --enable-automation so the engine's AutomationControlled feature
     // stays off (it flips webdriver-adjacent tells). Caller can override via ignoreDefaultArgs.
     ignoreDefaultArgs: ["--enable-automation"],
     ...(pwOptions as PlaywrightLaunchOptions),
     executablePath: exePath,
-    ...(launchEnv ? { env: launchEnv } : {}),
+    ...(runtimeEnv ? { env: runtimeEnv } : {}),
     args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined),
   }), exe);
+  // Release the concurrency slot when the browser closes.
+  if (lease) browser.on("disconnected", () => { void lease.stop(); });
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
   installHumanize(browser, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   return browser;
@@ -253,7 +291,7 @@ export async function launchPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, ...rest } = merged;
+  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -290,16 +328,21 @@ export async function launchPersistentContext(
     }
   }
   delete (opts as Record<string, unknown>).ignoreDefaultArgs;  // passed explicitly below
-  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
+  // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
+  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
   ensureRunnableHere(exe);
+  // License (opt-in): check out a concurrency slot + inject CLEARCOTE_RUN_TOKEN. Inert in free mode.
+  const lease = await acquireLease({ licenseKey, licenseApiBase, sdkVersion: String(RELEASE.version), quiet });
   const ctxEnv = fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env);
+  const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv) : ctxEnv;
   const context = await winAvRetry((exePath) => chromium.launchPersistentContext(userDataDir, {
     ...opts,
     ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
     executablePath: exePath,
-    ...(ctxEnv ? { env: ctxEnv } : {}),
+    ...(runtimeEnv ? { env: runtimeEnv } : {}),
     args: assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined),
   }), exe);
+  if (lease) context.on("close", () => { void lease.stop(); });
   installHumanizeOnContext(context, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   return context;
 }
@@ -369,6 +412,7 @@ export class Server {
     readonly port: number,
     private readonly userDataDir: string,
     private readonly ownUdd: boolean,
+    private readonly lease?: LeaseSession | null,
   ) {}
   /** HTTP CDP base — pass to `connectOverCDP` / `puppeteer.connect({ browserURL })`. */
   get cdpUrl(): string {
@@ -392,6 +436,8 @@ export class Server {
     } catch {
       /* ignore */
     }
+    // Release the concurrency slot (best-effort).
+    try { await this.lease?.stop(); } catch { /* ignore */ }
     if (this.ownUdd) {
       try {
         rmSync(this.userDataDir, { recursive: true, force: true });
@@ -438,7 +484,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     : launchOpts;
   const {
     profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption,
-    args: userArgs, geoip, autoUpdate, cacheDir, quiet, ...rest
+    args: userArgs, geoip, autoUpdate, cacheDir, quiet, licenseKey, licenseApiBase, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
@@ -448,7 +494,8 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless, _userArgs: userArgs ?? [] },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
-  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet });
+  // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
+  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
   ensureRunnableHere(exe);
   const engineArgs = assembleArgs(
     fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions),
@@ -467,7 +514,9 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   if (headless) cdpArgs.push("--headless=new");
   if (proxyOpt?.server) cdpArgs.push(`--proxy-server=${proxyOpt.server}`);
 
-  const env = { ...process.env, ...(fontLaunchEnv(exe, undefined) ?? {}) };
+  // License (opt-in): check out a concurrency slot + inject CLEARCOTE_RUN_TOKEN. Inert in free mode.
+  const lease = await acquireLease({ licenseKey, licenseApiBase, sdkVersion: String(RELEASE.version), quiet });
+  const env = { ...process.env, ...(fontLaunchEnv(exe, undefined) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token } : {}) };
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
@@ -496,11 +545,12 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   }
   if (!ready) {
     try { proc.kill(); } catch { /* ignore */ }
+    try { await lease?.stop(); } catch { /* ignore */ }
     if (ownUdd) { try { rmSync(userDataDir, { recursive: true, force: true }); } catch { /* ignore */ } }
     throw new Error(
       `clearcote serve: CDP endpoint at http://${host}:${resolvedPort} did not come up within ${readyTimeoutMs}ms`);
   }
-  const srv = new Server(proc, host, resolvedPort, userDataDir, ownUdd);
+  const srv = new Server(proc, host, resolvedPort, userDataDir, ownUdd, lease);
   process.once("exit", () => { void srv.close(); });
   if (!quiet) {
     process.stderr.write(

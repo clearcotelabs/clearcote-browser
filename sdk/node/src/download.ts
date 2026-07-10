@@ -401,6 +401,74 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
   return exe;
 }
 
+/** Options for {@link proEnsureBinary}. */
+export interface ProDownloadOptions {
+  /** License API base (default: `CLEARCOTE_LICENSE_API` env or clearcotelabs.com). */
+  apiBase?: string;
+  /** Override the cache directory (default: per-OS user cache dir). */
+  cacheDir?: string;
+  /** Suppress progress logging. */
+  quiet?: boolean;
+}
+
+/**
+ * Download + verify the PRO (license-gated) browser and return its chrome path.
+ *
+ * The PRO build is not on a public releases page: the SDK asks the site for it via
+ * `GET /api/v1/download/pro` with the license key, gets back an unguessable, short-lived
+ * blob URL + sha256, then reuses the SAME verify+extract path as the free binary
+ * ({@link fetchAndVerify}, sha256-only — no GPG, exactly like the free pin). Cached per PRO
+ * tag. Throws on any failure — a licensed caller must get the PRO build, never a silent free
+ * fall-back (that would launch a binary the engine gate then refuses).
+ */
+export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptions = {}): Promise<string> {
+  const baseUrl = (opts.apiBase || process.env.CLEARCOTE_LICENSE_API || "https://www.clearcotelabs.com").replace(/\/$/, "");
+  const plat = process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : null;
+  if (!plat) throw new Error("Clearcote PRO ships Windows x64 and Linux x64 only.");
+
+  const res = await fetch(`${baseUrl}/api/v1/download/pro?platform=${plat}`, {
+    redirect: "follow",
+    headers: { authorization: `Bearer ${licenseKey}`, "User-Agent": "clearcote-sdk" },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) {
+    const body = (await res.text().catch(() => "")).slice(0, 200);
+    throw new Error(
+      `Clearcote PRO download not authorized (HTTP ${res.status}): ${body}\n` +
+        "Check your license key and that your plan is active.",
+    );
+  }
+  const meta = (await res.json()) as {
+    tag?: string; version?: string; asset?: string; archive?: string; binary?: string;
+    url?: string; sha256?: string; exe_sha256?: string; size?: number;
+  };
+  if (!meta.url || !meta.sha256) {
+    throw new Error(`Clearcote PRO build is not currently available for ${plat} (the server returned no download).`);
+  }
+
+  const rel: ResolvedRelease = {
+    tag: meta.tag || `pro-${meta.version || ""}`,
+    version: meta.version || "",
+    asset: meta.asset || `clearcote-pro-${meta.version || ""}-${plat}-x64.${plat === "windows" ? "zip" : "tar.xz"}`,
+    url: meta.url,
+    sha256: meta.sha256,
+    exeSha256: meta.exe_sha256 || "",
+    size: meta.size || 0,
+    os: process.platform,
+    archive: (meta.archive as "zip" | "tar.xz") || (plat === "windows" ? "zip" : "tar.xz"),
+    binary: meta.binary || (plat === "windows" ? "chrome.exe" : "chrome"),
+    assetGlob: `${plat}-x64`,
+    unpinned: false, // pinned -> sha256-only verify (no GPG), like the free pin
+  };
+
+  const base = path.join(opts.cacheDir || defaultCacheRoot(), rel.tag);
+  if (existsSync(path.join(base, ".verified"))) {
+    const cached = findFile(path.join(base, "browser"), rel.binary || "chrome.exe");
+    if (cached) return cached;
+  }
+  return fetchAndVerify(rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
+}
+
 /**
  * Ensure the Clearcote binary is present and verified; return the path to chrome.exe.
  * Cached per release tag, so subsequent calls are instant.

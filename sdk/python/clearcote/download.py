@@ -381,3 +381,58 @@ def ensure_binary(cache_dir=None, quiet=False, auto_update=None):
         if cached:
             return cached
     return _fetch_and_verify(rel, base, quiet)
+
+
+def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False):
+    """Download + verify the PRO (license-gated) browser and return its chrome path.
+
+    The PRO build is not on a public releases page: the SDK asks the site for it via
+    ``GET /api/v1/download/pro`` with the license key, gets back an unguessable blob
+    URL + sha256, then reuses the SAME verify+extract path as the free binary
+    (``_fetch_and_verify``, sha256-only — no GPG). Cached per PRO tag. Raises on any
+    failure — a licensed caller must get the PRO build, never a silent free fall-back.
+    """
+    import urllib.error
+
+    base_url = (api_base or os.environ.get("CLEARCOTE_LICENSE_API")
+                or "https://www.clearcotelabs.com").rstrip("/")
+    plat = ("windows" if sys.platform.startswith("win")
+            else "linux" if sys.platform.startswith("linux") else None)
+    if plat is None:
+        raise RuntimeError("Clearcote PRO ships Windows x64 and Linux x64 only.")
+
+    req = urllib.request.Request(
+        f"{base_url}/api/v1/download/pro?platform={plat}",
+        headers={"Authorization": f"Bearer {license_key}", "User-Agent": "clearcote-sdk"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            meta = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:200]
+        raise RuntimeError(
+            f"Clearcote PRO download not authorized (HTTP {e.code}): {body}\n"
+            "Check your license key and that your plan is active.") from None
+
+    if not meta.get("url") or not meta.get("sha256"):
+        raise RuntimeError(
+            f"Clearcote PRO build is not currently available for {plat} "
+            "(the server returned no download).")
+
+    rel = {
+        "tag": meta.get("tag") or f"pro-{meta.get('version', '')}",
+        "version": meta.get("version", ""),
+        "url": meta["url"],
+        "sha256": meta["sha256"],
+        "exe_sha256": meta.get("exe_sha256"),
+        "asset": meta["asset"],
+        "archive": meta.get("archive"),
+        "binary": meta.get("binary", "chrome.exe"),
+        "size": meta.get("size"),
+        "unpinned": False,  # pinned -> sha256-only verify (no GPG), like the free pin
+    }
+    dst = os.path.join(cache_dir or _cache_root(), rel["tag"])
+    if os.path.exists(os.path.join(dst, ".verified")):
+        cached = _find(os.path.join(dst, "browser"), rel["binary"])
+        if cached:
+            return cached
+    return _fetch_and_verify(rel, dst, quiet)
