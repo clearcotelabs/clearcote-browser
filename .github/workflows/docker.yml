@@ -33,15 +33,17 @@ jobs:
         run: |
           SDK="${{ github.event.inputs.version }}"
           [ -z "$SDK" ] && SDK=$(grep -m1 -oP '^version\s*=\s*"\K[^"]+' sdk/python/pyproject.toml)
-          # wait for the exact SDK version to be installable on PyPI (up to 5 min)
+          # Wait until the exact version is actually pip-INSTALLABLE (up to 5 min) by retrying the
+          # REAL `pip install`. Gating on the /json API (as before) races: pypi.org/.../json goes
+          # live before pip's install index propagates, so the loop broke early and the install
+          # below then 404'd ("No matching distribution found for clearcote==<ver>").
           for i in $(seq 1 30); do
-            curl -sfL "https://pypi.org/pypi/clearcote/${SDK}/json" >/dev/null && break
-            echo "waiting for PyPI clearcote ${SDK} ($i/30)..."; sleep 10
-            [ "$i" = 30 ] && { echo "::error::clearcote ${SDK} never appeared on PyPI"; exit 1; }
+            pip install --quiet "clearcote==${SDK}" && break
+            echo "waiting for PyPI clearcote ${SDK} to become pip-installable ($i/30)..."; sleep 10
+            [ "$i" = 30 ] && { echo "::error::clearcote ${SDK} never became pip-installable on PyPI"; exit 1; }
           done
-          # the browser tag MUST come from the SDK we install (so the image tag == the baked binary),
-          # not from the repo checkout (which may be ahead of the published SDK).
-          pip install --quiet "clearcote==${SDK}"
+          # The browser tag MUST come from the SDK we just installed (so the image tag == the baked
+          # binary), not the repo checkout (which may be ahead of the published SDK).
           BROWSER=$(python -c "from clearcote.release import platform_release; print(platform_release('linux')['tag'][1:])")
           echo "sdk=$SDK" >> "$GITHUB_OUTPUT"
           echo "browser=$BROWSER" >> "$GITHUB_OUTPUT"
