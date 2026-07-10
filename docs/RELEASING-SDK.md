@@ -74,6 +74,18 @@ the same fields — it converts on first upload and does not reserve the name, s
    provenance/attestations). A version that doesn't match the tag fails the run loudly (a guard
    step), turning a forgotten bump into a clean red ❌ instead of a mispublish.
 
+5. **Smoke-test the published release — REQUIRED, don't skip.** Unit tests don't prove the browser
+   launches; a green CI can still ship a build that can't start (bad pin, mis-packaged archive,
+   broken PRO route, missing Docker system libs). Install the just-published version from the real
+   registries and launch it — FREE + PRO, Python + Node — on **each** target OS plus a clean-room
+   container:
+   ```bash
+   CLEARCOTE_LICENSE_KEY=cc_lic_...  sdk/scripts/smoke-release.sh <version>            # this OS (run on Windows AND Linux)
+   CLEARCOTE_LICENSE_KEY=cc_lic_...  sdk/scripts/smoke-release.sh <version> --docker   # clean-room Linux container
+   ```
+   Must print `### SMOKE PASS ###` (exit 0). Any `LAUNCH_FAIL` → the release is broken; yank/patch,
+   don't announce. Full details + the Docker system-lib list: [RELEASE-SMOKE-TEST.md](RELEASE-SMOKE-TEST.md).
+
 > A single `sdk-v*` tag publishes **both** packages (they share one version today). If you ever need
 > to release them at different versions, split into per-package tag namespaces.
 
