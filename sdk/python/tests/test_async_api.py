@@ -154,3 +154,61 @@ async def test_install_humanize_wraps_new_page():
     page = await browser.new_page()       # wrapped -> attaches humanize
     await page.mouse.move(300, 200)
     assert page.mouse.moves[-1] == (300, 200)
+
+
+# ---- regression: async launch must unpack _prepare's 6-tuple (PR #9) ----
+async def test_async_launch_unpacks_prepare_sixtuple_and_threads_seed(monkeypatch):
+    """_prepare returns 6 values (…, effective seed). The async launch paths must
+    unpack 6 (not 5) and pass the profile-aware seed to install_humanize. Before the
+    fix these unpacked 5 -> `ValueError: too many values to unpack (expected 5, got 6)`
+    the moment launch()/launch_persistent_context() was actually awaited."""
+    import tempfile
+    captured = {}
+
+    class _FakeBrowserObj:
+        pass
+
+    def fake_prepare(kwargs):
+        # exe, args, pw_kwargs, humanize, show_cursor, seed
+        return ("chrome", ["--x"], {}, True, False, "eff-seed-123")
+
+    class _FakeChromium:
+        async def launch(self, **kw):
+            return _FakeBrowserObj()
+
+        async def launch_persistent_context(self, user_data_dir, **kw):
+            return _FakeBrowserObj()
+
+    class _FakePW:
+        chromium = _FakeChromium()
+
+        async def stop(self):
+            pass
+
+    async def fake_start_driver():
+        return _FakePW()
+
+    async def fake_install(browser, humanize, show_cursor, seed=None):
+        captured["launch_seed"] = seed
+        captured["humanize"] = humanize
+
+    async def fake_install_ctx(context, humanize, show_cursor, seed=None):
+        captured["ctx_seed"] = seed
+
+    monkeypatch.setattr(async_api, "_prepare", fake_prepare)
+    monkeypatch.setattr(async_api, "_start_driver", fake_start_driver)
+    monkeypatch.setattr(async_api, "_headed_no_viewport", lambda pw_kwargs: False)
+    monkeypatch.setattr(async_api, "_bind_driver", lambda *a, **k: None)
+    monkeypatch.setattr(async_api, "install_humanize", fake_install)
+    monkeypatch.setattr(async_api, "install_humanize_on_context", fake_install_ctx)
+
+    # launch(): must not raise the unpack ValueError; uses the _prepare (effective) seed.
+    browser = await async_api.launch(fingerprint="raw-ignored")
+    assert browser is not None
+    assert captured["launch_seed"] == "eff-seed-123"
+    assert captured["humanize"] is True
+
+    # launch_persistent_context(): same 6-unpack + seed threading.
+    context = await async_api.launch_persistent_context(tempfile.mkdtemp())
+    assert context is not None
+    assert captured["ctx_seed"] == "eff-seed-123"
