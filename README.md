@@ -390,6 +390,21 @@ cd clearcote-browser && WORK=~/clearcote-build ./build.sh
 
 - **[docs/BUILDING.md](docs/BUILDING.md)** — full build-from-source guide · **[patches/](patches/)** — the 32 diffs · **[docs/PATCHES.md](docs/PATCHES.md)** — what each one does.
 
+## Clearcote Pro — $49/month
+
+Clearcote is free and open source, and the free build always will be — **fully functional, and reproducible from source.** Pro is simply how you support the project and get a maintained build.
+
+Let me be blunt about what you're paying for. Keeping a Chromium fork current — tracking upstream, porting the anti-detection patches to every new Chromium version, testing, and building for Windows and Linux — is a lot of ongoing work, mostly mine. **$49/month funds that work.** In return you get:
+
+- **A maintained, always-current build** — the latest Chromium and the newest anti-detection patches, kept up to date for you (no manual rebuilds).
+- **A few extra stealth patches I keep private** so they aren't trivially copied. This means the **Pro binary is *not* reproducible from public source** — unlike the free build, which is, and stays that way.
+- **Unlimited concurrent instances.**
+- **Direct email support from me, the owner.** You email, I answer.
+
+No lock-in, no dark patterns. The free build is not crippled to sell you Pro. Pro is a maintained build, a handful of patches I don't publish, and a direct line to the person who makes it.
+
+**→ Get Pro at [clearcotelabs.com/pricing](https://clearcotelabs.com/pricing)**
+
 ## Reference
 
 | | |
