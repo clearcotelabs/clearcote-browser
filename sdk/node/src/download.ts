@@ -21,7 +21,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import extract from "extract-zip";
-import { RELEASE, REPO, SIGNING_KEY_FPR, platformRelease, type ReleaseInfo } from "./release.js";
+import { RELEASE, REPO, SIGNING_KEY_FPR, platformRelease, CATALOG_URL, CATALOG_FALLBACK, type ReleaseInfo, type Catalog, type CatalogBuild } from "./release.js";
 
 /**
  * Read every file under `dir` so on-access antivirus finishes scanning the freshly-extracted,
@@ -76,6 +76,12 @@ export interface DownloadOptions {
    * Also enabled by setting the env var `CLEARCOTE_AUTO_UPDATE=1`.
    */
   autoUpdate?: boolean;
+  /**
+   * Select a specific browser build from the version catalog: a bare major (`"150"`), an exact
+   * version (`"150.0.7871.115"`), or `"latest"`. Validated against the catalog before download.
+   * PRO-tier versions require a license key. Also set via `CLEARCOTE_BROWSER_VERSION`.
+   */
+  version?: string;
 }
 
 /** A resolved release to fetch — either the pinned {@link RELEASE} or one discovered at runtime. */
@@ -401,6 +407,117 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
   return exe;
 }
 
+// ── Version catalog resolver ─────────────────────────────────────────────────
+// Catalog platform key for this OS (matches the /download/pro `platform` param).
+function platKey(): "windows" | "linux" | null {
+  if (process.platform === "win32") return "windows";
+  if (process.platform === "linux") return "linux";
+  return null;
+}
+
+/** Compare two version strings numerically: "150.0.7871.115" > "149.0.7827.114". */
+function verCmp(a: string, b: string): number {
+  const x = (a.match(/\d+/g) || []).slice(0, 4).map(Number);
+  const y = (b.match(/\d+/g) || []).slice(0, 4).map(Number);
+  for (let i = 0; i < 4; i++) {
+    const d = (x[i] || 0) - (y[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+async function fetchCatalog(quiet?: boolean): Promise<Catalog> {
+  try {
+    const res = await fetch(CATALOG_URL, { redirect: "follow", headers: { "User-Agent": "clearcote-sdk" }, signal: AbortSignal.timeout(30_000) });
+    if (res.ok) {
+      const data = (await res.json()) as Catalog;
+      if (data && Array.isArray(data.builds) && data.builds.length) return data;
+    }
+  } catch (e) {
+    log(quiet, `version catalog unreachable (${(e as Error).message}); using the bundled snapshot`);
+  }
+  return CATALOG_FALLBACK;
+}
+
+function catalogAvailable(cat: Catalog, plat: "windows" | "linux"): string {
+  return cat.builds.filter((b) => b.platforms[plat]).map((b) => `${b.version} (${b.tier || "free"})`).join(", ") || "none";
+}
+
+/** A resolved version plan: a free release to download, or a pro version to fetch via the licensed route. */
+export type VersionPlan = { kind: "free"; rel: ResolvedRelease } | { kind: "pro"; version: string };
+
+/**
+ * Resolve a version selector against the public catalog, VALIDATING that it exists (and is reachable
+ * for this tier) BEFORE any download — so a bad request fails fast with a helpful message instead of
+ * getting stuck. `selector` may be a bare major ("150"), an exact version, or "latest". Throws when
+ * the version doesn't exist for this OS, or when it's a PRO build and `hasLicense` is false.
+ */
+export async function resolveVersion(selector: string, hasLicense: boolean, quiet?: boolean): Promise<VersionPlan> {
+  const plat = platKey();
+  if (!plat) throw new Error("Clearcote ships Windows x64 and Linux x64 only.");
+  const cat = await fetchCatalog(quiet);
+  const builds = cat.builds.filter((b) => b.platforms[plat]);
+  const sel = String(selector || "").trim();
+
+  let cands: CatalogBuild[];
+  if (/^(latest|newest)$/i.test(sel)) {
+    cands = builds.filter((b) => (b.tier || "free") === "free" || hasLicense); // newest ACCESSIBLE
+  } else if (/^\d+$/.test(sel)) {
+    cands = builds.filter((b) => String(b.major) === sel); // bare major -> newest of that major
+  } else {
+    cands = builds.filter((b) => b.version === sel); // exact version
+  }
+  if (!cands.length) {
+    throw new Error(`No Clearcote build matches version '${selector}' for ${plat}. Available: ${catalogAvailable(cat, plat)}.`);
+  }
+  const pick = cands.reduce((a, b) => (verCmp(b.version, a.version) > 0 ? b : a));
+  const tier = pick.tier || "free";
+
+  if (tier === "pro" && !hasLicense) {
+    const free = builds.filter((b) => (b.tier || "free") === "free").map((b) => b.version);
+    throw new Error(
+      `Clearcote ${pick.version} is a PRO build and isn't public yet — set a license key (CLEARCOTE_LICENSE_KEY, or pass licenseKey) to use it.\n` +
+        `  Free versions you can use without a key: ${free.join(", ") || "none"}.`,
+    );
+  }
+  if (tier === "pro") return { kind: "pro", version: pick.version };
+
+  const p = pick.platforms[plat]!;
+  if (!p.url || !p.sha256) throw new Error(`Clearcote ${pick.version} is marked free but the catalog has no download for ${plat}.`);
+  const rel: ResolvedRelease = {
+    tag: pick.tag || `v-${pick.version}`,
+    version: pick.version,
+    asset: p.asset || `clearcote-${pick.version}-${plat}-x64.${p.archive === "zip" ? "zip" : "tar.xz"}`,
+    url: p.url,
+    sha256: p.sha256,
+    exeSha256: p.exeSha256 || "",
+    size: p.size || 0,
+    os: process.platform,
+    archive: p.archive,
+    binary: p.binary,
+    assetGlob: `${plat}-x64`,
+    unpinned: false, // catalog sha256 is the trust anchor -> sha256-only verify, like a pin
+  };
+  return { kind: "free", rel };
+}
+
+/** Resolve a version selector to a downloaded, verified binary path (free from GitHub, pro via the licensed route). */
+export async function ensureVersion(
+  selector: string,
+  opts: { licenseKey?: string; apiBase?: string; cacheDir?: string; quiet?: boolean } = {},
+): Promise<string> {
+  const plan = await resolveVersion(selector, !!opts.licenseKey, opts.quiet);
+  if (plan.kind === "pro") {
+    return proEnsureBinary(opts.licenseKey as string, { apiBase: opts.apiBase, cacheDir: opts.cacheDir, quiet: opts.quiet, version: plan.version });
+  }
+  const base = path.join(opts.cacheDir || defaultCacheRoot(), plan.rel.tag);
+  if (existsSync(path.join(base, ".verified"))) {
+    const cached = findFile(path.join(base, "browser"), plan.rel.binary || "chrome");
+    if (cached) return cached;
+  }
+  return fetchAndVerify(plan.rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
+}
+
 /** Options for {@link proEnsureBinary}. */
 export interface ProDownloadOptions {
   /** License API base (default: `CLEARCOTE_LICENSE_API` env or clearcotelabs.com). */
@@ -409,6 +526,8 @@ export interface ProDownloadOptions {
   cacheDir?: string;
   /** Suppress progress logging. */
   quiet?: boolean;
+  /** Request a specific PRO major/version; the server returns the newest match. */
+  version?: string;
 }
 
 /**
@@ -426,7 +545,9 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
   const plat = process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : null;
   if (!plat) throw new Error("Clearcote PRO ships Windows x64 and Linux x64 only.");
 
-  const res = await fetch(`${baseUrl}/api/v1/download/pro?platform=${plat}`, {
+  let proUrl = `${baseUrl}/api/v1/download/pro?platform=${plat}`;
+  if (opts.version) proUrl += `&version=${encodeURIComponent(opts.version)}`; // request a specific PRO version
+  const res = await fetch(proUrl, {
     redirect: "follow",
     headers: { authorization: `Bearer ${licenseKey}`, "User-Agent": "clearcote-sdk" },
     signal: AbortSignal.timeout(30_000),

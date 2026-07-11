@@ -22,7 +22,7 @@ import type {
   BrowserContextOptions,
   LaunchOptions as PlaywrightLaunchOptions,
 } from "playwright-core";
-import { ensureBinary, proEnsureBinary, warmFiles, type DownloadOptions } from "./download.js";
+import { ensureBinary, ensureVersion, proEnsureBinary, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
 import { resolveGeo, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
@@ -147,10 +147,21 @@ function ensureRunnableHere(exe: string): void {
  * site's authenticated download route. When it's absent — the free path — behaviour is unchanged.
  */
 export async function executablePath(
-  options: { executablePath?: string; pro?: { licenseKey: string; licenseApiBase?: string } } & DownloadOptions = {}
+  options: { executablePath?: string; version?: string; pro?: { licenseKey: string; licenseApiBase?: string } } & DownloadOptions = {}
 ): Promise<string> {
   if (options.executablePath) return options.executablePath;
   if (process.env.CLEARCOTE_BINARY) return process.env.CLEARCOTE_BINARY;
+  const version = options.version || process.env.CLEARCOTE_BROWSER_VERSION;
+  if (version) {
+    // Explicit version selector: validate against the catalog FIRST (clear error if it doesn't
+    // exist or needs a license), then route free (GitHub) vs pro (authenticated route).
+    return ensureVersion(version, {
+      licenseKey: options.pro?.licenseKey,
+      apiBase: options.pro?.licenseApiBase,
+      cacheDir: options.cacheDir,
+      quiet: options.quiet,
+    });
+  }
   if (options.pro) {
     return proEnsureBinary(options.pro.licenseKey, {
       apiBase: options.pro.licenseApiBase,
@@ -170,9 +181,14 @@ function proSelector(
   return key ? { licenseKey: key, licenseApiBase } : undefined;
 }
 
-/** Pre-fetch + verify the Clearcote binary without launching it. Returns the chrome.exe path. */
-export async function download(options: DownloadOptions = {}): Promise<string> {
-  return ensureBinary(options);
+/** Pre-fetch + verify the Clearcote binary without launching it. Returns the chrome.exe path.
+ * Pass `version` ("150" / "150.0.7871.115" / "latest") to fetch a specific catalog build (PRO-tier
+ * versions need `licenseKey` / `CLEARCOTE_LICENSE_KEY`). */
+export async function download(
+  options: DownloadOptions & { version?: string; licenseKey?: string; licenseApiBase?: string } = {},
+): Promise<string> {
+  const { version, licenseKey, licenseApiBase, ...dl } = options;
+  return executablePath({ version, pro: proSelector(licenseKey, licenseApiBase), ...dl });
 }
 
 /** A headed launch with Playwright's default emulated viewport (1280x720) on the real OS window
@@ -244,7 +260,7 @@ export async function winAvRetry<T>(doLaunch: (exe: string) => Promise<T>, exe: 
 export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   // profile= a saved persona: its options are the base, explicit options override.
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, licenseKey, licenseApiBase, ...rest } = merged;
+  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -257,7 +273,7 @@ export async function launch(options: LaunchOptions = {}): Promise<Browser> {
     { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless, _userArgs: args ?? [] },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
-  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
+  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
   ensureRunnableHere(exe);
   const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
   // License (opt-in): check out a concurrency slot and inject CLEARCOTE_RUN_TOKEN so the PRO
@@ -291,7 +307,7 @@ export async function launchPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, licenseKey, licenseApiBase, ...rest } = merged;
+  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -329,7 +345,7 @@ export async function launchPersistentContext(
   }
   delete (opts as Record<string, unknown>).ignoreDefaultArgs;  // passed explicitly below
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
-  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
+  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
   ensureRunnableHere(exe);
   // License (opt-in): check out a concurrency slot + inject CLEARCOTE_RUN_TOKEN. Inert in free mode.
   const lease = await acquireLease({ licenseKey, licenseApiBase, sdkVersion: String(RELEASE.version), quiet });
@@ -484,7 +500,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     : launchOpts;
   const {
     profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption,
-    args: userArgs, geoip, autoUpdate, cacheDir, quiet, licenseKey, licenseApiBase, ...rest
+    args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
@@ -495,7 +511,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     { ...fingerprint, proxy: proxyOpt, geoip, headless, _userArgs: userArgs ?? [] },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
-  const exe = await executablePath({ executablePath: exeOption, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
+  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
   ensureRunnableHere(exe);
   const engineArgs = assembleArgs(
     fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions),

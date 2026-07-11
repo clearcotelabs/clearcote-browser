@@ -68,3 +68,40 @@ REPO = "clearcotelabs/clearcote-browser"
 # an auto-resolved (un-pinned) release's SHA256SUMS.txt.asc is verified against THIS fingerprint
 # before the binary is trusted. (Pinned mode trusts the baked-in sha256 instead.)
 SIGNING_KEY_FPR = "CA96F185F96A693AEDB3AC1FCB00D851B7A86B0F"
+
+
+# ── Version catalog ──────────────────────────────────────────────────────────
+# The catalog is the source of truth for "which browser majors exist and what tier each is". The SDK
+# fetches it at runtime so a NEW release becomes switchable (launch(version="150")) without an SDK
+# bump. Each build declares a `tier`: FREE builds are public on GitHub and carry their url+sha256; PRO
+# builds (license-gated, not yet public) advertise existence ONLY — the SDK validates the request and
+# routes the actual download through the authenticated /api/v1/download/pro route. When a PRO major is
+# later promoted to public, flip its `tier` to "free" and add the GitHub url — no SDK change needed.
+#
+# platform keys are "windows"/"linux" (matching the /download/pro `platform` param).
+CATALOG_URL = "https://www.clearcotelabs.com/api/v1/versions"
+
+# Offline fallback snapshot — keep in sync with published releases. Lets the SDK still VALIDATE a
+# request (and download the free pins) when the live catalog is unreachable. Only list builds that are
+# actually DOWNLOADABLE: when a new build (e.g. the 150 PRO) goes live, add it to the live catalog
+# (/api/v1/versions) — no SDK republish needed — and to this snapshot on the next SDK release.
+CATALOG_FALLBACK = {
+    "schema": 1,
+    "builds": [
+        {
+            "major": 149, "version": "149.0.7827.114", "tier": "free", "tag": "v0.1.0-pre.21",
+            "platforms": {
+                "windows": {
+                    "asset": _WINDOWS["asset"], "url": _WINDOWS["url"], "sha256": _WINDOWS["sha256"],
+                    "exe_sha256": _WINDOWS["exe_sha256"], "size": _WINDOWS["size"],
+                    "archive": "zip", "binary": "chrome.exe",
+                },
+                "linux": {
+                    "asset": _LINUX["asset"], "url": _LINUX["url"], "sha256": _LINUX["sha256"],
+                    "exe_sha256": _LINUX["exe_sha256"], "size": _LINUX["size"],
+                    "archive": "tar.xz", "binary": "chrome",
+                },
+            },
+        },
+    ],
+}

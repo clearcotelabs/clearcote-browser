@@ -87,12 +87,24 @@ public class VersionTests
     }
 
     [Fact]
-    public void Bundled_fallback_catalog_is_wellformed()
+    public async Task Explicit_executable_path_wins_over_version()
+    {
+        // backwards compat: an explicit ExecutablePath short-circuits before any version/catalog work.
+        var p = await Clearcote.ExecutablePathAsync(new LaunchOptions { ExecutablePath = "/opt/x/chrome", Version = "150" });
+        Assert.Equal("/opt/x/chrome", p);
+    }
+
+    [Fact]
+    public void Bundled_fallback_lists_only_downloadable_builds()
     {
         var byVer = Release.CatalogFallback.Builds.ToDictionary(b => b.Version);
         Assert.Equal("free", byVer["149.0.7827.114"].Tier);
         Assert.False(string.IsNullOrEmpty(byVer["149.0.7827.114"].Platforms["linux"].Url)); // free carries a url
-        Assert.Equal("pro", byVer["150.0.7871.115"].Tier);
-        Assert.Null(byVer["150.0.7871.115"].Platforms["linux"].Url); // pro advertises existence only
+        // 150 PRO is NOT advertised until its binary is live (else a licensed Version="150" would 404).
+        Assert.False(byVer.ContainsKey("150.0.7871.115"));
+        // every listed build must actually be downloadable (have a url per platform).
+        foreach (var b in Release.CatalogFallback.Builds)
+            foreach (var p in b.Platforms.Values)
+                Assert.False(string.IsNullOrEmpty(p.Url));
     }
 }

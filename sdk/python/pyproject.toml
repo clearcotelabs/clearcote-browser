@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "clearcote"
-version = "0.15.3"
+version = "0.16.0"
 description = "Playwright drop-in for the Clearcote anti-fingerprint Chromium build. launch() returns a standard Playwright Browser backed by the verified Clearcote binary, which is auto-downloaded and SHA-256 checked."
 readme = "README.md"
 requires-python = ">=3.8"

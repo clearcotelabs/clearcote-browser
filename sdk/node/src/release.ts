@@ -81,3 +81,56 @@ export const REPO = "clearcotelabs/clearcote-browser";
  * an auto-resolved (un-pinned) release's `SHA256SUMS.txt.asc` is verified against THIS fingerprint
  * before the binary is trusted. (Pinned mode trusts the baked-in sha256 instead.) */
 export const SIGNING_KEY_FPR = "CA96F185F96A693AEDB3AC1FCB00D851B7A86B0F";
+
+// ── Version catalog ──────────────────────────────────────────────────────────
+// Source of truth for "which browser majors exist and what tier each is". Fetched at runtime so a NEW
+// release becomes switchable (launch({version:"150"})) without an SDK bump. Each build declares a
+// `tier`: FREE builds are public on GitHub and carry url+sha256; PRO builds (license-gated, not yet
+// public) advertise existence ONLY — the actual download routes through the authenticated
+// /api/v1/download/pro. When a PRO major is promoted to public, flip its tier to "free" + add the URL.
+// platform keys are "windows"/"linux" (matching the /download/pro `platform` param).
+
+export type Tier = "free" | "pro";
+
+export interface CatalogPlatform {
+  asset?: string;
+  url?: string;
+  sha256?: string;
+  exeSha256?: string;
+  size?: number;
+  archive: "zip" | "tar.xz";
+  binary: string;
+}
+export interface CatalogBuild {
+  major: number;
+  version: string;
+  tier: Tier;
+  tag: string;
+  platforms: Partial<Record<"windows" | "linux", CatalogPlatform>>;
+}
+export interface Catalog {
+  schema: number;
+  builds: CatalogBuild[];
+}
+
+export const CATALOG_URL = "https://www.clearcotelabs.com/api/v1/versions";
+
+/** Offline fallback snapshot — keep in sync with published releases. Lets the SDK still VALIDATE a
+ * request (and download the free pins) when the live catalog is unreachable. Only list builds that are
+ * actually DOWNLOADABLE: when a new build (e.g. the 150 PRO) goes live, add it to the live catalog
+ * (/api/v1/versions) — no SDK republish needed — and to this snapshot on the next SDK release. */
+export const CATALOG_FALLBACK: Catalog = {
+  schema: 1,
+  builds: [
+    {
+      major: 149,
+      version: "149.0.7827.114",
+      tier: "free",
+      tag: "v0.1.0-pre.21",
+      platforms: {
+        windows: { asset: WINDOWS.asset, url: WINDOWS.url, sha256: WINDOWS.sha256, exeSha256: WINDOWS.exeSha256, size: WINDOWS.size, archive: "zip", binary: "chrome.exe" },
+        linux: { asset: LINUX.asset, url: LINUX.url, sha256: LINUX.sha256, exeSha256: LINUX.exeSha256, size: LINUX.size, archive: "tar.xz", binary: "chrome" },
+      },
+    },
+  ],
+};

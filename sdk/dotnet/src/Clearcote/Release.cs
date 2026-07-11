@@ -95,7 +95,9 @@ public static class Release
     /// Public version catalog URL the SDK fetches; the bundled snapshot is the offline fallback.
     public const string CatalogUrl = "https://www.clearcotelabs.com/api/v1/versions";
 
-    /// Offline fallback snapshot — keep in sync with published releases.
+    /// Offline fallback snapshot — keep in sync with published releases. Only list builds that are
+    /// actually DOWNLOADABLE: when a new build (e.g. the 150 PRO) goes live, add it to the live catalog
+    /// (/api/v1/versions) — no SDK republish needed — and to this snapshot on the next SDK release.
     public static readonly Catalog CatalogFallback = new()
     {
         Schema = 1,
@@ -108,16 +110,6 @@ public static class Release
                 {
                     ["windows"] = new() { Asset = Windows.Asset, Url = Windows.Url, Sha256 = Windows.Sha256, ExeSha256 = Windows.ExeSha256, Size = Windows.Size, Archive = "zip", Binary = "chrome.exe" },
                     ["linux"] = new() { Asset = Linux.Asset, Url = Linux.Url, Sha256 = Linux.Sha256, ExeSha256 = Linux.ExeSha256, Size = Linux.Size, Archive = "tar.xz", Binary = "chrome" },
-                },
-            },
-            new()
-            {
-                // PRO — existence advertised for validation; download requires a license via /download/pro.
-                Major = 150, Version = "150.0.7871.115", Tier = "pro", Tag = "pro-150.0.7871.115",
-                Platforms = new Dictionary<string, CatalogPlatform>
-                {
-                    ["windows"] = new() { Archive = "zip", Binary = "chrome.exe" },
-                    ["linux"] = new() { Archive = "tar.xz", Binary = "chrome" },
                 },
             },
         },

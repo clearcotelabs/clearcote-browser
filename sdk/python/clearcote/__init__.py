@@ -72,7 +72,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.15.3"
+__version__ = "0.16.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -99,33 +99,67 @@ def _playwright():
     return _pw
 
 
-def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_update=None, pro=None):
+def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_update=None, pro=None,
+                    version=None):
     if executable_path:
         return executable_path
     env = os.environ.get("CLEARCOTE_BINARY")
     if env:
         return env
-    if pro:  # (license_key, api_base) -> the PRO (license-gated) build via the site
+    version = version or os.environ.get("CLEARCOTE_BROWSER_VERSION")
+    if version:
+        # Explicit version selector ("150" / "149.0.7827.114" / "latest"): validate against the public
+        # catalog FIRST (clear error if it doesn't exist or needs a license), then route free vs pro.
+        from .download import (
+            _cache_root,
+            _fetch_and_verify,
+            _find,
+            pro_ensure_binary,
+            resolve_version,
+        )
+
+        kind, payload = resolve_version(version, has_license=bool(pro and pro[0]), quiet=quiet)
+        if kind == "pro":
+            return pro_ensure_binary(pro[0], api_base=(pro[1] if pro else None),
+                                     cache_dir=cache_dir, quiet=quiet, version=payload)
+        rel = payload  # free build resolved from the catalog
+        base = os.path.join(cache_dir or _cache_root(), rel["tag"])
+        if os.path.exists(os.path.join(base, ".verified")):
+            cached = _find(os.path.join(base, "browser"), rel["binary"])
+            if cached:
+                return cached
+        return _fetch_and_verify(rel, base, quiet)
+    if pro:  # (license_key, api_base) -> the PRO (license-gated) pinned build via the site
         from .download import pro_ensure_binary
         return pro_ensure_binary(pro[0], api_base=pro[1], cache_dir=cache_dir, quiet=quiet)
     return ensure_binary(cache_dir=cache_dir, quiet=quiet, auto_update=auto_update)
 
 
-def executable_path(executable_path=None, cache_dir=None, quiet=False, auto_update=None):
+def executable_path(executable_path=None, cache_dir=None, quiet=False, auto_update=None,
+                    version=None, license_key=None, license_api_base=None):
     """Resolve the Clearcote chrome.exe path, downloading + verifying it if needed.
 
-    Order: explicit ``executable_path`` > ``CLEARCOTE_BINARY`` env > auto-download.
+    Order: explicit ``executable_path`` > ``CLEARCOTE_BINARY`` env > ``version`` selector > auto-download.
+    Pass ``version="150"`` (major), ``"150.0.7871.115"`` (exact), or ``"latest"`` to pick a specific
+    browser build from the catalog (a PRO-tier version needs ``license_key`` / ``CLEARCOTE_LICENSE_KEY``).
     Pass ``auto_update=True`` (or set ``CLEARCOTE_AUTO_UPDATE=1``) to fetch the latest release.
     """
-    return _resolve_binary(executable_path, cache_dir, quiet, auto_update)
+    key = resolve_license_key(license_key)
+    pro = (key, license_api_base) if key else None
+    return _resolve_binary(executable_path, cache_dir, quiet, auto_update, pro=pro, version=version)
 
 
-def download(cache_dir=None, quiet=False, auto_update=None):
+def download(cache_dir=None, quiet=False, auto_update=None, version=None, license_key=None,
+             license_api_base=None):
     """Pre-fetch + verify the Clearcote binary without launching. Returns the chrome.exe path.
 
+    Pass ``version="150"`` / ``"150.0.7871.115"`` / ``"latest"`` to fetch a specific browser build
+    from the catalog (PRO-tier versions need ``license_key`` / ``CLEARCOTE_LICENSE_KEY``).
     Pass ``auto_update=True`` (or set ``CLEARCOTE_AUTO_UPDATE=1``) to fetch the latest release.
     """
-    return ensure_binary(cache_dir=cache_dir, quiet=quiet, auto_update=auto_update)
+    key = resolve_license_key(license_key)
+    pro = (key, license_api_base) if key else None
+    return _resolve_binary(None, cache_dir, quiet, auto_update, pro=pro, version=version)
 
 
 def _guard(exe):
@@ -163,6 +197,7 @@ def _prepare(kwargs):
     cache_dir = kwargs.pop("cache_dir", None)
     quiet = kwargs.pop("quiet", False)
     auto_update = kwargs.pop("auto_update", None)
+    version = kwargs.pop("version", None)  # browser major/version selector (catalog-resolved)
     proxy_opt = kwargs.get("proxy")  # captured before resolve_proxy rewrites it (for quic + warnings)
     if geoip:
         # resolve the proxy's exit-IP geo and fill any UNSET timezone/accept_language/location/webrtc_ip
@@ -175,7 +210,7 @@ def _prepare(kwargs):
             # fabricates the srflx candidate at this IP; no real STUN leaves the host).
             if geo.get("ip") and fp.get("webrtc_ip") is None:
                 fp["webrtc_ip"] = geo["ip"]
-    exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update, pro=_cc_pro)
+    exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update, pro=_cc_pro, version=version)
     _guard(exe)
     # SOCKS5-with-credentials must go through --proxy-server (Playwright rejects creds in its SOCKS
     # proxy descriptor); resolve_proxy returns proxy=None for that case so we drop it from Playwright.

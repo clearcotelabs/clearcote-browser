@@ -369,6 +369,29 @@ audited baked-in hashes are used. Each build is cached per tag, so this only dow
 version actually ships. (For locked-down/reproducible deployments, leave `autoUpdate` off and bump
 the package deliberately.)
 
+## Choosing a browser version
+
+By default the SDK downloads the exact build pinned into this package. To pick a specific browser
+major/version instead, pass `version` (or set `CLEARCOTE_BROWSER_VERSION`):
+
+```ts
+await launch({ fingerprint: "seed-1", version: "149" });     // newest 149.x (free)
+await launch({ version: "149.0.7827.114" });                 // an exact build
+await launch({ version: "latest" });                         // newest you can access
+await launch({ version: "150", licenseKey: "cc_lic_..." });  // a PRO-tier version (see below)
+```
+
+The request is resolved against a public catalog (`GET /api/v1/versions`) and **validated to exist
+before anything downloads**, so a bad request fails fast instead of getting stuck:
+
+- unknown version → `No Clearcote build matches version '151'. Available: 149.0.7827.114 (free).`
+- a PRO-tier version without a key → `Clearcote 150… is a PRO build … set a license key (CLEARCOTE_LICENSE_KEY).`
+
+Free versions download from GitHub (no key needed); PRO versions download via the authenticated route.
+Each build is cached per version, so different majors coexist. Binary resolution order:
+`executablePath` > `CLEARCOTE_BINARY` > `version` > pinned default. Also on `launchPersistentContext`,
+`serve`, `executablePath()`, and `download()`.
+
 ## PRO tier (license key)
 
 Everything above is the **free** build. A PRO license adds **floating-concurrency licensing** and

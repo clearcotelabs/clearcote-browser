@@ -356,6 +356,105 @@ def _fetch_and_verify(rel, base, quiet):
     return exe
 
 
+def _plat_key():
+    """Catalog platform key for this OS (matches the /download/pro `platform` param)."""
+    if sys.platform.startswith("win"):
+        return "windows"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    return None
+
+
+def _ver_key(v):
+    """Sortable tuple from a version string, e.g. '150.0.7871.115' -> (150, 0, 7871, 115)."""
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:4])
+
+
+def _fetch_catalog(quiet=False):
+    """The public version catalog (source of truth for which majors exist + each build's tier).
+    Falls back to the bundled snapshot when the live catalog is unreachable."""
+    from .release import CATALOG_FALLBACK, CATALOG_URL
+
+    try:
+        data = json.loads(_http_get(CATALOG_URL).decode("utf-8"))
+        if isinstance(data, dict) and data.get("builds"):
+            return data
+    except Exception as exc:  # noqa: BLE001
+        _log(quiet, f"version catalog unreachable ({exc}); using the bundled snapshot")
+    return CATALOG_FALLBACK
+
+
+def _catalog_available(catalog, plat):
+    return ", ".join(
+        f"{b.get('version')} ({b.get('tier', 'free')})"
+        for b in catalog.get("builds", [])
+        if plat in (b.get("platforms") or {})
+    ) or "none"
+
+
+def resolve_version(selector, has_license=False, quiet=False):
+    """Resolve a version selector against the public catalog, VALIDATING that it exists (and is
+    reachable) BEFORE any download, so a bad request fails fast with a helpful message instead of
+    getting stuck.
+
+    ``selector`` may be a bare major ("150"), an exact version ("150.0.7871.115"), or "latest".
+    Returns ``("free", rel_dict)`` (download via ``_fetch_and_verify``) or ``("pro", version_str)``
+    (download via ``pro_ensure_binary(version=...)``). Raises ``ValueError`` when the version does
+    not exist for this OS, or when it is a PRO build and ``has_license`` is False.
+    """
+    plat = _plat_key()
+    if plat is None:
+        raise RuntimeError("Clearcote ships Windows x64 and Linux x64 only.")
+    catalog = _fetch_catalog(quiet)
+    builds = [b for b in catalog.get("builds", []) if plat in (b.get("platforms") or {})]
+    sel = str(selector or "").strip()
+
+    if sel.lower() in ("latest", "newest"):
+        # newest build the caller can actually use (free always; pro only when licensed)
+        cands = [b for b in builds if b.get("tier", "free") == "free" or has_license]
+    elif re.fullmatch(r"\d+", sel):  # bare major -> newest of that major
+        cands = [b for b in builds if str(b.get("major")) == sel]
+    else:  # exact version
+        cands = [b for b in builds if b.get("version") == sel]
+
+    if not cands:
+        raise ValueError(
+            f"No Clearcote build matches version {selector!r} for {plat}. "
+            f"Available: {_catalog_available(catalog, plat)}."
+        )
+    pick = max(cands, key=lambda b: _ver_key(b.get("version", "0")))
+    tier = pick.get("tier", "free")
+
+    if tier == "pro" and not has_license:
+        free = [b["version"] for b in builds if b.get("tier", "free") == "free"]
+        raise ValueError(
+            f"Clearcote {pick['version']} is a PRO build and isn't public yet — set a license key "
+            f"(CLEARCOTE_LICENSE_KEY, or pass license_key=...) to use it.\n"
+            f"  Free versions you can use without a key: {', '.join(free) or 'none'}."
+        )
+    if tier == "pro":
+        return ("pro", pick["version"])
+
+    p = pick["platforms"][plat]
+    if not p.get("url") or not p.get("sha256"):
+        raise ValueError(
+            f"Clearcote {pick['version']} is marked free but the catalog has no download for {plat}."
+        )
+    rel = {
+        "tag": pick.get("tag") or f"v-{pick['version']}",
+        "version": pick["version"],
+        "asset": p["asset"],
+        "url": p["url"],
+        "sha256": p["sha256"],
+        "exe_sha256": p.get("exe_sha256"),
+        "size": p.get("size"),
+        "archive": p.get("archive"),
+        "binary": p.get("binary", "chrome"),
+        "unpinned": False,  # catalog sha256 is the trust anchor -> sha256-only verify, like a pin
+    }
+    return ("free", rel)
+
+
 def ensure_binary(cache_dir=None, quiet=False, auto_update=None):
     """Ensure the Clearcote binary is present and verified; return the chrome.exe path.
 
@@ -383,7 +482,7 @@ def ensure_binary(cache_dir=None, quiet=False, auto_update=None):
     return _fetch_and_verify(rel, base, quiet)
 
 
-def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False):
+def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, version=None):
     """Download + verify the PRO (license-gated) browser and return its chrome path.
 
     The PRO build is not on a public releases page: the SDK asks the site for it via
@@ -393,6 +492,7 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False):
     failure — a licensed caller must get the PRO build, never a silent free fall-back.
     """
     import urllib.error
+    import urllib.parse
 
     base_url = (api_base or os.environ.get("CLEARCOTE_LICENSE_API")
                 or "https://www.clearcotelabs.com").rstrip("/")
@@ -401,9 +501,11 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False):
     if plat is None:
         raise RuntimeError("Clearcote PRO ships Windows x64 and Linux x64 only.")
 
+    url = f"{base_url}/api/v1/download/pro?platform={plat}"
+    if version:  # request a specific PRO major/version; server returns the newest match
+        url += f"&version={urllib.parse.quote(str(version))}"
     req = urllib.request.Request(
-        f"{base_url}/api/v1/download/pro?platform={plat}",
-        headers={"Authorization": f"Bearer {license_key}", "User-Agent": "clearcote-sdk"})
+        url, headers={"Authorization": f"Bearer {license_key}", "User-Agent": "clearcote-sdk"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
             meta = json.loads(resp.read().decode("utf-8"))
