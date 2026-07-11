@@ -17,9 +17,10 @@ LABEL org.opencontainers.image.title="clearcote" \
 # Chromium runtime libraries + a base font set (fontconfig + Liberation + Noto emoji/CJK so
 # canvas/text hashes stay coherent on a bare container — the #1 Linux tell). The clearcote
 # release ALSO bundles the Windows metric-clone fonts, wired in by the SDK on launch. socat
-# publishes Chrome's loopback-only DevTools port.
+# publishes Chrome's loopback-only DevTools port. xvfb provides a virtual X display so the
+# browser runs HEADFUL by default (headed Chrome avoids headless-mode tells; see serve.py).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      xz-utils ca-certificates socat \
+      xz-utils ca-certificates socat xvfb \
       libnss3 libnspr4 libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
       libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libxfixes3 libxext6 libxrender1 libxcb1 \
       libpango-1.0-0 libcairo2 libx11-6 libexpat1 libdbus-1-3 libxi6 libxtst6 \

@@ -18,7 +18,9 @@ with sync_playwright() as p:
 ```
 
 The image bakes in the signed clearcote Linux binary (SHA-256 verified), a base font set **and**
-the Windows metric-clone fonts, and defaults to a coherent **native Linux** persona.
+the Windows metric-clone fonts, and defaults to a coherent **native Linux** persona. The browser
+runs **headful on a virtual X display (Xvfb) by default** — a real headed Chrome avoids the
+headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-headless mode.
 
 ## Configure the persona (env vars)
 
@@ -33,6 +35,8 @@ the Windows metric-clone fonts, and defaults to a coherent **native Linux** pers
 | `CC_HARDWARE_CONCURRENCY` | `8` | `navigator.hardwareConcurrency` |
 | `CC_GPU_VENDOR` / `CC_GPU_RENDERER` | `Google Inc. (NVIDIA)` / `ANGLE (NVIDIA …)` | WebGL strings |
 | `CC_TLS_PROFILE` | `match-persona` | TLS ClientHello follows the claimed Chrome major |
+| `CC_HEADLESS` | `1` | force pure-headless (default is **headful on Xvfb**) |
+| `CC_SCREEN` | `1920x1080x24` | Xvfb virtual screen geometry (headful mode) |
 | `CC_PORT` | `9222` | exposed CDP port |
 
 ```bash
