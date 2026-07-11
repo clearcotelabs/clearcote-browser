@@ -396,12 +396,13 @@ Clearcote is free and open source, and the free build always will be — **fully
 
 Let me be blunt about what you're paying for. Keeping a Chromium fork current — tracking upstream, porting the anti-detection patches to every new Chromium version, testing, and building for Windows and Linux — is a lot of ongoing work, mostly mine. **$49/month funds that work.** In return you get:
 
+- **Latest builds first.** When a new Chromium major (e.g. 150) is built, it goes to Pro users immediately. The free build gets that major **later — roughly 2 months after release.** It's an incentive to support the project, not a crippled free tier: when a major lands for free, it's the same fully open, reproducible build.
 - **A maintained, always-current build** — the latest Chromium and the newest anti-detection patches, kept up to date for you (no manual rebuilds).
 - **A few extra stealth patches I keep private** so they aren't trivially copied. This means the **Pro binary is *not* reproducible from public source** — unlike the free build, which is, and stays that way.
 - **Unlimited concurrent instances.**
 - **Direct email support from me, the owner.** You email, I answer.
 
-No lock-in, no dark patterns. The free build is not crippled to sell you Pro. Pro is a maintained build, a handful of patches I don't publish, and a direct line to the person who makes it.
+No lock-in, no dark patterns. The free build is not crippled to sell you Pro — it just gets the newest Chromium major on a delay. Pro is a maintained build shipped first, a handful of patches I don't publish, and a direct line to the person who makes it.
 
 **→ Get Pro at [clearcotelabs.com/pricing](https://clearcotelabs.com/pricing)**
 
