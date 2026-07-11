@@ -1,0 +1,36 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{88CDC961-A249-4B77-8B5F-E911C47FF0D5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Clearcote", "src\Clearcote\Clearcote.csproj", "{71BCAACF-338B-4E95-9749-4BB9F3A4DB95}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{E603CA80-1877-4514-A905-7E41316EF8CE}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Clearcote.Tests", "tests\Clearcote.Tests\Clearcote.Tests.csproj", "{3DBFA94A-7ABD-43C6-8E77-001F9FF2F660}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{71BCAACF-338B-4E95-9749-4BB9F3A4DB95}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{71BCAACF-338B-4E95-9749-4BB9F3A4DB95}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{71BCAACF-338B-4E95-9749-4BB9F3A4DB95}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{71BCAACF-338B-4E95-9749-4BB9F3A4DB95}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3DBFA94A-7ABD-43C6-8E77-001F9FF2F660}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3DBFA94A-7ABD-43C6-8E77-001F9FF2F660}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3DBFA94A-7ABD-43C6-8E77-001F9FF2F660}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3DBFA94A-7ABD-43C6-8E77-001F9FF2F660}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{71BCAACF-338B-4E95-9749-4BB9F3A4DB95} = {88CDC961-A249-4B77-8B5F-E911C47FF0D5}
+		{3DBFA94A-7ABD-43C6-8E77-001F9FF2F660} = {E603CA80-1877-4514-A905-7E41316EF8CE}
+	EndGlobalSection
+EndGlobal

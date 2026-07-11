@@ -1,0 +1,83 @@
+# Publishes the `Clearcote` NuGet package from sdk/dotnet via nuget.org TRUSTED PUBLISHING (GitHub
+# OIDC) — no stored API key.
+#
+# Trigger: push a tag `dotnet-v<version>` (e.g. dotnet-v0.15.3) whose version matches
+# sdk/dotnet/src/Clearcote/Clearcote.csproj <Version>. The job builds, runs the unit tests, packs
+# the .nupkg (+ symbols), exchanges the GitHub OIDC token for a short-lived nuget.org key via the
+# NuGet/login action, and pushes.
+#
+# One-time setup on nuget.org (Account -> Trusted Publishing -> Create):
+#   Package Owner   = pim97
+#   Repository Owner= clearcotelabs
+#   Repository      = clearcote-browser
+#   Workflow File   = nuget.yml   (this file)
+#   Environment     = (blank; or set one + uncomment `environment:` below for an approval gate)
+# See sdk/dotnet/PUBLISHING.md.
+name: Publish NuGet SDK
+
+on:
+  push:
+    tags:
+      - "dotnet-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SDK version being published (informational). Source of truth is the csproj <Version>."
+        required: false
+
+concurrency:
+  group: publish-nuget
+  cancel-in-progress: false # never cancel an in-flight publish
+
+permissions:
+  contents: read
+  id-token: write # REQUIRED for OIDC trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # If you set an Environment in the Trusted Publishing policy, uncomment this (and create the
+    # environment under repo Settings -> Environments) — it also lets you add a manual approval gate:
+    # environment: nuget
+    defaults:
+      run:
+        working-directory: sdk/dotnet
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Version-drift guard (tag must match csproj <Version>, skipped on manual dispatch)
+        if: startsWith(github.ref, 'refs/tags/dotnet-v')
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#dotnet-v}"
+          CSPROJ_VER=$(grep -oP '(?<=<Version>)[^<]+' src/Clearcote/Clearcote.csproj | head -1)
+          echo "tag=$TAG_VER  csproj=$CSPROJ_VER"
+          test "$TAG_VER" = "$CSPROJ_VER" || { echo "::error::tag $TAG_VER != csproj $CSPROJ_VER"; exit 1; }
+
+      - name: Restore
+        run: dotnet restore Clearcote.sln
+
+      - name: Build (Release)
+        run: dotnet build Clearcote.sln -c Release --no-restore
+
+      - name: Test
+        run: dotnet test Clearcote.sln -c Release --no-build
+
+      - name: Pack
+        run: dotnet pack src/Clearcote/Clearcote.csproj -c Release --no-build -o ../../artifacts
+
+      - name: NuGet login (trusted publishing -> short-lived API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: pim97 # your nuget.org username (the Package Owner)
+
+      - name: Push to nuget.org
+        run: |
+          dotnet nuget push "../../artifacts/*.nupkg" \
+            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

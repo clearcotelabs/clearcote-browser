@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Clearcote</AssemblyName>
+    <RootNamespace>Clearcote</RootNamespace>
+
+    <!-- NuGet package metadata -->
+    <PackageId>Clearcote</PackageId>
+    <Version>0.15.3</Version>
+    <Authors>clearcotelabs</Authors>
+    <Company>clearcotelabs</Company>
+    <Description>Playwright drop-in for the Clearcote anti-fingerprint Chromium build. Launch() returns a standard Microsoft.Playwright IBrowser backed by the verified Clearcote binary, which is auto-downloaded and SHA-256 checked. With a PRO license key it pulls the license-gated build and checks out a floating-concurrency lease.</Description>
+    <PackageTags>anti-fingerprint;stealth;chromium;playwright;browser;automation;fingerprint;anti-detect</PackageTags>
+    <PackageLicenseExpression>BSD-3-Clause</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/clearcotelabs/clearcote-browser</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/clearcotelabs/clearcote-browser</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Playwright" Version="1.49.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <InternalsVisibleTo Include="Clearcote.Tests" />
+  </ItemGroup>
+
+</Project>

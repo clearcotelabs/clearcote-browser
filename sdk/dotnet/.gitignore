@@ -1,0 +1,15 @@
+# Build output
+bin/
+obj/
+artifacts/
+[Dd]ebug/
+[Rr]elease/
+
+# NuGet
+*.nupkg
+*.snupkg
+
+# IDE / user
+.vs/
+*.user
+*.suo
