@@ -11,6 +11,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Linux%20x64-a78bfa?style=flat-square&labelColor=07080a)](https://github.com/clearcotelabs/clearcote-browser/releases)
 [![npm](https://img.shields.io/npm/v/clearcote?style=flat-square&logo=npm&logoColor=white&label=npm&labelColor=07080a&color=CB3837)](https://www.npmjs.com/package/clearcote)
 [![PyPI](https://img.shields.io/pypi/v/clearcote?style=flat-square&logo=pypi&logoColor=white&label=pip&labelColor=07080a&color=3776AB)](https://pypi.org/project/clearcote/)
+[![NuGet](https://img.shields.io/nuget/v/Clearcote?style=flat-square&logo=nuget&logoColor=white&label=nuget&labelColor=07080a&color=004880)](https://www.nuget.org/packages/Clearcote)
 [![Docker](https://img.shields.io/docker/pulls/teamflatearth/clearcote?style=flat-square&logo=docker&logoColor=white&label=docker&labelColor=07080a&color=2496ED)](https://hub.docker.com/r/teamflatearth/clearcote)
 [![License](https://img.shields.io/badge/license-BSD--3--Clause-38e0d6?style=flat-square&labelColor=07080a)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=07080a)](https://discord.gg/WxvCjAnXZm)
@@ -49,7 +50,7 @@ One real Chromium keeps the JS identity, the **UA / UA-CH** headers, and the **T
 <td width="33%" valign="top">
 
 #### Drop-in Playwright / Puppeteer
-`launch()` returns a **standard Playwright `Browser`**. Swap the executable, keep your code. Node **and** Python SDKs auto-download + SHA-256-verify the right binary per OS.
+`launch()` returns a **standard Playwright `Browser`**. Swap the executable, keep your code. Node, Python **and** .NET SDKs auto-download + SHA-256-verify the right binary per OS.
 
 </td>
 </tr>
@@ -104,7 +105,7 @@ It's a **drop-in for [Playwright](https://playwright.dev/) / [Puppeteer](https:/
 ### The 12-second tour
 
 ```bash
-pip install clearcote      # or:  npm install clearcote
+pip install clearcote      # or:  npm install clearcote   ·   dotnet add package Clearcote
 ```
 ```python
 from clearcote import launch
@@ -123,7 +124,7 @@ Same `fingerprint` seed ⇒ a stable identity across launches; a new seed ⇒ a 
 
 ### SDK — Playwright drop-in
 
-Published on **[npm](https://www.npmjs.com/package/clearcote)** and **[PyPI](https://pypi.org/project/clearcote/)**. Each `launch()` returns a standard Playwright `Browser`.
+Published on **[npm](https://www.npmjs.com/package/clearcote)**, **[PyPI](https://pypi.org/project/clearcote/)** and **[NuGet](https://www.nuget.org/packages/Clearcote)**. Each `launch()` returns a standard Playwright `Browser` (a `Microsoft.Playwright IBrowser` in .NET).
 
 ```javascript
 import { launch } from "clearcote";
@@ -149,13 +150,24 @@ page.goto("https://example.com")
 browser.close()
 ```
 
+```csharp
+using Clearcote;
+
+var browser = await Clearcote.Clearcote.LaunchAsync(new LaunchOptions {
+    Fingerprint = "user-7423", Platform = "windows", Timezone = "America/New_York",
+});
+var page = await browser.NewPageAsync();      // a standard Microsoft.Playwright IBrowser
+await page.GotoAsync("https://example.com");
+await browser.CloseAsync();
+```
+
 **Match a proxy automatically** — `geoip: true` resolves the proxy's exit region and sets a coherent timezone + `navigator.languages` + `Accept-Language` + WebRTC egress:
 
 ```javascript
 await launch({ fingerprint: "u1", proxy: { server: "http://host:8080", username: "u", password: "p" }, geoip: true });
 ```
 
-Full option list: [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python).
+Full option list: [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python) · [`sdk/dotnet`](sdk/dotnet).
 
 ### Direct — any CDP client
 
@@ -421,7 +433,7 @@ Which Chromium majors are shipped or in progress, and when each tier gets them:
 
 | | |
 |---|---|
-| **SDK options** | [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python) |
+| **SDK options** | [`sdk/node`](sdk/node) · [`sdk/python`](sdk/python) · [`sdk/dotnet`](sdk/dotnet) |
 | **Docs** | [VERIFY](docs/VERIFY.md) · [BUILDING](docs/BUILDING.md) · [CANVAS-BRIDGE](docs/CANVAS-BRIDGE.md) · [STEALTH-COHERENCE](docs/STEALTH-COHERENCE.md) · [PATCHES](docs/PATCHES.md) |
 | **For agents** | [AGENTS.md](AGENTS.md) · [llms.txt](llms.txt) |
 | **Profiles** | [clearcote-profiles](https://github.com/clearcotelabs/clearcote-profiles) library · [collector](tools/fingerprint-collect) |

@@ -11,7 +11,8 @@
 #   Repository Owner= clearcotelabs
 #   Repository      = clearcote-browser
 #   Workflow File   = nuget.yml   (this file)
-#   Environment     = (blank; or set one + uncomment `environment:` below for an approval gate)
+#   Environment     = nuget       (this job runs in the `nuget` GitHub environment; may be left blank
+#                                  in the policy to match any, or set to `nuget` to require it)
 # See sdk/dotnet/PUBLISHING.md.
 name: Publish NuGet SDK
 
@@ -36,9 +37,12 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # If you set an Environment in the Trusted Publishing policy, uncomment this (and create the
-    # environment under repo Settings -> Environments) — it also lets you add a manual approval gate:
-    # environment: nuget
+    # Registers the publish as a GitHub Deployment (repo -> Deployments/Environments) and lets you add
+    # a manual-approval gate under repo Settings -> Environments -> nuget. The Trusted Publishing policy's
+    # Environment field may be left blank (matches any) or set to `nuget` to require this environment.
+    environment:
+      name: nuget
+      url: https://www.nuget.org/packages/Clearcote
     defaults:
       run:
         working-directory: sdk/dotnet
