@@ -406,6 +406,17 @@ No lock-in, no dark patterns. The free build is not crippled to sell you Pro —
 
 **→ Get Pro at [clearcotelabs.com/pricing](https://clearcotelabs.com/pricing)**
 
+## Build availability
+
+Which Chromium majors are shipped or in progress, and when each tier gets them:
+
+| Chromium | Status | Free | Pro |
+|---|---|---|---|
+| **149** (`149.0.7827.114`) | ✅ Available | Available now | Available now |
+| **150** | 🔨 In progress | ~2 months after release | First — as soon as it's built |
+
+*A new Chromium major goes to Pro users the day it's built; the free build gets that same fully open, reproducible major roughly 2 months later. Latest live version: `v0.1.0-pre.21` (Windows + Linux x64).*
+
 ## Reference
 
 | | |
