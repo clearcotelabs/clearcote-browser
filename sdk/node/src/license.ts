@@ -99,12 +99,14 @@ function apiBase(opts: LicenseOptions): string {
 const osTag = (): string =>
   ({ win32: "windows", linux: "linux", darwin: "macos" } as Record<string, string>)[process.platform] ?? "unknown";
 
-// ── offline token cache (best-effort grace) ───────────────────────────────
+// ── shared token cache (cross-process reuse + offline grace) ───────────────
+// {token, exp, lease_id}. A second process on the machine reuses a still-valid
+// token instead of checking out again. Older caches without lease_id are honored.
 function cachePath(licenseKey: string): string {
   const id = createHash("sha256").update(licenseKey).digest("hex").slice(0, 16);
   return join(homedir(), ".clearcote", `lease-${id}.json`);
 }
-function readCache(licenseKey: string): { token: string; exp: number } | null {
+function readCache(licenseKey: string): { token: string; exp: number; lease_id?: string } | null {
   try {
     const d = JSON.parse(readFileSync(cachePath(licenseKey), "utf8"));
     if (d && typeof d.token === "string" && typeof d.exp === "number") return d;
@@ -113,11 +115,11 @@ function readCache(licenseKey: string): { token: string; exp: number } | null {
   }
   return null;
 }
-function writeCache(licenseKey: string, token: string, exp: number): void {
+function writeCache(licenseKey: string, token: string, exp: number, leaseId?: string): void {
   try {
     const dir = join(homedir(), ".clearcote");
     mkdirSync(dir, { recursive: true });
-    writeFileSync(cachePath(licenseKey), JSON.stringify({ token, exp }));
+    writeFileSync(cachePath(licenseKey), JSON.stringify({ token, exp, lease_id: leaseId ?? null }));
   } catch {
     /* ignore */
   }
@@ -156,13 +158,182 @@ export interface LeaseSession {
   stop(): Promise<void>;
 }
 
+// Seconds of headroom kept before a token's exp: reuse it only while still valid
+// with this much slack, so an in-flight launch never ships an expiring token.
+const SKEW_SEC = 60;
+
 /**
- * Acquire a concurrency lease if a license key is configured.
+ * One shared lease per (process, license key).
  *
- * Returns `null` in free mode (no key) — the caller launches normally with no
- * token. Throws {@link ConcurrencyLimitError} / {@link LicenseRevokedError} /
- * {@link LicenseError} when a key IS present but the backend refuses. On a
- * network failure with a still-valid cached token, resumes offline (degraded).
+ * Concurrency is per-MACHINE (the backend dedups by instance_id), so re-checking
+ * out on every launch is redundant — the machine already holds its one slot. This
+ * checks out at most once per token-TTL and lets every launch in the process share
+ * the same run-token, cutting backend calls from O(launches) to O(TTL windows).
+ * Only the cold-checkout owner heartbeats + checks in at exit; a process that
+ * reuses a still-valid on-disk token makes no backend calls at all.
+ */
+class MachineLease {
+  token: string | null = null;
+  exp = 0;
+  leaseId: string | null = null;
+  private hbSec = 270;
+  private owner = false;
+  private timer: NodeJS.Timeout | null = null;
+  private refs = 0;
+  private ensuring: Promise<void> | null = null;
+
+  constructor(
+    private readonly key: string,
+    private readonly base: string,
+    private readonly instanceId: string,
+    private readonly sdkVersion: string | undefined,
+    private readonly quiet: boolean,
+  ) {}
+
+  private valid(): boolean {
+    return !!this.token && this.exp > Math.floor(Date.now() / 1000) + SKEW_SEC;
+  }
+
+  /** Serialize concurrent ensures so only one cold checkout happens. */
+  ensure(): Promise<void> {
+    if (this.valid()) return Promise.resolve();
+    if (!this.ensuring) this.ensuring = this._ensure().finally(() => { this.ensuring = null; });
+    return this.ensuring;
+  }
+
+  private async _ensure(): Promise<void> {
+    if (this.valid()) return;
+    const now = Math.floor(Date.now() / 1000);
+    const cached = readCache(this.key);
+    if (cached && cached.exp > now + SKEW_SEC) {
+      // cross-process reuse: another process's owner keeps the slot alive.
+      this.token = cached.token;
+      this.exp = cached.exp;
+      this.leaseId = cached.lease_id ?? null;
+      this.owner = false;
+      return; // NO checkout, NO heartbeat
+    }
+    await this.checkout();
+    this.owner = true;
+    this.startHeartbeat();
+  }
+
+  private async checkout(): Promise<void> {
+    try {
+      const res = await postJson(`${this.base}/api/v1/lease/checkout`, this.key, {
+        instance_id: this.instanceId,
+        os: osTag(),
+        sdk_version: this.sdkVersion,
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+        throwForStatus(res.status, body);
+      }
+      const co = (await res.json()) as CheckoutResponse;
+      this.token = co.token;
+      this.exp = co.exp;
+      this.leaseId = co.lease_id;
+      this.hbSec = Math.max(5, co.heartbeat_interval_sec || 270);
+      writeCache(this.key, co.token, co.exp, co.lease_id);
+    } catch (e) {
+      if (e instanceof LicenseError) throw e; // definitive verdict must surface
+      const cached = readCache(this.key);
+      const now = Math.floor(Date.now() / 1000);
+      if (cached && cached.exp > now + SKEW_SEC) {
+        if (!this.quiet)
+          process.stderr.write(`[clearcote] [license] backend unreachable (${String(e)}); using cached run-token.\n`);
+        this.token = cached.token;
+        this.exp = cached.exp;
+        this.leaseId = cached.lease_id ?? null;
+        return;
+      }
+      throw new LicenseError(`Could not reach the license server and no valid cached token: ${String(e)}`);
+    }
+  }
+
+  private startHeartbeat(): void {
+    if (this.timer) return;
+    this.timer = setInterval(async () => {
+      try {
+        const res = await postJson(`${this.base}/api/v1/lease/heartbeat`, this.key, {
+          lease_id: this.leaseId,
+          nonce: randomUUID(),
+        });
+        if (res.status === 409) {
+          const co = await postJson(`${this.base}/api/v1/lease/checkout`, this.key, {
+            instance_id: this.instanceId,
+            os: osTag(),
+            sdk_version: this.sdkVersion,
+          });
+          if (co.ok) {
+            const d = (await co.json()) as CheckoutResponse;
+            this.leaseId = d.lease_id;
+            this.token = d.token;
+            this.exp = d.exp;
+            writeCache(this.key, d.token, d.exp, d.lease_id);
+          }
+          return;
+        }
+        if (res.ok) {
+          const d = (await res.json()) as { token: string; exp: number };
+          this.token = d.token;
+          this.exp = d.exp;
+          writeCache(this.key, d.token, d.exp, this.leaseId ?? undefined);
+        }
+      } catch {
+        /* transient — offline grace until token exp */
+      }
+    }, this.hbSec * 1000);
+    (this.timer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  async acquire(): Promise<LeaseSession> {
+    await this.ensure();
+    this.refs++;
+    const self = this;
+    return {
+      get token() {
+        return self.token as string;
+      },
+      get leaseId() {
+        return (self.leaseId ?? "cached") as string;
+      },
+      // Per-launch close: refcount only. The machine slot is held for the process
+      // lifetime and reclaimed by TTL after the heartbeat stops (see shutdown()).
+      stop: async () => {
+        self.release();
+      },
+    } as LeaseSession;
+  }
+
+  release(): void {
+    if (this.refs > 0) this.refs--;
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.owner && this.leaseId) {
+      try {
+        await postJson(`${this.base}/api/v1/lease/checkin`, this.key, { lease_id: this.leaseId });
+      } catch {
+        /* best-effort; the lease TTL reclaims it anyway */
+      }
+    }
+  }
+}
+
+const machineLeases = new Map<string, MachineLease>();
+let exitHooked = false;
+
+/**
+ * Acquire a per-MACHINE concurrency lease, shared across every launch in this
+ * process (checks out ~once per token-TTL, not once per launch). Returns `null` in
+ * free mode. Throws {@link ConcurrencyLimitError} / {@link LicenseRevokedError} /
+ * {@link LicenseError} only on a cold checkout the backend definitively refuses;
+ * falls back to a cached, still-valid token on a transient network failure.
  */
 export async function acquireLease(
   opts: LicenseOptions & { sdkVersion?: string; quiet?: boolean } = {},
@@ -171,88 +342,18 @@ export async function acquireLease(
   if (!licenseKey) return null; // free mode — inert
 
   const base = apiBase(opts);
-  const instanceId = resolveInstanceId();
-  const warn = (m: string) => {
-    if (!opts.quiet) process.stderr.write(`[clearcote] [license] ${m}\n`);
-  };
-
-  let checkout: CheckoutResponse;
-  try {
-    const res = await postJson(`${base}/api/v1/lease/checkout`, licenseKey, {
-      instance_id: instanceId,
-      os: osTag(),
-      sdk_version: opts.sdkVersion,
-    });
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
-      throwForStatus(res.status, body);
-    }
-    checkout = (await res.json()) as CheckoutResponse;
-    writeCache(licenseKey, checkout.token, checkout.exp);
-  } catch (e) {
-    // A definitive licensing verdict must surface (never silently downgrade).
-    if (e instanceof LicenseError) throw e;
-    // Network/other failure: fall back to a cached, still-valid token if we have one.
-    const cached = readCache(licenseKey);
-    const now = Math.floor(Date.now() / 1000);
-    if (cached && cached.exp > now + 60) {
-      warn(`backend unreachable (${String(e)}); using cached run-token (offline grace).`);
-      return { token: cached.token, leaseId: "cached", stop: async () => {} };
-    }
-    throw new LicenseError(`Could not reach the license server and no valid cached token: ${String(e)}`);
+  let ml = machineLeases.get(licenseKey);
+  if (!ml) {
+    ml = new MachineLease(licenseKey, base, resolveInstanceId(), opts.sdkVersion, !!opts.quiet);
+    machineLeases.set(licenseKey, ml);
   }
-
-  let leaseId = checkout.lease_id;
-  let currentToken = checkout.token;
-  const hbMs = Math.max(5, checkout.heartbeat_interval_sec || 30) * 1000;
-
-  const timer: NodeJS.Timeout = setInterval(async () => {
-    try {
-      const res = await postJson(`${base}/api/v1/lease/heartbeat`, licenseKey, { lease_id: leaseId, nonce: randomUUID() });
-      if (res.status === 409) {
-        // Lease reclaimed/expired server-side — re-check out to keep the slot.
-        const co = await postJson(`${base}/api/v1/lease/checkout`, licenseKey, {
-          instance_id: instanceId, os: osTag(), sdk_version: opts.sdkVersion,
-        });
-        if (co.ok) {
-          const data = (await co.json()) as CheckoutResponse;
-          leaseId = data.lease_id;
-          currentToken = data.token;
-          writeCache(licenseKey, data.token, data.exp);
-        }
-        return;
-      }
-      if (res.ok) {
-        const data = (await res.json()) as { token: string; exp: number };
-        currentToken = data.token;
-        writeCache(licenseKey, data.token, data.exp);
-      }
-    } catch {
-      /* transient — offline grace until token exp */
-    }
-  }, hbMs);
-  // Don't keep the process alive just for the heartbeat.
-  (timer as unknown as { unref?: () => void }).unref?.();
-
-  let stopped = false;
-  const stop = async () => {
-    if (stopped) return;
-    stopped = true;
-    clearInterval(timer);
-    try {
-      await postJson(`${base}/api/v1/lease/checkin`, licenseKey, { lease_id: leaseId });
-    } catch {
-      /* best-effort; the lease TTL will reclaim it anyway */
-    }
-  };
-
-  return {
-    get token() {
-      return currentToken;
-    },
-    leaseId,
-    stop,
-  } as LeaseSession;
+  if (!exitHooked) {
+    exitHooked = true;
+    process.once("beforeExit", () => {
+      for (const m of machineLeases.values()) void m.shutdown();
+    });
+  }
+  return ml.acquire();
 }
 
 /** Merge the run-token into a child-process env (base defaults to the parent env). */

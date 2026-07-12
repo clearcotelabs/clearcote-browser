@@ -21,14 +21,18 @@ Each launched browser/context owns its Playwright driver and stops it on ``close
 
 import asyncio
 import json
+import os
+import shutil
+import sys
 import tempfile
 
-from . import _headed_no_viewport, _prepare, _acquire_lease_from_kwargs  # shared sync helpers
+from . import _headed_no_viewport, _prepare, _acquire_lease_from_kwargs, _is_win_launch_race  # shared sync helpers
 from ._license import inject_run_token
+from ._fonts import apply_font_env
 from ._humanize_async import install_humanize, install_humanize_on_context
 from ._profile import Profile, list_profiles, load_profile
 from ._render_async import check_render_coherence
-from .download import ensure_binary
+from .download import ensure_binary, warm_files
 from .geoip import resolve_geo
 from .release import RELEASE
 
@@ -103,6 +107,33 @@ async def _start_driver():
     return await async_playwright().start()
 
 
+async def _win_av_retry_async(do_launch, exe):
+    """Async mirror of the sync ``_win_av_retry``: work around the Windows first-launch
+    'spawn UNKNOWN' / 'side-by-side configuration is incorrect' race — a just-extracted,
+    unsigned chrome.exe can fail to spawn while real-time AV is still scanning chrome_elf.dll
+    (the SxS assembly member its manifest depends on), and Windows caches that negative
+    activation against the path. Re-scan + back off + retry, then relaunch from a pristine
+    temp copy which always gets a clean SxS evaluation. Pass-through on non-Windows.
+
+    Without this the async API launched the engine directly and surfaced the raw
+    'spawn UNKNOWN' (the sync API has had this workaround; the async API did not)."""
+    if sys.platform != "win32":
+        return await do_launch(exe)
+    for i in range(3):
+        try:
+            return await do_launch(exe)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_win_launch_race(exc):
+                raise
+            await asyncio.to_thread(warm_files, os.path.dirname(exe))
+            await asyncio.sleep(0.8 * (i + 1))
+    # The in-place SxS activation-context poison never clears; relaunch from a fresh copy.
+    recover = os.path.join(tempfile.mkdtemp(prefix="clearcote-recover-"), "browser")
+    await asyncio.to_thread(shutil.copytree, os.path.dirname(exe), recover)
+    await asyncio.to_thread(warm_files, recover)
+    return await do_launch(os.path.join(recover, os.path.basename(exe)))
+
+
 async def launch(**kwargs):
     """Launch Clearcote and return a Playwright **async** ``Browser``. Same kwargs as the sync
     ``clearcote.launch`` (fingerprint, platform, brand, gpu_*, timezone, accept_language, proxy,
@@ -112,10 +143,12 @@ async def launch(**kwargs):
     exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(_prepare, kwargs)
     if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
         inject_run_token(pw_kwargs, lease.token)
+    await asyncio.to_thread(apply_font_env, exe, pw_kwargs)  # Linux: bundled font clones (mirror sync)
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
     pw = await _start_driver()
     try:
-        browser = await pw.chromium.launch(executable_path=exe, args=args, **pw_kwargs)
+        browser = await _win_av_retry_async(
+            lambda e: pw.chromium.launch(executable_path=e, args=args, **pw_kwargs), exe)
     except BaseException:
         if lease:
             lease.stop()
@@ -146,12 +179,14 @@ async def launch_persistent_context(user_data_dir, **kwargs):
     exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(_prepare, kwargs)
     if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
         inject_run_token(pw_kwargs, lease.token)
+    await asyncio.to_thread(apply_font_env, exe, pw_kwargs)  # Linux: bundled font clones (mirror sync)
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
     pw = await _start_driver()
     try:
-        context = await pw.chromium.launch_persistent_context(
-            user_data_dir, executable_path=exe, args=args, **pw_kwargs)
+        context = await _win_av_retry_async(
+            lambda e: pw.chromium.launch_persistent_context(
+                user_data_dir, executable_path=e, args=args, **pw_kwargs), exe)
     except BaseException:
         if lease:
             lease.stop()
