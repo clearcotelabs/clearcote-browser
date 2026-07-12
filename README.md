@@ -424,10 +424,10 @@ Which Chromium majors are shipped or in progress, and when each tier gets them:
 
 | Chromium | Status | Free | Pro |
 |---|---|---|---|
+| **150** (`150.0.7871.114`) | ✅ Available | ~2 months after release | ✅ **Available now** |
 | **149** (`149.0.7827.114`) | ✅ Available | Available now | Available now |
-| **150** | 🔨 In progress | ~2 months after release | First — as soon as it's built |
 
-*A new Chromium major goes to Pro users the day it's built; the free build gets that same fully open, reproducible major roughly 2 months later. Latest live version: `v0.1.0-pre.21` (Windows + Linux x64).*
+*A new Chromium major goes to Pro users the day it's built; the free build gets that same fully open, reproducible major roughly 2 months later. **Chromium 150 (`150.0.7871.114`) is live for Pro now** (Windows + Linux x64, CreepJS 0% headless / 0% stealth); free stays on `149.0.7827.114` (`v0.1.0-pre.21`) until ~2 months after the 150 release. Select a build with the SDK: `launch(version="150", license_key=...)` (Pro) or `version="149"` (free) — omit it to get the latest of your tier (Pro → 150, free → 149). Requires the SDK ≥ 0.16.0.*
 
 ## Reference
 
