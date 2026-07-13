@@ -501,6 +501,25 @@ export async function resolveVersion(selector: string, hasLicense: boolean, quie
   return { kind: "free", rel };
 }
 
+/** Best-effort resolved browser build (version string) this launch will run, for lease TELEMETRY
+ * only. Never throws. An exact "X.Y.Z.W" selector is returned as-is (no network); a bare major /
+ * "latest" / empty is resolved against the catalog (empty -> newest usable, matching the binary
+ * path). Any failure falls back to the pinned {@link RELEASE} version. */
+export async function resolvedEngineVersion(
+  selector: string | undefined,
+  hasLicense: boolean,
+  quiet = true,
+): Promise<string> {
+  try {
+    const sel = String(selector || "").trim();
+    if (/^\d+(?:\.\d+){3}$/.test(sel)) return sel; // exact build -> no catalog round-trip
+    const plan = await resolveVersion(sel || "latest", hasLicense, quiet);
+    return plan.kind === "pro" ? plan.version : plan.rel.version;
+  } catch {
+    return String(RELEASE.version);
+  }
+}
+
 /** Resolve a version selector to a downloaded, verified binary path (free from GitHub, pro via the licensed route). */
 export async function ensureVersion(
   selector: string,

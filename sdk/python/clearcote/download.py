@@ -455,6 +455,24 @@ def resolve_version(selector, has_license=False, quiet=False):
     return ("free", rel)
 
 
+def resolved_engine_version(selector, has_license=False, quiet=True):
+    """Best-effort: the browser build this launch will actually run, as a version string, for
+    lease TELEMETRY only. Never raises (a launch must never fail over telemetry).
+
+    An exact "X.Y.Z.W" selector is returned as-is (no network). A bare major / "latest" / None is
+    resolved against the public catalog — None maps to the newest build the caller can use, which
+    is the same default the binary path picks (newest free, or newest pro when licensed). Any
+    failure (catalog unreachable, unknown selector) falls back to the pinned ``RELEASE`` version."""
+    try:
+        sel = str(selector or "").strip()
+        if re.fullmatch(r"\d+(?:\.\d+){3}", sel):  # exact build -> no catalog round-trip
+            return sel
+        kind, payload = resolve_version(sel or "latest", has_license=has_license, quiet=quiet)
+        return payload if kind == "pro" else payload.get("version")
+    except Exception:  # noqa: BLE001
+        return str(RELEASE["version"])
+
+
 def ensure_binary(cache_dir=None, quiet=False, auto_update=None):
     """Ensure the Clearcote binary is present and verified; return the chrome.exe path.
 

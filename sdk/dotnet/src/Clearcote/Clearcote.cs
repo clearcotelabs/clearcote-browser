@@ -15,7 +15,7 @@ namespace Clearcote;
 public static class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.16.0";
+    public const string Version = "0.17.1";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
@@ -64,9 +64,12 @@ public static class Clearcote
         var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy);
 
+        var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
+        var licKey = License.ResolveLicenseKey(options.LicenseKey);
         var lease = await License.AcquireLeaseAsync(
             new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase },
-            Release.Current.Version, options.Quiet).ConfigureAwait(false);
+            Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
+            () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null)).ConfigureAwait(false);
         var env = lease is not null ? License.WithRunToken(lease.Token, options.Env) : options.Env;
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
@@ -97,9 +100,12 @@ public static class Clearcote
         var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy);
 
+        var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
+        var licKey = License.ResolveLicenseKey(options.LicenseKey);
         var lease = await License.AcquireLeaseAsync(
             new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase },
-            Release.Current.Version, options.Quiet).ConfigureAwait(false);
+            Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
+            () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null)).ConfigureAwait(false);
         var env = lease is not null ? License.WithRunToken(lease.Token, options.Env) : options.Env;
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
@@ -149,9 +155,12 @@ public static class Clearcote
         if (options.Headless != false) cdpArgs.Add("--headless=new");
         if (!string.IsNullOrEmpty(options.Proxy?.Server)) cdpArgs.Add($"--proxy-server={options.Proxy!.Server}");
 
+        var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
+        var licKey = License.ResolveLicenseKey(options.LicenseKey);
         var lease = await License.AcquireLeaseAsync(
             new LicenseOptions { LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase },
-            Release.Current.Version, options.Quiet).ConfigureAwait(false);
+            Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
+            () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null)).ConfigureAwait(false);
 
         var proc = await WinLaunch.WinAvRetryAsync(exePath =>
         {

@@ -181,6 +181,7 @@ class MachineLease {
   private timer: NodeJS.Timeout | null = null;
   private refs = 0;
   private ensuring: Promise<void> | null = null;
+  private engineResolved: string | null = null;
 
   constructor(
     private readonly key: string,
@@ -188,10 +189,27 @@ class MachineLease {
     private readonly instanceId: string,
     private readonly sdkVersion: string | undefined,
     private readonly quiet: boolean,
+    // Resolved browser build (e.g. "150.0.7871.114"). A string, or a thunk that resolves it lazily
+    // so the catalog is only consulted on a cold checkout — never per launch. Telemetry only.
+    private readonly engineVersion?: string | (() => string | Promise<string>),
   ) {}
 
   private valid(): boolean {
     return !!this.token && this.exp > Math.floor(Date.now() / 1000) + SKEW_SEC;
+  }
+
+  /** Resolved engine version for telemetry — memoized, resolved at most once (on cold checkout).
+   * Any failure yields undefined (the field is simply omitted from the body). */
+  private async engineVer(): Promise<string | undefined> {
+    if (this.engineResolved === null) {
+      try {
+        const ev = this.engineVersion;
+        this.engineResolved = (typeof ev === "function" ? await ev() : ev) || "";
+      } catch {
+        this.engineResolved = "";
+      }
+    }
+    return this.engineResolved || undefined;
   }
 
   /** Serialize concurrent ensures so only one cold checkout happens. */
@@ -224,6 +242,7 @@ class MachineLease {
         instance_id: this.instanceId,
         os: osTag(),
         sdk_version: this.sdkVersion,
+        engine_version: await this.engineVer(),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
@@ -264,6 +283,7 @@ class MachineLease {
             instance_id: this.instanceId,
             os: osTag(),
             sdk_version: this.sdkVersion,
+            engine_version: await this.engineVer(),
           });
           if (co.ok) {
             const d = (await co.json()) as CheckoutResponse;
@@ -336,7 +356,11 @@ let exitHooked = false;
  * falls back to a cached, still-valid token on a transient network failure.
  */
 export async function acquireLease(
-  opts: LicenseOptions & { sdkVersion?: string; quiet?: boolean } = {},
+  opts: LicenseOptions & {
+    sdkVersion?: string;
+    quiet?: boolean;
+    engineVersion?: string | (() => string | Promise<string>);
+  } = {},
 ): Promise<LeaseSession | null> {
   const licenseKey = resolveLicenseKey(opts.licenseKey);
   if (!licenseKey) return null; // free mode — inert
@@ -344,7 +368,8 @@ export async function acquireLease(
   const base = apiBase(opts);
   let ml = machineLeases.get(licenseKey);
   if (!ml) {
-    ml = new MachineLease(licenseKey, base, resolveInstanceId(), opts.sdkVersion, !!opts.quiet);
+    ml = new MachineLease(licenseKey, base, resolveInstanceId(), opts.sdkVersion, !!opts.quiet,
+      opts.engineVersion);
     machineLeases.set(licenseKey, ml);
   }
   if (!exitHooked) {

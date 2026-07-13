@@ -172,11 +172,16 @@ class _MachineLease:
     """
 
     def __init__(self, key: str, base: str, instance_id: str,
-                 sdk_version: str | None, quiet: bool):
+                 sdk_version: str | None, quiet: bool, engine_version=None):
         self._key = key
         self._base = base
         self._instance_id = instance_id
-        self._sdk_version = sdk_version
+        self._sdk_version = sdk_version          # SDK PACKAGE version (e.g. "0.17.1")
+        # Resolved browser build (e.g. "150.0.7871.114"). May be a str or a zero-arg callable that
+        # resolves it lazily (so the catalog is only consulted on a cold checkout, never per launch);
+        # memoized in _engine_resolved. Telemetry only — never gates the lease.
+        self._engine_version = engine_version
+        self._engine_resolved: str | None = None
         self._quiet = quiet
         self._lock = threading.RLock()
         self.token: str | None = None
@@ -190,6 +195,17 @@ class _MachineLease:
 
     def _valid(self) -> bool:
         return bool(self.token) and self.exp > time.time() + _SKEW_SEC
+
+    def _engine_ver(self):
+        """Resolved engine version for telemetry — memoized, resolved at most once. A callable is
+        invoked on the first (cold-checkout) use only; any failure yields None (field omitted)."""
+        if self._engine_resolved is None:
+            ev = self._engine_version
+            try:
+                self._engine_resolved = (ev() if callable(ev) else ev) or ""
+            except Exception:  # noqa: BLE001 — telemetry must never break a launch
+                self._engine_resolved = ""
+        return self._engine_resolved or None
 
     def ensure(self) -> None:
         """Make a usable run-token available with the fewest possible backend calls.
@@ -214,7 +230,8 @@ class _MachineLease:
         try:
             status, body = _post(f"{self._base}/api/v1/lease/checkout", self._key,
                                  {"instance_id": self._instance_id, "os": _os_tag(),
-                                  "sdk_version": self._sdk_version})
+                                  "sdk_version": self._sdk_version,
+                                  "engine_version": self._engine_ver()})
             if status != 200:
                 _raise_for_status(status, body)
         except LicenseError:
@@ -250,7 +267,8 @@ class _MachineLease:
                 if status == 409:  # reclaimed/expired -> re-checkout to keep the slot
                     st2, b2 = _post(f"{self._base}/api/v1/lease/checkout", self._key,
                                     {"instance_id": self._instance_id, "os": _os_tag(),
-                                     "sdk_version": self._sdk_version})
+                                     "sdk_version": self._sdk_version,
+                                     "engine_version": self._engine_ver()})
                     if st2 == 200:
                         with self._lock:
                             self.lease_id = b2["lease_id"]
@@ -321,7 +339,8 @@ def _shutdown_all() -> None:
 
 
 def acquire_lease(license_key: str | None = None, api_base: str | None = None,
-                  sdk_version: str | None = None, quiet: bool = False):
+                  sdk_version: str | None = None, quiet: bool = False,
+                  engine_version=None):
     """Acquire a per-MACHINE concurrency lease, shared across every launch in this
     process. Returns None in free mode. The backend is contacted at most once per
     token-TTL (not once per launch); subsequent launches reuse the shared token with
@@ -337,7 +356,8 @@ def acquire_lease(license_key: str | None = None, api_base: str | None = None,
     with _REG_LOCK:
         ml = _MACHINE_LEASES.get(key)
         if ml is None:
-            ml = _MachineLease(key, base, resolve_instance_id(), sdk_version, quiet)
+            ml = _MachineLease(key, base, resolve_instance_id(), sdk_version, quiet,
+                               engine_version=engine_version)
             _MACHINE_LEASES[key] = ml
         if not _ATEXIT_REGISTERED:
             atexit.register(_shutdown_all)

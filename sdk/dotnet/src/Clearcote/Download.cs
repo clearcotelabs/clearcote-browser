@@ -409,6 +409,22 @@ public static class Download
         return ResolveFromCatalog(cat, selector, hasLicense);
     }
 
+    /// Best-effort resolved browser build (version string) this launch will run, for lease TELEMETRY
+    /// only. Never throws (a launch must never fail over telemetry). An exact "X.Y.Z.W" selector is
+    /// returned as-is (no network); a bare major / "latest" / empty is resolved against the catalog
+    /// (empty -&gt; newest usable, matching the binary path). Any failure falls back to the pinned build.
+    public static async Task<string?> ResolvedEngineVersionAsync(string? selector, bool hasLicense, bool quiet = true)
+    {
+        try
+        {
+            var sel = (selector ?? "").Trim();
+            if (System.Text.RegularExpressions.Regex.IsMatch(sel, @"^\d+(?:\.\d+){3}$")) return sel;
+            var plan = await ResolveVersionAsync(string.IsNullOrEmpty(sel) ? "latest" : sel, hasLicense, quiet).ConfigureAwait(false);
+            return plan.Kind == "pro" ? plan.Version : plan.Rel?.Version;
+        }
+        catch { return Release.Current.Version; }
+    }
+
     /// Pure validate-first resolution against an in-memory catalog (no I/O).
     public static VersionPlan ResolveFromCatalog(Catalog cat, string selector, bool hasLicense)
     {

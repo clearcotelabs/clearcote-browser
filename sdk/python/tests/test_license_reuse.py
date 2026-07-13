@@ -140,6 +140,56 @@ def test_exit_checks_in_once(monkeypatch):
     _reset()
 
 
+def test_checkout_sends_sdk_and_engine_version(monkeypatch):
+    """Telemetry split: sdk_version = the given package version; engine_version = the resolver's
+    result. Both land in the checkout body; the resolver is invoked lazily (cold checkout only)."""
+    _env(monkeypatch); _reset()
+    bodies = []
+
+    def ok(url, key, body, timeout=15.0):
+        bodies.append((url.rsplit("/", 1)[-1], body))
+        if url.endswith("/checkout"):
+            return 200, {"lease_id": "L1", "token": "T1", "exp": time.time() + 800,
+                         "heartbeat_interval_sec": 270}
+        return 200, {}
+
+    monkeypatch.setattr(L, "_post", ok)
+    calls = {"n": 0}
+
+    def resolver():
+        calls["n"] += 1
+        return "150.0.7871.114"
+
+    L.acquire_lease(sdk_version="0.17.1", engine_version=resolver)
+    L.acquire_lease(sdk_version="0.17.1", engine_version=resolver)  # reuses -> no 2nd checkout
+    checkout_bodies = [b for p, b in bodies if p == "checkout"]
+    assert len(checkout_bodies) == 1
+    assert checkout_bodies[0]["sdk_version"] == "0.17.1"
+    assert checkout_bodies[0]["engine_version"] == "150.0.7871.114"
+    assert calls["n"] == 1  # resolver memoized, run once on the cold checkout only
+    _reset()
+
+
+def test_engine_resolver_failure_is_soft(monkeypatch):
+    """A resolver that raises must not break checkout — engine_version is simply omitted (None)."""
+    _env(monkeypatch); _reset()
+    bodies = []
+
+    def ok(url, key, body, timeout=15.0):
+        bodies.append(body)
+        return 200, {"lease_id": "L1", "token": "T1", "exp": time.time() + 800}
+
+    monkeypatch.setattr(L, "_post", ok)
+
+    def boom():
+        raise RuntimeError("catalog down")
+
+    h = L.acquire_lease(sdk_version="0.17.1", engine_version=boom)
+    assert h.token == "T1"                       # launch still works
+    assert bodies[0]["engine_version"] is None   # field omitted, not fatal
+    _reset()
+
+
 def test_public_api_surface_preserved():
     for sym in ("acquire_lease", "inject_run_token", "resolve_license_key", "resolve_instance_id",
                 "LicenseError", "ConcurrencyLimitError", "LicenseRevokedError"):

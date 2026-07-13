@@ -108,6 +108,51 @@ describe("acquireLease — per-machine token reuse", () => {
     expect(h?.token).toBe("DISK-TOK");
   });
 
+  it("checkout body carries sdk_version + resolved engine_version (resolver runs once)", async () => {
+    isolateHome();
+    process.env.CLEARCOTE_LICENSE_API = "http://test.local";
+    process.env.CLEARCOTE_LICENSE_KEY = "cc_lic_tel_" + Date.now();
+    const bodies: Record<string, unknown>[] = [];
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      const ep = String(url).split("/").pop();
+      if (ep === "checkout") {
+        bodies.push(JSON.parse(String(init?.body ?? "{}")));
+        const now = Math.floor(Date.now() / 1000);
+        return new Response(JSON.stringify({ lease_id: "L1", token: "T1", exp: now + 800,
+          lease_ttl_sec: 810, heartbeat_interval_sec: 270, concurrency: { used: 1, limit: 5 } }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    let resolved = 0;
+    const engineVersion = () => { resolved++; return "150.0.7871.114"; };
+    await acquireLease({ quiet: true, sdkVersion: "0.17.1", engineVersion });
+    await acquireLease({ quiet: true, sdkVersion: "0.17.1", engineVersion }); // reuse -> no 2nd checkout
+    expect(bodies.length).toBe(1);
+    expect(bodies[0].sdk_version).toBe("0.17.1");
+    expect(bodies[0].engine_version).toBe("150.0.7871.114");
+    expect(resolved).toBe(1); // memoized, resolved once on the cold checkout
+  });
+
+  it("a throwing engine resolver is soft — checkout still succeeds, field omitted", async () => {
+    isolateHome();
+    process.env.CLEARCOTE_LICENSE_API = "http://test.local";
+    process.env.CLEARCOTE_LICENSE_KEY = "cc_lic_soft_" + Date.now();
+    let body: Record<string, unknown> = {};
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      const ep = String(url).split("/").pop();
+      if (ep === "checkout") {
+        body = JSON.parse(String(init?.body ?? "{}"));
+        const now = Math.floor(Date.now() / 1000);
+        return new Response(JSON.stringify({ lease_id: "L1", token: "T1", exp: now + 800 }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    const h = await acquireLease({ quiet: true, sdkVersion: "0.17.1",
+      engineVersion: () => { throw new Error("catalog down"); } });
+    expect(h?.token).toBe("T1");            // launch still works
+    expect(body.engine_version).toBeUndefined(); // omitted, not fatal
+  });
+
   it("reads a LEGACY cache without lease_id (backwards compat, 0 checkout)", async () => {
     isolateHome();
     process.env.CLEARCOTE_LICENSE_API = "http://test.local";

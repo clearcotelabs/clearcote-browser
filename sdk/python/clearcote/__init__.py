@@ -42,7 +42,7 @@ from ._license import (
     inject_run_token,
     resolve_license_key,
 )
-from .download import ensure_binary, warm_files
+from .download import ensure_binary, resolved_engine_version, warm_files
 from .geoip import resolve_geo
 from .release import RELEASE
 from ._serve import Server, serve
@@ -72,7 +72,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.17.0"
+__version__ = "0.17.1"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -320,9 +320,14 @@ def _acquire_lease_from_kwargs(kwargs):
     # PRO (gated) binary with the SAME key: licensed run -> gated build, free -> public.
     key = resolve_license_key(license_key)
     kwargs["_cc_pro"] = (key, license_api_base) if key else None
+    # Telemetry split: sdk_version = the SDK PACKAGE version; engine_version = the resolved browser
+    # build (respecting version="150"/"latest"/exact). The engine resolve is deferred behind a lambda
+    # so the catalog is only consulted on a cold checkout (not on every launch that reuses the token).
+    version_sel = kwargs.get("version") or os.environ.get("CLEARCOTE_BROWSER_VERSION")
     return acquire_lease(
         license_key=license_key, api_base=license_api_base,
-        sdk_version=str(RELEASE["version"]), quiet=kwargs.get("quiet", False),
+        sdk_version=__version__, quiet=kwargs.get("quiet", False),
+        engine_version=lambda: resolved_engine_version(version_sel, has_license=bool(key)),
     )
 
 

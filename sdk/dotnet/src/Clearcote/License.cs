@@ -36,23 +36,24 @@ public class LicenseOptions
 /// A live floating-concurrency lease. Keep it until the browser closes, then call <see cref="StopAsync"/>.
 public sealed class LeaseSession
 {
+    private readonly Func<string> _token;
     private readonly Func<Task> _stop;
-    private volatile string _token;
     private int _stopped;
 
-    internal LeaseSession(string token, string leaseId, Func<Task> stop)
+    internal LeaseSession(Func<string> token, string leaseId, Func<Task> stop)
     {
         _token = token;
         LeaseId = leaseId;
         _stop = stop;
     }
 
-    /// The current (rotating) run-token injected as CLEARCOTE_RUN_TOKEN.
-    public string Token => _token;
-    internal void SetToken(string token) => _token = token;
+    /// The current (rotating) run-token injected as CLEARCOTE_RUN_TOKEN. Reads the shared
+    /// per-machine lease's live token, so a heartbeat rotation is reflected here.
+    public string Token => _token();
     public string LeaseId { get; internal set; }
 
-    /// Release the slot + stop the heartbeat (best-effort; safe to call twice).
+    /// Release this launch's handle (best-effort; safe to call twice). Per-machine reuse means this
+    /// does NOT check the slot in — the shared lease is checked in once, at process exit.
     public Task StopAsync()
     {
         if (Interlocked.Exchange(ref _stopped, 1) != 0) return Task.CompletedTask;
@@ -126,7 +127,9 @@ public static class License
         return Path.Combine(Native.ClearcoteDir, $"lease-{id}.json");
     }
 
-    private static (string token, long exp)? ReadCache(string licenseKey)
+    // The on-disk cache now also carries lease_id (for the exit checkin). A LEGACY cache written by an
+    // older SDK (token+exp only) is still honored — leaseId is simply null then.
+    private static (string token, long exp, string? leaseId)? ReadCache(string licenseKey)
     {
         try
         {
@@ -134,19 +137,23 @@ public static class License
             var root = doc.RootElement;
             if (root.TryGetProperty("token", out var t) && t.ValueKind == JsonValueKind.String
                 && root.TryGetProperty("exp", out var e) && e.TryGetInt64(out var exp))
-                return (t.GetString()!, exp);
+            {
+                string? lid = root.TryGetProperty("lease_id", out var l) && l.ValueKind == JsonValueKind.String
+                    ? l.GetString() : null;
+                return (t.GetString()!, exp, lid);
+            }
         }
         catch { /* ignore */ }
         return null;
     }
 
-    private static void WriteCache(string licenseKey, string token, long exp)
+    private static void WriteCache(string licenseKey, string token, long exp, string? leaseId)
     {
         try
         {
             Directory.CreateDirectory(Native.ClearcoteDir);
             File.WriteAllText(CachePath(licenseKey),
-                JsonSerializer.Serialize(new { token, exp }));
+                JsonSerializer.Serialize(new { token, exp, lease_id = leaseId }));
         }
         catch { /* ignore */ }
     }
@@ -182,98 +189,202 @@ public static class License
 
     private static long NowSec() => DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-    /// Acquire a concurrency lease if a license key is configured. Returns null in free mode (no key).
-    /// Throws <see cref="ConcurrencyLimitError"/> / <see cref="LicenseRevokedError"/> /
-    /// <see cref="LicenseError"/> when a key IS present but the backend refuses. On a network failure
-    /// with a still-valid cached token, resumes offline (degraded).
+    // ── per-machine lease reuse ──────────────────────────────────────────────
+    // One shared lease per (process, license key). Concurrency is per-MACHINE (the backend dedups by
+    // the stable instance_id), so re-checking-out on every launch is redundant — the machine already
+    // holds its one slot. Check out at most once per token-TTL and share the run-token across every
+    // launch in the process; only the cold-checkout owner heartbeats + checks in (once, at exit).
+    // This is the .NET port of the Python/Node MachineLease (SDK 0.17.x).
+    private sealed class MachineLease
+    {
+        private readonly string _key, _baseUrl, _instanceId;
+        private readonly string? _sdkVersion;
+        private readonly Func<Task<string?>>? _engineVersion;
+        private readonly bool _quiet;
+        private readonly SemaphoreSlim _gate = new(1, 1);
+        private volatile string? _token;
+        private long _exp;
+        private string? _leaseId;
+        private string? _engineResolved;   // memoized ("" once resolved-empty)
+        private int _hbSec = 270;
+        private bool _owner;               // only the cold-checkout owner heartbeats + checks in
+        private CancellationTokenSource? _hbCts;
+        private int _refs;
+
+        public MachineLease(string key, string baseUrl, string instanceId, string? sdkVersion,
+            Func<Task<string?>>? engineVersion, bool quiet)
+        {
+            _key = key; _baseUrl = baseUrl; _instanceId = instanceId;
+            _sdkVersion = sdkVersion; _engineVersion = engineVersion; _quiet = quiet;
+        }
+
+        private bool Valid() => _token != null && _exp > NowSec() + 60;
+
+        // Resolved engine version for telemetry — memoized, resolved at most once (cold checkout only).
+        private async Task<string?> EngineVerAsync()
+        {
+            if (_engineResolved == null)
+            {
+                try { _engineResolved = (_engineVersion != null ? await _engineVersion().ConfigureAwait(false) : null) ?? ""; }
+                catch { _engineResolved = ""; }
+            }
+            return _engineResolved.Length == 0 ? null : _engineResolved;
+        }
+
+        public async Task<LeaseSession> AcquireAsync()
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (!Valid())
+                {
+                    var cached = ReadCache(_key);
+                    if (cached is { } c && c.exp > NowSec() + 60)
+                    {
+                        // cross-process reuse: another process's owner keeps the slot alive.
+                        _token = c.token; _exp = c.exp; _leaseId = c.leaseId; _owner = false;
+                    }
+                    else
+                    {
+                        await CheckoutAsync().ConfigureAwait(false);
+                        _owner = true;
+                        StartHeartbeat();
+                    }
+                }
+            }
+            finally { _gate.Release(); }
+
+            Interlocked.Increment(ref _refs);
+            // Per-launch handle: reads the machine's (rotating) token live; StopAsync just decrefs
+            // (NO checkin — the shared slot is checked in once at process exit).
+            return new LeaseSession(() => _token!, _leaseId ?? "", () =>
+            {
+                Interlocked.Decrement(ref _refs);
+                return Task.CompletedTask;
+            });
+        }
+
+        private async Task CheckoutAsync()
+        {
+            try
+            {
+                using var res = await PostJsonAsync($"{_baseUrl}/api/v1/lease/checkout", _key,
+                    new { instance_id = _instanceId, os = Native.OsTag, sdk_version = _sdkVersion,
+                          engine_version = await EngineVerAsync().ConfigureAwait(false) }).ConfigureAwait(false);
+                if (!res.IsSuccessStatusCode) await ThrowForStatusAsync(res).ConfigureAwait(false);
+                using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
+                var root = doc.RootElement;
+                _token = root.GetProperty("token").GetString()!;
+                _exp = root.GetProperty("exp").GetInt64();
+                _leaseId = root.GetProperty("lease_id").GetString()!;
+                _hbSec = root.TryGetProperty("heartbeat_interval_sec", out var hb) && hb.TryGetInt32(out var v) ? v : 270;
+                WriteCache(_key, _token, _exp, _leaseId);
+            }
+            catch (LicenseError) { throw; } // a definitive verdict must surface (never silently downgrade)
+            catch (Exception e)
+            {
+                var cached = ReadCache(_key);
+                if (cached is { } c && c.exp > NowSec() + 60)
+                {
+                    if (!_quiet) Console.Error.WriteLine($"[clearcote] [license] backend unreachable ({e.Message}); using cached run-token.");
+                    _token = c.token; _exp = c.exp; _leaseId = c.leaseId;
+                    return;
+                }
+                throw new LicenseError($"Could not reach the license server and no valid cached token: {e.Message}");
+            }
+        }
+
+        private void StartHeartbeat()
+        {
+            if (_hbCts != null) return;
+            _hbCts = new CancellationTokenSource();
+            var ct = _hbCts.Token;
+            var hbMs = Math.Max(5, _hbSec) * 1000;
+            _ = Task.Run(async () =>
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    try { await Task.Delay(hbMs, ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { break; }
+                    try
+                    {
+                        using var res = await PostJsonAsync($"{_baseUrl}/api/v1/lease/heartbeat", _key,
+                            new { lease_id = _leaseId, nonce = Guid.NewGuid().ToString() }).ConfigureAwait(false);
+                        if ((int)res.StatusCode == 409) // reclaimed/expired -> re-checkout to keep the slot
+                        {
+                            using var co = await PostJsonAsync($"{_baseUrl}/api/v1/lease/checkout", _key,
+                                new { instance_id = _instanceId, os = Native.OsTag, sdk_version = _sdkVersion,
+                                      engine_version = await EngineVerAsync().ConfigureAwait(false) }).ConfigureAwait(false);
+                            if (co.IsSuccessStatusCode)
+                            {
+                                using var d = JsonDocument.Parse(await co.Content.ReadAsStringAsync().ConfigureAwait(false));
+                                _leaseId = d.RootElement.GetProperty("lease_id").GetString()!;
+                                _token = d.RootElement.GetProperty("token").GetString()!;
+                                _exp = d.RootElement.GetProperty("exp").GetInt64();
+                                WriteCache(_key, _token, _exp, _leaseId);
+                            }
+                            continue;
+                        }
+                        if (res.IsSuccessStatusCode)
+                        {
+                            using var d = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
+                            _token = d.RootElement.GetProperty("token").GetString()!;
+                            _exp = d.RootElement.GetProperty("exp").GetInt64();
+                            WriteCache(_key, _token, _exp, _leaseId);
+                        }
+                    }
+                    catch { /* transient — offline grace until token exp */ }
+                }
+            });
+        }
+
+        // Single checkin at process exit (owner only). Frees the slot without waiting for the TTL.
+        public async Task ShutdownAsync()
+        {
+            _hbCts?.Cancel();
+            if (_owner && _leaseId != null)
+            {
+                try
+                {
+                    using var _ = await PostJsonAsync($"{_baseUrl}/api/v1/lease/checkin", _key,
+                        new { lease_id = _leaseId }).ConfigureAwait(false);
+                }
+                catch { /* best-effort; the lease TTL reclaims it anyway */ }
+            }
+        }
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, MachineLease> _machineLeases = new();
+    private static int _exitHooked;
+
+    /// Acquire a per-MACHINE concurrency lease, shared across every launch in this process (checks out
+    /// ~once per token-TTL, not once per launch). Returns null in free mode (no key). Throws
+    /// <see cref="ConcurrencyLimitError"/> / <see cref="LicenseRevokedError"/> / <see cref="LicenseError"/>
+    /// only on a cold checkout the backend definitively refuses; falls back to a cached, still-valid
+    /// token on a transient network failure (offline grace).
+    ///
+    /// <paramref name="sdkVersion"/> is the SDK PACKAGE version (checkout telemetry sdk_version).
+    /// <paramref name="engineVersion"/> lazily resolves the browser build (engine_version) — invoked
+    /// on a cold checkout only, so the catalog is never consulted per launch.
     public static async Task<LeaseSession?> AcquireLeaseAsync(
-        LicenseOptions opts, string? sdkVersion = null, bool quiet = false)
+        LicenseOptions opts, string? sdkVersion = null, bool quiet = false,
+        Func<Task<string?>>? engineVersion = null)
     {
         var licenseKey = ResolveLicenseKey(opts.LicenseKey);
         if (licenseKey is null) return null; // free mode — inert
 
         var baseUrl = ApiBase(opts);
-        var instanceId = ResolveInstanceId();
-        void Warn(string m) { if (!quiet) Console.Error.WriteLine($"[clearcote] [license] {m}"); }
-
-        JsonElement checkout;
-        try
+        var ml = _machineLeases.GetOrAdd(licenseKey,
+            k => new MachineLease(k, baseUrl, ResolveInstanceId(), sdkVersion, engineVersion, quiet));
+        if (Interlocked.Exchange(ref _exitHooked, 1) == 0)
         {
-            using var res = await PostJsonAsync($"{baseUrl}/api/v1/lease/checkout", licenseKey,
-                new { instance_id = instanceId, os = Native.OsTag, sdk_version = sdkVersion }).ConfigureAwait(false);
-            if (!res.IsSuccessStatusCode) await ThrowForStatusAsync(res).ConfigureAwait(false);
-            using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
-            checkout = doc.RootElement.Clone();
-            WriteCache(licenseKey, checkout.GetProperty("token").GetString()!, checkout.GetProperty("exp").GetInt64());
-        }
-        catch (LicenseError) { throw; } // a definitive verdict must surface (never silently downgrade)
-        catch (Exception e)
-        {
-            var cached = ReadCache(licenseKey);
-            if (cached is { } c && c.exp > NowSec() + 60)
+            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {
-                Warn($"backend unreachable ({e.Message}); using cached run-token (offline grace).");
-                return new LeaseSession(c.token, "cached", () => Task.CompletedTask);
-            }
-            throw new LicenseError($"Could not reach the license server and no valid cached token: {e.Message}");
+                foreach (var m in _machineLeases.Values)
+                    try { m.ShutdownAsync().GetAwaiter().GetResult(); } catch { /* best-effort */ }
+            };
         }
-
-        var leaseId = checkout.GetProperty("lease_id").GetString()!;
-        var token = checkout.GetProperty("token").GetString()!;
-        var hbSec = checkout.TryGetProperty("heartbeat_interval_sec", out var hb) && hb.TryGetInt32(out var v) ? v : 30;
-        var hbMs = Math.Max(5, hbSec) * 1000;
-
-        var cts = new CancellationTokenSource();
-        LeaseSession session = null!;
-        async Task Heartbeat()
-        {
-            while (!cts.IsCancellationRequested)
-            {
-                try { await Task.Delay(hbMs, cts.Token).ConfigureAwait(false); }
-                catch (OperationCanceledException) { break; }
-                try
-                {
-                    using var res = await PostJsonAsync($"{baseUrl}/api/v1/lease/heartbeat", licenseKey,
-                        new { lease_id = session.LeaseId, nonce = Guid.NewGuid().ToString() }).ConfigureAwait(false);
-                    if ((int)res.StatusCode == 409)
-                    {
-                        using var co = await PostJsonAsync($"{baseUrl}/api/v1/lease/checkout", licenseKey,
-                            new { instance_id = instanceId, os = Native.OsTag, sdk_version = sdkVersion }).ConfigureAwait(false);
-                        if (co.IsSuccessStatusCode)
-                        {
-                            using var d = JsonDocument.Parse(await co.Content.ReadAsStringAsync().ConfigureAwait(false));
-                            session.LeaseId = d.RootElement.GetProperty("lease_id").GetString()!;
-                            session.SetToken(d.RootElement.GetProperty("token").GetString()!);
-                            WriteCache(licenseKey, session.Token, d.RootElement.GetProperty("exp").GetInt64());
-                        }
-                        continue;
-                    }
-                    if (res.IsSuccessStatusCode)
-                    {
-                        using var d = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
-                        session.SetToken(d.RootElement.GetProperty("token").GetString()!);
-                        WriteCache(licenseKey, session.Token, d.RootElement.GetProperty("exp").GetInt64());
-                    }
-                }
-                catch { /* transient — offline grace until token exp */ }
-            }
-        }
-
-        async Task Stop()
-        {
-            cts.Cancel();
-            try
-            {
-                using var _ = await PostJsonAsync($"{baseUrl}/api/v1/lease/checkin", licenseKey,
-                    new { lease_id = session.LeaseId }).ConfigureAwait(false);
-            }
-            catch { /* best-effort; the lease TTL reclaims it anyway */ }
-            cts.Dispose();
-        }
-
-        session = new LeaseSession(token, leaseId, Stop);
-        _ = Task.Run(Heartbeat); // background; does not keep the process alive
-        return session;
+        return await ml.AcquireAsync().ConfigureAwait(false);
     }
 
     /// Merge the run-token into an env dictionary (base defaults to the current process env).

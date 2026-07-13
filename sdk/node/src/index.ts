@@ -11,7 +11,7 @@
 // as engine switches.
 
 import { chromium } from "playwright-core";
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -22,7 +22,7 @@ import type {
   BrowserContextOptions,
   LaunchOptions as PlaywrightLaunchOptions,
 } from "playwright-core";
-import { ensureBinary, ensureVersion, proEnsureBinary, warmFiles, type DownloadOptions } from "./download.js";
+import { ensureBinary, ensureVersion, proEnsureBinary, resolvedEngineVersion, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
 import { resolveGeo, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
@@ -278,7 +278,11 @@ export async function launch(options: LaunchOptions = {}): Promise<Browser> {
   const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
   // License (opt-in): check out a concurrency slot and inject CLEARCOTE_RUN_TOKEN so the PRO
   // engine gate lets the browser launch. Inert (null) in free mode / when no key is set.
-  const lease = await acquireLease({ licenseKey, licenseApiBase, sdkVersion: String(RELEASE.version), quiet });
+  const lease = await acquireLease({
+    licenseKey, licenseApiBase, quiet, sdkVersion: SDK_VERSION,
+    // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
+    engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
+  });
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …).
   const launchEnv = fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env);
   const runtimeEnv = lease ? withRunToken(lease.token, launchEnv) : launchEnv;
@@ -348,7 +352,11 @@ export async function launchPersistentContext(
   const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
   ensureRunnableHere(exe);
   // License (opt-in): check out a concurrency slot + inject CLEARCOTE_RUN_TOKEN. Inert in free mode.
-  const lease = await acquireLease({ licenseKey, licenseApiBase, sdkVersion: String(RELEASE.version), quiet });
+  const lease = await acquireLease({
+    licenseKey, licenseApiBase, quiet, sdkVersion: SDK_VERSION,
+    // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
+    engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
+  });
   const ctxEnv = fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env);
   const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv) : ctxEnv;
   const context = await winAvRetry((exePath) => chromium.launchPersistentContext(userDataDir, {
@@ -531,7 +539,11 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   if (proxyOpt?.server) cdpArgs.push(`--proxy-server=${proxyOpt.server}`);
 
   // License (opt-in): check out a concurrency slot + inject CLEARCOTE_RUN_TOKEN. Inert in free mode.
-  const lease = await acquireLease({ licenseKey, licenseApiBase, sdkVersion: String(RELEASE.version), quiet });
+  const lease = await acquireLease({
+    licenseKey, licenseApiBase, quiet, sdkVersion: SDK_VERSION,
+    // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
+    engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
+  });
   const env = { ...process.env, ...(fontLaunchEnv(exe, undefined) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token } : {}) };
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
@@ -577,6 +589,17 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
 }
 
 import { runAgentTask } from "./agent.js";
+
+// The SDK PACKAGE version (reported to the lease backend as sdk_version). Read from the packaged
+// package.json (present in every npm install, one level above dist/). Falls back to the engine pin
+// only if that read ever fails. Kept separate from the engine build (engine_version telemetry).
+const SDK_VERSION: string = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
+  } catch {
+    return String(RELEASE.version);
+  }
+})();
 import { listProfiles, loadProfile } from "./profile.js";
 export default {
   launch,
