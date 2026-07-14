@@ -112,8 +112,35 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
     st.x = x; st.y = y;
   };
 
-  mouse.move = async (x: number, y: number) => { await glide(x, y); };
+  // Engine real-trajectory routing (PRO): send point-to-point moves/clicks through
+  // Browser.humanizedClick (real recorded human paths for PRO, engine bezier for free,
+  // tiered by the engine license gate). Held-button DRAGS stay native; falls back to the
+  // SDK bezier if the method is unavailable (older engine / no browser session).
+  const eng: { session: any; tid: string | null; ok: boolean } = { session: null, tid: null, ok: true };
+  const engineGlide = async (x: number, y: number, noClick: boolean): Promise<boolean> => {
+    if (!eng.ok) return false;
+    try {
+      if (eng.session === null) {
+        const ctx: any = page.context();
+        const tsession = await ctx.newCDPSession(page);
+        const info: any = await tsession.send("Target.getTargetInfo");
+        eng.tid = info.targetInfo.targetId;
+        const br: any = ctx.browser ? ctx.browser() : null;
+        eng.session = br ? await br.newBrowserCDPSession() : tsession;
+      }
+      const dx = x - st.x, dy = y - st.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const dur = Math.min(1.10, Math.max(0.28, 0.30 + dist / 1700)) * (0.85 + 0.30 * Math.random());
+      await eng.session.send("Browser.humanizedClick", { targetId: eng.tid, x, y, duration: dur, noClick });
+      try { await nativeMove(x, y); } catch { /* keep playwright cursor pos in sync for drags */ }
+      st.x = x; st.y = y;
+      return true;
+    } catch { eng.ok = false; return false; }
+  };
+
+  mouse.move = async (x: number, y: number) => { if (!(await engineGlide(x, y, true))) await glide(x, y); };
   mouse.click = async (x: number, y: number) => {
+    if (await engineGlide(x, y, false)) return;
     await glide(x, y);
     await sleep(rand(40, 130)); // brief dwell before pressing, like a human
     // delay = the mousedown→mouseup HOLD (human ~60–150 ms); without it Playwright releases in ~2 ms.
@@ -135,6 +162,14 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   // Held-button drag leg with the seating jiggle (settle), reachable from the module-level
   // Locator.dragTo patch (which can't see this closure) via the page object.
   (page as any)._clearcoteHeldGlide = async (x: number, y: number) => { await glide(x, y, { settle: true }); };
+
+  // DEFAULT under humanize (no longer opt-in): fire a short ambient burst on every load.
+  (page as any)._clearcoteAutoAmbient = true;
+  page.on("load", () => {
+    if ((page as any)._clearcoteAutoAmbient) {
+      Promise.resolve((page as any).ambientMotion(rand(450, 950))).catch(() => {});
+    }
+  });
   // scroll easing: break into eased chunks of native wheel deltas
   mouse.wheel = async (dx: number, dy: number) => {
     const steps = Math.max(5, Math.min(24, Math.round((Math.abs(dx) + Math.abs(dy)) / 60)));

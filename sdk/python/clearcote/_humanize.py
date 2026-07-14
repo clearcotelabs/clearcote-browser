@@ -120,10 +120,55 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
         _dispatch(plan_move(st["pos"], (x, y), persona, target_w=target_w, settle=settle))
         st["pos"] = (x, y)
 
+    # --- Engine real-trajectory routing (PRO) --------------------------------
+    # Route point-to-point moves/clicks through the browser engine's
+    # Browser.humanizedClick: a trusted WebMouseEvent path built in the browser
+    # process from REAL recorded human trajectories (PRO) or the engine bezier
+    # (free) -- tiered automatically by the engine's runtime license gate, so the
+    # SDK stays tier-agnostic. One CDP call per action (far less Input-domain
+    # traffic than per-step native moves); continuity is tracked engine-side.
+    # Held-button DRAGS stay on the native path (the engine click can't hold a
+    # button across the path -- sliders depend on it); wheel/typing unchanged.
+    # Falls back to the SDK bezier (plan_move) permanently if the method is
+    # unavailable (older engine, or a persistent context with no Browser handle).
+    _eng = {"session": None, "tid": None, "ok": True}
+
+    def _engine_glide(x, y, no_click):
+        if not _eng["ok"]:
+            return False
+        try:
+            if _eng["session"] is None:
+                tsession = page.context.new_cdp_session(page)
+                _eng["tid"] = tsession.send(
+                    "Target.getTargetInfo")["targetInfo"]["targetId"]
+                b = getattr(page.context, "browser", None)
+                _eng["session"] = (b.new_browser_cdp_session()
+                                   if b is not None else tsession)
+            dx, dy = x - st["pos"][0], y - st["pos"][1]
+            dist = (dx * dx + dy * dy) ** 0.5
+            dur = min(1.10, max(0.28, 0.30 + dist / 1700.0)) * (0.85 + 0.30 * random.random())
+            _eng["session"].send("Browser.humanizedClick", {
+                "targetId": _eng["tid"], "x": float(x), "y": float(y),
+                "duration": dur, "noClick": bool(no_click)})
+            # Keep Playwright's own cursor position in sync so a following
+            # mouse.down()/drag presses where the engine left the cursor.
+            try:
+                native_move(x, y)
+            except Exception:  # noqa: BLE001
+                pass
+            st["pos"] = (x, y)
+            return True
+        except Exception:  # noqa: BLE001 - method missing / no browser session: stop trying
+            _eng["ok"] = False
+            return False
+
     def hmove(x, y, **kw):
-        _glide(x, y)
+        if not _engine_glide(x, y, no_click=True):
+            _glide(x, y)
 
     def hclick(x, y, **kw):
+        if _engine_glide(x, y, no_click=False):
+            return
         _glide(x, y)
         time.sleep(_rand(40, 130) / 1000.0)    # brief dwell before pressing, like a human
         try:
@@ -149,6 +194,21 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
             pass
 
     page.ambient_motion = hambient
+
+    # DEFAULT under humanize (no longer opt-in): every page load fires a short burst
+    # of ambient pointer entropy automatically, so a behavioral collector sees human
+    # mouse activity on the page before the first goal action. Disable per-page with
+    # page._clearcote_auto_ambient = False.
+    page._clearcote_auto_ambient = True
+
+    def _auto_ambient(_=None):
+        if getattr(page, "_clearcote_auto_ambient", False):
+            try:
+                hambient(_rand(450, 950))
+            except Exception:  # noqa: BLE001
+                pass
+
+    page.on("load", lambda _=None: _auto_ambient())
 
     def hwheel(delta_x, delta_y):
         steps = max(5, min(24, round((abs(delta_x) + abs(delta_y)) / 60)))

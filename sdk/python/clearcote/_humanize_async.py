@@ -54,10 +54,46 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         await _dispatch(plan_move(st["pos"], (x, y), persona, target_w=target_w, settle=settle))
         st["pos"] = (x, y)
 
+    # Engine real-trajectory routing (PRO): send point-to-point moves/clicks through
+    # Browser.humanizedClick (real recorded human paths for PRO, engine bezier for free,
+    # tiered by the engine license gate). Drags stay native (held button); fall back to
+    # the SDK bezier if the method is unavailable.
+    _eng = {"session": None, "tid": None, "ok": True}
+
+    async def _engine_glide(x, y, no_click):
+        if not _eng["ok"]:
+            return False
+        try:
+            if _eng["session"] is None:
+                tsession = await page.context.new_cdp_session(page)
+                info = await tsession.send("Target.getTargetInfo")
+                _eng["tid"] = info["targetInfo"]["targetId"]
+                b = getattr(page.context, "browser", None)
+                _eng["session"] = (await b.new_browser_cdp_session()
+                                   if b is not None else tsession)
+            dx, dy = x - st["pos"][0], y - st["pos"][1]
+            dist = (dx * dx + dy * dy) ** 0.5
+            dur = min(1.10, max(0.28, 0.30 + dist / 1700.0)) * (0.85 + 0.30 * random.random())
+            await _eng["session"].send("Browser.humanizedClick", {
+                "targetId": _eng["tid"], "x": float(x), "y": float(y),
+                "duration": dur, "noClick": bool(no_click)})
+            try:
+                await native_move(x, y)
+            except Exception:  # noqa: BLE001
+                pass
+            st["pos"] = (x, y)
+            return True
+        except Exception:  # noqa: BLE001
+            _eng["ok"] = False
+            return False
+
     async def hmove(x, y, **kw):
-        await _glide(x, y)
+        if not await _engine_glide(x, y, no_click=True):
+            await _glide(x, y)
 
     async def hclick(x, y, **kw):
+        if await _engine_glide(x, y, no_click=False):
+            return
         await _glide(x, y)
         await asyncio.sleep(_rand(40, 130) / 1000.0)
         try:
@@ -81,6 +117,18 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
             pass
 
     page.ambient_motion = hambient
+
+    # DEFAULT under humanize (no longer opt-in): fire a short ambient burst on every load.
+    page._clearcote_auto_ambient = True
+
+    async def _auto_ambient():
+        if getattr(page, "_clearcote_auto_ambient", False):
+            try:
+                await hambient(_rand(450, 950))
+            except Exception:  # noqa: BLE001
+                pass
+
+    page.on("load", lambda _=None: asyncio.ensure_future(_auto_ambient()))
 
     async def hwheel(delta_x, delta_y):
         steps = max(5, min(24, round((abs(delta_x) + abs(delta_y)) / 60)))
