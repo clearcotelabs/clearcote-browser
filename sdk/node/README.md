@@ -47,6 +47,29 @@ await browser.close();
 Already using Playwright? Swap `chromium.launch(...)` for `launch(...)` from `clearcote` — the
 returned object is a normal Playwright `Browser`.
 
+### Light stealth (`lightStealth: true`)
+
+When the full seed-derived persona is more than a target needs, `lightStealth` spoofs only a
+coherent, seed-derived bundle of the *safe* metadata axes — `hardwareConcurrency`, `deviceMemory`,
+`colorDepth`, `devicePixelRatio`, `maxTouchPoints` — via native override switches, leaving rendering
+(canvas/WebGL/audio/fonts), TLS and the real browser version untouched. Screen dimensions stay real by
+default (opt-in), since a faked screen that can't be reconciled with the real render surface is a
+reliable block trigger. It never engages the `--fingerprint` persona machinery.
+
+```javascript
+const browser = await launch({ lightStealth: true, fingerprint: "my-seed" });
+```
+
+Or set any native override directly (no seed needed) — an explicit value always wins over the persona:
+
+```javascript
+const browser = await launch({ hardwareConcurrency: 8, deviceMemory: 8, devicePixelRatio: 1.25, maxTouchPoints: 0 });
+```
+
+Native overrides: `hardwareConcurrency`, `deviceMemory`, `colorDepth`, `devicePixelRatio`,
+`maxTouchPoints`, and (opt-in) `screenWidth` / `screenHeight` / `availWidth` / `availHeight`. Needs the
+Clearcote 149.0.7827.114 (v0.1.0-pre.22) build or newer.
+
 ### Standing CDP endpoint (`serve()`)
 
 Run Clearcote as a **stealthy CDP endpoint** any existing automation attaches to unchanged —

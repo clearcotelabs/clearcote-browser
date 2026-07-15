@@ -74,6 +74,29 @@ Same options as the sync `launch` (fingerprint/persona/proxy/`geoip`/`profile`/`
 `run_agent_task`, `executable_path`, `download`, plus `Profile` (use `launch(profile="name")`). Each
 launched browser owns its Playwright driver and stops it on `await browser.close()`.
 
+### Light stealth (`light_stealth=True`)
+
+When the full seed-derived persona is more than a target needs, `light_stealth` spoofs only a
+coherent, seed-derived bundle of the *safe* metadata axes — `hardware_concurrency`, `device_memory`,
+`color_depth`, `device_pixel_ratio`, `max_touch_points` — via native override switches, leaving
+rendering (canvas/WebGL/audio/fonts), TLS and the real browser version untouched. Screen dimensions
+stay real by default (opt-in), since a faked screen that can't be reconciled with the real render
+surface is a reliable block trigger. It never engages the `--fingerprint` persona machinery.
+
+```python
+browser = launch(light_stealth=True, fingerprint="my-seed")   # coherent metadata, rendering left real
+```
+
+Or set any native override directly (no seed needed) — an explicit value always wins over the persona:
+
+```python
+browser = launch(hardware_concurrency=8, device_memory=8, device_pixel_ratio=1.25, max_touch_points=0)
+```
+
+Native overrides: `hardware_concurrency`, `device_memory`, `color_depth`, `device_pixel_ratio`,
+`max_touch_points`, and (opt-in) `screen_width` / `screen_height` / `avail_width` / `avail_height`.
+Needs the Clearcote 149.0.7827.114 (v0.1.0-pre.22) build or newer.
+
 ### Standing CDP endpoint (`serve()`)
 
 Run Clearcote as a **stealthy CDP endpoint** that any existing automation attaches to unchanged —
