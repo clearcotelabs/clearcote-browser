@@ -1,0 +1,22 @@
+--- a/chrome/app/chrome_command_ids.h	2026-07-15 09:10:44.505467777 +0000
++++ b/chrome/app/chrome_command_ids.h	2026-07-15 09:10:44.509467796 +0000
+@@ -67,6 +67,11 @@
+ #define IDC_TOGGLE_MULTITASK_MENU       34050
+ #endif
+ 
++// clearcote-rc-guard: build_config.h (and thus BUILDFLAG) is compiled out under
++// RC_INVOKED (build_config.h:57), so these BUILDFLAG(IS_LINUX) checks must not be
++// evaluated during Windows resource compilation. The Linux-only command IDs are
++// never needed by the .rc, so skip the whole region under RC.
++#if !defined(RC_INVOKED)
+ #if BUILDFLAG(IS_LINUX)
+ #define IDC_USE_SYSTEM_TITLE_BAR        34051
+ #endif
+@@ -74,6 +79,7 @@
+ #if BUILDFLAG(IS_LINUX)
+ #define IDC_RESTORE_WINDOW              34052
+ #endif
++#endif  // !RC_INVOKED
+ 
+ #define IDC_OPEN_IN_PWA_WINDOW          34053
+ #define IDC_MOVE_TAB_TO_NEW_WINDOW      34054

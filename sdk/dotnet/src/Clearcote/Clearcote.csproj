@@ -10,7 +10,7 @@
 
     <!-- NuGet package metadata -->
     <PackageId>Clearcote</PackageId>
-    <Version>0.17.2</Version>
+    <Version>0.18.0</Version>
     <Authors>clearcotelabs</Authors>
     <Company>clearcotelabs</Company>
     <Description>Playwright drop-in for the Clearcote anti-fingerprint Chromium build. Launch() returns a standard Microsoft.Playwright IBrowser backed by the verified Clearcote binary, which is auto-downloaded and SHA-256 checked. With a PRO license key it pulls the license-gated build and checks out a floating-concurrency lease.</Description>

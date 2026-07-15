@@ -42,17 +42,20 @@
  }
  
  }  // namespace blink
---- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
-+++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
-@@ -4,6 +4,7 @@
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc	2026-07-15 11:42:11.992973682 +0000
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc	2026-07-15 11:42:11.992973682 +0000
+@@ -4,6 +4,10 @@
  
  #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
  
 +#include "components/ungoogled/persona_profile.h"
++#include "base/command_line.h"  // clearcote-light-stealth
++#include "base/strings/string_number_conversions.h"
++#include "components/ungoogled/ungoogled_switches.h"
  #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
  #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
  #include "third_party/blink/renderer/core/dom/document.h"
-@@ -12,7 +13,14 @@
+@@ -12,7 +16,29 @@
  namespace blink {
  
  float NavigatorDeviceMemory::deviceMemory() const {
@@ -62,8 +65,23 @@
 +  // constant. navigator.deviceMemory is spec-clamped to a maximum of 8, so a
 +  // higher-RAM persona still reports 8 -- the value real Chrome reports for any
 +  // machine with >= 8 GB.
-+  float gb = ungoogled::CurrentPersona().device_memory_gb;
-+  return gb > 8.0f ? 8.0f : gb;
++  // clearcote-light-stealth: direct override (flag > persona > real).
++  const base::CommandLine* ls_cmd = base::CommandLine::ForCurrentProcess();
++  double ls_mem = 0;
++  if (ls_cmd->HasSwitch(::switches::kFingerprintDeviceMemory) &&
++      base::StringToDouble(
++          ls_cmd->GetSwitchValueASCII(::switches::kFingerprintDeviceMemory),
++          &ls_mem) &&
++      ls_mem > 0) {
++    return ls_mem > 8.0 ? 8.0f : static_cast<float>(ls_mem);
++  }
++  if (ls_cmd->HasSwitch(::switches::kFingerprint)) {
++    float gb = ungoogled::CurrentPersona().device_memory_gb;
++    return gb > 8.0f ? 8.0f : gb;
++  }
++  // clearcote-ls-refine: spec-cap the real path at 8 (real Chrome never reports >8).
++  float ls_real = ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
++  return ls_real > 8.0f ? 8.0f : ls_real;
 +  // return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
  }
  

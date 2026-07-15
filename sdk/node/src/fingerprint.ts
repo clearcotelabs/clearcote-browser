@@ -3,6 +3,7 @@
 
 import { gzipSync } from "node:zlib";
 import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 export interface FingerprintOptions {
   /**
@@ -46,6 +47,37 @@ export interface FingerprintOptions {
   gpuRenderer?: string;
   /** navigator.hardwareConcurrency. */
   hardwareConcurrency?: number;
+  /** navigator.deviceMemory in GB (spec-clamps to 8 — larger values report as 8). */
+  deviceMemory?: number;
+  /**
+   * screen.width in CSS px. NOTE: spoofing screen dimensions is a reliable block trigger on strict
+   * anti-bots (a faked screen cannot be reconciled with the real window/render surface), so this is
+   * opt-in and is NOT part of the `lightStealth` preset. Best when the host's real display matches.
+   */
+  screenWidth?: number;
+  /** screen.height in CSS px (see the caveat on `screenWidth`). */
+  screenHeight?: number;
+  /** screen.availWidth in CSS px (see the caveat on `screenWidth`). */
+  availWidth?: number;
+  /** screen.availHeight in CSS px (see the caveat on `screenWidth`). */
+  availHeight?: number;
+  /** screen.colorDepth (e.g. 24). */
+  colorDepth?: number;
+  /** window.devicePixelRatio (e.g. 1, 1.25, 1.5). */
+  devicePixelRatio?: number;
+  /** navigator.maxTouchPoints (0 on a mouse-only desktop). */
+  maxTouchPoints?: number;
+  /**
+   * Light-stealth preset: spoof a coherent, seed-derived bundle of the metadata axes that SURVIVE
+   * strict anti-bot checks — hardwareConcurrency, deviceMemory, colorDepth, devicePixelRatio,
+   * maxTouchPoints — applied via the native override switches ONLY (never the `--fingerprint`
+   * persona machinery / farbling that strict anti-bots detect). Rendering (canvas/WebGL/audio/fonts),
+   * TLS, and the real Chrome version are all left untouched, so the identity stays coherent and
+   * passes. Screen dimensions are deliberately NOT spoofed (a faked screen is a reliable block
+   * trigger) — pass screenWidth/etc. explicitly to opt in. An explicit field wins over the preset.
+   * The lightest identity variation that still passes strict detection.
+   */
+  lightStealth?: boolean;
   /** Geolocation as "lat,lng" (only returned when the page is granted permission). */
   location?: string;
   /** IANA timezone, e.g. "America/New_York". */
@@ -129,6 +161,15 @@ export const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "gpuVendor",
   "gpuRenderer",
   "hardwareConcurrency",
+  "deviceMemory",
+  "screenWidth",
+  "screenHeight",
+  "availWidth",
+  "availHeight",
+  "colorDepth",
+  "devicePixelRatio",
+  "maxTouchPoints",
+  "lightStealth",
   "location",
   "timezone",
   "acceptLanguage",
@@ -200,6 +241,51 @@ export function profileAcceptLanguage(value: string | Record<string, unknown>): 
   return undefined;
 }
 
+// Coherent Windows-plausible desktop/laptop metadata bundles, indexed by a hash of the seed:
+// [screen_w, screen_h, avail_w, avail_h, dpr, color_depth, device_memory_gb, hw_concurrency].
+// lightStealth uses ONLY dpr/color_depth/device_memory/hw_concurrency from each row (screen stays
+// real — see the note on `lightStealth`). The screen columns are retained so an explicit opt-in
+// screen spoof can reuse a coherent row.
+const LIGHT_STEALTH_PROFILES: readonly (readonly [number, number, number, number, number, number, number, number])[] = [
+  [1920, 1080, 1920, 1040, 1.0, 24, 8, 8],
+  [1920, 1080, 1920, 1040, 1.0, 24, 16, 12],
+  [1920, 1080, 1920, 1040, 1.0, 24, 16, 16],
+  [2560, 1440, 2560, 1400, 1.0, 24, 16, 16],
+  [2560, 1440, 2560, 1400, 1.5, 24, 16, 12],
+  [1536, 864, 1536, 824, 1.25, 24, 8, 8],
+  [1536, 864, 1536, 824, 1.25, 24, 16, 12],
+  [1366, 768, 1366, 728, 1.0, 24, 8, 4],
+  [1366, 768, 1366, 728, 1.0, 24, 4, 4],
+  [1440, 900, 1440, 860, 1.0, 24, 8, 8],
+  [1600, 900, 1600, 860, 1.0, 24, 8, 8],
+  [1680, 1050, 1680, 1010, 1.0, 24, 8, 8],
+  [1920, 1200, 1920, 1160, 1.0, 24, 16, 12],
+  [3840, 2160, 3840, 2120, 1.0, 24, 32, 16],
+];
+
+/**
+ * Deterministic, coherent metadata bundle for `lightStealth`, applied via the NATIVE override
+ * switches only (never `--fingerprint`). Spoofs ONLY the axes that survive strict anti-bot checks:
+ * hardwareConcurrency, deviceMemory, colorDepth, devicePixelRatio, maxTouchPoints. It deliberately
+ * does NOT spoof screen/avail dimensions (a faked screen is a reliable block trigger). Presents the
+ * browser's REAL version (no brandVersion spoof — a version lie desyncs UA-CH + TLS from the real
+ * binary). The seed->row mapping matches the Python SDK (full sha256 digest as a big integer mod N).
+ */
+export function lightStealthValues(seed?: string | number): Partial<FingerprintOptions> {
+  const key = seed === undefined || seed === null || String(seed) === "" ? "clearcote-light-stealth" : String(seed);
+  const hex = createHash("sha256").update(key, "utf8").digest("hex");
+  const idx = Number(BigInt("0x" + hex) % BigInt(LIGHT_STEALTH_PROFILES.length));
+  const row = LIGHT_STEALTH_PROFILES[idx];
+  return {
+    devicePixelRatio: row[4],
+    colorDepth: row[5],
+    deviceMemory: row[6],
+    hardwareConcurrency: row[7],
+    maxTouchPoints: 0,
+    brand: "chrome",
+  };
+}
+
 /** Build the Chromium switches for a set of fingerprint options. */
 /** Parse the leading integer (the major) out of a version string like "120.0.6099.109" -> 120. */
 function majorFromVersion(value?: string): number | undefined {
@@ -265,6 +351,18 @@ export function defaultTimezone(primaryLang: string): string | undefined {
 
 export function fingerprintArgs(o: FingerprintOptions): string[] {
   const args: string[] = [];
+  o = { ...o }; // never mutate the caller's options
+  if (o.lightStealth) {
+    // Fill in the coherent metadata bundle via native override switches. An explicit caller field
+    // (e.g. deviceMemory: 16) wins over the preset. CRITICAL: never emit --fingerprint, so the
+    // persona machinery / farbling never engages; each value then takes the C++ flag > real path.
+    const preset = lightStealthValues(o.fingerprint) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(preset)) {
+      const cur = (o as Record<string, unknown>)[k];
+      if (cur === undefined || cur === null || cur === "") (o as Record<string, unknown>)[k] = v;
+    }
+    delete o.fingerprint;
+  }
   const set = (flag: string, value: unknown) => {
     if (value !== undefined && value !== null && value !== "") {
       args.push(`--${flag}=${value}`);
@@ -286,6 +384,16 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   set("fingerprint-gpu-vendor", o.gpuVendor);
   set("fingerprint-gpu-renderer", o.gpuRenderer);
   set("fingerprint-hardware-concurrency", o.hardwareConcurrency);
+  // Native metadata overrides (flag > persona > real). Read directly by the getters — no
+  // --fingerprint persona machinery — so they are safe to spoof individually or via lightStealth.
+  set("fingerprint-device-memory", o.deviceMemory);
+  set("fingerprint-screen-width", o.screenWidth);
+  set("fingerprint-screen-height", o.screenHeight);
+  set("fingerprint-avail-width", o.availWidth);
+  set("fingerprint-avail-height", o.availHeight);
+  set("fingerprint-color-depth", o.colorDepth);
+  set("fingerprint-device-pixel-ratio", o.devicePixelRatio);
+  set("fingerprint-max-touch-points", o.maxTouchPoints);
   set("fingerprint-location", o.location);
   set("fingerprint-storage-quota", o.storageQuota);
   set("timezone", o.timezone);

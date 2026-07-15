@@ -6,6 +6,7 @@ Switch names mirror components/ungoogled/ungoogled_switches.cc
 
 import base64
 import gzip
+import hashlib
 import json
 import os
 import sys
@@ -21,6 +22,16 @@ FINGERPRINT_KEYS = (
     "gpu_vendor",
     "gpu_renderer",
     "hardware_concurrency",
+    # clearcote-light-stealth: individual native metadata overrides (no persona machinery).
+    "device_memory",
+    "screen_width",
+    "screen_height",
+    "avail_width",
+    "avail_height",
+    "color_depth",
+    "device_pixel_ratio",
+    "max_touch_points",
+    "light_stealth",
     "location",
     "timezone",
     "accept_language",
@@ -44,6 +55,15 @@ _FLAGS = {
     "gpu_vendor": "fingerprint-gpu-vendor",
     "gpu_renderer": "fingerprint-gpu-renderer",
     "hardware_concurrency": "fingerprint-hardware-concurrency",
+    # clearcote-light-stealth: direct native-override switches (flag > persona > real).
+    "device_memory": "fingerprint-device-memory",
+    "screen_width": "fingerprint-screen-width",
+    "screen_height": "fingerprint-screen-height",
+    "avail_width": "fingerprint-avail-width",
+    "avail_height": "fingerprint-avail-height",
+    "color_depth": "fingerprint-color-depth",
+    "device_pixel_ratio": "fingerprint-device-pixel-ratio",
+    "max_touch_points": "fingerprint-max-touch-points",
     "location": "fingerprint-location",
     "timezone": "timezone",
     "webrtc_ip": "webrtc-ip",
@@ -173,9 +193,74 @@ def _default_timezone(primary_lang):
     return "America/New_York"
 
 
+# Coherent Windows-plausible desktop/laptop metadata bundles:
+# (screen_w, screen_h, avail_w, avail_h, dpr, color_depth, device_memory_gb, hw_concurrency).
+# screen_* are LOGICAL (CSS) px; avail_h subtracts a ~40px taskbar; dpr matches the
+# scaling that produces that logical size; all mouse-only desktops (max_touch=0).
+_LIGHT_STEALTH_PROFILES = (
+    (1920, 1080, 1920, 1040, 1.0, 24, 8, 8),     # FHD desktop
+    (1920, 1080, 1920, 1040, 1.0, 24, 16, 12),   # FHD desktop, mid
+    (1920, 1080, 1920, 1040, 1.0, 24, 16, 16),   # FHD desktop, high
+    (2560, 1440, 2560, 1400, 1.0, 24, 16, 16),   # QHD desktop
+    (2560, 1440, 2560, 1400, 1.5, 24, 16, 12),   # 4K @150% -> logical QHD
+    (1536, 864, 1536, 824, 1.25, 24, 8, 8),      # FHD laptop @125%
+    (1536, 864, 1536, 824, 1.25, 24, 16, 12),    # FHD laptop @125%, mid
+    (1366, 768, 1366, 728, 1.0, 24, 8, 4),       # HD laptop
+    (1366, 768, 1366, 728, 1.0, 24, 4, 4),       # HD laptop, budget
+    (1440, 900, 1440, 860, 1.0, 24, 8, 8),       # 16:10 laptop
+    (1600, 900, 1600, 860, 1.0, 24, 8, 8),       # HD+ desktop
+    (1680, 1050, 1680, 1010, 1.0, 24, 8, 8),     # 16:10 desktop
+    (1920, 1200, 1920, 1160, 1.0, 24, 16, 12),   # 16:10 FHD+ desktop
+    (3840, 2160, 3840, 2120, 1.0, 24, 32, 16),   # 4K native @100%
+)
+
+
+def _light_stealth_values(seed):
+    """Deterministic, coherent metadata bundle applied via the NATIVE override switches only
+    (never --fingerprint), so the persona machinery / farble hooks that strict anti-bots detect
+    stay dormant and rendering surfaces (canvas / WebGL / audio / fonts) stay at the real host
+    values -- which is what passes.
+
+    Spoofs ONLY the metadata axes that survive strict anti-bot checks: hardware_concurrency,
+    device_memory, color_depth, device_pixel_ratio, max_touch_points. It deliberately does NOT
+    spoof screen / avail dimensions -- a faked screen size cannot be reconciled with the real
+    window/render surface and is a reliable block trigger -- so screen stays REAL by default.
+    Opt into a screen spoof by passing screen_width=/screen_height=/avail_width=/avail_height=
+    explicitly (best when the host's real display actually matches)."""
+    key = str(seed if seed not in (None, "") else "clearcote-light-stealth")
+    h = int(hashlib.sha256(key.encode("utf-8")).hexdigest(), 16)
+    _sw, _sh, _aw, _ah, dpr, depth, mem, hw = _LIGHT_STEALTH_PROFILES[h % len(_LIGHT_STEALTH_PROFILES)]
+    # Present the browser's REAL version -- do NOT spoof brand_version. A Chrome-major lie moves
+    # the UA-CH version AND (via tls_profile="match-persona") the TLS ClientHello off the genuine
+    # binary, while the binary's real JS/engine surface still reflects its true version -- another
+    # coherence tell strict anti-bots block. Callers can still pass brand_version= to opt into it.
+    return {
+        "device_pixel_ratio": dpr, "color_depth": depth, "device_memory": mem,
+        "hardware_concurrency": hw, "max_touch_points": 0,
+        "brand": "chrome",
+    }
+
+
 def fingerprint_args(opts):
     """Build the Chromium switches for a dict of fingerprint options."""
     args = []
+    opts = dict(opts)  # clearcote-light-stealth: never mutate the caller's fp dict
+    if opts.get("light_stealth"):
+        # Fill in a coherent metadata bundle via native override switches. setdefault
+        # semantics: an explicit caller kwarg (e.g. device_memory=16) wins over the preset.
+        for _k, _v in _light_stealth_values(opts.get("fingerprint")).items():
+            if opts.get(_k) in (None, ""):
+                opts[_k] = _v
+        # CRITICAL: never emit --fingerprint, so CurrentPersona()/farble never engage;
+        # every value then takes the C++ flag > real path (no persona machinery).
+        opts.pop("fingerprint", None)
+        # Size the REAL window to fit the spoofed screen so inner <= outer <= avail <=
+        # screen (window.outer*/screenX/Y stay coherent). Emitted in base args -> a
+        # user-supplied --window-size still wins (merged after these).
+        try:
+            args.append("--window-size={},{}".format(int(opts["avail_width"]), int(opts["avail_height"])))
+        except (KeyError, TypeError, ValueError):
+            pass
     for key, flag in _FLAGS.items():
         value = opts.get(key)
         if value is not None and value != "":

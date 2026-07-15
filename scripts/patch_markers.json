@@ -5,18 +5,26 @@
       "surface": "Defines the clearcote fingerprint / canvas-bridge / TLS command-line switch value strings and forwards them from the browser process into the renderer process so downstream spoofing patches can read them.",
       "windows_only": false,
       "markers": [
-        "fingerprint-tls-profile",
-        "canvas-bridge-url",
         "canvas-bridge-fallback",
         "canvas-bridge-mode",
+        "canvas-bridge-url",
+        "disable-fingerprint-noise",
+        "disable-gpu-fingerprint",
+        "fingerprint-avail-height",
+        "fingerprint-avail-width",
+        "fingerprint-brand-version",
+        "fingerprint-color-depth",
+        "fingerprint-device-memory",
+        "fingerprint-device-pixel-ratio",
         "fingerprint-gpu-renderer",
         "fingerprint-hardware-concurrency",
-        "fingerprint-brand-version",
-        "disable-gpu-fingerprint",
-        "disable-fingerprint-noise",
+        "fingerprint-max-touch-points",
         "fingerprint-profile",
-        "fingerprint-webgpu-architecture",
-        "fingerprint-storage-quota"
+        "fingerprint-screen-height",
+        "fingerprint-screen-width",
+        "fingerprint-storage-quota",
+        "fingerprint-tls-profile",
+        "fingerprint-webgpu-architecture"
       ],
       "runtime": {
         "surface": "navigator.hardwareConcurrency (proves a fingerprint switch was forwarded browser-process -> renderer-process by this patch's kSwitchNames array)",
@@ -384,6 +392,16 @@
         "surface": "Intl locale coherence",
         "probe": "Launch with --lang=de-DE; assert Intl.DateTimeFormat().resolvedOptions().locale starts with 'de' AND (12345.6).toLocaleString()=='12.345,6' AND navigator.language=='de-DE' (all agree). Regression: any drift where navigator.languages!=Intl.locale."
       }
+    },
+    "905-rc-invoked-guard.patch": {
+      "markers": [],
+      "runtime": {
+        "surface": "Existence/launchability of the cross-compiled Windows chrome build artifact (build-fix, no JS surface).",
+        "probe": "Cross-build chrome for Windows; the chrome_dll.res resource compile must succeed.",
+        "expect": "chrome_dll.rc resource compile succeeds; without the guard, chrome_command_ids.h's BUILDFLAG(IS_LINUX) is evaluated under RC_INVOKED (build_config.h compiled out) and rc preprocessing fails with 'BUILDFLAG_INTERNAL_IS_LINUX is not defined'."
+      },
+      "surface": "Windows-cross-build enabler: guards the Linux-only IDC_* command IDs in chrome/app/chrome_command_ids.h under #if !defined(RC_INVOKED) so the Windows resource compiler can preprocess the header.",
+      "windows_only": false
     }
   }
 }

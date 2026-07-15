@@ -30,3 +30,4 @@
 200-agent-and-humanized-input.patch
 210-tls-network-persona.patch
 900-windows-build-fixes.patch
+905-rc-invoked-guard.patch

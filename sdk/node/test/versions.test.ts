@@ -11,7 +11,7 @@ const CATALOG = {
   schema: 1,
   builds: [
     {
-      major: 149, version: "149.0.7827.114", tier: "free", tag: "v0.1.0-pre.21",
+      major: 149, version: "149.0.7827.114", tier: "free", tag: "v0.1.0-pre.22",
       platforms: {
         windows: { asset: "cc-149-win.zip", url: "https://x/cc-149-win.zip", sha256: "a".repeat(64), archive: "zip", binary: "chrome.exe" },
         linux: { asset: "cc-149-linux.tar.xz", url: "https://x/cc-149-linux.tar.xz", sha256: "b".repeat(64), archive: "tar.xz", binary: "chrome" },

@@ -13,7 +13,7 @@ dl = importlib.import_module("clearcote.download")
 CATALOG = {
     "schema": 1,
     "builds": [
-        {"major": 149, "version": "149.0.7827.114", "tier": "free", "tag": "v0.1.0-pre.21",
+        {"major": 149, "version": "149.0.7827.114", "tier": "free", "tag": "v0.1.0-pre.22",
          "platforms": {
              "windows": {"asset": "cc-149-win.zip", "url": "https://x/cc-149-win.zip",
                          "sha256": "a" * 64, "archive": "zip", "binary": "chrome.exe"},

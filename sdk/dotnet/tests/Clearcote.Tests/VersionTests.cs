@@ -14,7 +14,7 @@ public class VersionTests
         {
             new()
             {
-                Major = 149, Version = "149.0.7827.114", Tier = "free", Tag = "v0.1.0-pre.21",
+                Major = 149, Version = "149.0.7827.114", Tier = "free", Tag = "v0.1.0-pre.22",
                 Platforms = new Dictionary<string, CatalogPlatform>
                 {
                     ["windows"] = new() { Asset = "cc-149-win.zip", Url = "https://x/cc-149-win.zip", Sha256 = new string('a', 64), Archive = "zip", Binary = "chrome.exe" },

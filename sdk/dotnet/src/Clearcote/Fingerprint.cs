@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.IO.Compression;
+using System.Numerics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -45,6 +47,32 @@ public class FingerprintOptions
     public string? GpuRenderer { get; set; }
     /// navigator.hardwareConcurrency.
     public int? HardwareConcurrency { get; set; }
+    /// navigator.deviceMemory in GB (spec-clamps to 8 — larger values report as 8).
+    public int? DeviceMemory { get; set; }
+    /// screen.width in CSS px. NOTE: spoofing screen dimensions is a reliable block trigger on strict
+    /// anti-bots (a faked screen cannot be reconciled with the real window/render surface), so this is
+    /// opt-in and is NOT part of the LightStealth preset. Best when the host's real display matches.
+    public int? ScreenWidth { get; set; }
+    /// screen.height in CSS px (see the caveat on <see cref="ScreenWidth"/>).
+    public int? ScreenHeight { get; set; }
+    /// screen.availWidth in CSS px (see the caveat on <see cref="ScreenWidth"/>).
+    public int? AvailWidth { get; set; }
+    /// screen.availHeight in CSS px (see the caveat on <see cref="ScreenWidth"/>).
+    public int? AvailHeight { get; set; }
+    /// screen.colorDepth (e.g. 24).
+    public int? ColorDepth { get; set; }
+    /// window.devicePixelRatio (e.g. 1, 1.25, 1.5).
+    public double? DevicePixelRatio { get; set; }
+    /// navigator.maxTouchPoints (0 on a mouse-only desktop).
+    public int? MaxTouchPoints { get; set; }
+    /// Light-stealth preset: spoof a coherent, seed-derived bundle of the metadata axes that SURVIVE
+    /// strict anti-bot checks — HardwareConcurrency, DeviceMemory, ColorDepth, DevicePixelRatio,
+    /// MaxTouchPoints — applied via the native override switches ONLY (never the --fingerprint persona
+    /// machinery / farbling that strict anti-bots detect). Rendering (canvas/WebGL/audio/fonts), TLS,
+    /// and the real Chrome version are all left untouched, so the identity stays coherent and passes.
+    /// Screen dimensions are deliberately NOT spoofed (a faked screen is a reliable block trigger) —
+    /// set ScreenWidth/etc. explicitly to opt in. An explicit field wins over the preset.
+    public bool? LightStealth { get; set; }
     /// Geolocation as "lat,lng" (only returned when the page is granted permission).
     public string? Location { get; set; }
     /// IANA timezone, e.g. "America/New_York".
@@ -63,6 +91,9 @@ public class FingerprintOptions
     public int? StorageQuota { get; set; }
     /// Canvas bridge config (set Url to enable; auto-adds --no-sandbox).
     public CanvasBridgeOptions? CanvasBridge { get; set; }
+
+    /// Shallow copy, so applying the LightStealth preset never mutates the caller's object.
+    internal FingerprintOptions Clone() => (FingerprintOptions)MemberwiseClone();
 }
 
 /// Maps fingerprint options to Clearcote Chromium switches (ports fingerprint.ts).
@@ -82,6 +113,49 @@ public static class Fingerprint
         ["ru-RU"] = "Europe/Moscow", ["tr-TR"] = "Europe/Istanbul", ["ar-SA"] = "Asia/Riyadh",
         ["hi-IN"] = "Asia/Kolkata", ["id-ID"] = "Asia/Jakarta",
     };
+
+    // Coherent Windows-plausible desktop/laptop metadata bundles, indexed by a hash of the seed:
+    // (screen_w, screen_h, avail_w, avail_h, dpr, color_depth, device_memory_gb, hw_concurrency).
+    // LightStealth uses ONLY dpr/color_depth/device_memory/hw_concurrency (screen stays real).
+    private static readonly (int Sw, int Sh, int Aw, int Ah, double Dpr, int Cd, int Mem, int Hw)[] LightStealthProfiles =
+    {
+        (1920, 1080, 1920, 1040, 1.0, 24, 8, 8),
+        (1920, 1080, 1920, 1040, 1.0, 24, 16, 12),
+        (1920, 1080, 1920, 1040, 1.0, 24, 16, 16),
+        (2560, 1440, 2560, 1400, 1.0, 24, 16, 16),
+        (2560, 1440, 2560, 1400, 1.5, 24, 16, 12),
+        (1536, 864, 1536, 824, 1.25, 24, 8, 8),
+        (1536, 864, 1536, 824, 1.25, 24, 16, 12),
+        (1366, 768, 1366, 728, 1.0, 24, 8, 4),
+        (1366, 768, 1366, 728, 1.0, 24, 4, 4),
+        (1440, 900, 1440, 860, 1.0, 24, 8, 8),
+        (1600, 900, 1600, 860, 1.0, 24, 8, 8),
+        (1680, 1050, 1680, 1010, 1.0, 24, 8, 8),
+        (1920, 1200, 1920, 1160, 1.0, 24, 16, 12),
+        (3840, 2160, 3840, 2120, 1.0, 24, 32, 16),
+    };
+
+    /// Deterministic, coherent metadata bundle for LightStealth: spoofs ONLY the axes that survive
+    /// strict anti-bot checks (HardwareConcurrency, DeviceMemory, ColorDepth, DevicePixelRatio,
+    /// MaxTouchPoints), never screen. The seed->row mapping matches the Python/Node SDKs (full sha256
+    /// digest as a big integer mod N).
+    public static FingerprintOptions LightStealthValues(string? seed)
+    {
+        var key = string.IsNullOrEmpty(seed) ? "clearcote-light-stealth" : seed;
+        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(key));
+        var big = new BigInteger(digest, isUnsigned: true, isBigEndian: true);
+        var idx = (int)(big % LightStealthProfiles.Length);
+        var row = LightStealthProfiles[idx];
+        return new FingerprintOptions
+        {
+            DevicePixelRatio = row.Dpr,
+            ColorDepth = row.Cd,
+            DeviceMemory = row.Mem,
+            HardwareConcurrency = row.Hw,
+            MaxTouchPoints = 0,
+            Brand = "chrome",
+        };
+    }
 
     /// Normalize an Accept-Language for Chromium's --accept-lang: a plain comma-separated tag list with
     /// NO ";q=" weights or spaces (a ";" in the switch value trips a DCHECK and crashes the renderer).
@@ -170,6 +244,20 @@ public static class Fingerprint
     /// Build the Chromium switches for a set of fingerprint options (ports fingerprintArgs()).
     public static List<string> Args(FingerprintOptions o)
     {
+        // Apply the LightStealth preset first, on a copy (explicit fields win; never emit --fingerprint).
+        if (o.LightStealth == true)
+        {
+            o = o.Clone();
+            var preset = LightStealthValues(o.Fingerprint);
+            o.HardwareConcurrency ??= preset.HardwareConcurrency;
+            o.DeviceMemory ??= preset.DeviceMemory;
+            o.ColorDepth ??= preset.ColorDepth;
+            o.DevicePixelRatio ??= preset.DevicePixelRatio;
+            o.MaxTouchPoints ??= preset.MaxTouchPoints;
+            if (string.IsNullOrEmpty(o.Brand)) o.Brand = preset.Brand;
+            o.Fingerprint = null; // never emit --fingerprint, so the persona machinery never engages
+        }
+
         var args = new List<string>();
         void Set(string flag, object? value)
         {
@@ -186,6 +274,16 @@ public static class Fingerprint
         Set("fingerprint-gpu-vendor", o.GpuVendor);
         Set("fingerprint-gpu-renderer", o.GpuRenderer);
         Set("fingerprint-hardware-concurrency", o.HardwareConcurrency);
+        // Native metadata overrides (flag > persona > real). Read directly by the getters — no
+        // --fingerprint persona machinery — so they are safe to spoof individually or via LightStealth.
+        Set("fingerprint-device-memory", o.DeviceMemory);
+        Set("fingerprint-screen-width", o.ScreenWidth);
+        Set("fingerprint-screen-height", o.ScreenHeight);
+        Set("fingerprint-avail-width", o.AvailWidth);
+        Set("fingerprint-avail-height", o.AvailHeight);
+        Set("fingerprint-color-depth", o.ColorDepth);
+        Set("fingerprint-device-pixel-ratio", o.DevicePixelRatio);
+        Set("fingerprint-max-touch-points", o.MaxTouchPoints);
         Set("fingerprint-location", o.Location);
         Set("fingerprint-storage-quota", o.StorageQuota);
         Set("timezone", o.Timezone);

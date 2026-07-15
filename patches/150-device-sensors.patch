@@ -1,30 +1,3 @@
---- a/third_party/blink/renderer/core/events/navigator_events.cc
-+++ b/third_party/blink/renderer/core/events/navigator_events.cc
-@@ -30,6 +30,9 @@
- 
- #include "third_party/blink/renderer/core/events/navigator_events.h"
- 
-+#include "base/command_line.h"
-+#include "components/ungoogled/persona_profile.h"
-+#include "components/ungoogled/ungoogled_switches.h"
- #include "third_party/blink/renderer/core/frame/local_dom_window.h"
- #include "third_party/blink/renderer/core/frame/local_frame.h"
- #include "third_party/blink/renderer/core/frame/navigator.h"
-@@ -38,6 +41,14 @@
- namespace blink {
- 
- int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
-+  // clearcote: the Windows desktop persona is mouse-only (coherent with CSS
-+  // pointer:fine / hover:hover); report 0 touch points instead of the host's real
-+  // value (e.g. 2 from a pen/precision-touchpad), which would contradict it.
-+  // clearcote: return the persona's touch-point count -- 0 for the mouse-only
-+  // desktop personas (unchanged), 5 for the Android persona. This keeps
-+  // maxTouchPoints coherent with CSS pointer:coarse and userAgentData.mobile.
-+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(::switches::kFingerprint))
-+    return ungoogled::CurrentPersona().max_touch_points;
-   LocalDOMWindow* window = navigator.DomWindow();
-   return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
- }
 --- a/third_party/blink/renderer/modules/battery/battery_manager.cc
 +++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
 @@ -4,6 +4,10 @@
@@ -365,3 +338,41 @@
    probe::ApplyDataSaverOverride(probe::ToCoreProbeSink(GetExecutionContext()),
                                  save_data);
    return save_data;
+--- a/third_party/blink/renderer/core/events/navigator_events.cc	2026-07-15 11:42:12.380975338 +0000
++++ b/third_party/blink/renderer/core/events/navigator_events.cc	2026-07-15 11:42:12.380975338 +0000
+@@ -30,6 +30,10 @@
+ 
+ #include "third_party/blink/renderer/core/events/navigator_events.h"
+ 
++#include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"  // clearcote-light-stealth
++#include "components/ungoogled/persona_profile.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+@@ -38,6 +42,24 @@
+ namespace blink {
+ 
+ int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
++  // clearcote: the Windows desktop persona is mouse-only (coherent with CSS
++  // pointer:fine / hover:hover); report 0 touch points instead of the host's real
++  // value (e.g. 2 from a pen/precision-touchpad), which would contradict it.
++  // clearcote: return the persona's touch-point count -- 0 for the mouse-only
++  // desktop personas (unchanged), 5 for the Android persona. This keeps
++  // maxTouchPoints coherent with CSS pointer:coarse and userAgentData.mobile.
++  // clearcote-light-stealth: direct override (flag > persona > real).
++  const base::CommandLine* ls_cmd = base::CommandLine::ForCurrentProcess();
++  int ls_mt = 0;
++  if (ls_cmd->HasSwitch(::switches::kFingerprintMaxTouchPoints) &&
++      base::StringToInt(
++          ls_cmd->GetSwitchValueASCII(::switches::kFingerprintMaxTouchPoints),
++          &ls_mt) &&
++      ls_mt >= 0) {
++    return ls_mt;
++  }
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(::switches::kFingerprint))
++    return ungoogled::CurrentPersona().max_touch_points;
+   LocalDOMWindow* window = navigator.DomWindow();
+   return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
+ }

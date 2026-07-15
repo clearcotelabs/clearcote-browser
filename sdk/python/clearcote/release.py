@@ -12,34 +12,34 @@ import sys
 # signed asset + its SHA-256 (the trust anchor) + the inner-binary hash (defence in depth) + how to
 # unpack it. Windows and Linux ship from their own release tags.
 _WINDOWS = {
-    "tag": "v0.1.0-pre.21",
+    "tag": "v0.1.0-pre.22",
     "version": "149.0.7827.114",
     "asset": "clearcote-149.0.7827.114-windows-x64.zip",
     "url": (
         "https://github.com/clearcotelabs/clearcote-browser/releases/download/"
-        "v0.1.0-pre.21/clearcote-149.0.7827.114-windows-x64.zip"
+        "v0.1.0-pre.22/clearcote-149.0.7827.114-windows-x64.zip"
     ),
     # SHA-256 of the archive — verified after download; a mismatch is a hard failure.
-    "sha256": "79b03d2d875b374970b2d54eae54f77070eba06b6a446dc163420854ec068c4d",
+    "sha256": "f40c83049aae13d8c0322e9822eeb2d7236fddd5e7915304eb6f0f5f1f79fcb6",
     # SHA-256 of the inner browser binary — verified after extraction (defence in depth).
     "exe_sha256": "09a9f5ed46be45b54babc91872256fcdd5ef61cef6bf65cbec3928cbb38ee17a",
-    "size": 242655762,
+    "size": 242661515,
     "os": "win32",
     "archive": "zip",
     "binary": "chrome.exe",
     "asset_glob": "windows-x64",
 }
 _LINUX = {
-    "tag": "v0.1.0-pre.21",
+    "tag": "v0.1.0-pre.22",
     "version": "149.0.7827.114",
     "asset": "clearcote-149.0.7827.114-linux-x64.tar.xz",
     "url": (
         "https://github.com/clearcotelabs/clearcote-browser/releases/download/"
-        "v0.1.0-pre.21/clearcote-149.0.7827.114-linux-x64.tar.xz"
+        "v0.1.0-pre.22/clearcote-149.0.7827.114-linux-x64.tar.xz"
     ),
-    "sha256": "5e7241a3e90033bc84f6079821829e99a6e6f0f6479eaa291d8b6590363aa292",
-    "exe_sha256": "dd5aef845b47f63ebf84d769cc349dae69178639fe5c703fc52779c5a0606cce",
-    "size": 146851212,
+    "sha256": "6625971f51318acb6adc301fcc18dcf790c3de0ba2b313be7182eff180a8ec53",
+    "exe_sha256": "aea54f3c1b5bfc43b4c42aff00d41df49393575950df7c644cc580f72462db4a",
+    "size": 146834232,
     "os": "linux",
     "archive": "tar.xz",
     "binary": "chrome",
@@ -89,7 +89,7 @@ CATALOG_FALLBACK = {
     "schema": 1,
     "builds": [
         {
-            "major": 149, "version": "149.0.7827.114", "tier": "free", "tag": "v0.1.0-pre.21",
+            "major": 149, "version": "149.0.7827.114", "tier": "free", "tag": "v0.1.0-pre.22",
             "platforms": {
                 "windows": {
                     "asset": _WINDOWS["asset"], "url": _WINDOWS["url"], "sha256": _WINDOWS["sha256"],

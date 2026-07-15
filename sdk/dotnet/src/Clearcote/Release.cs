@@ -40,13 +40,13 @@ public static class Release
 {
     public static readonly ReleaseInfo Windows = new()
     {
-        Tag = "v0.1.0-pre.21",
+        Tag = "v0.1.0-pre.22",
         Version = "149.0.7827.114",
         Asset = "clearcote-149.0.7827.114-windows-x64.zip",
-        Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.21/clearcote-149.0.7827.114-windows-x64.zip",
-        Sha256 = "79b03d2d875b374970b2d54eae54f77070eba06b6a446dc163420854ec068c4d",
+        Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.22/clearcote-149.0.7827.114-windows-x64.zip",
+        Sha256 = "f40c83049aae13d8c0322e9822eeb2d7236fddd5e7915304eb6f0f5f1f79fcb6",
         ExeSha256 = "09a9f5ed46be45b54babc91872256fcdd5ef61cef6bf65cbec3928cbb38ee17a",
-        Size = 242655762,
+        Size = 242661515,
         Os = "windows",
         Archive = "zip",
         Binary = "chrome.exe",
@@ -55,13 +55,13 @@ public static class Release
 
     public static readonly ReleaseInfo Linux = new()
     {
-        Tag = "v0.1.0-pre.21",
+        Tag = "v0.1.0-pre.22",
         Version = "149.0.7827.114",
         Asset = "clearcote-149.0.7827.114-linux-x64.tar.xz",
-        Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.21/clearcote-149.0.7827.114-linux-x64.tar.xz",
-        Sha256 = "5e7241a3e90033bc84f6079821829e99a6e6f0f6479eaa291d8b6590363aa292",
-        ExeSha256 = "dd5aef845b47f63ebf84d769cc349dae69178639fe5c703fc52779c5a0606cce",
-        Size = 146851212,
+        Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.22/clearcote-149.0.7827.114-linux-x64.tar.xz",
+        Sha256 = "6625971f51318acb6adc301fcc18dcf790c3de0ba2b313be7182eff180a8ec53",
+        ExeSha256 = "aea54f3c1b5bfc43b4c42aff00d41df49393575950df7c644cc580f72462db4a",
+        Size = 146834232,
         Os = "linux",
         Archive = "tar.xz",
         Binary = "chrome",
@@ -105,7 +105,7 @@ public static class Release
         {
             new()
             {
-                Major = 149, Version = "149.0.7827.114", Tier = "free", Tag = "v0.1.0-pre.21",
+                Major = 149, Version = "149.0.7827.114", Tier = "free", Tag = "v0.1.0-pre.22",
                 Platforms = new Dictionary<string, CatalogPlatform>
                 {
                     ["windows"] = new() { Asset = Windows.Asset, Url = Windows.Url, Sha256 = Windows.Sha256, ExeSha256 = Windows.ExeSha256, Size = Windows.Size, Archive = "zip", Binary = "chrome.exe" },
