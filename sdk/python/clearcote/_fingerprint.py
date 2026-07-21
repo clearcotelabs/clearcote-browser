@@ -36,6 +36,7 @@ FINGERPRINT_KEYS = (
     "timezone",
     "accept_language",
     "webrtc_ip",
+    "webrtc_mdns",
     "disable_gpu_fingerprint",
     "fingerprint_noise",
     "fingerprint_profile",
@@ -70,6 +71,9 @@ _FLAGS = {
     # navigator.storage.estimate().quota in MEGABYTES (a tiny/ephemeral quota reads as a test
     # machine / incognito; set a realistic on-disk value, e.g. 250000 for ~244 GB).
     "storage_quota": "fingerprint-storage-quota",
+    # Direct metadata overrides (the "light" path): each beats the persona, which beats the real
+    # host value. Emitted whenever the value is not None -- including 0, which is a real value for
+    # max_touch_points (a non-touch desktop) rather than "unset".
 }
 
 
@@ -265,6 +269,16 @@ def fingerprint_args(opts):
         value = opts.get(key)
         if value is not None and value != "":
             args.append(f"--{flag}={value}")
+    # Only "off" is meaningful: concealment ON is both the Chromium default and real Chrome's
+    # behaviour, so there is nothing to emit for "on".
+    #
+    # This uses Chromium's OWN feature flag rather than a clearcote switch. The mDNS responder is
+    # created in PeerConnectionDependencyFactory behind kWebRtcHideLocalIpsWithMdns; disabling the
+    # feature means no responder is built and host candidates are signalled as raw IPs. Verified
+    # end-to-end: with the flag, host candidates come back as 192.168.x.x; without it, <uuid>.local.
+    # merge_feature_flags folds this into any other --disable-features value.
+    if str(opts.get("webrtc_mdns") or "").lower() == "off":
+        args.append("--disable-features=WebRtcHideLocalIpsWithMdns")
     # Default the persona platform to the HOST OS, so it's coherent with the binary the SDK ships for
     # this machine (Windows binary -> windows persona, Linux binary -> linux persona) rather than a
     # seed-derived OS that could vary. Override explicitly via platform="windows"/"linux"/"macos".

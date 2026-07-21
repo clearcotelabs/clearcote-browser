@@ -91,6 +91,17 @@ export interface FingerprintOptions {
   /** WebRTC egress IP to report (typically your proxy's public IP). */
   webrtcIp?: string;
   /**
+   * WebRTC host-candidate mDNS concealment. Real Chrome hides local host candidates behind an
+   * `<uuid>.local` mDNS name so a page opening an RTCPeerConnection cannot read the LAN address;
+   * that is the default here too. Set `"off"` only if you need routable raw host candidates
+   * (LAN/P2P) — it re-exposes the private IP to every page.
+   *
+   * Requires an engine built with `enable_mdns=true`; with it off the responder is never compiled,
+   * concealment cannot happen, and the LAN IP leaks regardless of this option. (Builds before
+   * 150.0.7871.114-r4 were in exactly that state.)
+   */
+  webrtcMdns?: "on" | "off";
+  /**
    * Present the machine's **real GPU** instead of a spoofed one. WebGL `UNMASKED_VENDOR`/`RENDERER`,
    * the `getParameter` table, and the canvas/WebGL render all report the genuine host backend. This
    * is the most coherent setting against strict browser-tampering classifiers: the GPU string and
@@ -174,6 +185,7 @@ export const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "timezone",
   "acceptLanguage",
   "webrtcIp",
+  "webrtcMdns",
   "disableGpuFingerprint",
   "fingerprintNoise",
   "fingerprintProfile",
@@ -396,6 +408,17 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   set("fingerprint-max-touch-points", o.maxTouchPoints);
   set("fingerprint-location", o.location);
   set("fingerprint-storage-quota", o.storageQuota);
+  // Direct metadata overrides (the "light" path): each beats the persona, which beats the real
+  // host value. `set` uses strict comparison, so a numeric 0 is emitted rather than dropped —
+  // that matters for maxTouchPoints, where 0 is a real value (a non-touch desktop) and not "unset".
+  set("fingerprint-device-memory", o.deviceMemory);
+  set("fingerprint-max-touch-points", o.maxTouchPoints);
+  set("fingerprint-screen-width", o.screenWidth);
+  set("fingerprint-screen-height", o.screenHeight);
+  set("fingerprint-avail-width", o.availWidth);
+  set("fingerprint-avail-height", o.availHeight);
+  set("fingerprint-color-depth", o.colorDepth);
+  set("fingerprint-device-pixel-ratio", o.devicePixelRatio);
   set("timezone", o.timezone);
   // Always send a coherent Accept-Language. Without --accept-lang Chromium falls back to the
   // build/OS locale, which can leak a language that mismatches the proxy's country/timezone
@@ -422,6 +445,15 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
     if (tz) args.push(`--timezone=${tz}`);
   }
   set("webrtc-ip", o.webrtcIp);
+  // Only "off" is meaningful — concealment ON is both the Chromium default and real Chrome's
+  // behaviour, so there is nothing to emit for "on".
+  //
+  // This uses Chromium's OWN feature flag rather than a clearcote switch. The mDNS responder is
+  // created in PeerConnectionDependencyFactory behind `kWebRtcHideLocalIpsWithMdns`; disabling
+  // the feature means no responder is built and host candidates are signalled as raw IPs.
+  // Verified end-to-end: with the flag, host candidates come back as 192.168.x.x; without it,
+  // as <uuid>.local. mergeFeatureFlags folds this into any other --disable-features value.
+  if (o.webrtcMdns === "off") args.push("--disable-features=WebRtcHideLocalIpsWithMdns");
   if (o.disableGpuFingerprint) args.push("--disable-gpu-fingerprint");
   // fingerprintNoise=false turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects)
   // so those surfaces return natural values — for sites whose ML flags the noise as "tampered".

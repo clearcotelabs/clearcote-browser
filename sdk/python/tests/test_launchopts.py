@@ -23,7 +23,7 @@ def test_merge_feature_flags_collapses_into_one_each():
 def test_privacy_sandbox_args():
     assert privacy_sandbox_args() == [
         "--disable-features=BrowsingTopics,BrowsingTopicsDocumentAPI,Fledge,InterestGroupStorage,"
-        "PrivateAggregationApi,SharedStorageAPI,FencedFrames,WebUSB"
+        "PrivateAggregationApi,SharedStorageAPI,FencedFrames"
     ]
 
 

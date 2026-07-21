@@ -422,6 +422,32 @@ pulls a separate, license-gated browser build. It's opt-in and entirely additive
 license key the SDK is byte-for-byte the free client** (free binary from GitHub, and it never
 contacts the license backend).
 
+### What's in each tier
+
+The identity surface is **free in full**. PRO does not unlock "more spoofing" — every fingerprint
+control below is in the free build. What PRO adds is behavioural realism that needs recorded data
+or engine work held out of the public tree, plus the licensing itself.
+
+| Capability | Free | PRO |
+|---|:---:|:---:|
+| Seeded personas (`fingerprint`), per-site farbling | ✅ | ✅ |
+| Canvas / WebGL / audio / font identity controls | ✅ | ✅ |
+| All 18 metadata overrides (`screenWidth`, `deviceMemory`, `gpuVendor`, …) | ✅ | ✅ |
+| `light_stealth` preset | ✅ | ✅ |
+| WebRTC mDNS concealment (`.local` host candidates) | ✅ | ✅ |
+| TLS ClientHello profile (`tlsProfile`) | ✅ | ✅ |
+| Proxy + `geoip` locale/timezone coherence | ✅ | ✅ |
+| Humanized input (`humanize`) — synthetic bézier paths | ✅ | ✅ |
+| **Humanized input — real recorded human trajectories** | — | ✅ |
+| **Coalesced pointer samples** (`getCoalescedEvents` realism) | — | ✅ |
+| **Coherent WebRTC srflx fabrication** (`webrtcIp`) | — | ✅ |
+| **Request-header hygiene** on revalidation | — | ✅ |
+| Floating-concurrency licensing + run-token gate | — | ✅ |
+
+The mouse tier is decided **at runtime** from a signed claim in the run-token — same SDK call,
+same `humanize: true`. With a valid PRO lease the motion comes from recorded human trajectories;
+without one it falls back to the synthetic bézier path. Nothing in your code changes.
+
 Pass a `licenseKey` (or set `CLEARCOTE_LICENSE_KEY`, or drop it in `~/.clearcote/license.key`):
 
 ```ts

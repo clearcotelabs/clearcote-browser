@@ -13,10 +13,13 @@ public sealed class ProxyOptions
 public static class LaunchOpts
 {
     /// Privacy-Sandbox features Clearcote disables by default (a stock, un-enrolled Chrome profile).
+    /// WebUSB is deliberately excluded: it is a device API, not a Privacy Sandbox feature, and it
+    /// ships alongside Web Serial/WebHID/Web Bluetooth under identical gating. Disabling only
+    /// WebUSB produced a device-API family split no real Chromium exhibits.
     public static readonly string[] PrivacySandboxFeatures =
     {
         "BrowsingTopics", "BrowsingTopicsDocumentAPI", "Fledge", "InterestGroupStorage",
-        "PrivateAggregationApi", "SharedStorageAPI", "FencedFrames", "WebUSB",
+        "PrivateAggregationApi", "SharedStorageAPI", "FencedFrames",
     };
 
     public static List<string> PrivacySandboxArgs()

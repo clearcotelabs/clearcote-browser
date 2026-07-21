@@ -88,7 +88,7 @@ interface ProfileOption {
 interface ExtensionsOption {
   /** Unpacked-extension directory paths. */
   extensions?: string[];
-  /** Disable Privacy Sandbox + intrusive APIs (Topics/FLEDGE/WebUSB/…). Default `true` — a
+  /** Disable Privacy Sandbox APIs (Topics/FLEDGE/Shared Storage/…). Default `true` — a
    * de-Googled build shouldn't expose them. Set `false` to keep them. */
   disablePrivacySandbox?: boolean;
 }

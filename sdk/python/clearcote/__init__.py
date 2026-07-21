@@ -191,7 +191,7 @@ def _prepare(kwargs):
     _cc_pro = kwargs.pop("_cc_pro", None)  # (license_key, api_base) or None -> pick PRO vs free binary
     extra_args = kwargs.pop("args", None)
     extensions = kwargs.pop("extensions", None)
-    # de-Googled-coherence default: disable Privacy Sandbox + intrusive APIs (Topics/FLEDGE/WebUSB/
+    # de-Googled-coherence default: disable Privacy Sandbox APIs (Topics/FLEDGE/Shared Storage/
     # etc). Pass disable_privacy_sandbox=False to keep them.
     disable_privacy_sandbox = kwargs.pop("disable_privacy_sandbox", True)
     cache_dir = kwargs.pop("cache_dir", None)

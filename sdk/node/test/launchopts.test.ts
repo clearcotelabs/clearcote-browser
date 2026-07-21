@@ -23,7 +23,7 @@ describe("mergeFeatureFlags", () => {
 describe("privacySandboxArgs", () => {
   it("disables the Privacy Sandbox + intrusive APIs", () => {
     expect(privacySandboxArgs()).toEqual([
-      "--disable-features=BrowsingTopics,BrowsingTopicsDocumentAPI,Fledge,InterestGroupStorage,PrivateAggregationApi,SharedStorageAPI,FencedFrames,WebUSB",
+      "--disable-features=BrowsingTopics,BrowsingTopicsDocumentAPI,Fledge,InterestGroupStorage,PrivateAggregationApi,SharedStorageAPI,FencedFrames",
     ]);
   });
 });

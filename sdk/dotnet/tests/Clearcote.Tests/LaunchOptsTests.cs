@@ -21,7 +21,7 @@ public class LaunchOptsTests
     [Fact]
     public void PrivacySandboxArgs_is_exact()
         => Assert.Equal(
-            new[] { "--disable-features=BrowsingTopics,BrowsingTopicsDocumentAPI,Fledge,InterestGroupStorage,PrivateAggregationApi,SharedStorageAPI,FencedFrames,WebUSB" },
+            new[] { "--disable-features=BrowsingTopics,BrowsingTopicsDocumentAPI,Fledge,InterestGroupStorage,PrivateAggregationApi,SharedStorageAPI,FencedFrames" },
             LaunchOpts.PrivacySandboxArgs());
 
     [Fact]

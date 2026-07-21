@@ -8,12 +8,20 @@ import warnings
 _SOCKS = re.compile(r"^socks", re.IGNORECASE)
 
 # Privacy Sandbox + intrusive web APIs a de-Googled stealth build should not expose (a build that
-# claims to be de-Googled while still answering document.browsingTopics()/navigator.runAdAuction/
-# navigator.usb is a self-contradictory, pivotable fingerprint). All are runtime base::Features, so
-# disabling needs no rebuild. Verified present in the 149 source.
+# claims to be de-Googled while still answering document.browsingTopics()/navigator.runAdAuction
+# is a self-contradictory, pivotable fingerprint). All are runtime base::Features, so disabling
+# needs no rebuild. Verified present in the 149 source.
+#
+# WebUSB is deliberately NOT in this list. It is not a Privacy Sandbox feature - it is a device
+# API that ships alongside Web Serial, WebHID and Web Bluetooth under identical secure-context
+# gating. Disabling only WebUSB left navigator.usb absent while serial/hid/bluetooth stayed
+# present, a combination no real Chromium produces; measured against stock Chrome on the same
+# host, that split was the single flagged difference in the device-API family. Presence leaks
+# nothing on its own - the API is permission-gated and enumerates no device without a user
+# gesture - so exposing it costs no privacy and removes a hard coherence tell.
 PRIVACY_SANDBOX_FEATURES = (
     "BrowsingTopics", "BrowsingTopicsDocumentAPI", "Fledge", "InterestGroupStorage",
-    "PrivateAggregationApi", "SharedStorageAPI", "FencedFrames", "WebUSB",
+    "PrivateAggregationApi", "SharedStorageAPI", "FencedFrames",
 )
 
 

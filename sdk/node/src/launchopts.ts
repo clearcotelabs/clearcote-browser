@@ -11,12 +11,20 @@ export interface PwProxy {
 }
 
 /** Privacy Sandbox + intrusive web APIs a de-Googled stealth build should not expose (a build that
- * claims de-Googled while still answering document.browsingTopics()/navigator.runAdAuction/
- * navigator.usb is a self-contradictory, pivotable fingerprint). All are runtime base::Features, so
- * disabling needs no rebuild. */
+ * claims de-Googled while still answering document.browsingTopics()/navigator.runAdAuction is a
+ * self-contradictory, pivotable fingerprint). All are runtime base::Features, so disabling needs
+ * no rebuild.
+ *
+ * WebUSB is deliberately NOT in this list. It is not a Privacy Sandbox feature - it is a device
+ * API that ships alongside Web Serial, WebHID and Web Bluetooth under identical secure-context
+ * gating. Disabling only WebUSB left navigator.usb absent while serial/hid/bluetooth stayed
+ * present, a combination no real Chromium produces; measured against stock Chrome on the same
+ * host, that split was the single flagged difference in the device-API family. Presence leaks
+ * nothing on its own - the API is permission-gated and enumerates no device without a user
+ * gesture - so exposing it costs no privacy and removes a hard coherence tell. */
 export const PRIVACY_SANDBOX_FEATURES = [
   "BrowsingTopics", "BrowsingTopicsDocumentAPI", "Fledge", "InterestGroupStorage",
-  "PrivateAggregationApi", "SharedStorageAPI", "FencedFrames", "WebUSB",
+  "PrivateAggregationApi", "SharedStorageAPI", "FencedFrames",
 ] as const;
 
 /** Chromium honors only the LAST --enable-features / --disable-features on the command line (they

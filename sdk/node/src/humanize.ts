@@ -73,6 +73,22 @@ const SELECT_ALL = "Control+a"; // Clearcote ships a Windows binary; Control is 
 
 /** Wrap a single page's input methods + (optionally) inject the cursor overlay. */
 export async function attachHumanize(browser: Browser, page: Page, opts: HumanizeOptions): Promise<void> {
+  // IDEMPOTENCY GUARD — do not remove.
+  //
+  // installHumanize wraps BOTH browser.newPage and browser.newContext. Playwright's newPage()
+  // creates a context internally, so the wrapped newContext runs installHumanizeOnContext (which
+  // attaches on the "page" event) and then the outer newPage wrapper attaches a second time.
+  //
+  // Without this guard the mouse is wrapped twice, and the second
+  //     const nativeMove = mouse.move.bind(mouse)
+  // captures the FIRST WRAPPER rather than the real native move — so every step of the outer
+  // planned path triggers an entire inner planned path. Measured on the same ~980px move:
+  //     browser.newPage()   51338 ms   2946 samples
+  //     context.newPage()    2833 ms    161 samples   <- correct (planner caps at ~180)
+  // i.e. an 18x blow-up on the most common entry point in the API.
+  if ((page as any).__clearcoteHumanized) return;
+  (page as any).__clearcoteHumanized = true;
+
   if (opts.showCursor) {
     const inject = () => page.evaluate(CURSOR_OVERLAY).catch(() => {});
     inject();
