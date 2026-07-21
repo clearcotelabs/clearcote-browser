@@ -81,6 +81,11 @@ public class FingerprintOptions
     public string? AcceptLanguage { get; set; }
     /// WebRTC egress IP to report (typically your proxy's public IP).
     public string? WebrtcIp { get; set; }
+    /// WebRTC host-candidate mDNS concealment. Real Chrome hides local host candidates behind an
+    /// &lt;uuid&gt;.local name so a page opening an RTCPeerConnection cannot read the LAN address; that
+    /// is the default here too. Set "off" only if you need routable raw host candidates (LAN/P2P) —
+    /// it re-exposes the private IP to every page. Requires an engine built with enable_mdns.
+    public string? WebrtcMdns { get; set; }
     /// Present the machine's real GPU instead of a spoofed one (most coherent vs strict classifiers).
     public bool? DisableGpuFingerprint { get; set; }
     /// Set false to turn OFF per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects).
@@ -308,6 +313,13 @@ public static class Fingerprint
         }
 
         Set("webrtc-ip", o.WebrtcIp);
+        // Only "off" is meaningful — concealment ON is both the Chromium default and real Chrome's
+        // behaviour, so there is nothing to emit for "on". Uses Chromium's own feature flag rather
+        // than a clearcote switch: the mDNS responder is created behind kWebRtcHideLocalIpsWithMdns,
+        // so disabling the feature means no responder is built and host candidates are signalled as
+        // raw IPs. MergeFeatureFlags folds this into any other --disable-features value.
+        if (string.Equals(o.WebrtcMdns, "off", StringComparison.OrdinalIgnoreCase))
+            args.Add("--disable-features=WebRtcHideLocalIpsWithMdns");
         if (o.DisableGpuFingerprint == true) args.Add("--disable-gpu-fingerprint");
         if (o.FingerprintNoise == false) args.Add("--disable-fingerprint-noise");
         if (o.FingerprintProfile is not null) args.Add($"--fingerprint-profile={EncodeProfile(o.FingerprintProfile)}");
