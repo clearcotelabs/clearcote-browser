@@ -32,11 +32,20 @@ describe("webrtcDefaultDenyArgs", () => {
   it("defaults to disable_non_proxied_udp when no webrtcIp", () => {
     expect(webrtcDefaultDenyArgs([], undefined)).toEqual(["--webrtc-ip-handling-policy=disable_non_proxied_udp"]);
   });
-  it("is skipped when a webrtcIp is set", () => {
-    expect(webrtcDefaultDenyArgs([], "1.2.3.4")).toEqual([]);
+  // Regression: this used to return [] when a webrtcIp was set, on the theory that the engine's
+  // srflx fabrication covered WebRTC. It does not. A page using iceTransportPolicy:"relay" forces
+  // TURN; TURN prefers UDP; an HTTP/SOCKS proxy carries only TCP — so the UDP left on the host's
+  // own path and the TURN server read the real public IP off the packet, with no candidate
+  // involved for the fabrication to rewrite. geoip:true sets webrtcIp for you, so the coherent
+  // configurations were the exposed ones.
+  it("still denies non-proxied UDP when a webrtcIp is set", () => {
+    expect(webrtcDefaultDenyArgs([], "1.2.3.4")).toEqual(["--webrtc-ip-handling-policy=disable_non_proxied_udp"]);
   });
   it("is skipped when the caller already set a policy", () => {
     expect(webrtcDefaultDenyArgs(["--webrtc-ip-handling-policy=default"], undefined)).toEqual([]);
+  });
+  it("is skipped when the caller set a forced policy, even with a webrtcIp", () => {
+    expect(webrtcDefaultDenyArgs(["--force-webrtc-ip-handling-policy=default"], "1.2.3.4")).toEqual([]);
   });
 });
 

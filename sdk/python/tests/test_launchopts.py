@@ -29,8 +29,16 @@ def test_privacy_sandbox_args():
 
 def test_webrtc_default_deny():
     assert webrtc_default_deny_args([], None) == ["--webrtc-ip-handling-policy=disable_non_proxied_udp"]
-    assert webrtc_default_deny_args([], "1.2.3.4") == []  # webrtc_ip set -> engine fabricates coherently
+    # Regression: this used to return [] when webrtc_ip was set, on the theory that the engine's
+    # srflx fabrication covered WebRTC. It does not. A page using iceTransportPolicy:"relay" forces
+    # TURN; TURN prefers UDP; an HTTP/SOCKS proxy carries only TCP -- so the UDP left on the host's
+    # own path and the TURN server read the real public IP off the packet, with no candidate
+    # involved for the fabrication to rewrite. geoip=True sets webrtc_ip for you, so the coherent
+    # configurations were the exposed ones.
+    assert webrtc_default_deny_args([], "1.2.3.4") == ["--webrtc-ip-handling-policy=disable_non_proxied_udp"]
     assert webrtc_default_deny_args(["--webrtc-ip-handling-policy=default"], None) == []  # caller set it
+    # An explicit caller policy still wins, even alongside a webrtc_ip.
+    assert webrtc_default_deny_args(["--force-webrtc-ip-handling-policy=default"], "1.2.3.4") == []
 
 
 def test_quic_args_disabled_only_when_proxied():

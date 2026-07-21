@@ -68,12 +68,31 @@ def quic_args(proxy):
     return ["--disable-quic"] if (isinstance(proxy, dict) and proxy.get("server")) else []
 
 
-def webrtc_default_deny_args(args, webrtc_ip):
-    """When no persona WebRTC IP is configured, default WebRTC to disable_non_proxied_udp so the real
-    local IP can't leak via srflx (stock Chromium leaks it). Skipped if the caller already set a
-    handling policy or a webrtc_ip (the engine owns coherent fabrication in that case)."""
-    if webrtc_ip:
-        return []
+def webrtc_default_deny_args(args, webrtc_ip=None):
+    """Default WebRTC to disable_non_proxied_udp, so no UDP can egress around the proxy.
+
+    This used to be skipped whenever ``webrtc_ip`` was set, on the theory that the engine's srflx
+    fabrication already covered WebRTC. It does not -- the two defend different things:
+
+      * fabrication rewrites what the browser *reports*, which beats a page reading the candidate;
+      * this policy stops UDP *leaving the machine*, which beats a server watching where packets
+        arrive from.
+
+    A page that sets ``iceTransportPolicy: "relay"`` forces the browser to talk to its own TURN
+    server. TURN prefers UDP and an HTTP/SOCKS proxy carries only TCP, so that UDP left on the
+    host's own path and the TURN server read the real public address straight off the packet -- no
+    candidate involved, so fabricating one changed nothing. Reported by a customer whose session was
+    flagged for location spoofing with an otherwise perfectly coherent persona.
+
+    Worse, ``geoip=True`` sets ``webrtc_ip`` for you, so the more carefully a caller configured for
+    coherence the more likely they had silently lost this. Now only an explicit policy from the
+    caller suppresses it.
+
+    Note this is a real trade-off, not a free win: denying non-proxied UDP means peer connections
+    that genuinely need UDP will not establish. Callers who need working WebRTC through a proxy want
+    a transport that actually carries UDP (SOCKS5 with UDP ASSOCIATE, or a full tunnel) and can set
+    their own policy to opt out. ``webrtc_ip`` is accepted and ignored, for call-site compatibility.
+    """
     if any(a.startswith("--webrtc-ip-handling-policy") or a.startswith("--force-webrtc-ip-handling-policy")
            for a in args):
         return []

@@ -49,10 +49,22 @@ public static class LaunchOpts
     public static List<string> QuicArgs(ProxyOptions? proxy)
         => proxy is not null && !string.IsNullOrEmpty(proxy.Server) ? new() { "--disable-quic" } : new();
 
-    /// Default WebRTC to deny non-proxied UDP unless a webrtcIp is set or the caller already set a policy.
-    public static List<string> WebrtcDefaultDenyArgs(IEnumerable<string> args, string? webrtcIp)
+    /// Default WebRTC to deny non-proxied UDP, so no UDP can egress around the proxy.
+    ///
+    /// This used to be skipped whenever a webrtcIp was set, on the theory that the engine's srflx
+    /// fabrication already covered WebRTC. It does not — fabrication rewrites what the browser
+    /// reports (beating a page that reads the candidate), while this policy stops UDP leaving the
+    /// machine (beating a server that watches where packets arrive from). A page using
+    /// iceTransportPolicy: "relay" forces TURN, TURN prefers UDP, and an HTTP/SOCKS proxy carries
+    /// only TCP — so the UDP left on the host's own path and the TURN server read the real public
+    /// address off the packet. Only an explicit caller policy suppresses this now.
+    ///
+    /// Trade-off, not a free win: peer connections that genuinely need UDP will not establish.
+    /// Callers who need working WebRTC through a proxy want a transport that carries UDP (SOCKS5
+    /// with UDP ASSOCIATE, or a full tunnel) and can set their own policy to opt out.
+    /// webrtcIp is accepted and ignored, for call-site compatibility.
+    public static List<string> WebrtcDefaultDenyArgs(IEnumerable<string> args, string? webrtcIp = null)
     {
-        if (!string.IsNullOrEmpty(webrtcIp)) return new();
         if (args.Any(a => a.StartsWith("--webrtc-ip-handling-policy")
                           || a.StartsWith("--force-webrtc-ip-handling-policy")))
             return new();

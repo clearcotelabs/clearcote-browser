@@ -59,11 +59,30 @@ export function quicArgs(proxy: PwProxy | undefined): string[] {
   return proxy && proxy.server ? ["--disable-quic"] : [];
 }
 
-/** When no persona WebRTC IP is configured, default WebRTC to disable_non_proxied_udp so the real
- * local IP can't leak via srflx (stock Chromium leaks it). Skipped if the caller already set a
- * handling policy or a webrtcIp (the engine owns coherent fabrication in that case). */
-export function webrtcDefaultDenyArgs(args: string[], webrtcIp: unknown): string[] {
-  if (webrtcIp) return [];
+/** Default WebRTC to disable_non_proxied_udp, so no UDP can egress around the proxy.
+ *
+ * This used to be skipped whenever `webrtcIp` was set, on the theory that the engine's srflx
+ * fabrication already covered WebRTC. It does not — the two defend different things:
+ *
+ *   - fabrication rewrites what the browser *reports*, which beats a page that reads the candidate;
+ *   - this policy stops UDP *leaving the machine*, which beats a server that watches where packets
+ *     arrive from.
+ *
+ * A page that sets `iceTransportPolicy: "relay"` forces the browser to talk to its own TURN server.
+ * TURN prefers UDP and an HTTP/SOCKS proxy carries only TCP, so that UDP left on the host's own
+ * path and the TURN server read the real public address straight off the packet — no candidate
+ * involved, so fabricating one changed nothing. Reported by a customer whose session was flagged
+ * for location spoofing with an otherwise perfectly coherent persona.
+ *
+ * Worse, `geoip: true` sets `webrtcIp` for you, so the more carefully a caller configured for
+ * coherence the more likely they had silently lost this. Now only an explicit policy from the
+ * caller suppresses it.
+ *
+ * Note this is a real trade-off, not a free win: denying non-proxied UDP means peer connections
+ * that genuinely need UDP will not establish. Callers who need working WebRTC through a proxy want
+ * a transport that actually carries UDP (SOCKS5 with UDP ASSOCIATE, or a full tunnel) and can set
+ * their own policy to opt out. */
+export function webrtcDefaultDenyArgs(args: string[], _webrtcIp?: unknown): string[] {
   if (args.some((a) => a.startsWith("--webrtc-ip-handling-policy") || a.startsWith("--force-webrtc-ip-handling-policy"))) {
     return [];
   }
