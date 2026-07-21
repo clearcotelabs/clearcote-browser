@@ -398,6 +398,15 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   set("fingerprint-hardware-concurrency", o.hardwareConcurrency);
   // Native metadata overrides (flag > persona > real). Read directly by the getters — no
   // --fingerprint persona machinery — so they are safe to spoof individually or via lightStealth.
+  //
+  // Emit each EXACTLY ONCE. These were previously set in two separate blocks, so every override
+  // went out twice. Chromium takes the last occurrence and the values were identical, so nothing
+  // misbehaved — but a command line carrying `--fingerprint-device-memory` twice is a shape no
+  // real browser produces, and the engine exposes the command line over CDP
+  // (BrowserHandler::GetBrowserCommandLine), so it was a free tell.
+  //
+  // `set` compares strictly against undefined, so a numeric 0 is emitted rather than dropped —
+  // that matters for maxTouchPoints, where 0 is a real value (a non-touch desktop), not "unset".
   set("fingerprint-device-memory", o.deviceMemory);
   set("fingerprint-screen-width", o.screenWidth);
   set("fingerprint-screen-height", o.screenHeight);
@@ -408,17 +417,6 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   set("fingerprint-max-touch-points", o.maxTouchPoints);
   set("fingerprint-location", o.location);
   set("fingerprint-storage-quota", o.storageQuota);
-  // Direct metadata overrides (the "light" path): each beats the persona, which beats the real
-  // host value. `set` uses strict comparison, so a numeric 0 is emitted rather than dropped —
-  // that matters for maxTouchPoints, where 0 is a real value (a non-touch desktop) and not "unset".
-  set("fingerprint-device-memory", o.deviceMemory);
-  set("fingerprint-max-touch-points", o.maxTouchPoints);
-  set("fingerprint-screen-width", o.screenWidth);
-  set("fingerprint-screen-height", o.screenHeight);
-  set("fingerprint-avail-width", o.availWidth);
-  set("fingerprint-avail-height", o.availHeight);
-  set("fingerprint-color-depth", o.colorDepth);
-  set("fingerprint-device-pixel-ratio", o.devicePixelRatio);
   set("timezone", o.timezone);
   // Always send a coherent Accept-Language. Without --accept-lang Chromium falls back to the
   // build/OS locale, which can leak a language that mismatches the proxy's country/timezone
