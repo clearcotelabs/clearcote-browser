@@ -345,39 +345,6 @@ It combines naturally with the fingerprint spoofing and `humanize` input above �
 
 ## Proof & verify
 
-### Per-build fingerprint audit
-
-Every build is audited with [`scripts/creepjs_audit.py`](scripts/creepjs_audit.py) — it reads the signals the browser actually exposes, cross-checks them for internal consistency (e.g. **UA vs UA-CH**), confirms the WebRTC mock leaks no LAN address, and checks it isn't flagged as headless/automated.
-
-<!-- CREEPJS_RESULTS:START -->
-**Build `149.0.7827.114` · seed `demo` · platform `windows`**
-
-| Signal | Value | Verdict |
-|---|---|---|
-| `navigator.webdriver` | False | ✅ hidden |
-| User-Agent ↔ UA-CH | `Chrome/149` ↔ `149.0.7827.x` | ✅ consistent |
-| UA-CH platform | Windows 19.0.0 | ✅ |
-| WebGL vendor / renderer | Google Inc. (Intel) / ANGLE (Intel, Intel(R) UHD Graphics 770 … Direct3D11 …) | ✅ spoofed |
-| Canvas 2D | deterministic per seed | ✅ noised |
-| Timezone | America/New_York | ✅ |
-| WebRTC host (LAN) candidate | none | ✅ no LAN leak |
-| WebRTC srflx (public) | = mocked egress IP | ✅ |
-| Headless (hard) / Stealth-detect | 0% / 0% | ✅ |
-<!-- CREEPJS_RESULTS:END -->
-
-Beyond the per-build audit, Clearcote is exercised against **independent, third-party detection services** and comes back clean across every category below. *Service names are omitted by policy; the categories are what matter.*
-
-| Detection category | What it verifies | Result |
-|---|---|:--|
-| 🤖 **Webdriver / headless suites** | `navigator.webdriver`, headless heuristics, plugin / UA tells | ✅ Hidden · normal headful Chrome |
-| 🧩 **Automation-framework leaks** | CDP `Runtime.enable` leak, injected init-scripts, main-world execution | ✅ No leaks · isolated world |
-| 🔒 **TLS / JA4 client fingerprint** | Handshake matches a real Chrome — no spoofed-JS-over-tooling-TLS seam | ✅ Genuine Chrome 149 JA4 |
-| 📡 **WebRTC leak tests** | STUN / host candidates exposing a real LAN or ISP IP | ✅ Only the egress IP |
-| 🎨 **Canvas / WebGL / fonts / audio** | Per-surface fingerprints render coherently and deterministically per seed | ✅ Coherent GPU + font metrics |
-| 🌐 **Locale / timezone coherence** | JS `Intl` / timezone ↔ `navigator.languages` ↔ network egress all agree | ✅ Aligned end-to-end via `geoip` |
-
-> **Honest scope.** This is an **experimental pre-release**. The above is open-source, adversarial *coherence* auditing (a persona measured against a real Chrome on the same probe) — **not** published pass-rates against commercial services. And detection is only half the picture: a clean fingerprint over a **burned proxy IP** can still be blocked on IP reputation alone. Treat IP quality as a separate axis from browser identity.
-
 ### Don't trust us — verify us
 
 Every release is **GPG-signed, SHA-256-checksummed, and reproducible from source**. Pin the **Clearcote release signing key** (it does not change between releases) and check every download against it:
