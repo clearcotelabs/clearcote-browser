@@ -424,6 +424,9 @@ contacts the license backend).
 
 ### What's in each tier
 
+<!-- The rows below mirror site/lib/tiers.ts, which is the single source of truth for the
+     free/PRO split. If you change one, change the other (and the sibling SDK README). -->
+
 The identity surface is **free in full**. PRO does not unlock "more spoofing" — every fingerprint
 control below is in the free build. What PRO adds is behavioural realism that needs recorded data
 or engine work held out of the public tree, plus the licensing itself.
@@ -434,13 +437,13 @@ or engine work held out of the public tree, plus the licensing itself.
 | Canvas / WebGL / audio / font identity controls | ✅ | ✅ |
 | All 18 metadata overrides (`screenWidth`, `deviceMemory`, `gpuVendor`, …) | ✅ | ✅ |
 | `light_stealth` preset | ✅ | ✅ |
-| WebRTC mDNS concealment (`.local` host candidates) | ✅ | ✅ |
 | TLS ClientHello profile (`tlsProfile`) | ✅ | ✅ |
 | Proxy + `geoip` locale/timezone coherence | ✅ | ✅ |
 | Humanized input (`humanize`) — synthetic bézier paths | ✅ | ✅ |
 | **Humanized input — real recorded human trajectories** | — | ✅ |
 | **Coalesced pointer samples** (`getCoalescedEvents` realism) | — | ✅ |
 | **Coherent WebRTC srflx fabrication** (`webrtcIp`) | — | ✅ |
+| **WebRTC host-candidate concealment** (`.local` names) | — | ✅ |
 | **Request-header hygiene** on revalidation | — | ✅ |
 | Floating-concurrency licensing + run-token gate | — | ✅ |
 

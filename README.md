@@ -410,9 +410,11 @@ Let me be blunt about what you're paying for. Keeping a Chromium fork current �
 
 - **Latest builds first.** When a new Chromium major (e.g. 150) is built, it goes to Pro users immediately. The free build gets that major **later — roughly 2 months after release.** It's an incentive to support the project, not a crippled free tier: when a major lands for free, it's the same fully open, reproducible build.
 - **A maintained, always-current build** — the latest Chromium and the newest anti-detection patches, kept up to date for you (no manual rebuilds).
-- **A few extra stealth patches I keep private** so they aren't trivially copied. This means the **Pro binary is *not* reproducible from public source** — unlike the free build, which is, and stays that way.
+- **Four stealth patches I keep private** so they aren't trivially copied. This means the **Pro binary is *not* reproducible from public source** — unlike the free build, which is, and stays that way. Concretely, on 150 those are: real recorded human mouse trajectories (free uses synthetic bézier paths), coalesced pointer samples, a coherent WebRTC server-reflexive candidate, host-candidate concealment, and request-header hygiene on revalidation.
 - **Unlimited concurrent instances.**
 - **Direct email support from me, the owner.** You email, I answer.
+
+**What Pro is not:** it does not unlock more spoofing. The whole identity surface — personas, canvas/WebGL/audio farbling, all 18 native metadata overrides, `light_stealth`, TLS profiles, humanized input — is in the free build, in full. Pro adds behavioural realism that needs recorded data, plus earlier access to new Chromium majors. The per-feature table lives in the SDK READMEs ([Node](sdk/node/README.md#whats-in-each-tier) / [Python](sdk/python/README.md#whats-in-each-tier)), generated from `site/lib/tiers.ts`.
 
 No lock-in, no dark patterns. The free build is not crippled to sell you Pro — it just gets the newest Chromium major on a delay. Pro is a maintained build shipped first, a handful of patches I don't publish, and a direct line to the person who makes it.
 
