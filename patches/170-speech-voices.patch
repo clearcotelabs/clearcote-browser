@@ -1,6 +1,241 @@
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -202,6 +202,26 @@
+ // persona; later calls return the same one. Thread-safe (std::call_once).
+ COMPONENT_EXPORT(UNGOOGLED) const PersonaProfile& CurrentPersona();
+ 
++// clearcote: the persona's speechSynthesis voice list, retargeted to the
++// persona's locale. |accept_languages| is the RendererPreferences
++// Accept-Language string -- the SAME field NavigatorLanguage::
++// GetAcceptLanguages() parses into navigator.languages (see
++// 092-language-locale-coherence), so there is exactly ONE source of locale
++// truth and a de-DE persona cannot ship an en-US-only voice roster.
++//
++// Both speechSynthesis emission paths call this -- the browser one
++// (content::SpeechSynthesisImpl::SendVoiceListToObserver) and the renderer
++// backfill (blink::SpeechSynthesis::BackfillPersonaVoices) -- so whichever
++// answers first, the list is identical.
++//
++// Rules: a deliberately EMPTY persona voice list (the linux and android
++// personas, which really do report getVoices()==[]) stays empty; an imported
++// profile's captured voices are ground truth and are returned unchanged; only
++// the built-in Windows en-US default set is retargeted, and only when the
++// primary language tag has a known Windows SAPI voice pack.
++COMPONENT_EXPORT(UNGOOGLED) std::vector<PersonaProfile::Voice>
++PersonaVoicesForAcceptLanguages(const std::string& accept_languages);
++
+ }  // namespace ungoogled
+ 
+ #endif  // COMPONENTS_UNGOOGLED_PERSONA_PROFILE_H_
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -745,4 +745,203 @@
+   return *profile;
+ }
+ 
++namespace {
++
++// clearcote: Windows SAPI5 voice packs keyed by BCP-47 tag. These are the real
++// "Microsoft <Name> - <Language> (<Country>)" strings Chrome-on-Windows reports
++// once the matching Windows display-language pack is installed; the first entry
++// of a row is that locale's SAPI default voice. Only locales whose voice names
++// are known are listed -- an unlisted tag falls through to the en-US base set,
++// which is what a Windows install with no matching pack actually reports.
++struct LocaleVoiceRow {
++  const char* tag;       // lowercase BCP-47; full-tag match wins, else language
++  const char* lang;      // the lang string these voices report
++  const char* names[3];  // unused slots are nullptr
++};
++
++constexpr LocaleVoiceRow kLocaleVoices[] = {
++    {"en-us", "en-US",
++     {"Microsoft David - English (United States)",
++      "Microsoft Zira - English (United States)",
++      "Microsoft Mark - English (United States)"}},
++    {"en-gb", "en-GB",
++     {"Microsoft Hazel - English (United Kingdom)",
++      "Microsoft George - English (United Kingdom)",
++      "Microsoft Susan - English (United Kingdom)"}},
++    {"en-au", "en-AU",
++     {"Microsoft Catherine - English (Australia)",
++      "Microsoft James - English (Australia)", nullptr}},
++    {"en-ca", "en-CA",
++     {"Microsoft Linda - English (Canada)",
++      "Microsoft Richard - English (Canada)", nullptr}},
++    {"en-in", "en-IN",
++     {"Microsoft Heera - English (India)", "Microsoft Ravi - English (India)",
++      nullptr}},
++    {"de-de", "de-DE",
++     {"Microsoft Hedda - German (Germany)", "Microsoft Katja - German (Germany)",
++      "Microsoft Stefan - German (Germany)"}},
++    {"fr-fr", "fr-FR",
++     {"Microsoft Hortense - French (France)",
++      "Microsoft Julie - French (France)", "Microsoft Paul - French (France)"}},
++    {"fr-ca", "fr-CA",
++     {"Microsoft Caroline - French (Canada)",
++      "Microsoft Claude - French (Canada)",
++      "Microsoft Nathalie - French (Canada)"}},
++    {"es-es", "es-ES",
++     {"Microsoft Helena - Spanish (Spain)", "Microsoft Laura - Spanish (Spain)",
++      "Microsoft Pablo - Spanish (Spain)"}},
++    {"es-mx", "es-MX",
++     {"Microsoft Sabina - Spanish (Mexico)",
++      "Microsoft Raul - Spanish (Mexico)", nullptr}},
++    {"it-it", "it-IT",
++     {"Microsoft Elsa - Italian (Italy)", "Microsoft Cosimo - Italian (Italy)",
++      nullptr}},
++    {"pt-br", "pt-BR",
++     {"Microsoft Maria - Portuguese (Brazil)",
++      "Microsoft Daniel - Portuguese (Brazil)", nullptr}},
++    {"pt-pt", "pt-PT",
++     {"Microsoft Helia - Portuguese (Portugal)", nullptr, nullptr}},
++    {"nl-nl", "nl-NL",
++     {"Microsoft Frank - Dutch (Netherlands)", nullptr, nullptr}},
++    {"pl-pl", "pl-PL",
++     {"Microsoft Paulina - Polish (Poland)", "Microsoft Adam - Polish (Poland)",
++      nullptr}},
++    {"ru-ru", "ru-RU",
++     {"Microsoft Irina - Russian (Russia)", "Microsoft Pavel - Russian (Russia)",
++      nullptr}},
++    {"ja-jp", "ja-JP",
++     {"Microsoft Haruka - Japanese (Japan)",
++      "Microsoft Ayumi - Japanese (Japan)",
++      "Microsoft Ichiro - Japanese (Japan)"}},
++    {"ko-kr", "ko-KR", {"Microsoft Heami - Korean (Korea)", nullptr, nullptr}},
++    {"zh-cn", "zh-CN",
++     {"Microsoft Huihui - Chinese (Simplified, PRC)",
++      "Microsoft Yaoyao - Chinese (Simplified, PRC)",
++      "Microsoft Kangkang - Chinese (Simplified, PRC)"}},
++    {"zh-tw", "zh-TW",
++     {"Microsoft Hanhan - Chinese (Traditional, Taiwan)",
++      "Microsoft Yating - Chinese (Traditional, Taiwan)",
++      "Microsoft Zhiwei - Chinese (Traditional, Taiwan)"}},
++    {"tr-tr", "tr-TR", {"Microsoft Tolga - Turkish (Turkey)", nullptr, nullptr}},
++    {"sv-se", "sv-SE", {"Microsoft Bengt - Swedish (Sweden)", nullptr, nullptr}},
++    {"da-dk", "da-DK", {"Microsoft Helle - Danish (Denmark)", nullptr, nullptr}},
++    {"fi-fi", "fi-FI", {"Microsoft Heidi - Finnish (Finland)", nullptr, nullptr}},
++    {"cs-cz", "cs-CZ", {"Microsoft Jakub - Czech (Czech)", nullptr, nullptr}},
++    {"sk-sk", "sk-SK", {"Microsoft Filip - Slovak (Slovakia)", nullptr, nullptr}},
++    {"hu-hu", "hu-HU",
++     {"Microsoft Szabolcs - Hungarian (Hungary)", nullptr, nullptr}},
++    {"ro-ro", "ro-RO",
++     {"Microsoft Andrei - Romanian (Romania)", nullptr, nullptr}},
++    {"el-gr", "el-GR", {"Microsoft Stefanos - Greek (Greece)", nullptr, nullptr}},
++    {"he-il", "he-IL", {"Microsoft Asaf - Hebrew (Israel)", nullptr, nullptr}},
++    {"ar-sa", "ar-SA",
++     {"Microsoft Naayf - Arabic (Saudi Arabia)", nullptr, nullptr}},
++    {"th-th", "th-TH", {"Microsoft Pattara - Thai (Thailand)", nullptr, nullptr}},
++    {"id-id", "id-ID",
++     {"Microsoft Andika - Indonesian (Indonesia)", nullptr, nullptr}},
++    {"vi-vn", "vi-VN",
++     {"Microsoft An - Vietnamese (Vietnam)", nullptr, nullptr}},
++    {"hi-in", "hi-IN",
++     {"Microsoft Kalpana - Hindi (India)", "Microsoft Hemant - Hindi (India)",
++      nullptr}},
++};
++
++// The exact set DerivePersona() installs as the Windows default. Anything else
++// in PersonaProfile::voices came from an imported profile (a real capture) and
++// must not be rewritten.
++bool IsBuiltinWindowsDefaultVoiceSet(
++    const std::vector<PersonaProfile::Voice>& v) {
++  return v.size() == 3 &&
++         v[0].name == "Microsoft David - English (United States)" &&
++         v[1].name == "Microsoft Zira - English (United States)" &&
++         v[2].name == "Microsoft Mark - English (United States)";
++}
++
++// First token of an Accept-Language list, normalized the way
++// NavigatorLanguage::ParseAndSanitize() normalizes navigator.languages[0]
++// (trimmed, '_' -> '-'), then lowercased for table lookup and stripped of any
++// ";q=" weight.
++std::string PrimaryLanguageTag(const std::string& accept_languages) {
++  std::string tag = accept_languages.substr(0, accept_languages.find(','));
++  const size_t q = tag.find(';');
++  if (q != std::string::npos)
++    tag = tag.substr(0, q);
++  const size_t b = tag.find_first_not_of(" \t");
++  if (b == std::string::npos)
++    return std::string();
++  tag = tag.substr(b, tag.find_last_not_of(" \t") - b + 1);
++  for (char& c : tag) {
++    if (c == '_')
++      c = '-';
++    else if (c >= 'A' && c <= 'Z')
++      c = static_cast<char>(c - 'A' + 'a');
++  }
++  return tag;
++}
++
++const LocaleVoiceRow* FindLocaleVoiceRow(const std::string& tag) {
++  if (tag.empty())
++    return nullptr;
++  for (const LocaleVoiceRow& row : kLocaleVoices) {
++    if (tag == row.tag)
++      return &row;
++  }
++  // No region match ("de", or an unlisted region like "de-AT"): fall back to
++  // the first row for that language subtag, which is the pack Windows installs.
++  const std::string lang = tag.substr(0, tag.find('-'));
++  for (const LocaleVoiceRow& row : kLocaleVoices) {
++    if (lang == std::string(row.tag).substr(0, std::string(row.tag).find('-')))
++      return &row;
++  }
++  return nullptr;
++}
++
++}  // namespace
++
++std::vector<PersonaProfile::Voice> PersonaVoicesForAcceptLanguages(
++    const std::string& accept_languages) {
++  std::vector<PersonaProfile::Voice> out = CurrentPersona().voices;
++  // A deliberately empty persona list (linux / android) stays empty: those
++  // platforms genuinely report getVoices()==[].
++  if (out.empty())
++    return out;
++  // An imported profile's voices are a real capture -- authoritative as-is.
++  if (!IsBuiltinWindowsDefaultVoiceSet(out))
++    return out;
++
++  const LocaleVoiceRow* row =
++      FindLocaleVoiceRow(PrimaryLanguageTag(accept_languages));
++  if (!row)
++    return out;
++
++  std::vector<PersonaProfile::Voice> v;
++  for (const char* name : row->names) {
++    if (!name)
++      break;
++    PersonaProfile::Voice voice;
++    voice.voice_uri = name;
++    voice.name = name;
++    voice.lang = row->lang;
++    voice.local_service = true;
++    // SAPI's default voice is the display-language one, so the FIRST entry of
++    // the matched row is the default -- this is what makes the default voice's
++    // lang agree with navigator.language instead of contradicting it.
++    voice.is_default = v.empty();
++    v.push_back(std::move(voice));
++  }
++  if (v.empty())
++    return out;
++  if (std::string(row->lang) != "en-US") {
++    // Windows carries the en-US base voices in the OS image regardless of
++    // display language, so a localized install reports its pack's voices *and*
++    // these. Never default.
++    for (size_t i = 0; i < out.size() && i < 2; ++i) {
++      PersonaProfile::Voice base_voice = out[i];
++      base_voice.is_default = false;
++      v.push_back(std::move(base_voice));
++    }
++  }
++  return v;
++}
++
+ }  // namespace ungoogled
 --- a/content/browser/speech/speech_synthesis_impl.cc
 +++ b/content/browser/speech/speech_synthesis_impl.cc
-@@ -4,6 +4,8 @@
+@@ -4,11 +4,14 @@
  
  #include "content/browser/speech/speech_synthesis_impl.h"
  
@@ -9,68 +244,207 @@
  #include "content/browser/media/audio_stream_monitor.h"
  #include "content/browser/renderer_host/render_frame_host_impl.h"
  #include "content/browser/speech/tts_utterance_impl.h"
-@@ -91,6 +93,31 @@
+ #include "content/browser/web_contents/web_contents_impl.h"
+ #include "content/public/browser/web_contents.h"
++#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+ 
+ namespace content {
+ namespace {
+@@ -88,9 +91,56 @@
+       audible_client_;
+ };
+ 
++// clearcote: the persona's Accept-Language, read from the WebContents'
++// RendererPreferences -- the exact field that is pushed to the renderer as
++// Settings::AcceptLanguages() and parsed there into navigator.languages. Both
++// speech emission paths read this one field, so neither invents its own idea
++// of the persona locale.
++std::string PersonaAcceptLanguages(WebContents* web_contents) {
++  if (!web_contents)
++    return std::string();
++  return web_contents->GetMutableRendererPrefs()->accept_languages;
++}
++
  void SendVoiceListToObserver(
      blink::mojom::SpeechSynthesisVoiceListObserver* observer,
-     const std::vector<VoiceData>& voices) {
-+  // clearcote: when fingerprinting, present the deterministic persona voice set
-+  // (coherent with the persona locale -- an en-US default voice, no en-GB) in
-+  // place of the build host's real SAPI voices, whose default voice + ordering
-+  // otherwise leak the host locale (an en-GB default under an en-US persona is a
-+  // cross-API tell). The persona carries is_default per voice.
+-    const std::vector<VoiceData>& voices) {
++    const std::vector<VoiceData>& voices,
++    const std::string& accept_languages) {
++  // clearcote: when fingerprinting, present the deterministic persona voice
++  // set in place of the build host's real SAPI/TTS voices, whose default voice
++  // and ordering otherwise leak the host locale (an en-GB default under an
++  // en-US persona is a cross-API tell). The set comes from
++  // ungoogled::PersonaVoicesForAcceptLanguages(), keyed on the persona's
++  // Accept-Language, and the renderer-side backfill in blink::SpeechSynthesis
++  // calls the SAME function -- the two emission paths cannot disagree.
++  //
++  // ORDERING: this list is delivered over mojo (OnSetVoiceList), i.e. on stock
++  // Chrome's asynchronous `voiceschanged` path. Nothing here makes the first
++  // synchronous getVoices() non-empty; that ordering is the tell, independent
++  // of the voice values.
 +  const base::CommandLine* cc_cmd = base::CommandLine::ForCurrentProcess();
 +  if (cc_cmd->HasSwitch("fingerprint")) {
-+    const auto& cc_voices = ungoogled::CurrentPersona().voices;
-+    if (!cc_voices.empty()) {
-+      std::vector<blink::mojom::SpeechSynthesisVoicePtr> cc_out;
-+      cc_out.reserve(cc_voices.size());
-+      for (const auto& cc_v : cc_voices) {
-+        blink::mojom::SpeechSynthesisVoicePtr ov =
-+            blink::mojom::SpeechSynthesisVoice::New();
-+        ov->voice_uri = cc_v.voice_uri;
-+        ov->name = cc_v.name;
-+        ov->lang = cc_v.lang;
-+        ov->is_local_service = cc_v.local_service;
-+        ov->is_default = cc_v.is_default;
-+        cc_out.push_back(std::move(ov));
-+      }
-+      observer->OnSetVoiceList(std::move(cc_out));
-+      return;
++    // Deliberately unconditional on the list being non-empty: a persona whose
++    // voice list is EMPTY (linux / android) must emit an EMPTY list, not fall
++    // through to the host's real voices -- a Windows SAPI roster under a Linux
++    // persona would be a direct contradiction.
++    const std::vector<ungoogled::PersonaProfile::Voice> cc_voices =
++        ungoogled::PersonaVoicesForAcceptLanguages(accept_languages);
++    std::vector<blink::mojom::SpeechSynthesisVoicePtr> cc_out;
++    cc_out.reserve(cc_voices.size());
++    for (const auto& cc_v : cc_voices) {
++      blink::mojom::SpeechSynthesisVoicePtr ov =
++          blink::mojom::SpeechSynthesisVoice::New();
++      ov->voice_uri = cc_v.voice_uri;
++      ov->name = cc_v.name;
++      ov->lang = cc_v.lang;
++      ov->is_local_service = cc_v.local_service;
++      ov->is_default = cc_v.is_default;
++      cc_out.push_back(std::move(ov));
 +    }
++    observer->OnSetVoiceList(std::move(cc_out));
++    return;
 +  }
    std::vector<blink::mojom::SpeechSynthesisVoicePtr> out_voices;
    out_voices.resize(voices.size());
    for (size_t i = 0; i < voices.size(); ++i) {
+@@ -138,7 +188,8 @@
+ 
+   std::vector<VoiceData> voices;
+   TtsController::GetInstance()->GetVoices(browser_context_, GURL(), &voices);
+-  SendVoiceListToObserver(observer.get(), voices);
++  SendVoiceListToObserver(observer.get(), voices,
++                          PersonaAcceptLanguages(web_contents_));
+ 
+   observer_set_.Add(std::move(observer));
+ }
+@@ -186,7 +237,8 @@
+   std::vector<VoiceData> voices;
+   TtsController::GetInstance()->GetVoices(browser_context_, GURL(), &voices);
+   for (auto& observer : observer_set_)
+-    SendVoiceListToObserver(observer.get(), voices);
++    SendVoiceListToObserver(observer.get(), voices,
++                            PersonaAcceptLanguages(web_contents_));
+ }
+ 
+ }  // namespace content
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.h
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.h
+@@ -101,6 +101,11 @@
+ 
+  private:
+   void VoicesDidChange();
++  // clearcote: deferred persona voice backfill. getVoices() never fills the
++  // list synchronously (see speech_synthesis.cc); it only arms this, which
++  // runs on a task and no-ops if the browser process already answered.
++  void MaybeArmPersonaVoiceBackfill();
++  void BackfillPersonaVoices();
+   void StartSpeakingImmediately();
+   void HandleSpeakingCompleted(
+       SpeechSynthesisUtterance*,
+@@ -135,6 +140,9 @@
+   HeapVector<Member<SpeechSynthesisVoice>> voice_list_;
+   HeapDeque<Member<SpeechSynthesisUtterance>> utterance_queue_;
+   bool is_paused_ = false;
++  // clearcote: set once MaybeArmPersonaVoiceBackfill() has posted its task,
++  // so repeated getVoices() calls do not queue a backfill per call.
++  bool persona_voice_backfill_armed_ = false;
+ 
+   // EventTarget
+   const AtomicString& InterfaceName() const override;
 --- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
 +++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
-@@ -28,6 +28,9 @@
+@@ -28,12 +28,21 @@
  #include <tuple>
  
  #include "build/build_config.h"
 +#include "base/command_line.h"
++#include "base/task/single_thread_task_runner.h"
 +#include "components/ungoogled/persona_profile.h"
 +#include "components/ungoogled/ungoogled_switches.h"
  #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
++#include "third_party/blink/public/platform/task_type.h"
  #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
  #include "third_party/blink/public/platform/platform.h"
-@@ -95,6 +98,20 @@
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_speech_synthesis_error_event_init.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_speech_synthesis_event_init.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/core/frame/local_frame.h"
++#include "third_party/blink/renderer/core/frame/settings.h"
++#include "third_party/blink/renderer/core/page/page.h"
+ #include "third_party/blink/renderer/core/frame/deprecation/deprecation.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/web_feature.h"
+@@ -44,6 +53,8 @@
+ #include "third_party/blink/renderer/modules/speech/speech_synthesis_event.h"
+ #include "third_party/blink/renderer/modules/speech/speech_synthesis_voice.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
++#include "third_party/blink/renderer/platform/heap/persistent.h"
++#include "third_party/blink/renderer/platform/wtf/functional.h"
+ 
+ namespace blink {
+ 
+@@ -95,9 +106,62 @@
  const HeapVector<Member<SpeechSynthesisVoice>>& SpeechSynthesis::getVoices() {
    // Kick off initialization here to ensure voice list gets populated.
    std::ignore = TryEnsureMojomSynthesis();
-+  // clearcote: a real Windows Chrome exposes SAPI voices; an empty list is a
-+  // headless tell. When fingerprinting and the platform supplied none, present
-+  // the persona voices (default Windows set, or an imported profile's voices).
-+  if (voice_list_.empty()) {
-+    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
-+    if (cmd && cmd->HasSwitch(switches::kFingerprint)) {
-+      for (const auto& pv : ungoogled::CurrentPersona().voices) {
-+        voice_list_.push_back(MakeGarbageCollected<SpeechSynthesisVoice>(
-+            mojom::blink::SpeechSynthesisVoice::New(
-+                String::FromUtf8(pv.voice_uri), String::FromUtf8(pv.name),
-+                String::FromUtf8(pv.lang), pv.local_service, pv.is_default)));
-+      }
-+    }
-+  }
++  // clearcote: stock Chrome fills voice_list_ ONLY from the browser process
++  // over mojo (OnSetVoiceList), so on a fresh document the FIRST synchronous
++  // getVoices() returns [] and the real list arrives later, together with a
++  // `voiceschanged` event. Synthesizing the persona list right here would hand
++  // back a complete list on that first call -- an ordering tell that is
++  // independent of whether the voice VALUES are right, and one anti-bot
++  // vendors check for directly. So we never fill synchronously: we only ARM a
++  // deferred backfill, for the case where the browser reply never comes (no
++  // TTS interface bound). On the normal path the browser answers, the backfill
++  // sees a populated list and no-ops -- and because both sides build the list
++  // with ungoogled::PersonaVoicesForAcceptLanguages(), they agree.
++  MaybeArmPersonaVoiceBackfill();
    return voice_list_;
  }
  
++void SpeechSynthesis::MaybeArmPersonaVoiceBackfill() {
++  if (persona_voice_backfill_armed_ || !voice_list_.empty())
++    return;
++  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++  if (!cmd || !cmd->HasSwitch(switches::kFingerprint))
++    return;
++  ExecutionContext* context = GetExecutionContext();
++  if (!context)
++    return;
++  persona_voice_backfill_armed_ = true;
++  context->GetTaskRunner(TaskType::kMiscPlatformAPI)
++      ->PostTask(FROM_HERE,
++                 BindOnce(&SpeechSynthesis::BackfillPersonaVoices,
++                          WrapPersistent(this)));
++}
++
++void SpeechSynthesis::BackfillPersonaVoices() {
++  // The browser process already answered (the normal path): it sent this very
++  // same persona list and fired `voiceschanged`. Nothing to do.
++  if (!voice_list_.empty())
++    return;
++  LocalDOMWindow* window = GetSupplementable();
++  if (!window || !window->GetFrame() || !window->GetFrame()->GetPage())
++    return;
++  // Same locale source as the browser path and as navigator.languages: the
++  // Accept-Language pushed down in RendererPreferences.
++  const std::string accept_languages =
++      window->GetFrame()->GetPage()->GetSettings().GetAcceptLanguages().Utf8();
++  for (const auto& pv :
++       ungoogled::PersonaVoicesForAcceptLanguages(accept_languages)) {
++    voice_list_.push_back(MakeGarbageCollected<SpeechSynthesisVoice>(
++        mojom::blink::SpeechSynthesisVoice::New(
++            String::FromUtf8(pv.voice_uri), String::FromUtf8(pv.name),
++            String::FromUtf8(pv.lang), pv.local_service, pv.is_default)));
++  }
++  // An empty persona list means the persona genuinely has no voices; stock
++  // Chrome would have fired nothing at all here, so neither do we.
++  if (!voice_list_.empty())
++    VoicesDidChange();
++}
++
+ bool SpeechSynthesis::speaking() const {
+   // If we have a current speech utterance, then that means we're assumed to be
+   // in a speaking state. This state is independent of whether the utterance

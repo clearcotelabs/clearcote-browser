@@ -71,7 +71,7 @@ forward the instant it lands.
 |----|-----|
 | `measuretext-grid` | measureText perturbation set to factor 0 (patch `060`): metrics are truthful and on the 1/512 grid. Entropy comes from the spoofed font set, not a sub-grid scale. |
 | `worker-vs-main` | with the metric scale gone, the main thread returns the same truthful metrics as an `OffscreenCanvas` worker (patch `060`). |
-| `bcr-vs-range` | clientRects offset set to factor 0 (patch `050`): `getBoundingClientRect` and `Range` rects agree and stay on-grid. |
+| `bcr-vs-range` | clientRects offset mechanism **removed outright** (patch `050`): `getBoundingClientRect` and `Range` rects agree and stay on-grid. It had been neutered to factor 0, but the zeroing was skipped under `--disable-fingerprint-noise` while the members kept their multiplicative-era default of `1`, so that flag shifted every rect by +1.0px — and non-uniformly, since only the `element.cc` sites honoured the absolutely-positioned exemption. Deleting the mechanism removes the bug and the bug class: client rects are an *output* of fonts + DPR + viewport, never an input. |
 
 These are now `REQUIRED` — a regression fails the build.
 

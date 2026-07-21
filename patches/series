@@ -10,7 +10,6 @@
 065-canvas-bridge.patch
 070-webgl-gpu.patch
 075-webgpu-coherence.patch
-080-client-rects.patch
 090-timezone.patch
 092-language-locale-coherence.patch
 100-webrtc-leak.patch

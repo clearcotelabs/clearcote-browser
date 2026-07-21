@@ -98,7 +98,7 @@ All on `$BOX`, in the existing `~/clearcoat/build` tree (incremental — do **no
 1. **`900-windows-build-fixes` (build-blocker, HIGH)** — validate before anything else. Re-port the `tool_wrapper.py` `ExecRcWrapper` rewrite, the `clang_lib("compiler_builtins")` `libname="builtins"` for `is_win`, the `.rc` `BUILDFLAG()` guards. **Watch for the UIA-CLSID flipping from missing-symbol → *duplicate*-symbol** if 150 raises the SDK floor and defines `CLSID_CUIAutomationClientInfoSource` itself.
 2. **Known recurring break points (check first, cheap):** `090-timezone` (`timezone_controller.cc` — WTF `String::FromUtf8` rename history; re-check for another rename + `SetIcuTimeZoneAndNotifyV8` signature + lazy-timezone-init gate) and `030-hardware-concurrency` (the old `std::stoull` crash, already fixed to `base::StringToUint` — confirm it stuck).
 3. **The 6 high-fragility patches:** `010-user-agent`, `040-fonts`, `050-shadow-dom`, `060-canvas`, `070-webgl-gpu`, `100-webrtc-leak`.
-4. **Dependency-ordered within the set:** apply **`080-client-rects` before `050`** (080 defines a `QuadF` helper that 050 calls — if 080 fails, `element.cc`/`range.cc` won't compile). **`060` before `070`** (060's `ShuffleSubchannelColorData` gains a `uint64_t` seed that 070's ReadPixels consumes — coupled signature).
+4. **Dependency-ordered within the set:** **`060` before `070`** (060's `ShuffleSubchannelColorData` gains a `uint64_t` seed that 070's ReadPixels consumes — coupled signature).
 
 **Mechanics:**
 

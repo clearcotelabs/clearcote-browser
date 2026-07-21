@@ -88,7 +88,7 @@ REQUIRED = {
     # Enforced forward now: a regression fails the build.
     "measuretext-grid",   # measureText metrics truthful/on-grid (patch 060: noise factor 0)
     "worker-vs-main",     # main thread == OffscreenCanvas worker (patch 060)
-    "bcr-vs-range",       # getBoundingClientRect == Range rects, on-grid (patch 050: clientRects offset 0)
+    "bcr-vs-range",       # getBoundingClientRect == Range rects, on-grid (patch 050: clientRects offset mechanism removed)
 }
 KNOWN_GAPS = {
     "origin-invariant": "canvas/WebGL readback is keyed by registrable domain, so one identity renders differently per site. Left domain-keyed by design (2026-06-30): per-site noise-unlinkability is retained. Flipping to persona-keyed (patch 001) is only warranted if the usage model becomes one-profile-per-identity.",

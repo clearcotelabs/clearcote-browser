@@ -1,37 +1,152 @@
+--- a/chrome/renderer/BUILD.gn
++++ b/chrome/renderer/BUILD.gn
+@@ -203,6 +203,7 @@
+     "//components/translate/content/renderer",
+     "//components/translate/core/common",
+     "//components/translate/core/language_detection",
++    "//components/ungoogled:ungoogled_switches",
+     "//components/visitedlink/renderer",
+     "//components/wallet/content/renderer",
+     "//components/wallet/core/common:features",
+--- a/chrome/renderer/DEPS
++++ b/chrome/renderer/DEPS
+@@ -88,6 +88,7 @@
+   "+components/trusted_vault/features.h",
+   "+components/trusted_vault/trusted_vault_histograms.h",
+   "+components/trusted_vault/trusted_vault_server_constants.h",
++  "+components/ungoogled",
+   "+components/version_info",
+   "+components/visitedlink/renderer",
+   "+components/wallet/content/renderer",
 --- a/chrome/renderer/chrome_content_renderer_client.cc
 +++ b/chrome/renderer/chrome_content_renderer_client.cc
-@@ -1430,7 +1430,15 @@
- // Web Share is conditionally enabled here in chrome/, to avoid it
- // being made available in WebView or Linux.
- #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN) || \
--    BUILDFLAG(IS_MAC)
-+    BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
-+  // clearcote: add IS_LINUX so the Linux build (which spoofs a Windows
-+  // desktop persona via UA + sec-ch-ua-platform) also exposes
-+  // navigator.share / navigator.canShare. Real Win Chrome 149 always
-+  // exposes the Web Share API surface (share() may reject with
-+  // NotAllowedError on hosts with no share target -- a tell-free failure
-+  // mode). Without this, our Linux build never defines navigator.share
-+  // and any fingerprinter cross-checking it against UA="Windows NT 10.0"
-+  // flags the inconsistency as headless/automation.
-   blink::WebRuntimeFeatures::EnableWebShare(true);
- #endif
+@@ -119,6 +119,7 @@
+ #include "components/subresource_filter/core/common/common_features.h"
+ #include "components/surface_embed/common/features.h"
+ #include "components/surface_embed/renderer/create_plugin.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "components/variations/net/variations_http_headers.h"
+ #include "components/variations/variations_switches.h"
+ #include "components/version_info/version_info.h"
+@@ -1427,12 +1428,46 @@
+   // embedder only.
+   blink::WebRuntimeFeatures::EnablePerformanceManagerInstrumentation(true);
  
+-// Web Share is conditionally enabled here in chrome/, to avoid it
+-// being made available in WebView or Linux.
++  // Web Share is conditionally enabled here in chrome/, to avoid it
++  // being made available in WebView or Linux.
++  //
++  // clearcote: whether navigator.share / navigator.canShare exist is a
++  // one-line OS detector -- real Chrome defines them on Windows, macOS,
++  // Android and ChromeOS and does NOT define them on desktop Linux. So the
++  // exposure has to follow the PERSONA platform, not the host build:
++  // a Windows persona served from a Linux box must expose them (or it
++  // contradicts UA="Windows NT 10.0" / navigator.platform="Win32"), and a
++  // Linux persona must not expose them even on a Windows or macOS host (or it
++  // contradicts navigator.platform="Linux x86_64").
++  //
++  // The persona platform is resolved exactly the way Navigator::platform()
++  // (blink/renderer/core/frame/navigator.cc) and GetReducedNavigatorPlatform()
++  // (blink/renderer/core/execution_context/navigator_base.cc) resolve it: the
++  // --fingerprint-platform switch when it carries a recognized value,
++  // otherwise the host build. An unrecognized value falls through to the host
++  // build, matching those two.
++  {
++    bool web_share_enabled =
+ #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_WIN) || \
+     BUILDFLAG(IS_MAC)
+-  blink::WebRuntimeFeatures::EnableWebShare(true);
++        true;
++#else
++        false;
+ #endif
++    const base::CommandLine* command_line =
++        base::CommandLine::ForCurrentProcess();
++    if (command_line->HasSwitch(switches::kFingerprintPlatform)) {
++      const std::string persona_platform = base::ToLowerASCII(
++          command_line->GetSwitchValueASCII(switches::kFingerprintPlatform));
++      if (persona_platform == "windows" || persona_platform == "macos" ||
++          persona_platform == "android") {
++        web_share_enabled = true;
++      } else if (persona_platform == "linux") {
++        web_share_enabled = false;
++      }
++    }
++    blink::WebRuntimeFeatures::EnableWebShare(web_share_enabled);
++  }
+ 
+   if (base::FeatureList::IsEnabled(
+           autofill::features::kAutofillPolicyControlledFeatureAutofill)) {
 --- a/third_party/blink/renderer/core/url/dom_url.cc
 +++ b/third_party/blink/renderer/core/url/dom_url.cc
-@@ -57,11 +57,36 @@
+@@ -26,7 +26,13 @@
+ 
+ #include "third_party/blink/renderer/core/url/dom_url.h"
+ 
++#include <string>
++
+ #include "base/auto_reset.h"
++#include "base/command_line.h"
++#include "base/strings/string_util.h"
++#include "build/build_config.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/fileapi/public_url_manager.h"
+ #include "third_party/blink/renderer/core/url/dom_origin.h"
+@@ -57,11 +63,76 @@
                                        exception_state);
  }
  
 +namespace {
 +
-+// clearcote persona: mirror Chromium's WIN32-only url_util drive-letter handling
-+// so `new URL("C:/").protocol` resolves to "file:" on this Linux-built binary too.
-+// Some fingerprint scripts read new URL("C:/").protocol to detect the host OS
-+// (Windows => "file:", others => "c:"); the persona claims Windows, so match it.
-+// Window is minimal (single ASCII letter, ':', then '/' or backslash 0x5C) so
-+// legitimate single-letter scheme URLs (go:foo, ws:bar) are never rewritten.
++// clearcote persona: Chromium applies Windows drive-letter fixups
++// ("C:/foo" -> "file:///C:/foo") only in builds where WIN32 is defined
++// (url/url_util.cc DoCanonicalize, url/url_canon_relative.cc DoIsRelativeUrl).
++// Fingerprint scripts read new URL("C:/").protocol to infer the OS
++// (Windows => "file:", Linux/macOS => "c:"), so the behaviour must follow the
++// PERSONA rather than the host build: a Windows persona served from a Linux
++// box has to say "file:", and a Linux persona must never say "file:".
++//
++// The persona platform is resolved exactly the way Navigator::platform()
++// (core/frame/navigator.cc) and GetReducedNavigatorPlatform()
++// (core/execution_context/navigator_base.cc) resolve it: the
++// --fingerprint-platform switch when it carries a recognized value, otherwise
++// the host build. Keeping all three in lockstep is the point -- navigator.
++// platform and new URL("C:/").protocol must not be able to contradict.
++//
++// Cached in a function-local static: DOMURL is constructed on every
++// `new URL(...)` and the command line is fixed for the process lifetime.
++bool IsWindowsPersona() {
++  static const bool kIsWindowsPersona = [] {
++    const base::CommandLine* command_line =
++        base::CommandLine::ForCurrentProcess();
++    if (command_line->HasSwitch(switches::kFingerprintPlatform)) {
++      const std::string persona_platform = base::ToLowerASCII(
++          command_line->GetSwitchValueASCII(switches::kFingerprintPlatform));
++      if (persona_platform == "windows")
++        return true;
++      if (persona_platform == "linux" || persona_platform == "macos" ||
++          persona_platform == "android")
++        return false;
++      // Unrecognized value: fall through to the host build, which is what
++      // Navigator::platform() does for the same input.
++    }
++#if BUILDFLAG(IS_WIN)
++    return true;
++#else
++    return false;
++#endif
++  }();
++  return kIsWindowsPersona;
++}
++
++// Applied only under a Windows persona (see above). The match window is
++// minimal (single ASCII letter, ':', then '/' or backslash 0x5C) so legitimate
++// single-letter scheme URLs (go:foo, ws:bar) are never rewritten.
 +String MaybeRewriteDriveLetter(const String& url) {
++  if (!IsWindowsPersona())
++    return url;
 +  if (url.length() < 3)
 +    return url;
 +  UChar c0 = url[0];
