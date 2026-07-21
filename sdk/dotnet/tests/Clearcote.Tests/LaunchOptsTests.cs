@@ -29,8 +29,17 @@ public class LaunchOptsTests
     {
         Assert.Equal(new[] { "--webrtc-ip-handling-policy=disable_non_proxied_udp" },
             LaunchOpts.WebrtcDefaultDenyArgs(Array.Empty<string>(), null));
-        Assert.Empty(LaunchOpts.WebrtcDefaultDenyArgs(Array.Empty<string>(), "1.2.3.4"));
+        // Regression: this used to be Assert.Empty when a webrtcIp was set, on the theory that the
+        // engine's srflx fabrication covered WebRTC. It does not. A page using
+        // iceTransportPolicy:"relay" forces TURN; TURN prefers UDP; an HTTP/SOCKS proxy carries only
+        // TCP — so the UDP left on the host's own path and the TURN server read the real public IP
+        // off the packet, with no candidate involved for the fabrication to rewrite. geoip sets
+        // WebrtcIp for you, so the coherent configurations were the exposed ones.
+        Assert.Equal(new[] { "--webrtc-ip-handling-policy=disable_non_proxied_udp" },
+            LaunchOpts.WebrtcDefaultDenyArgs(Array.Empty<string>(), "1.2.3.4"));
+        // An explicit caller policy still wins — with or without a webrtcIp.
         Assert.Empty(LaunchOpts.WebrtcDefaultDenyArgs(new[] { "--webrtc-ip-handling-policy=default" }, null));
+        Assert.Empty(LaunchOpts.WebrtcDefaultDenyArgs(new[] { "--force-webrtc-ip-handling-policy=default" }, "1.2.3.4"));
     }
 
     [Fact]
