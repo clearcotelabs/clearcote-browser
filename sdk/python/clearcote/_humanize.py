@@ -275,7 +275,27 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
     def hkb_type(text, **kw):
         _human_type_text(text)
 
+    def hkb_press(key, **kw):
+        """keyboard.press with the persona's hold, unless the caller specified their own.
+
+        WHY THIS EXISTS. keyboard.type was humanised from the start and keyboard.press was not,
+        which left the most common single-key call in any script -- Enter, Tab, Escape, arrow keys
+        -- emitting a keydown and keyUp in the same instant. Measured on this machine with
+        humanize ON, before this wrapper: keyboard.type held keys 58-107ms while keyboard.press
+        held them 1.4-3.8ms. A finger cannot press and release a key in under a millisecond, and
+        a detector reading the shortest dwell in a session sees the press path, not the type path
+        -- so one un-humanised call undid the whole keyboard persona.
+
+        The caller's own `delay` wins: press(key, delay=...) is the documented way to hold a key
+        for a specific time (game input, long-press UI), and silently overriding it would break
+        that. Only the DEFAULT changes, from "no hold at all" to "a human hold".
+        """
+        if "delay" not in kw:
+            kw["delay"] = key_dwell(persona)
+        return native_kb_press(key, **kw)
+
     kb.type = hkb_type
+    kb.press = hkb_press
 
     # ------------------------------------------------------- page-level targeted helpers
     def _is_focused(selector):
@@ -372,7 +392,10 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
                 if not _focus_click(selector, timeout):
                     return native_page_press(selector, key, **options)
                 time.sleep(_rand(40, 120) / 1000.0)
-            native_kb_press(key)
+            # The persona's hold, for the same reason hkb_press above carries one: this is the
+            # path Locator.press delegates to, so without it every locator.press() in a script
+            # emitted a zero-length keypress while the typed text around it looked human.
+            native_kb_press(key, delay=key_dwell(persona))
             return None
         except Exception:  # noqa: BLE001
             return native_page_press(selector, key, **options)
@@ -465,6 +488,7 @@ def _patch_locator_class():
     o_check = Locator.check
     o_uncheck = Locator.uncheck
     o_drag_to = Locator.drag_to
+    o_select_option = Locator.select_option
 
     def _on(self):
         # humanize active for this page?
@@ -578,6 +602,76 @@ def _patch_locator_class():
                 pass
         return o_uncheck(self, **kw)
 
+    def select_option(self, value=None, **kw):
+        """Choose a <select> option with the keyboard, so the ENGINE fires the events.
+
+        Playwright's selectOption assigns the value and dispatches input+change from script.
+        Those arrive with isTrusted false, which is the single most reliable dropdown tell
+        there is -- the engine cannot produce an untrusted change, so a page that reads the
+        flag knows the selection was not made by a person. Measured against this SDK before
+        this wrapper: 1 of 1 change events untrusted.
+
+        A <select> that has focus and is CLOSED steps through its options on ArrowUp/ArrowDown,
+        and the browser emits input then change itself, trusted, exactly as it does for a mouse.
+        So the fix is not to forge better events, it is to stop forging them.
+
+        Falls back to native selectOption whenever the keyboard route cannot be shown to have
+        worked -- a value that is not a plain option, a multi-select, or a platform where arrows
+        open the popup instead of stepping (macOS does this). Verifying selectedIndex afterwards
+        rather than assuming is what makes the fallback safe: a silently wrong selection would be
+        worse than an untrusted one.
+        """
+        if _on(self) and not kw.get("element"):
+            try:
+                # Which option is being asked for, in whichever of the three plain forms the caller
+                # used. `element=` is excluded above: it points at an ElementHandle rather than
+                # naming an option, so there is nothing to resolve by hand and native is correct.
+                one = lambda v: v[0] if isinstance(v, (list, tuple)) and len(v) == 1 else v
+                by, wanted = None, None
+                if kw.get("index") is not None and not isinstance(kw["index"], (list, tuple)):
+                    by, wanted = "index", int(kw["index"])
+                elif kw.get("label") is not None and isinstance(one(kw["label"]), str):
+                    by, wanted = "label", one(kw["label"])
+                elif isinstance(one(value), str):
+                    by, wanted = "value", one(value)
+                if by is not None:
+                    page = self.page
+                    sel = _sel(self)
+                    plan = page.evaluate(
+                        """(a) => { const s = document.querySelector(a.sel);
+                             if (!s || s.multiple || s.disabled) return null;
+                             const os = [...s.options];
+                             let i = -1;
+                             if (a.by === 'index') i = (a.want >= 0 && a.want < os.length) ? a.want : -1;
+                             else if (a.by === 'label') i = os.findIndex(o => (o.label || o.textContent || '').trim() === String(a.want).trim());
+                             else i = os.findIndex(o => o.value === a.want);
+                             if (i < 0 || os[i].disabled) return null;
+                             return { to: i, from: s.selectedIndex, ret: os[i].value }; }""",
+                        {"sel": sel, "by": by, "want": wanted},
+                    )
+                    if plan and plan["to"] != plan["from"]:
+                        self.focus()
+                        time.sleep(_rand(60, 160) / 1000.0)
+                        step = "ArrowDown" if plan["to"] > plan["from"] else "ArrowUp"
+                        for _ in range(abs(plan["to"] - plan["from"])):
+                            # page.keyboard.press, NOT the module-level native handle: this block
+                            # runs in the Locator-patch scope, where the per-page keyboard closure
+                            # does not exist. Going through the page also means the hold comes from
+                            # the humanised press wrapper rather than being reapplied here.
+                            page.keyboard.press(step)
+                            time.sleep(_rand(45, 120) / 1000.0)
+                        got = page.evaluate(
+                            "(s) => { const e = document.querySelector(s); return e ? e.selectedIndex : -1; }",
+                            sel,
+                        )
+                        if got == plan["to"]:
+                            return [plan["ret"]]
+                    elif plan and plan["to"] == plan["from"]:
+                        return [plan["ret"]]   # already selected; nothing to do, nothing to forge
+            except Exception:  # noqa: BLE001
+                pass
+        return o_select_option(self, value, **kw)
+
     def drag_to(self, target, **kw):
         if _on(self):
             try:
@@ -619,6 +713,7 @@ def _patch_locator_class():
     Locator.check = check
     Locator.uncheck = uncheck
     Locator.drag_to = drag_to
+    Locator.select_option = select_option
 
 
 def install_humanize_on_context(context, humanize=False, show_cursor=False, browser=None, seed=None):

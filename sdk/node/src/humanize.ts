@@ -241,6 +241,23 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   };
   keyboard.type = async (text: string) => { await humanTypeText(text); };
 
+  // keyboard.press with the persona's hold, unless the caller specified their own.
+  //
+  // WHY THIS EXISTS. keyboard.type was humanised from the start and keyboard.press was not, which
+  // left the most common single-key call in any script — Enter, Tab, Escape, arrow keys — emitting
+  // a keydown and keyUp in the same instant. Measured with humanize ON, before this wrapper:
+  // keyboard.type held keys 58–107ms while keyboard.press held them 1.4–3.8ms. A finger cannot
+  // press and release a key in under a millisecond, and a detector reading the SHORTEST dwell in a
+  // session sees the press path — so one un-humanised call undid the whole keyboard persona.
+  //
+  // The caller's own `delay` wins: press(key, {delay}) is the documented way to hold a key for a
+  // specific time, and silently overriding it would break that. Only the DEFAULT changes.
+  keyboard.press = async (key: string, options: any = {}) => {
+    const opts = options && typeof options === "object" ? options : {};
+    if (opts.delay === undefined) opts.delay = keyDwell(persona);
+    return nativeKbPress(key, opts);
+  };
+
   // ------------------------------------------------------- page-level targeted helpers
   const isFocused = async (selector: string): Promise<boolean> => {
     try {
@@ -332,7 +349,10 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
         if (!(await focusClick(selector, timeout))) return nativePagePress(selector, key, options);
         await sleep(rand(40, 120));
       }
-      await nativeKbPress(key);
+      // The persona's hold, for the same reason keyboard.press above carries one: this is the
+      // path locator.press() delegates to, so without it every locator.press in a script emitted
+      // a zero-length keypress while the typed text around it looked human.
+      await nativeKbPress(key, { delay: keyDwell(persona) });
     } catch {
       return nativePagePress(selector, key, options);
     }
@@ -404,7 +424,7 @@ function patchLocatorClass(sample: Locator): void {
   const oFill = proto.fill, oClick = proto.click, oType = proto.type, oDbl = proto.dblclick,
     oHover = proto.hover, oPress = proto.press, oPressSeq = proto.pressSequentially,
     oClear = proto.clear, oTap = proto.tap, oCheck = proto.check, oUncheck = proto.uncheck,
-    oDragTo = proto.dragTo;
+    oDragTo = proto.dragTo, oSelectOption = proto.selectOption;
 
   const on = (self: any): boolean => {
     const pg: any = self.page();
@@ -462,6 +482,66 @@ function patchLocatorClass(sample: Locator): void {
     }
     return oUncheck.call(this, kw);
   };
+  /** Choose a <select> option with the keyboard, so the ENGINE fires the events.
+   *
+   * Playwright's selectOption assigns the value and dispatches input+change from script. Those
+   * arrive with isTrusted false, which is the single most reliable dropdown tell there is — the
+   * engine cannot produce an untrusted change, so a page reading the flag knows the selection was
+   * not made by a person. A <select> that has focus and is CLOSED steps on ArrowUp/ArrowDown and
+   * the browser emits input then change itself, trusted, exactly as it does for a mouse. The fix
+   * is not to forge better events, it is to stop forging them.
+   *
+   * Falls back to native whenever the keyboard route cannot be SHOWN to have worked: a multi- or
+   * disabled select, an option that cannot be resolved, an ElementHandle target, or a platform
+   * where arrows open the popup instead of stepping (macOS). selectedIndex is verified afterwards
+   * rather than assumed — a silently wrong selection is worse than an untrusted one. */
+  proto.selectOption = async function (this: any, values: any, kw: any = {}) {
+    if (on(this)) {
+      try {
+        const one = (v: any) => (Array.isArray(v) && v.length === 1 ? v[0] : v);
+        const v = one(values);
+        let by: string | null = null, want: any = null;
+        if (v && typeof v === "object" && !(v as any).constructor?.name?.includes("ElementHandle")) {
+          if ((v as any).index != null) { by = "index"; want = (v as any).index; }
+          else if ((v as any).label != null) { by = "label"; want = (v as any).label; }
+          else if ((v as any).value != null) { by = "value"; want = (v as any).value; }
+        } else if (typeof v === "string") { by = "value"; want = v; }
+        if (by !== null) {
+          const page: any = this.page();
+          const s = sel(this);
+          const plan = await page.evaluate((a: any) => {
+            const el: any = (globalThis as any).document.querySelector(a.sel);
+            if (!el || el.multiple || el.disabled) return null;
+            const os: any[] = [...el.options];
+            let i = -1;
+            if (a.by === "index") i = a.want >= 0 && a.want < os.length ? a.want : -1;
+            else if (a.by === "label") i = os.findIndex((o: any) => (o.label || o.textContent || "").trim() === String(a.want).trim());
+            else i = os.findIndex((o: any) => o.value === a.want);
+            if (i < 0 || os[i].disabled) return null;
+            return { to: i, from: el.selectedIndex, ret: os[i].value };
+          }, { sel: s, by, want });
+          if (plan && plan.to === plan.from) return [plan.ret];   // already selected; forge nothing
+          if (plan) {
+            await this.focus();
+            await sleep(rand(60, 160));
+            const step = plan.to > plan.from ? "ArrowDown" : "ArrowUp";
+            for (let i = 0; i < Math.abs(plan.to - plan.from); i++) {
+              // page.keyboard.press — humanized above, so the hold comes with it.
+              await page.keyboard.press(step);
+              await sleep(rand(45, 120));
+            }
+            const got = await page.evaluate((q: string) => {
+              const e: any = (globalThis as any).document.querySelector(q);
+              return e ? e.selectedIndex : -1;
+            }, s);
+            if (got === plan.to) return [plan.ret];
+          }
+        }
+      } catch { /* fall back */ }
+    }
+    return oSelectOption.call(this, values, kw);
+  };
+
   proto.dragTo = async function (this: any, target: any, kw: any = {}) {
     if (on(this)) {
       try {
