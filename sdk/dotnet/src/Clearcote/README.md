@@ -83,6 +83,36 @@ var context = await Clearcote.Clearcote.LaunchPersistentContextAsync("./profile-
 });
 ```
 
+## Human input (`Humanize`)
+
+Playwright's input is instant: a click presses and releases in the same millisecond, a keystroke
+holds for ~1 ms, and every click lands on the element's exact centre. No hand does any of that, and
+each is separately measurable from the page. `Humanize` replaces those with a seeded motor persona —
+Fitts-timed minimum-jerk pointer paths, human press-hold and key dwell, dispersed landing points, and
+dropdown selection driven with the keyboard so the **engine** fires `input`/`change` (Playwright's
+`SelectOptionAsync` dispatches them from script, so they arrive `isTrusted: false`).
+
+```csharp
+var page = await browser.NewPageAsync();
+Humanize.Attach(page, "acct-1");        // same seed as your fingerprint => same motor signature
+
+await page.Locator("#submit").HumanClickAsync();
+await page.Locator("#email").HumanTypeAsync("someone@example.com");
+await page.Locator("#country").HumanSelectOptionAsync("NL");
+await page.HumanPressAsync("Enter");
+```
+
+`Attach` is optional — the first humanized call creates a random persona. Pass the same seed you pass
+to `Fingerprint` and the identity moves the same way in the Python and Node SDKs too: the persona is
+derived from the seed with a shared RNG, so it is a property of the identity rather than of the
+language.
+
+**These are extension methods, not replacements.** C# cannot patch `IPage`/`ILocator` the way the
+Python and Node SDKs patch their page objects, so ordinary `ClickAsync` stays exactly as Playwright
+wrote it and you opt in per call. `HumanSelectOptionAsync` falls back to `SelectOptionAsync` for
+multi-selects and anywhere the keyboard route cannot be verified to have worked (it re-reads
+`selectedIndex` afterwards rather than assuming).
+
 ## A standing, stealthy CDP endpoint (`ServeAsync`)
 
 Launches the engine directly (not through Playwright), so `--enable-automation` is never added, and returns a
