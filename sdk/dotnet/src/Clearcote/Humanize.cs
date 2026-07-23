@@ -106,6 +106,21 @@ public static class Humanize
     /// out-of-bounds and got re-homed on every scroll — the exact motion that gate exists to avoid.
     /// innerWidth/innerHeight are correct in both modes; the constant is a last resort only.
     /// </summary>
+    /// <summary>
+    /// Is this Playwright failure a TIMEOUT?
+    ///
+    /// Playwright for .NET exports exactly ONE exception type — <c>PlaywrightException</c>. There is
+    /// no <c>Microsoft.Playwright.TimeoutException</c> (verified by reflecting over
+    /// Microsoft.Playwright 1.49.0: PlaywrightException is the only exported Exception subtype), so
+    /// a timeout can only be told apart by its message, which Playwright formats as
+    /// "Timeout 30000ms exceeded". Catching the wrong thing here matters: a timeout must be
+    /// rethrown so a missing element fails on ITS deadline, while any other Playwright error falls
+    /// through to the native call.
+    /// </summary>
+    private static bool IsTimeout(PlaywrightException e) =>
+        e.Message.Contains("Timeout", StringComparison.OrdinalIgnoreCase)
+        && e.Message.Contains("exceeded", StringComparison.OrdinalIgnoreCase);
+
     private static async Task<(double W, double H)> ViewportAsync(IPage page)
     {
         try
@@ -177,7 +192,7 @@ public static class Humanize
             await GlideAsync(page, p, st, target.X, target.Y, Math.Max(6, bb.Width)).ConfigureAwait(false);
             return true;
         }
-        catch (Microsoft.Playwright.TimeoutException)
+        catch (PlaywrightException e) when (IsTimeout(e))
         {
             // An element that never appears has to fail on ITS timeout. Swallowing this would send the
             // caller to a native call that waits the whole timeout a second time before saying so.
@@ -359,7 +374,7 @@ public static class Humanize
                 dropW = Math.Max(6, tb.Width);
             }
         }
-        catch (Microsoft.Playwright.TimeoutException)
+        catch (PlaywrightException e) when (IsTimeout(e))
         {
             throw;   // as in GlideOntoAsync: do not make a missing target wait out two timeouts
         }
