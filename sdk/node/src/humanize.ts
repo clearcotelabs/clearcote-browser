@@ -4,11 +4,13 @@
 //   dragging, scrolling and typing — dispatched as native trusted input (isTrusted===true,
 //   navigator.webdriver stays false). It works whether you drive the page directly or via
 //   locators:
-//     page level    — page.click / hover / dblclick / type / fill / press, page.mouse.move /
-//                      click / wheel and held-button drags (down -> move -> up), page.keyboard.type
+//     page level    — page.click / hover / dblclick / type / fill / press / selectOption,
+//                      page.mouse.move / click / wheel and held-button drags (down -> move -> up),
+//                      page.keyboard.type / press
 //     locator level  — locator.click / type / fill / hover / dblclick / press /
-//                      pressSequentially / clear / check / uncheck / tap / dragTo (routed through
-//                      the humanized page methods; main-frame locators only, native fallback)
+//                      pressSequentially / clear / check / uncheck / tap / selectOption / dragTo
+//                      (routed through the humanized page methods; main-frame locators only,
+//                      native fallback)
 // `showCursor: true` — injects a red cursor dot that follows the real mousemove events.
 //
 // Mouse moves build an eased, slightly bowed cubic-bezier path SDK-side from the tracked cursor
@@ -19,7 +21,7 @@
 // special binary command required.
 
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
-import { makePersona, planMove, dragDwell, clickHold, keyDwell, clickPoint, planAmbient, type Persona, type Step } from "./motion.js";
+import { makePersona, planMove, dragDwell, clickHold, keyDwell, clickPoint, planAmbient, gaussFrom, type Persona, type Step } from "./motion.js";
 
 export interface HumanizeOptions {
   /** Humanize all input (move/click/drag/scroll/type) as native trusted events. */
@@ -51,6 +53,10 @@ export const CURSOR_OVERLAY = `(() => {
 })();`;
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+// Same unseeded live source as rand() — the seeded persona rng stays inside motion.ts, this is only
+// for placing a point in a plausible spread instead of on an exact landmark.
+const gauss = () => gaussFrom(Math.random);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Compact keyboard-adjacency map for realistic fat-finger typos.
@@ -104,12 +110,19 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   (page as any)._clearcotePersona = persona;
 
   // Tracked cursor position so each move continues from where the last one ended.
-  const st = { x: rand(140, 380), y: rand(90, 240) };
+  // `held` tracks whether a mouse button is currently down — see mouse.move below.
+  // `placed` records whether the engine's cursor has actually been moved yet. A page starts with the
+  // pointer at the default origin, so anything that delivers input WITHOUT a target to move to —
+  // a wheel, a mouse.down that opens a drag, a bare keyboard.type — otherwise happens from a cursor
+  // that has never been anywhere. The guarantees below key off this flag.
+  const st = { x: rand(140, 380), y: rand(90, 240), held: false, placed: false };
 
   const mouse: any = page.mouse;
   const nativeMove = mouse.move.bind(mouse);
   const nativeClick = mouse.click.bind(mouse);
   const nativeWheel = mouse.wheel.bind(mouse);
+  const nativeDown = mouse.down.bind(mouse);
+  const nativeUp = mouse.up.bind(mouse);
 
   // Walk a planned trajectory (motion.ts) with native (trusted) mouse.move + off-protocol sleeps.
   // Native input carries the button state, so a button pressed via mouse.down() stays held across
@@ -117,6 +130,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   const dispatch = async (steps: Step[]): Promise<void> => {
     for (const s of steps) {
       try { await nativeMove(s.x, s.y); } catch { break; }
+      st.placed = true;
       await sleep(s.sleepMs);
     }
   };
@@ -148,13 +162,114 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
       const dist = Math.sqrt(dx * dx + dy * dy);
       const dur = Math.min(1.10, Math.max(0.28, 0.30 + dist / 1700)) * (0.85 + 0.30 * Math.random());
       await eng.session.send("Browser.humanizedClick", { targetId: eng.tid, x, y, duration: dur, noClick });
+      // The engine walks the trajectory in the BROWSER process and answers this command before it
+      // has finished. Without waiting, a following mouse.down() fires at the cursor's STALE
+      // position — measured: a move to (110,58) then a press landed at (981,629), on <body>
+      // instead of the target, so every move-then-press sequence (drag, press-and-hold,
+      // drag-and-drop) acted on the wrong element.
+      await sleep(dur * 1000);
       try { await nativeMove(x, y); } catch { /* keep playwright cursor pos in sync for drags */ }
-      st.x = x; st.y = y;
+      st.x = x; st.y = y; st.placed = true;
       return true;
     } catch { eng.ok = false; return false; }
   };
 
-  mouse.move = async (x: number, y: number) => { if (!(await engineGlide(x, y, true))) await glide(x, y); };
+  // The REAL viewport, in CSS px — NOT page.viewportSize().
+  //
+  // installHeadedViewport (index.ts) forces `viewport: null` on every headed newPage/newContext,
+  // and launchPersistentContext does the same, so that innerWidth tracks the real OS window
+  // instead of Playwright's emulated 1280x720 (an emulated viewport on a headed window is itself
+  // a tell). With viewport:null, viewportSize() returns null for the LIFE of the page — so the
+  // `|| {1280, 800}` fallback was taken on every headed launch, and the scroll anchor's
+  // "is the pointer inside the viewport" gate was evaluated against a box unrelated to the
+  // window. On a maximized display a cursor legitimately at x=1400 read as out-of-bounds and got
+  // re-homed on EVERY scroll — precisely the behaviour that gate exists to prevent.
+  // innerWidth/innerHeight are correct in both modes; the constant is a last resort only.
+  let vpCache: { width: number; height: number } | null = null;
+  const viewport = async (): Promise<{ width: number; height: number }> => {
+    try {
+      const wh = (await page.evaluate("() => [innerWidth, innerHeight]")) as [number, number];
+      if (wh && wh[0] && wh[1]) { vpCache = { width: wh[0], height: wh[1] }; return vpCache; }
+    } catch { /* detached/navigating — fall through */ }
+    return (page.viewportSize && page.viewportSize()) || vpCache || { width: 1280, height: 800 };
+  };
+
+  // Non-goal cursor activity (idle drift + a few excursions). It never presses a button and never
+  // approaches a caller-named target, so it is also the safe way to give the cursor a position when
+  // an action needs one but names no coordinates.
+  const ambient = async (ms: number): Promise<void> => {
+    try {
+      const steps = planAmbient(st, await viewport(), persona, ms);
+      await dispatch(steps);
+      if (steps.length) { st.x = steps[steps.length - 1].x; st.y = steps[steps.length - 1].y; }
+    } catch { /* best-effort ambient */ }
+  };
+
+  // Give the cursor a position for input that names no coordinates (a bare keyboard.type). It is
+  // ambient only: it never presses, so it cannot activate anything it happens to pass over.
+  //
+  // NOT used before mouse.down — see that wrapper. Before any real move st.x/st.y is the RANDOM
+  // SEED assigned at attach, so pressing at the end of this walk would put a TRUSTED click at an
+  // arbitrary page coordinate the caller never named, which can land on a link and navigate.
+  const ensurePlaced = async (): Promise<void> => {
+    if (st.placed) return;
+    await ambient(rand(260, 560));
+    if (!st.placed) {
+      try { await nativeMove(st.x, st.y); st.placed = true; } catch { /* best-effort placement */ }
+    }
+  };
+
+  // A HELD BUTTON MUST STAY ON THE NATIVE PATH. The engine trajectory builds its own
+  // WebMouseEvents and cannot hold a button across them, so routing a drag leg through it emits
+  // moves reporting MouseEvent.buttons 0 in the middle of a press. That is both a contradiction no
+  // real mouse produces (buttons is derived from physical state) and a functional break — a range
+  // thumb, a map or a drop target ignores a move that says nothing is down. Measured before this
+  // guard: 672 of 829 held moves reported buttons 0, and a slider dragged 10%->90% never left 0.
+  // A BARE MOVE ALWAYS USES THE NATIVE PATH — never the engine trajectory. Two independent
+  // reasons, both measured on the Python sync file which shares this design:
+  //   * a held button cannot be carried across the engine's own WebMouseEvents, so a drag leg
+  //     routed through it reports MouseEvent.buttons 0 mid-press and a range thumb ignores it
+  //     (349 of 354 held moves reported buttons 0; the slider moved 0 -> 1 and stopped);
+  //   * the engine walks its path ASYNCHRONOUSLY in the browser process and answers before it has
+  //     finished, so it keeps moving the cursor AFTER the pre-press pin in mouse.down — a move to
+  //     (56,120) then down() pressed on HTML at (856,213) instead of the INPUT, and the slider
+  //     stayed at 0. Re-pinning right before the press does not help; the overrun outlives it.
+  // mouse.click keeps engine routing: it performs move+click entirely engine-side, where nothing
+  // races the trajectory. glide() is still fully humanized (minimum-jerk, colored noise, Fitts).
+  mouse.move = async (x: number, y: number) => {
+    await glide(x, y);
+  };
+  // down/up are wrapped to TRACK the held state mouse.move needs, and — critically — to make the
+  // press position DETERMINISTIC. The engine answers humanizedClick before its trajectory has
+  // finished walking, and it overruns the `duration` it reports, so sleeping that duration is not
+  // enough: measured on Node, a move to (110,58) was still mid-flight at (416,504) when the press
+  // fired, landing on <body>. Re-issuing a native move to the tracked target immediately before
+  // the press pins the cursor to where the caller asked, whatever the trajectory is doing.
+  mouse.down = async (...a: any[]) => {
+    // DELIBERATELY NO PLACEMENT WHEN THE POINTER HAS NEVER MOVED.
+    //
+    // An earlier revision called ensurePlaced() here and pressed wherever the ambient walk ended.
+    // But before any real move st.x/st.y is the RANDOM SEED assigned at attach — not a coordinate
+    // the caller named — so that converted a harmless no-op press at the origin into a TRUSTED
+    // click at an arbitrary point on the page, which can hit a link and navigate. That is a worse
+    // failure than the one it was meant to fix. A bare down() with no preceding move is a caller
+    // mistake, and humanize must not invent a target to paper over it; callers who want a
+    // humanized drag move first, and that move glides and sets `placed`.
+    if (st.placed) {
+      // Re-pin only once a real move has happened — that is what makes st.x/st.y correspond to
+      // where the engine's cursor actually is. The engine answers humanizedClick before its
+      // trajectory has finished, so without this the press can fire at a stale position.
+      try { await nativeMove(st.x, st.y); } catch { /* best effort: keep the press on target */ }
+    }
+    st.held = true;
+    try {
+      return await nativeDown(...a);
+    } catch (e) {
+      st.held = false; // a raising press must not strand held=true and make every later move a drag leg
+      throw e;
+    }
+  };
+  mouse.up = async (...a: any[]) => { try { return await nativeUp(...a); } finally { st.held = false; } };
   mouse.click = async (x: number, y: number) => {
     if (await engineGlide(x, y, false)) return;
     await glide(x, y);
@@ -166,14 +281,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   // Opt-in ambient / pre-challenge cursor activity: idle drift + a few non-goal moves so a behavioral
   // collector sees non-zero pointer entropy BEFORE the first goal action (the biggest reason a
   // challenge/slider is shown to headless automation). `await page.ambientMotion(ms)`.
-  (page as any).ambientMotion = async (ms = 1200): Promise<void> => {
-    try {
-      const vp = (page.viewportSize && page.viewportSize()) || { width: 1280, height: 800 };
-      const steps = planAmbient(st, { width: vp.width, height: vp.height }, persona, ms);
-      await dispatch(steps);
-      if (steps.length) { st.x = steps[steps.length - 1].x; st.y = steps[steps.length - 1].y; }
-    } catch { /* best-effort ambient */ }
-  };
+  (page as any).ambientMotion = async (ms = 1200): Promise<void> => { await ambient(ms); };
 
   // Held-button drag leg with the seating jiggle (settle), reachable from the module-level
   // Locator.dragTo patch (which can't see this closure) via the page object.
@@ -186,8 +294,30 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
       Promise.resolve((page as any).ambientMotion(rand(450, 950))).catch(() => {});
     }
   });
+  // A wheel event carries the pointer position, and until something moves the cursor that position
+  // is the default origin — so a scroll right after a page load reported the mouse parked in the
+  // corner, over nothing it was scrolling, while the deltas rolled down the middle of the document.
+  // Move to where someone reading this page would have left the cursor first.
+  //
+  // Only when the current position is unusable (never placed, or outside the viewport). A hand does
+  // not lift off the mouse between two scrolls of the same page, so re-homing on every wheel call
+  // would replace one tell with another.
+  const scrollAnchor = async (): Promise<void> => {
+    try {
+      const vp = await viewport();
+      if (st.placed && st.x > 6 && st.y > 6 && st.x < vp.width - 6 && st.y < vp.height - 6) return;
+      // Upper-middle of the reading column, gaussian-jittered: an exact viewport centre is as
+      // machine-made as the origin is, so the anchor has to be a distribution, not a landmark.
+      const x = clamp(vp.width * 0.48 + gauss() * vp.width * 0.10, vp.width * 0.18, vp.width * 0.82);
+      const y = clamp(vp.height * 0.36 + gauss() * vp.height * 0.09, vp.height * 0.14, vp.height * 0.62);
+      await glide(x, y);
+      await sleep(rand(60, 180)); // eyes land before the finger rolls the wheel
+    } catch { /* best-effort: scroll from wherever the cursor is */ }
+  };
+
   // scroll easing: break into eased chunks of native wheel deltas
   mouse.wheel = async (dx: number, dy: number) => {
+    await scrollAnchor();
     const steps = Math.max(5, Math.min(24, Math.round((Math.abs(dx) + Math.abs(dy)) / 60)));
     const ease = (u: number) => 1 - Math.pow(1 - u, 2.2); // ease-OUT: fast flick -> slow inertial settle
     let px = 0, py = 0;
@@ -200,6 +330,11 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
       // inside the humanize path. setTimeout is off-protocol.
       await sleep(rand(10, 38));
       if (Math.random() < 0.07) await sleep(rand(40, 120)); // occasional mid-scroll pause (reading)
+      // A hand resting on the mouse does not hold it perfectly still through a long scroll. Without
+      // this a wheel burst is the one input where the pointer coordinate never changes at all.
+      if (steps >= 10 && i > 2 && i < steps && Math.random() < 0.06) {
+        try { await glide(st.x + gauss() * 3.5, st.y + gauss() * 2.5); } catch { /* drift is cosmetic */ }
+      }
     }
     if (px !== dx || py !== dy) await nativeWheel(dx - px, dy - py);
   };
@@ -239,7 +374,24 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
       }
     }
   };
-  keyboard.type = async (text: string) => { await humanTypeText(text); };
+
+  // Keystrokes from a session in which the mouse never existed. Selector-based typing glides to the
+  // field first (focusClick), but page.keyboard.type/press names no target, and on a page focused by
+  // autofocus or by Tab it can be the first input of any kind — a keydown stream with zero preceding
+  // pointer events is one of the cheapest checks a collector can run.
+  //
+  // AMBIENT ONLY. Deliberately NOT a move toward the focused field: the caller has already chosen
+  // where the text goes, and approaching that element would hover it (and, on a control that reacts
+  // to hover, move it) for no behavioral gain. Once per page — after that the cursor has a history,
+  // and warming up before every keystroke would itself be the anomaly.
+  let kbWarmed = false;
+  const keyboardWarmup = async (): Promise<void> => {
+    if (kbWarmed || st.placed) return;
+    kbWarmed = true;
+    await ambient(rand(280, 620));
+  };
+
+  keyboard.type = async (text: string) => { await keyboardWarmup(); await humanTypeText(text); };
 
   // keyboard.press with the persona's hold, unless the caller specified their own.
   //
@@ -253,6 +405,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   // The caller's own `delay` wins: press(key, {delay}) is the documented way to hold a key for a
   // specific time, and silently overriding it would break that. Only the DEFAULT changes.
   keyboard.press = async (key: string, options: any = {}) => {
+    await keyboardWarmup();
     const opts = options && typeof options === "object" ? options : {};
     if (opts.delay === undefined) opts.delay = keyDwell(persona);
     return nativeKbPress(key, opts);
@@ -295,6 +448,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   const nativePageFill = page.fill.bind(page);
   const nativePagePress = page.press.bind(page);
   const nativePageDblclick = page.dblclick.bind(page);
+  const nativePageSelect = (page as any).selectOption ? (page as any).selectOption.bind(page) : null;
 
   (page as any).type = async (selector: string, text: string, options: any = {}) => {
     try {
@@ -358,6 +512,30 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
     }
   };
 
+  // page.selectOption was the last input method humanize did not touch, so a script that used it —
+  // rather than locator.selectOption, which has been patched for a while — went straight to
+  // Playwright's implementation: assign the value, dispatch input+change from page script. That is
+  // measurably scored: it fails 'interaction-select-change-trust' on clearcotelabs.com/audit,
+  // because no user gesture can produce a change event with isTrusted false.
+  //
+  // The move is a HOVER, not a click: clicking a <select> opens the native popup, and the popup
+  // swallows the arrow keys the trusted path steps the selection with. A person's pointer is on the
+  // dropdown they are choosing from either way.
+  if (nativePageSelect) {
+    (page as any).selectOption = async (selector: string, values: any, options: any = {}) => {
+      const timeout = options.timeout ?? 30000;
+      try {
+        const pt = await pointFor(selector, timeout);
+        if (pt) { await glide(pt.x, pt.y); await sleep(rand(50, 150)); }
+      } catch { /* the pre-move is best-effort; a trusted selection still beats a native one */ }
+      try {
+        const got = await trustedSelect(page, selector, values, timeout);
+        if (got) return got;
+      } catch { /* fall back */ }
+      return nativePageSelect(selector, values, options);
+    };
+  }
+
   const wrapTargeted = (name: "click" | "hover", noClick: boolean) => {
     const orig = (page as any)[name].bind(page);
     (page as any)[name] = async (selector: string, options: any = {}) => {
@@ -406,6 +584,64 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   // Marker the Locator-class patch keys off: humanize is active for THIS page.
   (page as any)._clearcoteHumanized = true;
   patchLocatorClass(page.locator("html"));
+}
+
+/** Choose a <select> option with the keyboard, so the ENGINE fires the events. Returns Playwright's
+ * `[value]` result once the selection is VERIFIED, or null when the keyboard route cannot be shown
+ * to have worked and the caller should fall back to native.
+ *
+ * Playwright's selectOption assigns the value and dispatches input+change from script. Those arrive
+ * with isTrusted false, which is the single most reliable dropdown tell there is — the engine cannot
+ * produce an untrusted change, so a page reading the flag knows the selection was not made by a
+ * person. A <select> that has focus and is CLOSED steps on ArrowUp/ArrowDown and the browser emits
+ * input then change itself, trusted, exactly as it does for a mouse. The fix is not to forge better
+ * events, it is to stop forging them.
+ *
+ * Returns null whenever that cannot be guaranteed: a multi- or disabled select, an option that
+ * cannot be resolved, an ElementHandle target, or a platform where arrows open the popup instead of
+ * stepping (macOS). selectedIndex is verified afterwards rather than assumed — a silently wrong
+ * selection is worse than an untrusted one. */
+async function trustedSelect(
+  page: any, selector: string, values: any, timeout: number
+): Promise<string[] | null> {
+  try {
+    const one = (v: any) => (Array.isArray(v) && v.length === 1 ? v[0] : v);
+    const v = one(values);
+    let by: string | null = null, want: any = null;
+    if (v && typeof v === "object" && !(v as any).constructor?.name?.includes("ElementHandle")) {
+      if ((v as any).index != null) { by = "index"; want = (v as any).index; }
+      else if ((v as any).label != null) { by = "label"; want = (v as any).label; }
+      else if ((v as any).value != null) { by = "value"; want = (v as any).value; }
+    } else if (typeof v === "string") { by = "value"; want = v; }
+    if (by === null) return null;
+    const plan = await page.evaluate((a: any) => {
+      const el: any = (globalThis as any).document.querySelector(a.sel);
+      if (!el || el.multiple || el.disabled) return null;
+      const os: any[] = [...el.options];
+      let i = -1;
+      if (a.by === "index") i = a.want >= 0 && a.want < os.length ? a.want : -1;
+      else if (a.by === "label") i = os.findIndex((o: any) => (o.label || o.textContent || "").trim() === String(a.want).trim());
+      else i = os.findIndex((o: any) => o.value === a.want);
+      if (i < 0 || os[i].disabled) return null;
+      return { to: i, from: el.selectedIndex, ret: os[i].value };
+    }, { sel: selector, by, want });
+    if (!plan) return null;
+    if (plan.to === plan.from) return [plan.ret];   // already selected; forge nothing
+    await page.focus(selector, { timeout });
+    await sleep(rand(60, 160));
+    const step = plan.to > plan.from ? "ArrowDown" : "ArrowUp";
+    for (let i = 0; i < Math.abs(plan.to - plan.from); i++) {
+      // page.keyboard.press — humanized by attachHumanize, so the hold comes with it.
+      await page.keyboard.press(step);
+      await sleep(rand(45, 120));
+    }
+    const got = await page.evaluate((q: string) => {
+      const e: any = (globalThis as any).document.querySelector(q);
+      return e ? e.selectedIndex : -1;
+    }, selector);
+    if (got === plan.to) return [plan.ret];
+  } catch { /* fall back */ }
+  return null;
 }
 
 // --------------------------------------------------------------------------- locator patch
@@ -482,63 +718,10 @@ function patchLocatorClass(sample: Locator): void {
     }
     return oUncheck.call(this, kw);
   };
-  /** Choose a <select> option with the keyboard, so the ENGINE fires the events.
-   *
-   * Playwright's selectOption assigns the value and dispatches input+change from script. Those
-   * arrive with isTrusted false, which is the single most reliable dropdown tell there is — the
-   * engine cannot produce an untrusted change, so a page reading the flag knows the selection was
-   * not made by a person. A <select> that has focus and is CLOSED steps on ArrowUp/ArrowDown and
-   * the browser emits input then change itself, trusted, exactly as it does for a mouse. The fix
-   * is not to forge better events, it is to stop forging them.
-   *
-   * Falls back to native whenever the keyboard route cannot be SHOWN to have worked: a multi- or
-   * disabled select, an option that cannot be resolved, an ElementHandle target, or a platform
-   * where arrows open the popup instead of stepping (macOS). selectedIndex is verified afterwards
-   * rather than assumed — a silently wrong selection is worse than an untrusted one. */
   proto.selectOption = async function (this: any, values: any, kw: any = {}) {
-    if (on(this)) {
-      try {
-        const one = (v: any) => (Array.isArray(v) && v.length === 1 ? v[0] : v);
-        const v = one(values);
-        let by: string | null = null, want: any = null;
-        if (v && typeof v === "object" && !(v as any).constructor?.name?.includes("ElementHandle")) {
-          if ((v as any).index != null) { by = "index"; want = (v as any).index; }
-          else if ((v as any).label != null) { by = "label"; want = (v as any).label; }
-          else if ((v as any).value != null) { by = "value"; want = (v as any).value; }
-        } else if (typeof v === "string") { by = "value"; want = v; }
-        if (by !== null) {
-          const page: any = this.page();
-          const s = sel(this);
-          const plan = await page.evaluate((a: any) => {
-            const el: any = (globalThis as any).document.querySelector(a.sel);
-            if (!el || el.multiple || el.disabled) return null;
-            const os: any[] = [...el.options];
-            let i = -1;
-            if (a.by === "index") i = a.want >= 0 && a.want < os.length ? a.want : -1;
-            else if (a.by === "label") i = os.findIndex((o: any) => (o.label || o.textContent || "").trim() === String(a.want).trim());
-            else i = os.findIndex((o: any) => o.value === a.want);
-            if (i < 0 || os[i].disabled) return null;
-            return { to: i, from: el.selectedIndex, ret: os[i].value };
-          }, { sel: s, by, want });
-          if (plan && plan.to === plan.from) return [plan.ret];   // already selected; forge nothing
-          if (plan) {
-            await this.focus();
-            await sleep(rand(60, 160));
-            const step = plan.to > plan.from ? "ArrowDown" : "ArrowUp";
-            for (let i = 0; i < Math.abs(plan.to - plan.from); i++) {
-              // page.keyboard.press — humanized above, so the hold comes with it.
-              await page.keyboard.press(step);
-              await sleep(rand(45, 120));
-            }
-            const got = await page.evaluate((q: string) => {
-              const e: any = (globalThis as any).document.querySelector(q);
-              return e ? e.selectedIndex : -1;
-            }, s);
-            if (got === plan.to) return [plan.ret];
-          }
-        }
-      } catch { /* fall back */ }
-    }
+    // Routed through the page method (which glides to the control first) rather than calling
+    // trustedSelect straight, so a locator selection gets the same pre-move as a locator click.
+    if (on(this)) { try { return await this.page().selectOption(sel(this), values, fwd(kw)); } catch { /* fall back */ } }
     return oSelectOption.call(this, values, kw);
   };
 

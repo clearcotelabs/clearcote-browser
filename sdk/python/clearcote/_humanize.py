@@ -97,10 +97,22 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
 
     # Tracked cursor position so each move continues from where the last one ended.
     # Seed at a plausible on-page spot (not 0,0) so the first glide doesn't start in the corner.
-    st = {"pos": (_rand(140, 380), _rand(90, 240))}
+    # "placed" records whether the REAL pointer has been moved on this page yet: until it has, the
+    # browser's cursor is still at the (0,0) origin no matter what pos claims. That distinction is
+    # what a wheel event (dispatched at the current pointer), a bare mouse.down() and a
+    # keyboard-only session all depend on — see _wheel_anchor / hdown / _pointer_presence.
+    st = {"pos": (_rand(140, 380), _rand(90, 240)), "held": False,
+          "placed": False, "kb_primed": False}
 
     mouse = page.mouse
     native_move, native_click, native_wheel = mouse.move, mouse.click, mouse.wheel
+    # getattr, not attribute access: attach must not raise on a page-like object that lacks a
+    # method we only optionally wrap. Reading these directly widened the attach-time contract and
+    # took four previously-green tests down with an AttributeError before anything was wrapped —
+    # humanize failing closed on attach is the one outcome this module must never produce, because
+    # it silently disables every other humanization along with it.
+    native_down = getattr(mouse, "down", None)
+    native_up = getattr(mouse, "up", None)
 
     def _dispatch(steps):
         """Walk a planned trajectory (list of (x, y, sleep_ms)) via native trusted mouse.move +
@@ -111,6 +123,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
                 native_move(sx, sy)
             except Exception:  # noqa: BLE001
                 break
+            st["placed"] = True
             time.sleep(sl / 1000.0)
 
     def _glide(x, y, settle=False, target_w=24):
@@ -150,6 +163,12 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
             _eng["session"].send("Browser.humanizedClick", {
                 "targetId": _eng["tid"], "x": float(x), "y": float(y),
                 "duration": dur, "noClick": bool(no_click)})
+            # The engine runs the trajectory in the BROWSER process and answers this command
+            # before it has finished walking it. Without waiting, a following mouse.down() fires
+            # at the cursor's stale position -- measured: a move to (110,58) then a press landed
+            # at (981,629), on <body> instead of the slider, so every move-then-press sequence
+            # (drag, press-and-hold, drag-and-drop) acted on the wrong element.
+            time.sleep(dur)
             # Keep Playwright's own cursor position in sync so a following
             # mouse.down()/drag presses where the engine left the cursor.
             try:
@@ -157,14 +176,77 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
             except Exception:  # noqa: BLE001
                 pass
             st["pos"] = (x, y)
+            st["placed"] = True
             return True
         except Exception:  # noqa: BLE001 - method missing / no browser session: stop trying
             _eng["ok"] = False
             return False
 
     def hmove(x, y, **kw):
-        if not _engine_glide(x, y, no_click=True):
-            _glide(x, y)
+        # A HELD BUTTON MUST STAY ON THE NATIVE PATH.
+        #
+        # The engine trajectory (Browser.humanizedClick) builds its own WebMouseEvents and cannot
+        # hold a button across them, so a drag leg routed through it emits moves reporting
+        # MouseEvent.buttons 0 in the middle of a press. That is both a contradiction no real
+        # mouse produces (buttons is derived from physical state) and a functional break: a range
+        # thumb ignores a move that says nothing is down. Measured on this file without the guard,
+        # dragging a 420px slider: the press landed on the INPUT correctly and 349 of 354 moves
+        # still reported buttons 0, so the thumb fired one input event and the value went 0 -> 1.
+        #
+        # A BARE MOVE IS ALSO NATIVE, for a second and independent reason: the engine walks its
+        # path ASYNCHRONOUSLY in the browser process and answers before it has finished, so it
+        # keeps moving the cursor AFTER the pre-press pin in hdown. Measured here on this file,
+        # move to (56,120) then mouse.down(): the button was carried correctly (407 of 560 moves
+        # reported buttons != 0) but the press landed on HTML at (856,213) instead of the INPUT,
+        # so the thumb never received it and the value stayed 0. Re-pinning immediately before the
+        # press does not help — the overrunning trajectory outlives the pin.
+        #
+        # _glide is still fully humanized (minimum-jerk sum-of-submovements, colored noise,
+        # Fitts-scaled duration); only the engine's recorded-trajectory SOURCING is given up for
+        # bare moves. hclick keeps it, because it performs the whole move+click engine-side where
+        # nothing races the trajectory.
+        _glide(x, y)
+
+    def hdown(**kw):
+        # A press needs a POSITION behind it. mouse.down() with nothing having moved the pointer
+        # first presses at the (0,0) origin, so a bare down -> move -> up drag grabs the corner of
+        # <body> instead of the thing it meant to drag, and the slide silently does nothing. Give
+        # the press a real origin: a short ambient placement, then travel to the point we are about
+        # to press, so the button goes down at the END of a movement the way a hand does it.
+        # DELIBERATELY NO PLACEMENT WHEN THE POINTER HAS NEVER MOVED.
+        #
+        # An earlier revision ran an ambient walk here and pressed wherever it ended. But before
+        # any real move, st["pos"] is the RANDOM SEED assigned at attach (_rand(140,380),
+        # _rand(90,240)) -- not a coordinate the caller ever named -- so that turned a harmless
+        # no-op press into a TRUSTED click at an arbitrary page position, which can land on a
+        # link and navigate. A bare down() with no preceding move is a caller mistake; inventing
+        # a target makes it a worse one. Callers wanting a humanized drag move first, and that
+        # move glides and sets "placed".
+        if st["placed"]:
+            # Pin the cursor to the tracked target before pressing. The engine answers
+            # humanizedClick before its trajectory has finished AND overruns the duration it
+            # reports, so waiting that duration is not sufficient on its own -- measured on Node,
+            # a move to (110,58) was still mid-flight at (416,504) when the press fired, landing
+            # on <body>. Only meaningful once a real move has happened: that is what makes
+            # st["pos"] correspond to where the cursor actually is.
+            try:
+                native_move(*st["pos"])
+            except Exception:  # noqa: BLE001 - best effort: keep the press on target
+                pass
+        # try/finally semantics so a raising press cannot strand held=True and turn every later
+        # move into a phantom drag leg. hup already guarded this; hdown did not.
+        try:
+            st["held"] = True
+            native_down(**kw)
+        except Exception:
+            st["held"] = False
+            raise
+
+    def hup(**kw):
+        try:
+            native_up(**kw)
+        finally:
+            st["held"] = False
 
     def hclick(x, y, **kw):
         if _engine_glide(x, y, no_click=False):
@@ -210,7 +292,55 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
 
     page.on("load", lambda _=None: _auto_ambient())
 
+    def _viewport():
+        """The REAL viewport, in CSS px.
+
+        Not page.viewport_size: launch() and launch_persistent_context() both force
+        viewport=None on every headed page (so innerWidth tracks the real OS window instead of
+        Playwright's emulated 1280x720 -- an emulated viewport on a headed window is itself a
+        tell). With viewport=None, viewport_size() returns None for the life of the page, so the
+        old `page.viewport_size or {1280, 800}` fell through to that constant on EVERY headed
+        launch. The anchor gate below then judged "is the pointer inside the viewport" against a
+        box unrelated to the window: on a maximized display a cursor legitimately at x=1400 read
+        as out-of-bounds and got re-homed on every single scroll, which is exactly the behaviour
+        the gate exists to prevent. innerWidth/innerHeight are the truth in both modes.
+        """
+        try:
+            wh = page.evaluate("() => [innerWidth, innerHeight]")
+            if wh and wh[0] and wh[1]:
+                return float(wh[0]), float(wh[1])
+        except Exception:  # noqa: BLE001
+            pass
+        vp = page.viewport_size or {"width": 1280, "height": 800}
+        return float(vp["width"]), float(vp["height"])
+
+    def _wheel_anchor():
+        """Put the cursor over the content before scrolling it.
+
+        A wheel event is delivered at wherever the pointer currently is, and until something has
+        moved it that is the (0,0) origin — so the first scroll on a freshly loaded page arrives
+        in the top-left corner, over whatever element happens to live there, which is not where a
+        hand ever scrolls. Only re-home when the pointer is nowhere sensible: a person does not
+        move the mouse between two scrolls of the same page, so re-anchoring on every wheel call
+        would be its own tell.
+        """
+        try:
+            vw, vh = _viewport()
+            x, y = st["pos"]
+            # With a button down every move is a DRAG leg, so anchoring mid-drag would haul the
+            # grabbed element across the page instead of scrolling under it.
+            if st["held"] or (st["placed"] and 8 <= x <= vw - 8 and 8 <= y <= vh - 8):
+                return
+            # Reading position: upper-middle, gaussian-spread. The exact centre is itself a tell —
+            # nobody parks the pointer on the centre pixel of the viewport.
+            ax = min(max(vw * 0.5 + random.gauss(0, vw * 0.10), vw * 0.12), vw * 0.88)
+            ay = min(max(vh * 0.34 + random.gauss(0, vh * 0.09), vh * 0.10), vh * 0.62)
+            _glide(ax, ay, target_w=140)   # coarse placement, not a target acquisition
+        except Exception:  # noqa: BLE001 - never let the anchor stop the scroll
+            pass
+
     def hwheel(delta_x, delta_y):
+        _wheel_anchor()
         steps = max(5, min(24, round((abs(delta_x) + abs(delta_y)) / 60)))
         px = py = 0
         for i in range(1, steps + 1):
@@ -225,14 +355,48 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
             time.sleep(_rand(10, 38) / 1000.0)
             if random.random() < 0.07:
                 time.sleep(_rand(40, 120) / 1000.0)   # occasional mid-scroll pause (reading)
+            # A hand resting on the mouse does not hold it perfectly still through a long scroll,
+            # so a burst of 20 wheel events sharing one identical clientX/clientY is a signature
+            # only a script produces. A couple of px, so the scroll stays over the same element
+            # (and never while a button is down, where a move is a drag leg).
+            if steps >= 10 and not st["held"] and random.random() < 0.06:
+                try:
+                    dx, dy = random.gauss(0, 1.5), random.gauss(0, 1.2)
+                    native_move(st["pos"][0] + dx, st["pos"][1] + dy)
+                    st["pos"] = (st["pos"][0] + dx, st["pos"][1] + dy)
+                except Exception:  # noqa: BLE001
+                    pass
         if px != delta_x or py != delta_y:
             native_wheel(delta_x - px, delta_y - py)  # exact total
 
     mouse.move, mouse.click, mouse.wheel = hmove, hclick, hwheel
+    # down/up are wrapped only to TRACK the held state hmove needs; the presses themselves stay
+    # native and unchanged.
+    mouse.down, mouse.up = hdown, hup
 
     # ----------------------------------------------------------------- keyboard
     kb = page.keyboard
     native_kb_type, native_kb_press = kb.type, kb.press
+
+    def _pointer_presence():
+        """Give a keyboard-only session a mouse, once, before its first keystroke.
+
+        Selector-driven typing already glides (page.type/fill/press go through _focus_click), but a
+        bare page.keyboard.type/press types into whatever is focused — from a session in which the
+        pointer never existed. A collector reading keydowns with zero preceding pointer events sees
+        input no person can produce, however good the keystroke dynamics are.
+
+        AMBIENT ONLY, deliberately not a move toward the focused field: the caller has already put
+        focus somewhere (often from script), and gliding onto a control could hover or re-target it
+        and land the text in the wrong place. plan_ambient never clicks, so focus cannot change.
+        """
+        if st["placed"] or st["kb_primed"]:
+            return
+        st["kb_primed"] = True   # one attempt per page, even if the ambient burst itself fails
+        try:
+            hambient(_rand(280, 620))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _emit_key(ch):
         """Emit one character with a human keydown->keyup DWELL. keyboard.press's `delay` IS the hold
@@ -273,6 +437,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
                 time.sleep(d)
 
     def hkb_type(text, **kw):
+        _pointer_presence()
         _human_type_text(text)
 
     def hkb_press(key, **kw):
@@ -290,6 +455,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
         for a specific time (game input, long-press UI), and silently overriding it would break
         that. Only the DEFAULT changes, from "no hold at all" to "a human hold".
         """
+        _pointer_presence()
         if "delay" not in kw:
             kw["delay"] = key_dwell(persona)
         return native_kb_press(key, **kw)
@@ -400,12 +566,57 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
         except Exception:  # noqa: BLE001
             return native_page_press(selector, key, **options)
 
+    # getattr for the same reason as mouse.down/up above: a page-like object that does not
+    # implement select_option must still get every OTHER humanization, not lose all of it to
+    # an AttributeError raised while wiring this one up.
+    native_page_select_option = getattr(page, "select_option", None)
+
+    def hselect_option(selector, value=None, **options):
+        """page.select_option, humanized the same way page.click/type/fill are.
+
+        Only Locator.select_option used to be patched, so page.select_option(...) went straight to
+        Playwright, which assigns the value and dispatches input+change FROM SCRIPT — isTrusted
+        false. That is not hypothetical: the identical selection made through a locator passes the
+        'interaction-select-change-trust' check on clearcotelabs.com/audit and this path fails it.
+
+        Glide over the <select> first (a person looks at a control before choosing from it) but do
+        NOT click it: an open native popup takes the arrow keys for itself, and the trusted route
+        below depends on the closed-select stepping behaviour.
+        """
+        try:
+            pt = _point_for(selector, options.get("timeout", 30000))
+            if pt:
+                _glide(pt[0], pt[1])
+                time.sleep(_rand(60, 160) / 1000.0)
+            picked = _select_by_keyboard(page, selector, value, options)
+            if picked is not None:
+                return picked
+        except Exception:  # noqa: BLE001
+            pass
+        return native_page_select_option(selector, value, **options)
+
     page.type = htype
     page.fill = hfill
     page.dblclick = hdblclick
     page.press = hpress
+    if native_page_select_option is not None:
+        page.select_option = hselect_option
 
     def _make_targeted(orig, no_click):
+        def _native(selector, options):
+            """Fall back to native Playwright, and RECORD that the real cursor moved.
+
+            Native click/hover genuinely move the browser pointer to the element. Leaving
+            st["placed"] False afterwards made the next wheel anchor believe the pointer was
+            still unplaced, so it glided away from the element the click had just left — a jump
+            from a button to the middle of the page between clicking and scrolling, which is
+            precisely the non-human motion this module exists to avoid.
+            """
+            try:
+                return _native(selector, options)
+            finally:
+                st["placed"] = True
+
         def wrapped(selector, **options):
             # Actionability pre-flight before a TRUSTED humanized click: a native Playwright click
             # waits for visible+enabled+stable+receives-events; the humanized path dispatches a real
@@ -418,15 +629,15 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
                 loc.wait_for(state="visible", timeout=timeout)
                 loc.scroll_into_view_if_needed(timeout=timeout)
                 if not loc.is_enabled():
-                    return orig(selector, **options)
+                    return _native(selector, options)
                 box = loc.bounding_box()
                 if not box:
-                    return orig(selector, **options)
+                    return _native(selector, options)
                 # stability: a box that's still moving = an animation in flight -> let PW settle it
                 time.sleep(0.05)
                 box2 = loc.bounding_box()
                 if not box2 or abs(box2["x"] - box["x"]) > 1 or abs(box2["y"] - box["y"]) > 1:
-                    return orig(selector, **options)
+                    return _native(selector, options)
                 box = box2
                 x, y = click_point(box, st["pos"], persona)
                 # covered-by: don't fire a trusted click at a point some overlay owns
@@ -437,7 +648,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
                         " return !(t && (t === el || el.contains(t) || t.contains(el))); }",
                         [x, y, handle],
                     ):
-                        return orig(selector, **options)  # covered -> let PW wait for it on top
+                        return _native(selector, options)  # covered -> let PW wait for it on top
                 except Exception:  # noqa: BLE001
                     pass
                 _glide(x, y)
@@ -446,7 +657,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
                     native_click(x, y, delay=click_hold(persona))
                 return None
             except Exception:  # noqa: BLE001
-                return orig(selector, **options)
+                return _native(selector, options)
         return wrapped
 
     page.click = _make_targeted(page.click, False)
@@ -455,6 +666,75 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
     # Marker the Locator-class patch keys off: humanize is active for THIS page.
     page._clearcote_humanized = True
     _patch_locator_class()
+
+
+def _select_by_keyboard(page, selector, value, kw):
+    """Choose a <select> option with the keyboard, so the ENGINE fires the events.
+
+    Playwright's selectOption assigns the value and dispatches input+change from script. Those
+    arrive with isTrusted false, which is the single most reliable dropdown tell there is -- the
+    engine cannot produce an untrusted change, so a page that reads the flag knows the selection
+    was not made by a person. Measured against this SDK before this existed: 1 of 1 change events
+    untrusted.
+
+    A <select> that has focus and is CLOSED steps through its options on ArrowUp/ArrowDown, and the
+    browser emits input then change itself, trusted, exactly as it does for a mouse. So the fix is
+    not to forge better events, it is to stop forging them.
+
+    Returns the selected values (what select_option returns) or None whenever the keyboard route
+    cannot be shown to have worked -- a value that is not a plain option, a multi-select, or a
+    platform where arrows open the popup instead of stepping (macOS does this). The caller then
+    falls back to native selectOption. Verifying selectedIndex afterwards rather than assuming is
+    what makes that fallback safe: a silently wrong selection would be worse than an untrusted one.
+
+    Module scope, not inside attach_humanize: it needs nothing from the per-page closure, and
+    keeping the trusted route in exactly one function is what stops the page-level and
+    locator-level entry points drifting apart again -- that drift is how page.select_option ended
+    up untrusted while the identical locator call was not.
+    """
+    # `element=` points at an ElementHandle rather than naming an option, so there is nothing to
+    # resolve by hand and native is correct.
+    if kw.get("element"):
+        return None
+    one = lambda v: v[0] if isinstance(v, (list, tuple)) and len(v) == 1 else v
+    by, wanted = None, None
+    if kw.get("index") is not None and not isinstance(kw["index"], (list, tuple)):
+        by, wanted = "index", int(kw["index"])
+    elif kw.get("label") is not None and isinstance(one(kw["label"]), str):
+        by, wanted = "label", one(kw["label"])
+    elif isinstance(one(value), str):
+        by, wanted = "value", one(value)
+    if by is None:
+        return None
+    plan = page.evaluate(
+        """(a) => { const s = document.querySelector(a.sel);
+             if (!s || s.multiple || s.disabled) return null;
+             const os = [...s.options];
+             let i = -1;
+             if (a.by === 'index') i = (a.want >= 0 && a.want < os.length) ? a.want : -1;
+             else if (a.by === 'label') i = os.findIndex(o => (o.label || o.textContent || '').trim() === String(a.want).trim());
+             else i = os.findIndex(o => o.value === a.want);
+             if (i < 0 || os[i].disabled) return null;
+             return { to: i, from: s.selectedIndex, ret: os[i].value }; }""",
+        {"sel": selector, "by": by, "want": wanted},
+    )
+    if not plan:
+        return None
+    if plan["to"] == plan["from"]:
+        return [plan["ret"]]          # already selected; nothing to do, nothing to forge
+    page.focus(selector, **({"timeout": kw["timeout"]} if kw.get("timeout") is not None else {}))
+    time.sleep(_rand(60, 160) / 1000.0)
+    step = "ArrowDown" if plan["to"] > plan["from"] else "ArrowUp"
+    for _ in range(abs(plan["to"] - plan["from"])):
+        # page.keyboard.press, NOT a native handle: going through the page means the hold comes
+        # from the humanised press wrapper rather than being reapplied here.
+        page.keyboard.press(step)
+        time.sleep(_rand(45, 120) / 1000.0)
+    got = page.evaluate(
+        "(s) => { const e = document.querySelector(s); return e ? e.selectedIndex : -1; }",
+        selector,
+    )
+    return [plan["ret"]] if got == plan["to"] else None
 
 
 # --------------------------------------------------------------------------- locator patch
@@ -508,6 +788,15 @@ def _patch_locator_class():
         out = {}
         if "timeout" in kw:
             out["timeout"] = kw["timeout"]
+        return out
+
+    def _fwd_select(kw):
+        """select_option names its option with index/label/element, so unlike every other method
+        here those have to travel with the timeout or the page-level call selects the wrong thing."""
+        out = _fwd(kw)
+        for k in ("index", "label", "element"):
+            if kw.get(k) is not None:
+                out[k] = kw[k]
         return out
 
     def fill(self, value, **kw):
@@ -603,71 +892,15 @@ def _patch_locator_class():
         return o_uncheck(self, **kw)
 
     def select_option(self, value=None, **kw):
-        """Choose a <select> option with the keyboard, so the ENGINE fires the events.
+        """Delegate to the humanized page.select_option, like every other method here.
 
-        Playwright's selectOption assigns the value and dispatches input+change from script.
-        Those arrive with isTrusted false, which is the single most reliable dropdown tell
-        there is -- the engine cannot produce an untrusted change, so a page that reads the
-        flag knows the selection was not made by a person. Measured against this SDK before
-        this wrapper: 1 of 1 change events untrusted.
-
-        A <select> that has focus and is CLOSED steps through its options on ArrowUp/ArrowDown,
-        and the browser emits input then change itself, trusted, exactly as it does for a mouse.
-        So the fix is not to forge better events, it is to stop forging them.
-
-        Falls back to native selectOption whenever the keyboard route cannot be shown to have
-        worked -- a value that is not a plain option, a multi-select, or a platform where arrows
-        open the popup instead of stepping (macOS does this). Verifying selectedIndex afterwards
-        rather than assuming is what makes the fallback safe: a silently wrong selection would be
-        worse than an untrusted one.
-        """
-        if _on(self) and not kw.get("element"):
+        The trusted keyboard route (_select_by_keyboard) used to live in this method only, which is
+        why page.select_option(...) stayed untrusted; keeping one implementation behind the page
+        method is what stops the two entry points drifting again — and it gains the locator path
+        the glide to the <select> that it never had."""
+        if _on(self):
             try:
-                # Which option is being asked for, in whichever of the three plain forms the caller
-                # used. `element=` is excluded above: it points at an ElementHandle rather than
-                # naming an option, so there is nothing to resolve by hand and native is correct.
-                one = lambda v: v[0] if isinstance(v, (list, tuple)) and len(v) == 1 else v
-                by, wanted = None, None
-                if kw.get("index") is not None and not isinstance(kw["index"], (list, tuple)):
-                    by, wanted = "index", int(kw["index"])
-                elif kw.get("label") is not None and isinstance(one(kw["label"]), str):
-                    by, wanted = "label", one(kw["label"])
-                elif isinstance(one(value), str):
-                    by, wanted = "value", one(value)
-                if by is not None:
-                    page = self.page
-                    sel = _sel(self)
-                    plan = page.evaluate(
-                        """(a) => { const s = document.querySelector(a.sel);
-                             if (!s || s.multiple || s.disabled) return null;
-                             const os = [...s.options];
-                             let i = -1;
-                             if (a.by === 'index') i = (a.want >= 0 && a.want < os.length) ? a.want : -1;
-                             else if (a.by === 'label') i = os.findIndex(o => (o.label || o.textContent || '').trim() === String(a.want).trim());
-                             else i = os.findIndex(o => o.value === a.want);
-                             if (i < 0 || os[i].disabled) return null;
-                             return { to: i, from: s.selectedIndex, ret: os[i].value }; }""",
-                        {"sel": sel, "by": by, "want": wanted},
-                    )
-                    if plan and plan["to"] != plan["from"]:
-                        self.focus()
-                        time.sleep(_rand(60, 160) / 1000.0)
-                        step = "ArrowDown" if plan["to"] > plan["from"] else "ArrowUp"
-                        for _ in range(abs(plan["to"] - plan["from"])):
-                            # page.keyboard.press, NOT the module-level native handle: this block
-                            # runs in the Locator-patch scope, where the per-page keyboard closure
-                            # does not exist. Going through the page also means the hold comes from
-                            # the humanised press wrapper rather than being reapplied here.
-                            page.keyboard.press(step)
-                            time.sleep(_rand(45, 120) / 1000.0)
-                        got = page.evaluate(
-                            "(s) => { const e = document.querySelector(s); return e ? e.selectedIndex : -1; }",
-                            sel,
-                        )
-                        if got == plan["to"]:
-                            return [plan["ret"]]
-                    elif plan and plan["to"] == plan["from"]:
-                        return [plan["ret"]]   # already selected; nothing to do, nothing to forge
+                return self.page.select_option(_sel(self), value, **_fwd_select(kw))
             except Exception:  # noqa: BLE001
                 pass
         return o_select_option(self, value, **kw)
