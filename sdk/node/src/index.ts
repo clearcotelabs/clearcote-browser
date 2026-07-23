@@ -11,7 +11,7 @@
 // as engine switches.
 
 import { chromium } from "playwright-core";
-import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -183,7 +183,8 @@ function proSelector(
 
 /** Pre-fetch + verify the Clearcote binary without launching it. Returns the chrome.exe path.
  * Pass `version` ("150" / "150.0.7871.115" / "latest") to fetch a specific catalog build (PRO-tier
- * versions need `licenseKey` / `CLEARCOTE_LICENSE_KEY`). */
+ * versions need `licenseKey` / `CLEARCOTE_LICENSE_KEY`). Pin a PRO rebuild with "150.0.7871.114-r7"
+ * (or bare "r7"). */
 export async function download(
   options: DownloadOptions & { version?: string; licenseKey?: string; licenseApiBase?: string } = {},
 ): Promise<string> {
@@ -250,10 +251,45 @@ export async function winAvRetry<T>(doLaunch: (exe: string) => Promise<T>, exe: 
     }
   }
   // The in-place SxS activation-context poison never clears; relaunch from a fresh copy.
+  sweepRecoverDirs();
   const recover = join(mkdtempSync(join(tmpdir(), "clearcote-recover-")), "browser");
   cpSync(dirname(exe), recover, { recursive: true });
   warmFiles(recover);
   return doLaunch(join(recover, basename(exe)));
+}
+
+/**
+ * Delete stale `clearcote-recover-*` copies left by earlier runs of the fallback above.
+ *
+ * That fallback copies the WHOLE browser (~400 MB on Windows) to a fresh temp dir and never
+ * removed it, so a machine where the SxS/AV race fires on every launch accumulates one ~400 MB
+ * directory per launch indefinitely — 75 of them were found on one dev box. It is also why the
+ * Windows Firewall re-prompts forever: each launch runs from a path Windows has never seen, and
+ * the random name means no per-path firewall rule can ever match.
+ *
+ * Best-effort by design: the directory belonging to a browser that is still running is locked on
+ * Windows, so removal throws and we skip it — it will be swept by a later run instead. Anything
+ * newer than `keepMs` is left alone so we never delete a copy a concurrent launch is mid-way
+ * through creating. Set `CLEARCOTE_KEEP_RECOVER=1` to retain them for debugging.
+ */
+function sweepRecoverDirs(keepMs = 60_000): void {
+  if (process.env.CLEARCOTE_KEEP_RECOVER) return;
+  try {
+    const tmp = tmpdir();
+    const now = Date.now();
+    for (const name of readdirSync(tmp)) {
+      if (!name.startsWith("clearcote-recover-")) continue;
+      const dir = join(tmp, name);
+      try {
+        if (now - statSync(dir).mtimeMs < keepMs) continue;  // possibly an in-flight launch
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* locked by a live browser, or vanished under us — a later sweep gets it */
+      }
+    }
+  } catch {
+    /* never let cleanup break a launch */
+  }
 }
 
 /** Launch Clearcote and return a standard Playwright {@link Browser}. */

@@ -79,7 +79,8 @@ export interface DownloadOptions {
   /**
    * Select a specific browser build from the version catalog: a bare major (`"150"`), an exact
    * version (`"150.0.7871.115"`), or `"latest"`. Validated against the catalog before download.
-   * PRO-tier versions require a license key. Also set via `CLEARCOTE_BROWSER_VERSION`.
+   * PRO-tier versions require a license key. Pin a specific PRO rebuild with `"150.0.7871.114-r7"`
+   * (or bare `"r7"`), which also requires a license. Also set via `CLEARCOTE_BROWSER_VERSION`.
    */
   version?: string;
 }
@@ -447,6 +448,16 @@ function catalogAvailable(cat: Catalog, plat: "windows" | "linux"): string {
 export type VersionPlan = { kind: "free"; rel: ResolvedRelease } | { kind: "pro"; version: string };
 
 /**
+ * True when the selector pins a specific PRO REBUILD, e.g. `"r7"` or `"150.0.7871.114-r7"`.
+ * Revisions are the same Chromium version rebuilt, so they never appear in the public version
+ * catalog (`resolveVersion` would reject them) and are PRO-only. The authenticated download route
+ * (which knows `PRO_CATALOG_JSON`) resolves the revision; the SDK just recognises the shape.
+ */
+export function isProRevisionSelector(selector: string | undefined): boolean {
+  return /(?:^|-)r\d+$/i.test(String(selector || "").trim());
+}
+
+/**
  * Resolve a version selector against the public catalog, VALIDATING that it exists (and is reachable
  * for this tier) BEFORE any download — so a bad request fails fast with a helpful message instead of
  * getting stuck. `selector` may be a bare major ("150"), an exact version, or "latest". Throws when
@@ -513,6 +524,11 @@ export async function resolvedEngineVersion(
   try {
     const sel = String(selector || "").trim();
     if (/^\d+(?:\.\d+){3}$/.test(sel)) return sel; // exact build -> no catalog round-trip
+    if (isProRevisionSelector(sel)) {
+      // "150.0.7871.114-r7" -> the version; bare "r7" -> the pinned baseline version.
+      const m = /^(\d+(?:\.\d+){3})-r\d+$/i.exec(sel);
+      return m ? m[1] : String(RELEASE.version);
+    }
     const plan = await resolveVersion(sel || "latest", hasLicense, quiet);
     return plan.kind === "pro" ? plan.version : plan.rel.version;
   } catch {
@@ -525,6 +541,16 @@ export async function ensureVersion(
   selector: string,
   opts: { licenseKey?: string; apiBase?: string; cacheDir?: string; quiet?: boolean } = {},
 ): Promise<string> {
+  // A PRO revision pin ("r7" / "150.0.7871.114-r7") isn't in the public catalog — it's a licensed
+  // rebuild. Route it straight to the PRO download (which resolves the revision) before validating.
+  if (isProRevisionSelector(selector)) {
+    if (!opts.licenseKey) {
+      throw new Error(
+        `Clearcote '${selector}' is a PRO revision — set a license key (CLEARCOTE_LICENSE_KEY, or pass licenseKey) to pin it.`,
+      );
+    }
+    return proEnsureBinary(opts.licenseKey, { apiBase: opts.apiBase, cacheDir: opts.cacheDir, quiet: opts.quiet, version: selector });
+  }
   const plan = await resolveVersion(selector, !!opts.licenseKey, opts.quiet);
   if (plan.kind === "pro") {
     return proEnsureBinary(opts.licenseKey as string, { apiBase: opts.apiBase, cacheDir: opts.cacheDir, quiet: opts.quiet, version: plan.version });

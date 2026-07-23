@@ -72,7 +72,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.19.3"
+__version__ = "0.20.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -114,9 +114,21 @@ def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_upda
             _cache_root,
             _fetch_and_verify,
             _find,
+            is_pro_revision_selector,
             pro_ensure_binary,
             resolve_version,
         )
+
+        # A PRO revision pin ("r7" / "150.0.7871.114-r7") isn't in the public catalog — it's a
+        # licensed rebuild. Route it straight to the PRO download (which resolves the revision).
+        if is_pro_revision_selector(version):
+            if not (pro and pro[0]):
+                raise ValueError(
+                    f"Clearcote {version!r} is a PRO revision — set a license key "
+                    "(CLEARCOTE_LICENSE_KEY, or pass license_key=...) to pin it."
+                )
+            return pro_ensure_binary(pro[0], api_base=(pro[1] if pro else None),
+                                     cache_dir=cache_dir, quiet=quiet, version=version)
 
         kind, payload = resolve_version(version, has_license=bool(pro and pro[0]), quiet=quiet)
         if kind == "pro":
@@ -142,6 +154,8 @@ def executable_path(executable_path=None, cache_dir=None, quiet=False, auto_upda
     Order: explicit ``executable_path`` > ``CLEARCOTE_BINARY`` env > ``version`` selector > auto-download.
     Pass ``version="150"`` (major), ``"150.0.7871.115"`` (exact), or ``"latest"`` to pick a specific
     browser build from the catalog (a PRO-tier version needs ``license_key`` / ``CLEARCOTE_LICENSE_KEY``).
+    Pin a specific PRO rebuild with ``version="150.0.7871.114-r7"`` (or bare ``"r7"``) — revisions are
+    licensed builds, so a key is required.
     Pass ``auto_update=True`` (or set ``CLEARCOTE_AUTO_UPDATE=1``) to fetch the latest release.
     """
     key = resolve_license_key(license_key)
@@ -154,7 +168,8 @@ def download(cache_dir=None, quiet=False, auto_update=None, version=None, licens
     """Pre-fetch + verify the Clearcote binary without launching. Returns the chrome.exe path.
 
     Pass ``version="150"`` / ``"150.0.7871.115"`` / ``"latest"`` to fetch a specific browser build
-    from the catalog (PRO-tier versions need ``license_key`` / ``CLEARCOTE_LICENSE_KEY``).
+    from the catalog (PRO-tier versions need ``license_key`` / ``CLEARCOTE_LICENSE_KEY``). A PRO
+    rebuild can be pinned with ``version="150.0.7871.114-r7"`` (or bare ``"r7"``).
     Pass ``auto_update=True`` (or set ``CLEARCOTE_AUTO_UPDATE=1``) to fetch the latest release.
     """
     key = resolve_license_key(license_key)

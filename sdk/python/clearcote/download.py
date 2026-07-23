@@ -392,6 +392,16 @@ def _catalog_available(catalog, plat):
     ) or "none"
 
 
+def is_pro_revision_selector(selector):
+    """True when the selector pins a specific PRO REBUILD, e.g. "r7" or "150.0.7871.114-r7".
+
+    Revisions are the same Chromium version rebuilt, so they never appear in the public version
+    catalog — resolve_version would reject them. They are PRO-only (the free build has no
+    revisions). The download route (which knows PRO_CATALOG_JSON) does the real resolution; the
+    SDK just recognises the shape and routes straight to the licensed PRO download."""
+    return bool(re.search(r"(?:^|-)r\d+$", str(selector or "").strip(), re.IGNORECASE))
+
+
 def resolve_version(selector, has_license=False, quiet=False):
     """Resolve a version selector against the public catalog, VALIDATING that it exists (and is
     reachable) BEFORE any download, so a bad request fails fast with a helpful message instead of
@@ -467,6 +477,10 @@ def resolved_engine_version(selector, has_license=False, quiet=True):
         sel = str(selector or "").strip()
         if re.fullmatch(r"\d+(?:\.\d+){3}", sel):  # exact build -> no catalog round-trip
             return sel
+        if is_pro_revision_selector(sel):
+            # "150.0.7871.114-r7" -> the version; bare "r7" -> the pinned baseline version.
+            m = re.match(r"^(\d+(?:\.\d+){3})-r\d+$", sel, re.IGNORECASE)
+            return m.group(1) if m else str(RELEASE["version"])
         kind, payload = resolve_version(sel or "latest", has_license=has_license, quiet=quiet)
         return payload if kind == "pro" else payload.get("version")
     except Exception:  # noqa: BLE001

@@ -20,6 +20,7 @@ public class LaunchOptions : FingerprintOptions
     public bool? AutoUpdate { get; set; }
     /// Select a specific browser build from the catalog: a bare major ("150"), an exact version
     /// ("150.0.7871.115"), or "latest". Validated before download; PRO-tier versions need a license.
+    /// Pin a specific PRO rebuild with "150.0.7871.114-r7" (or bare "r7"), which also needs a license.
     /// Also set via CLEARCOTE_BROWSER_VERSION.
     public string? Version { get; set; }
     /// Suppress SDK progress/warning logging.

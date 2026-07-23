@@ -419,6 +419,12 @@ public static class Download
         {
             var sel = (selector ?? "").Trim();
             if (System.Text.RegularExpressions.Regex.IsMatch(sel, @"^\d+(?:\.\d+){3}$")) return sel;
+            if (IsProRevisionSelector(sel))
+            {
+                // "150.0.7871.114-r7" -> the version; bare "r7" -> the pinned baseline version.
+                var m = Regex.Match(sel, @"^(\d+(?:\.\d+){3})-r\d+$", RegexOptions.IgnoreCase);
+                return m.Success ? m.Groups[1].Value : Release.Current.Version;
+            }
             var plan = await ResolveVersionAsync(string.IsNullOrEmpty(sel) ? "latest" : sel, hasLicense, quiet).ConfigureAwait(false);
             return plan.Kind == "pro" ? plan.Version : plan.Rel?.Version;
         }
@@ -477,10 +483,28 @@ public static class Download
         return new VersionPlan("free", rel, null);
     }
 
+    /// True when the selector pins a specific PRO REBUILD, e.g. "r7" or "150.0.7871.114-r7".
+    /// Revisions are the same Chromium version rebuilt, so they never appear in the public version
+    /// catalog (ResolveFromCatalog would reject them) and are PRO-only. The authenticated download
+    /// route (which knows PRO_CATALOG_JSON) resolves the revision; the SDK just recognises the shape.
+    public static bool IsProRevisionSelector(string? selector) =>
+        Regex.IsMatch((selector ?? "").Trim(), @"(?:^|-)r\d+$", RegexOptions.IgnoreCase);
+
     /// Resolve a version selector to a downloaded, verified binary path (free from GitHub, pro via the licensed route).
     public static async Task<string> EnsureVersionAsync(string selector, string? licenseKey = null,
         string? apiBase = null, string? cacheDir = null, bool quiet = false)
     {
+        // A PRO revision pin ("r7" / "150.0.7871.114-r7") isn't in the public catalog — it's a
+        // licensed rebuild. Route it straight to the PRO download (which resolves the revision).
+        if (IsProRevisionSelector(selector))
+        {
+            if (string.IsNullOrEmpty(licenseKey))
+                throw new Exception(
+                    $"Clearcote '{selector}' is a PRO revision — set a license key (CLEARCOTE_LICENSE_KEY, or pass LicenseKey) to pin it.");
+            return await ProEnsureBinaryAsync(licenseKey!,
+                new ProDownloadOptions { ApiBase = apiBase, CacheDir = cacheDir, Quiet = quiet, Version = selector }).ConfigureAwait(false);
+        }
+
         var plan = await ResolveVersionAsync(selector, !string.IsNullOrEmpty(licenseKey), quiet).ConfigureAwait(false);
         if (plan.Kind == "pro")
             return await ProEnsureBinaryAsync(licenseKey!,
