@@ -48,7 +48,7 @@ public class GeometryLiveTests
         }
         finally
         {
-            try { Directory.Delete(dir, recursive: true); } catch (IOException) { }
+            TestTemp.Remove(dir);
         }
     }
 
@@ -99,7 +99,7 @@ public class GeometryLiveTests
         }
         finally
         {
-            try { Directory.Delete(dir, recursive: true); } catch (IOException) { }
+            TestTemp.Remove(dir);
         }
     }
 
