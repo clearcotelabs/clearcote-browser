@@ -357,7 +357,7 @@ All optional. Anything not listed here is passed straight through to Playwright
 > applied at launch, before your first navigation. Pass an explicit `viewport`, `screen` or `no_viewport` to
 > opt out entirely.
 >
-> **Proxies:** a `socks5://user:pass@host:port` proxy is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor). Chromium can't authenticate SOCKS5, so the credentials are dropped with a warning — put the auth on a local relay.
+> **Proxies:** a `socks5://user:pass@host:port` proxy is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor), and the credentials are passed to the engine, which implements SOCKS5 username/password authentication (RFC 1929). Stock Chromium does not, so no local relay is needed.
 
 ## Personas & Client Hints coherence
 

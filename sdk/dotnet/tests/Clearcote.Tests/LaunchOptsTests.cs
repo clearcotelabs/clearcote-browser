@@ -66,9 +66,15 @@ public class LaunchOptsTests
         var (a0, p0) = LaunchOpts.ResolveProxy(null);
         Assert.Empty(a0); Assert.Null(p0);
 
+        // clearcote implements RFC 1929, so the credentials go to the engine rather than being
+        // dropped: bare server on --proxy-server, user:pass on --socks5-credentials.
         var (a1, p1) = LaunchOpts.ResolveProxy(new ProxyOptions { Server = "socks5://h:1080", Username = "u", Password = "p" });
-        Assert.Equal(new[] { "--proxy-server=socks5://h:1080" }, a1);
-        Assert.Null(p1); // credentials can't be authenticated by Chromium -> dropped
+        Assert.Equal(new[] { "--proxy-server=socks5://h:1080", "--socks5-credentials=u:p" }, a1);
+        Assert.Null(p1); // Playwright rejects a credentialed SOCKS descriptor
+
+        // userinfo already in the URL is stripped -- it must not reach --proxy-server
+        var (a1b, _) = LaunchOpts.ResolveProxy(new ProxyOptions { Server = "socks5://u:p@h:1080", Username = "u", Password = "p" });
+        Assert.Equal(new[] { "--proxy-server=socks5://h:1080", "--socks5-credentials=u:p" }, a1b);
 
         var socksNoCreds = new ProxyOptions { Server = "socks5://h:1080" };
         var (a2, p2) = LaunchOpts.ResolveProxy(socksNoCreds);
@@ -77,6 +83,17 @@ public class LaunchOptsTests
         var httpAuth = new ProxyOptions { Server = "http://h:8080", Username = "u", Password = "p" };
         var (a3, p3) = LaunchOpts.ResolveProxy(httpAuth);
         Assert.Empty(a3); Assert.Same(httpAuth, p3);
+    }
+
+    [Fact]
+    public void PortableArgs_covers_both_modes()
+    {
+        Assert.Empty(LaunchOpts.PortableArgs());
+        Assert.Equal(new[] { "--portable-profile" }, LaunchOpts.PortableArgs(portableProfile: true));
+        Assert.Equal(new[] { "--profile-encryption-key=s3cret" }, LaunchOpts.PortableArgs(encryptionKey: "s3cret"));
+        // an explicit key wins over the generated-file mode
+        Assert.Equal(new[] { "--profile-encryption-key=s3cret" },
+                     LaunchOpts.PortableArgs(portableProfile: true, encryptionKey: "s3cret"));
     }
 
     // ----------------------------------------------------------------- web bluetooth

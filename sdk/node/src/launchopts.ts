@@ -114,6 +114,18 @@ export function webrtcDefaultDenyArgs(args: string[], _webrtcIp?: unknown): stri
 /** Switches to load unpacked extensions. Chromium needs BOTH --load-extension=<dirs> and
  * --disable-extensions-except=<dirs> (the latter keeps the listed extensions enabled while
  * everything else stays off). `paths` is a list of unpacked-extension directories. */
+/** Switches that keep the cookie encryption key with the PROFILE rather than the OS keystore, so
+ * the whole user data directory can be copied to another machine and still decrypt.
+ *
+ * `encryptionKey` derives the key from a caller-supplied secret and writes nothing to disk — prefer
+ * it when the profile is synced to shared storage. `portableProfile` generates a key and stores it
+ * in the profile, which is convenient but means the cookie database is effectively unencrypted at
+ * rest (inherent to portability, not a flaw in it). */
+export function portableArgs(portableProfile?: boolean, encryptionKey?: string): string[] {
+  if (encryptionKey) return [`--profile-encryption-key=${encryptionKey}`];
+  return portableProfile ? ["--portable-profile"] : [];
+}
+
 export function extensionArgs(paths?: string[]): string[] {
   if (!paths || paths.length === 0) return [];
   const joined = paths.join(",");
@@ -123,21 +135,23 @@ export function extensionArgs(paths?: string[]): string[] {
 /** Resolve a Playwright proxy descriptor. Playwright rejects credentials in its proxy descriptor
  * for SOCKS schemes, so a socks5://user:pass@host:port proxy (the most common residential-proxy
  * shape) makes launch() fail outright. Route such a proxy through the --proxy-server engine switch
- * so the launch proceeds, and drop it from the Playwright options. NOTE: Chromium has no SOCKS5
- * authentication, so the credentials can't be honored either way — warn to put the auth on a local
- * relay. Everything else (http/https, or SOCKS without credentials) is left to Playwright. */
+ * so the launch proceeds, and drop it from the Playwright options.
+ *
+ * The credentials are forwarded to the engine as --socks5-credentials: clearcote implements RFC
+ * 1929 username/password authentication, which stock Chromium does not, so no local relay is
+ * needed. Everything else (http/https, or SOCKS without credentials) is left to Playwright. */
 export function resolveProxy(proxy: PwProxy | undefined): { args: string[]; proxy: PwProxy | undefined } {
   if (!proxy || typeof proxy !== "object") return { args: [], proxy };
   const server = (proxy.server ?? "").trim();
   const hasCreds = !!(proxy.username || proxy.password);
   if (server && /^socks/i.test(server) && hasCreds) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      "clearcote: routed a credentialed SOCKS5 proxy via --proxy-server so the launch can proceed, " +
-        "but Chromium cannot authenticate SOCKS5 — the credentials are dropped. Put the authentication " +
-        "on a local relay (a local SOCKS->authenticated-SOCKS bridge)."
-    );
-    return { args: [`--proxy-server=${server}`], proxy: undefined };
+    // Strip any userinfo already in the URL; the engine takes it via its own switch.
+    const bare = server.replace(/^([a-zA-Z0-9+.-]+:\/\/)[^/@]*@/, "$1");
+    const creds = `${proxy.username ?? ""}:${proxy.password ?? ""}`;
+    return {
+      args: [`--proxy-server=${bare}`, `--socks5-credentials=${creds}`],
+      proxy: undefined,
+    };
   }
   return { args: [], proxy };
 }

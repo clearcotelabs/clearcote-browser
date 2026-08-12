@@ -38,6 +38,7 @@ import {
 } from "./profilelib.js";
 import {
   extensionArgs,
+  portableArgs,
   resolveProxy,
   mergeFeatureFlags,
   privacySandboxArgs,
@@ -129,6 +130,12 @@ interface ProfileOption {
 interface ExtensionsOption {
   /** Unpacked-extension directory paths. */
   extensions?: string[];
+  /** Keep the cookie encryption key in the profile so the user data dir is portable between
+   * machines. Opt-in: the cookie database is then effectively unencrypted at rest. */
+  portableProfile?: boolean;
+  /** Derive the profile encryption key from this secret instead, writing nothing to disk.
+   * Preferred when the profile is synced to shared storage. */
+  encryptionKey?: string;
   /** Disable Privacy Sandbox APIs (Topics/FLEDGE/Shared Storage/Fenced Frames).
    *
    * Default `false` since 0.23.0 — real Google Chrome ships all of them, and the default persona
@@ -563,7 +570,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     options.profile && !isAutoProfile
       ? { ...resolveProfileOptions(options.profile as string | Profile), ...options }
       : options;
-  const { profile: _profile, profileSelect: _profileSelect, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest } = merged;
+  const { profile: _profile, profileSelect: _profileSelect, extensions, portableProfile, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -604,7 +611,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …).
   const launchEnv = fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env);
   const runtimeEnv = lease ? withRunToken(lease.token, launchEnv) : launchEnv;
-  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined);
+  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined);
   // Headless: screen.* has to be handled alongside the viewport or the window reports a geometry no
   // real browser can (see ./geometry.ts). Probe a copy — viewport/screen are context options, which
   // chromium.launch() does not take — and carry the result to newPage/newContext.
@@ -637,7 +644,7 @@ export async function launchPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, ...rest } = merged;
+  const { profile: _profile, extensions, portableProfile, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -685,7 +692,7 @@ export async function launchPersistentContext(
   });
   const ctxEnv = fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env);
   const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv) : ctxEnv;
-  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions), proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined);
+  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined);
   // headless: the persona owns screen when it is running, so only the window needs fitting; with no
   // persona the SDK overrides screen itself (see ./geometry.ts). Headed already set viewport: null.
   const geom = opts.headless === false
@@ -840,7 +847,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     ? { ...resolveProfileOptions(launchOpts.profile), ...launchOpts }
     : launchOpts;
   const {
-    profile: _profile, extensions, disablePrivacySandbox, executablePath: exeOption,
+    profile: _profile, extensions, portableProfile, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
     args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
@@ -855,7 +862,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
   ensureRunnableHere(exe);
   const engineArgs = assembleArgs(
-    fingerprintArgs(fingerprint), agentArgs(agent), extensionArgs(extensions),
+    fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)],
     proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs ?? [], proxyOpt);
 
   const resolvedPort = port ?? (await freePort());

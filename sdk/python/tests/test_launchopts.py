@@ -68,13 +68,19 @@ def test_resolve_proxy_passthrough_when_absent():
     assert resolve_proxy(None) == ([], None)
 
 
-def test_resolve_proxy_socks5_with_creds_routes_to_switch_and_drops_pw_proxy():
+def test_resolve_proxy_socks5_with_creds_routes_to_switch_and_forwards_creds():
     proxy = {"server": "socks5://h:1080", "username": "u", "password": "p"}
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        args, pw = resolve_proxy(proxy)
-    assert args == ["--proxy-server=socks5://h:1080"]
+    args, pw = resolve_proxy(proxy)
+    # The engine implements RFC 1929, so the credentials are handed to it rather than dropped.
+    assert args == ["--proxy-server=socks5://h:1080", "--socks5-credentials=u:p"]
     assert pw is None  # Playwright would reject creds in a SOCKS descriptor -> drop it
+
+
+def test_resolve_proxy_socks5_strips_userinfo_already_in_url():
+    proxy = {"server": "socks5://old:secret@h:1080", "username": "u", "password": "p"}
+    args, pw = resolve_proxy(proxy)
+    assert args == ["--proxy-server=socks5://h:1080", "--socks5-credentials=u:p"]
+    assert pw is None
 
 
 def test_resolve_proxy_socks5_without_creds_left_to_playwright():
@@ -88,11 +94,14 @@ def test_resolve_proxy_http_with_creds_left_to_playwright():
     assert resolve_proxy(proxy) == ([], proxy)
 
 
-def test_resolve_proxy_socks5_with_creds_warns():
+def test_resolve_proxy_socks5_with_creds_does_not_warn():
+    # This used to warn that Chromium cannot authenticate SOCKS5 and to put the auth on a local
+    # relay. The engine now speaks RFC 1929, so warning would send callers to a workaround they
+    # no longer need.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         resolve_proxy({"server": "socks5://h:1", "username": "u", "password": "p"})
-    assert any("SOCKS5" in str(w.message) for w in caught)
+    assert not [w for w in caught if "SOCKS5" in str(w.message)]
 
 
 # --------------------------------------------------------------------------- web bluetooth

@@ -31,6 +31,7 @@ from ._geometry import apply_headless_geometry, fit_window_to_persona, move_wind
 from ._humanize import install_humanize, install_humanize_on_context
 from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
     extension_args,
+    portable_args,
     merge_feature_flags,
     privacy_sandbox_args,
     quic_args,
@@ -108,7 +109,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -297,6 +298,8 @@ def _prepare(kwargs):
     _cc_pro = kwargs.pop("_cc_pro", None)  # (license_key, api_base) or None -> pick PRO vs free binary
     extra_args = kwargs.pop("args", None)
     extensions = kwargs.pop("extensions", None)
+    portable_profile = kwargs.pop("portable_profile", False)
+    encryption_key = kwargs.pop("encryption_key", None)
     # DEFAULT FLIPPED TO FALSE — Privacy Sandbox now stays ON unless the caller asks otherwise.
     #
     # The old default disabled Topics/FLEDGE/Shared Storage/Fenced Frames, reasoning that a build
@@ -356,7 +359,8 @@ def _prepare(kwargs):
         kwargs.pop("proxy", None)
     else:
         kwargs["proxy"] = proxy
-    base = fingerprint_args(fp) + agent_args(agent) + extension_args(extensions) + proxy_args
+    base = (fingerprint_args(fp) + agent_args(agent) + extension_args(extensions)
+            + portable_args(portable_profile, encryption_key) + proxy_args)
     base += quic_args(proxy_opt)  # behind a proxy, disable QUIC so no HTTP/3 UDP egresses around it
     # Linux hosts hide navigator.bluetooth while exposing usb/serial/hid — an OS-origin tell on a
     # Windows persona. Restore it (no-op off Linux). See web_bluetooth_args.

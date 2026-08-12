@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 namespace Clearcote;
 
 /// Proxy descriptor (mirrors the Playwright proxy shape the Node SDK reads).
@@ -104,9 +105,12 @@ public static class LaunchOpts
         return new() { $"--load-extension={joined}", $"--disable-extensions-except={joined}" };
     }
 
-    /// A credentialed SOCKS5 proxy can't authenticate in Chromium, so re-route it via --proxy-server and
-    /// drop it from the Playwright proxy (credentials are dropped with a warning). Everything else passes
-    /// through unchanged. Returns the extra args + the (possibly nulled) proxy to hand to Playwright.
+    /// Playwright rejects credentials in its SOCKS proxy descriptor, so a
+    /// socks5://user:pass@host:port proxy is routed through --proxy-server instead and the
+    /// credentials handed to the engine via --socks5-credentials. Clearcote implements RFC 1929
+    /// username/password authentication, which stock Chromium does not, so no local relay is
+    /// needed. Everything else passes through unchanged. Returns the extra args + the (possibly
+    /// nulled) proxy to hand to Playwright.
     public static (List<string> Args, ProxyOptions? Proxy) ResolveProxy(ProxyOptions? proxy)
     {
         if (proxy is null) return (new(), null);
@@ -114,11 +118,21 @@ public static class LaunchOpts
         var hasCreds = !string.IsNullOrEmpty(proxy.Username) || !string.IsNullOrEmpty(proxy.Password);
         if (isSocks && hasCreds && !string.IsNullOrEmpty(proxy.Server))
         {
-            Console.Error.WriteLine(
-                "[clearcote] SOCKS5 proxy credentials can't be authenticated by Chromium; " +
-                "routing via --proxy-server and dropping the credentials. Put the auth on a local relay.");
-            return (new() { $"--proxy-server={proxy.Server}" }, null);
+            // Strip any userinfo already in the URL; the engine takes it via its own switch.
+            var bare = Regex.Replace(proxy.Server!, "^([a-zA-Z0-9+.-]+://)[^/@]*@", "$1");
+            var creds = $"{proxy.Username ?? string.Empty}:{proxy.Password ?? string.Empty}";
+            return (new() { $"--proxy-server={bare}", $"--socks5-credentials={creds}" }, null);
         }
         return (new(), proxy);
+    }
+
+    /// Keep the profile's cookie encryption key with the profile instead of the OS keystore, so the
+    /// whole user data directory can be copied to another machine. `encryptionKey` derives the key
+    /// from a caller-supplied secret and writes nothing to disk; `portableProfile` generates one and
+    /// stores it in the profile.
+    public static List<string> PortableArgs(bool portableProfile = false, string? encryptionKey = null)
+    {
+        if (!string.IsNullOrEmpty(encryptionKey)) return new() { $"--profile-encryption-key={encryptionKey}" };
+        return portableProfile ? new() { "--portable-profile" } : new();
     }
 }

@@ -80,13 +80,25 @@ describe("resolveProxy", () => {
     expect(resolveProxy(undefined)).toEqual({ args: [], proxy: undefined });
   });
 
-  it("routes a credentialed SOCKS5 proxy to --proxy-server and drops it from Playwright", () => {
+  it("routes a credentialed SOCKS5 proxy to --proxy-server and forwards the credentials", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const r = resolveProxy({ server: "socks5://h:1080", username: "u", password: "p" });
-    expect(r.args).toEqual(["--proxy-server=socks5://h:1080"]);
+    expect(r.args).toEqual([
+      "--proxy-server=socks5://h:1080",
+      "--socks5-credentials=u:p",
+    ]);
     expect(r.proxy).toBeUndefined();
-    expect(warn).toHaveBeenCalled();
+    // The engine implements RFC 1929 now, so there is nothing to warn about.
+    expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it("strips userinfo already present in the SOCKS5 URL", () => {
+    const r = resolveProxy({ server: "socks5://old:secret@h:1080", username: "u", password: "p" });
+    expect(r.args).toEqual([
+      "--proxy-server=socks5://h:1080",
+      "--socks5-credentials=u:p",
+    ]);
   });
 
   it("leaves a SOCKS5 proxy without creds to Playwright", () => {

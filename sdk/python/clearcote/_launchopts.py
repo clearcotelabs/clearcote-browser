@@ -132,26 +132,41 @@ def extension_args(paths):
     return ["--load-extension=" + joined, "--disable-extensions-except=" + joined]
 
 
+def portable_args(portable_profile=False, encryption_key=None):
+    """Switches that keep the cookie encryption key with the PROFILE rather than the OS keystore,
+    so the whole user data directory can be copied to another machine and still decrypt.
+
+    ``encryption_key`` derives the key from a caller-supplied secret and writes nothing to disk --
+    prefer it when the profile is synced to shared storage. ``portable_profile`` generates a key and
+    stores it in the profile, which is convenient but means the cookie database is effectively
+    unencrypted at rest (inherent to portability, not a flaw in it)."""
+    if encryption_key:
+        return ["--profile-encryption-key=" + str(encryption_key)]
+    if portable_profile:
+        return ["--portable-profile"]
+    return []
+
+
 def resolve_proxy(proxy):
     """Return ``(extra_args, proxy_for_playwright)`` for a Playwright proxy descriptor.
 
     Playwright rejects credentials in its proxy descriptor for SOCKS schemes, so a
     ``socks5://user:pass@host:port`` proxy (the most common residential-proxy shape) makes
     ``launch()`` fail outright. Route such a proxy through the ``--proxy-server`` engine switch so
-    the launch proceeds, and drop it from the Playwright options. NOTE: Chromium has no SOCKS5
-    authentication, so the credentials can't be honored either way — we warn the caller to put the
-    auth on a local relay. Everything else (http/https proxies, or SOCKS without credentials) is
-    left to Playwright unchanged."""
+    the launch proceeds, and drop it from the Playwright options.
+
+    The credentials are forwarded to the engine as ``--socks5-credentials``: clearcote implements
+    RFC 1929 username/password authentication, which stock Chromium does not, so no local relay is
+    needed. Everything else (http/https proxies, or SOCKS without credentials) is left to
+    Playwright unchanged."""
     if not isinstance(proxy, dict):
         return [], proxy
     server = (proxy.get("server") or "").strip()
     has_creds = bool(proxy.get("username") or proxy.get("password"))
     if server and _SOCKS.match(server) and has_creds:
-        warnings.warn(
-            "clearcote: routed a credentialed SOCKS5 proxy via --proxy-server so the launch can "
-            "proceed, but Chromium cannot authenticate SOCKS5 — the credentials are dropped. Put "
-            "the authentication on a local relay (a local SOCKS->authenticated-SOCKS bridge).",
-            stacklevel=2,
-        )
-        return ["--proxy-server=" + server], None  # drop the proxy from Playwright (it would reject it)
+        # Strip any userinfo already in the URL; the engine takes it via its own switch.
+        bare = re.sub(r"^([a-zA-Z0-9+.-]+://)[^/@]*@", r"\1", server)
+        creds = "%s:%s" % (proxy.get("username") or "", proxy.get("password") or "")
+        # drop the proxy from Playwright (it would reject a credentialed SOCKS descriptor)
+        return ["--proxy-server=" + bare, "--socks5-credentials=" + creds], None
     return [], proxy
