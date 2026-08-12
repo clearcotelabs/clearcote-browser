@@ -44,7 +44,7 @@ Every spoofed getter *is* a C++ getter: `toString` returns `[native code]`, **re
 <td width="33%" valign="top">
 
 #### Coherent to the network
-One real Chromium keeps the JS identity, the **UA / UA-CH** headers, and the **TLS JA3/JA4 + HTTP/2** stack in agreement. No spoofed-JS-over-real-TLS seam for a cross-check to catch.
+One real Chromium keeps the JS identity, the **UA / UA-CH** headers, and the **TLS JA3/JA4 + HTTP/2** stack in agreement. No spoofed-JS-over-real-TLS seam to catch.
 
 </td>
 <td width="33%" valign="top">
@@ -54,42 +54,25 @@ One real Chromium keeps the JS identity, the **UA / UA-CH** headers, and the **T
 
 </td>
 </tr>
-<tr>
-<td width="33%" valign="top">
-
-#### One seed → one machine
-A single `--fingerprint` seed derives a whole **internally-consistent** identity — canvas, WebGL, audio, fonts, locale, hardware, GPU — stable across launches, unlinkable across seeds. Or import a **real** machine.
-
-</td>
-<td width="33%" valign="top">
-
-#### Auditable patches
-**32** small single-purpose diffs in [`patches/`](patches/). Read one in a minute; rebuild the engine with one script. No opaque binary, no phone-home.
-
-</td>
-<td width="33%" valign="top">
-
-#### Don't trust us — verify us
-Every release is **GPG-signed, checksummed, and reproducible from source**. Rebuild it yourself and diff the hash. Trust the math, not the vendor.
-
-</td>
-</tr>
 </table>
 
-> **🆕 What's new — [v0.1.0-pre.21](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.21) + SDK `clearcote` 0.15.0.** **Network request-header hygiene:** under a fingerprint persona the engine no longer emits redundant `Cache-Control` / `Pragma` request headers on navigations and reloads, matching a real Chrome cold navigation (the effective cache mode is unchanged; with no persona, stock behavior is preserved). **Humanized cursor — seeded motion model:** the SDK's humanizer now drives a shared, persona-seeded trajectory/timing core (minimum-jerk submovements, Fitts-law duration, colored noise, endpoint dwells) that is bit-identical across the Python **and** Node SDKs — one fingerprint ⇒ one stable motor identity — with an offline motion-score validator. Prior surfaces remain: locale coherence, `serve()` stealthy CDP endpoint + `clearcote-mcp` + Docker, render-vs-string **font coherence**, mobile/Android persona, **Edge** coherence, **TLS network persona** (`tlsProfile`), **Widevine / EME (DRM)**, the per-origin **[canvas bridge](docs/CANVAS-BRIDGE.md)**, real-fingerprint import, and the **[stealth-coherence gate](docs/STEALTH-COHERENCE.md)** that runs every release. Experimental pre-release.
+> **What's new** — free build [v0.1.0-pre.21](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.21), SDK `clearcote` **0.26.0**.
+> Recent: SOCKS5 proxy authentication (RFC 1929 — no local relay needed), portable profiles (copy a
+> profile between machines with its cookies), unpacked **Chrome extension** loading incl. Manifest V2,
+> client-hint headers that follow the persona, and locale/font coherence. Earlier surfaces remain:
+> `serve()` CDP endpoint + `clearcote-mcp` + Docker, mobile/Android and Edge personas, TLS network
+> persona, Widevine/EME, the per-origin [canvas bridge](docs/CANVAS-BRIDGE.md), real-fingerprint
+> import, and the [stealth-coherence gate](docs/STEALTH-COHERENCE.md) that runs every release.
+> Experimental pre-release.
 
 ---
 
 ## Contents
 
-- [What it is](#what-it-is) · [The 12-second tour](#the-12-second-tour)
-- [Quick start](#quick-start) — [SDK](#sdk--playwright-drop-in) · [Direct](#direct--any-cdp-client) · [Docker](#run-in-docker-)
-- [Why patch the engine, not the page](#why-patch-the-engine-not-the-page)
-- [Why Clearcote instead of the others](#why-clearcote-instead-of-the-others)
-- [Configure the persona](#configure-the-persona--what-you-control)
-- [Drive a page with an AI agent](#drive-a-page-with-an-ai-agent)
-- [Proof & verify](#proof--verify)
-- [Build from source](#build-from-source) · [Reference](#reference) · [Credits · License](#credits)
+[What it is](#what-it-is) · [Quick start](#quick-start) · [Why patch the engine](#why-patch-the-engine-not-the-page) ·
+[vs. the others](#why-clearcote-instead-of-the-others) · [Persona options](#configure-the-persona--what-you-control) ·
+[AI agents](#drive-a-page-with-an-ai-agent) · [Verify](#proof--verify) · [Build](#build-from-source) ·
+[Pro](#clearcote-pro--49month) · [Reference](#reference)
 
 ---
 
@@ -225,40 +208,11 @@ docker run -d -p 9222:9222 -e CC_PLATFORM=windows -e CC_FINGERPRINT=user-7423 -e
 
 > **Security:** the CDP endpoint is full browser control — publish it only to trusted networks (`-p 127.0.0.1:9222:9222` keeps it host-local). The [`docker/`](docker/) `Dockerfile` is auditable — rebuild + verify it yourself.
 
-**Or build your own image** (SDK-driven, run your own script). Clearcote ships a **Linux x64** binary, so it runs headless in a container. The image needs the browser's runtime libraries, a **base font set** (so canvas/text hashes are coherent — the #1 Linux tell), and the SDK. On Linux the persona defaults to a coherent **native Linux** identity; WebRTC leak-proofing and Privacy-Sandbox-disable are on by default.
+**Building your own image?** The full Dockerfile — runtime libraries, the base font set that keeps
+canvas and text hashes coherent (the number-one Linux tell), and an SDK-driven entrypoint — is in
+[`docker/`](docker/) and documented at [clearcotelabs.com/docs/deployment](https://www.clearcotelabs.com/docs/deployment).
 
-```dockerfile
-FROM node:20-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      xz-utils libnss3 libnspr4 libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-      libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libxfixes3 libxext6 libxrender1 \
-      libpango-1.0-0 libcairo2 libx11-6 libxcb1 libexpat1 libdbus-1-3 ca-certificates \
-      fontconfig fonts-liberation fonts-noto-color-emoji fonts-unifont fonts-ipafont-gothic fonts-wqy-zenhei \
- && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-RUN npm i clearcote
-RUN node --input-type=module -e "import { download } from 'clearcote'; await download();"   # bake the binary in
-COPY run.mjs .
-CMD ["node", "run.mjs"]
-```
-
-```javascript
-// run.mjs — one coherent Linux persona, every stealth surface on
-import { launchPersistentContext } from "clearcote";
-const ctx = await launchPersistentContext("/tmp/prof", {
-  headless: true,
-  fingerprint: "user-1",
-  proxy: { server: "http://gateway:8080", username: "u", password: "p" },
-  geoip: true,          // timezone + languages + WebRTC IP matched to the proxy exit
-  humanize: true,       // real, trusted bezier input; navigator.webdriver stays false
-  args: ["--no-sandbox"],
-});
-const page = ctx.pages()[0] ?? (await ctx.newPage());
-await page.goto("https://example.com");
-await ctx.close();
-```
-
-> `--shm-size=1g` avoids `/dev/shm` crashes on heavy pages. Python is identical (`from clearcote import launch_persistent_context`, `snake_case` options).
+> `--shm-size=1g` avoids `/dev/shm` crashes on heavy pages.
 
 ---
 
@@ -397,7 +351,10 @@ Which Chromium majors are shipped or in progress, and when each tier gets them:
 | **150** (`150.0.7871.114`) | ✅ Available | ~2 months after release | ✅ Available |
 | **149** (`149.0.7827.114`) | ✅ Available | Available now | Available now |
 
-*A new Chromium major goes to Pro users the day it's built; the free build gets that same fully open, reproducible major roughly 2 months later. **Chromium 151 (`151.0.7922.108`) is live for Pro now** (Windows + Linux x64), tracking the current Chrome stable; free stays on `149.0.7827.114` (`v0.1.0-pre.21`). Select a build with the SDK: `launch(version="151", license_key=...)` (Pro) or `version="149"` (free) — omit it to get the latest of your tier (Pro → 151, free → 149). Earlier Pro majors stay selectable: `version="150"` continues to resolve for anyone pinned to it. Requires the SDK ≥ 0.16.0.*
+*A new major reaches Pro the day it's built; the free build gets that same fully open, reproducible
+major roughly two months later. Pick one with the SDK — `launch(version="151", license_key=...)` for
+Pro, `version="149"` for free — or omit it for the latest of your tier. Earlier Pro majors stay
+selectable. Requires SDK ≥ 0.16.0.*
 
 ## Reference
 
@@ -411,21 +368,24 @@ Which Chromium majors are shipped or in progress, and when each tier gets them:
 
 ---
 
-## Credits
+## Credits · License · Responsible use
 
-Clearcote stands on excellent open-source work: **[Chromium](https://www.chromium.org/)** (BSD-3), **[ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium)** (de-Googled base), **[fingerprint-chromium](https://github.com/adryfish/fingerprint-chromium)** (engine-level fingerprint controls), **[Brave](https://brave.com/privacy-updates/3-fingerprint-randomization/)** (the per-site "farbling" model), and **[Camoufox](https://github.com/daijro/camoufox)** (a sibling open anti-detect browser). It's an **independent project** — not affiliated with or derived from any commercial product, and ships **no** proprietary code. Full attributions: [CREDITS.md](CREDITS.md).
+Clearcote stands on excellent open-source work: **[Chromium](https://www.chromium.org/)** (BSD-3),
+**[ungoogled-chromium](https://github.com/ungoogled-software/ungoogled-chromium)** (de-Googled base),
+**[fingerprint-chromium](https://github.com/adryfish/fingerprint-chromium)** (engine-level fingerprint
+controls), **[Brave](https://brave.com/privacy-updates/3-fingerprint-randomization/)** (the per-site
+"farbling" model), and **[Camoufox](https://github.com/daijro/camoufox)** (a sibling open anti-detect
+browser). It's an **independent project** — not affiliated with or derived from any commercial
+product, and ships **no** proprietary code. Full attributions: [CREDITS.md](CREDITS.md).
 
-## Roadmap · License · Responsible use
+Clearcote's code and patches are **BSD-3-Clause** ([LICENSE](LICENSE)); upstream components keep their
+licenses. It's a privacy and automation tool for **lawful** purposes — privacy, QA and testing,
+research, authorized automation. Respect site terms and the law. Provided "as is"
+([DISCLAIMER.md](DISCLAIMER.md)).
 
-- **[ROADMAP.md](ROADMAP.md)** — what's next (macOS, ARM64, more coherence, profile manager). ⭐ Star + watch to follow along.
-- **License** — Clearcote's code and patches are **BSD-3-Clause** ([LICENSE](LICENSE)); upstream components keep their licenses ([CREDITS.md](CREDITS.md)).
-- **Responsible use** — a privacy + automation tool for **lawful** purposes (privacy, QA/testing, research, authorized automation). Respect site terms and the law. Provided "as is." See [DISCLAIMER.md](DISCLAIMER.md).
-
-Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
-
-## Community
-
-Questions, feedback, or want to get involved? **[Join the Clearcote Discord](https://discord.gg/WxvCjAnXZm).**
+What's next is in [ROADMAP.md](ROADMAP.md) — macOS, ARM64, more coherence. Contributions welcome
+([CONTRIBUTING.md](CONTRIBUTING.md) · [AGENTS.md](AGENTS.md)), and questions are welcome in the
+**[Discord](https://discord.gg/WxvCjAnXZm)**.
 
 ---
 
