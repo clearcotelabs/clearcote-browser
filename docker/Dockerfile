@@ -5,7 +5,10 @@
 #   # then:  playwright.chromium.connect_over_cdp("http://localhost:9222")
 #
 # Published image: teamflatearth/clearcote  (docker run -d -p 9222:9222 teamflatearth/clearcote)
-# Requires the clearcote SDK >= 0.13.1 (which pins the v0.1.0-pre.19 binary).
+# Builds against the LATEST clearcote SDK (override with --build-arg CLEARCOTE_SPEC='==0.26.0').
+# Free by default. Pass a licence key to run the PRO engine, and mount the cache so it downloads once:
+#   docker run -d -p 9222:9222 -v clearcote-cache:/opt/xdg-cache \
+#     -e CLEARCOTE_LICENSE_KEY=cc_lic_... teamflatearth/clearcote
 FROM python:3.12-slim-bookworm
 
 LABEL org.opencontainers.image.title="clearcote" \
@@ -28,14 +31,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 # Install the SDK + bake the signed clearcote Linux binary into the image (SHA-256 verified).
-# CLEARCOTE_SPEC pins the SDK version: default ">=0.13.1" for standalone builds; CI passes
-# "==<version>" so the image is built from the exact SDK release that fired the workflow.
+# CLEARCOTE_SPEC pins the SDK version: empty (the default) installs the LATEST release, so a
+# rebuilt image always carries current licensed-build selection; CI passes "==<version>" so the
+# image is built from the exact SDK release that fired the workflow.
 ENV XDG_CACHE_HOME=/opt/xdg-cache
-ARG CLEARCOTE_SPEC=">=0.13.1"
+ARG CLEARCOTE_SPEC=""
 RUN mkdir -p /opt/xdg-cache \
  && pip install --no-cache-dir "clearcote${CLEARCOTE_SPEC}" \
  && python -c "from clearcote import download; print('binary:', download())" \
  && useradd -m -u 10001 cc && chown -R cc /opt/xdg-cache
+
+# The engine cache. A licensed container fetches the PRO engine here on first start; declaring
+# it a VOLUME keeps it out of the container layer and lets a named volume persist it, so the
+# ~180 MB download happens once rather than per container.
+VOLUME ["/opt/xdg-cache"]
 
 COPY serve.py /serve.py
 

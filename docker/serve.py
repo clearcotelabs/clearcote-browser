@@ -21,7 +21,34 @@ from clearcote import executable_path
 from clearcote._fingerprint import fingerprint_args
 from clearcote._fonts import linux_font_env
 
-exe = executable_path()
+# The image bakes in the FREE engine at build time. With CLEARCOTE_LICENSE_KEY set, resolve the
+# licensed build instead -- passing the key and any CC_VERSION pin explicitly, because a bare
+# executable_path() returns whatever is already cached, which is how a keyed container ends up
+# silently running the free engine. CC_VERSION accepts a major ("151"), an exact build, or a PRO
+# revision ("r14"); omit it for the newest build your licence allows.
+#
+# The download lands in XDG_CACHE_HOME (/opt/xdg-cache), which is declared a VOLUME so it survives
+# container replacement. Mount a named volume in production or every new container re-fetches
+# ~180 MB:   -v clearcote-cache:/opt/xdg-cache
+_license = os.environ.get("CLEARCOTE_LICENSE_KEY") or None
+_version = os.environ.get("CC_VERSION") or None
+_kwargs = {}
+if _license:
+    _kwargs["license_key"] = _license
+if _version:
+    _kwargs["version"] = _version
+
+try:
+    exe = executable_path(**_kwargs)
+except TypeError:
+    # An SDK older than 0.16 has no version/license_key parameters. Fall back, but say so loudly:
+    # silently serving the free engine to a licensed caller is the exact bug this code fixes.
+    print("[clearcote] WARNING: this image's SDK predates licensed build selection, so the "
+          "bundled FREE engine is being used. Rebuild the image to honour CLEARCOTE_LICENSE_KEY.",
+          flush=True)
+    exe = executable_path()
+
+print("[clearcote] engine: %s (%s)" % (exe, "licensed" if _license else "free"), flush=True)
 
 opts = {
     "fingerprint": os.environ.get("CC_FINGERPRINT", "clearcote-docker"),
