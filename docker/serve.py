@@ -22,6 +22,8 @@ from clearcote._fingerprint import fingerprint_args
 from clearcote._fonts import linux_font_env
 from clearcote._launchopts import web_bluetooth_args
 
+PROFILE_DIR = os.environ.get("CC_PROFILE_DIR", "/tmp/cc-profile")
+
 # The image bakes in the FREE engine at build time. With CLEARCOTE_LICENSE_KEY set, resolve the
 # licensed build instead -- passing the key and any CC_VERSION pin explicitly, because a bare
 # executable_path() returns whatever is already cached, which is how a keyed container ends up
@@ -67,6 +69,29 @@ for env_key, opt_key in _ENV_TO_OPT.items():
     if val:
         opts[opt_key] = val
 
+# Widevine CDM -- seeded ONLY for a Windows persona on this Linux host, which is where its absence
+# is a measured contradiction: a build branded Google Chrome that claims Windows and carries no CDM
+# is readable by any page (audit: "a build branded Google Chrome carries Google's Widevine CDM").
+# A Linux persona is NOT flagged for this, so the default container behaviour stays unchanged.
+# Force either way with CC_WIDEVINE=1 / CC_WIDEVINE=0.
+#
+# The CDM fetched is host-shaped (libwidevinecdm.so here), not persona-shaped -- correct, since a
+# Linux binary can only load a .so. Cached in the engine volume rather than $HOME so it is fetched
+# once, not per container. Best-effort: DRM must never stop the server coming up.
+_wv = os.environ.get("CC_WIDEVINE")
+_wv_on = (_wv not in ("0", "false", "no")) if _wv else (opts.get("platform") == "windows")
+if _wv_on:
+    os.environ.setdefault("CLEARCOTE_WIDEVINE_DIR",
+                          os.path.join(os.environ.get("XDG_CACHE_HOME", "/opt/xdg-cache"),
+                                       "clearcote", "WidevineCdm"))
+    try:
+        from clearcote._widevine import seed_widevine
+
+        seed_widevine(PROFILE_DIR, quiet=True)
+        print("[clearcote] widevine CDM seeded", flush=True)
+    except Exception as exc:  # noqa: BLE001 -- DRM is best-effort
+        print("[clearcote] widevine unavailable (continuing without DRM): %r" % exc, flush=True)
+
 args = fingerprint_args(opts)
 # Web Bluetooth is runtime-disabled on Linux only, so a Linux container serving a desktop persona
 # reports navigator.usb/serial/hid but NOT navigator.bluetooth -- a combination no real desktop
@@ -108,7 +133,7 @@ cmd = [
     # container has no GPU -> ANGLE/SwiftShader so WebGL/WebGPU stay coherent
     "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
     f"--remote-debugging-port={internal}", "--remote-allow-origins=*",
-    "--user-data-dir=/tmp/cc-profile",
+    "--user-data-dir=%s" % PROFILE_DIR,
 ] + mode_args + args + web_bluetooth_args() + extra
 
 env = dict(os.environ)
