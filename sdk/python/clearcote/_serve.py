@@ -49,12 +49,13 @@ def _free_port() -> int:
 class Server:
     """Handle for a standing clearcote CDP endpoint. Use ``.cdp_url`` with any CDP client."""
 
-    def __init__(self, process, host, port, user_data_dir, own_udd):
+    def __init__(self, process, host, port, user_data_dir, own_udd, lease=None):
         self.process = process
         self.host = host
         self.port = port
         self.user_data_dir = user_data_dir
         self._own_udd = own_udd
+        self._lease = lease  # licence handle, released in close(); None in free mode
         self._closed = False
 
     @property
@@ -86,6 +87,11 @@ class Server:
                 self.process.kill()
             except Exception:
                 pass
+        if self._lease:
+            try:
+                self._lease.stop()  # release the concurrency slot back to the plan
+            except Exception:  # noqa: BLE001 -- licence teardown must never break shutdown
+                pass
         if self._own_udd:
             shutil.rmtree(self.user_data_dir, ignore_errors=True)
 
@@ -110,10 +116,16 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     ``launch()`` accepts.
     """
     # Lazy import to avoid a circular import at module load (this module is imported by __init__).
-    from . import _prepare, _win_av_retry
+    from . import _acquire_lease_from_kwargs, _prepare, _win_av_retry
     from ._fonts import linux_font_env
 
     kwargs.pop("headless", None)  # serve() drives headless directly via --headless=new
+    # License (opt-in, inert in free mode). This MUST run before _prepare: it converts license_key
+    # into the _cc_pro tuple _prepare needs to select the gated binary. Without it serve() silently
+    # dropped the key and launched the FREE engine for a licensed caller -- and even had it resolved
+    # the PRO engine, the gate would have refused to start without CLEARCOTE_RUN_TOKEN below.
+    # launch()/launch_persistent_context() and Node's serve() have always done this.
+    lease = _acquire_lease_from_kwargs(kwargs)
     # Build the full stealth arg set exactly like launch() does (fingerprint + privacy-sandbox +
     # webrtc leak-proofing + proxy + feature-merge + geoip), then launch the binary ourselves.
     exe, args, pw_kwargs, _humanize, _show, _seed = _prepare(kwargs)
@@ -142,6 +154,9 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
 
     env = dict(os.environ)
     env.update(linux_font_env(exe))  # Linux: FONTCONFIG_FILE -> bundled font clones (no-op elsewhere)
+    if lease and lease.token:
+        # The PRO engine's gate reads this once at startup and exits if it is missing or invalid.
+        env["CLEARCOTE_RUN_TOKEN"] = lease.token
 
     # Launched DIRECTLY (no automation framework) -> no --enable-automation -> webdriver stays false.
     # Wrap in _win_av_retry so a just-extracted binary survives the Windows SxS/AV first-launch race
@@ -167,13 +182,18 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
             proc.kill()
         except Exception:
             pass
+        if lease:
+            try:
+                lease.stop()  # release the concurrency slot; the machine lease checks in at exit
+            except Exception:  # noqa: BLE001 -- never let licence teardown break server shutdown
+                pass
         if own_udd:
             shutil.rmtree(user_data_dir, ignore_errors=True)
         raise RuntimeError(
             "clearcote serve: CDP endpoint at http://%s:%d did not come up within %.0fs"
             % (host, port, ready_timeout))
 
-    srv = Server(proc, host, port, user_data_dir, own_udd)
+    srv = Server(proc, host, port, user_data_dir, own_udd, lease=lease)
     atexit.register(srv.close)
     if not quiet:
         sys.stderr.write(
