@@ -20,6 +20,7 @@ import time
 from clearcote import executable_path
 from clearcote._fingerprint import fingerprint_args
 from clearcote._fonts import linux_font_env
+from clearcote._launchopts import web_bluetooth_args
 
 # The image bakes in the FREE engine at build time. With CLEARCOTE_LICENSE_KEY set, resolve the
 # licensed build instead -- passing the key and any CC_VERSION pin explicitly, because a bare
@@ -67,6 +68,10 @@ for env_key, opt_key in _ENV_TO_OPT.items():
         opts[opt_key] = val
 
 args = fingerprint_args(opts)
+# Web Bluetooth is runtime-disabled on Linux only, so a Linux container serving a desktop persona
+# reports navigator.usb/serial/hid but NOT navigator.bluetooth -- a combination no real desktop
+# Chrome produces. web_bluetooth_args() restores it (and is empty on non-Linux). The SDK's launch()
+# adds this already; this entrypoint builds its own argv, so it has to ask for it too.
 port = os.environ.get("CC_PORT", "9222")               # externally exposed port
 internal = os.environ.get("CC_INTERNAL_PORT", "9223")  # chrome's loopback DevTools port
 extra = os.environ.get("CC_EXTRA_ARGS", "").split()
@@ -104,7 +109,7 @@ cmd = [
     "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
     f"--remote-debugging-port={internal}", "--remote-allow-origins=*",
     "--user-data-dir=/tmp/cc-profile",
-] + mode_args + args + extra
+] + mode_args + args + web_bluetooth_args() + extra
 
 env = dict(os.environ)
 env.update(linux_font_env(exe))  # point FONTCONFIG_FILE at the bundled Windows-font clones
