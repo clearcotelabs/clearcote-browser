@@ -109,5 +109,29 @@ cmd = [
 env = dict(os.environ)
 env.update(linux_font_env(exe))  # point FONTCONFIG_FILE at the bundled Windows-font clones
 
+# A PRO engine refuses to launch without a run token: the licence gate reads CLEARCOTE_RUN_TOKEN
+# once at startup and exits if it is missing or invalid. The SDK's own launch() mints one, but this
+# entrypoint exec's chrome directly, so check a lease out here and inject it.
+#
+# execvpe REPLACES this process, so the heartbeat thread and the atexit check-in do not survive.
+# That is fine: the gate only reads the token at startup, and the lease expires on its own TTL. On
+# a concurrency-limited plan it means the slot is held until that TTL rather than released at exit.
+if _license:
+    try:
+        from clearcote._license import acquire_lease
+
+        _lease = acquire_lease(_license, quiet=False)
+        if _lease and _lease.token:
+            env["CLEARCOTE_RUN_TOKEN"] = _lease.token
+            print("[clearcote] licence lease acquired", flush=True)
+        else:
+            print("[clearcote] WARNING: no lease returned for this key; the PRO engine will "
+                  "refuse to start.", flush=True)
+    except Exception as exc:  # noqa: BLE001 -- surface the reason, never launch a doomed browser
+        print("[clearcote] ERROR: could not lease a run token (%s: %s). The PRO engine will not "
+              "start. Check the key, the plan's concurrency limit, and outbound network access."
+              % (type(exc).__name__, exc), flush=True)
+        raise SystemExit(1)
+
 print(f"[clearcote] CDP endpoint on 0.0.0.0:{port} (proxy -> chrome 127.0.0.1:{internal}) | persona={opts}", flush=True)
 os.execvpe(cmd[0], cmd, env)
