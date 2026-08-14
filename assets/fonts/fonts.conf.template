@@ -47,10 +47,28 @@
   <match target="pattern"><test name="family"><string>Courier</string></test><edit name="family" mode="assign" binding="strong"><string>Cousine</string></edit></match>
   <match target="pattern"><test name="family"><string>Consolas</string></test><edit name="family" mode="assign" binding="strong"><string>Inconsolata</string></edit></match>
 
-  <!-- CSS generics resolve to bundled clones so a bare machine still renders sans/serif/mono -->
+  <!-- CSS generics resolve to bundled clones so a bare machine still renders sans/serif/mono.
+
+       system-ui and monospace are measured against a Windows host, because a page can compare a
+       generic against the concrete family it should resolve to and needs no reference data to read
+       the result. Measured at 100px, "The quick brown fox" / ten M's, genuine Chrome 151 on real
+       Windows and our Windows build agreeing exactly:
+
+         system-ui   Windows 895.86 (== Segoe UI)   here, before: 841.47 — the UNRESOLVED fallback
+         monospace   Windows 549.81 (== Consolas)   here, before: 600.11 (== Courier New)
+
+       system-ui had no rule at all, so it fell through to the default and measured identical to a
+       family that does not exist, which is the cheapest possible tell: the control is any garbage
+       family name. Segoe UI already resolves correctly here, so pointing system-ui at the same
+       target makes it exact.
+
+       monospace binds to Consolas on Windows, not Courier New. Pointing it at Inconsolata inherits
+       Consolas's residual width error (see above) but binds the GENERIC correctly; the remaining
+       gap is one substitute's absolute width rather than a wrong family. -->
   <alias><family>sans-serif</family><prefer><family>Arimo</family></prefer></alias>
   <alias><family>serif</family><prefer><family>Tinos</family></prefer></alias>
-  <alias><family>monospace</family><prefer><family>Cousine</family></prefer></alias>
+  <alias><family>monospace</family><prefer><family>Inconsolata</family></prefer></alias>
+  <alias><family>system-ui</family><prefer><family>Selawik</family></prefer></alias>
 
   <!-- typical Linux desktop rendering defaults (coherent hinting/AA rather than fontconfig bare) -->
   <match target="font"><edit name="antialias" mode="assign"><bool>true</bool></edit></match>
