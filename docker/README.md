@@ -38,12 +38,30 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | `CC_HEADLESS` | `1` | force pure-headless (default is **headful on Xvfb**) |
 | `CC_SCREEN` | `1920x1080x24` | Xvfb virtual screen geometry (headful mode) |
 | `CC_PORT` | `9222` | exposed CDP port |
+| `CC_WIDEVINE` | `1` \| `0` | seed the Widevine CDM — **auto-on for `CC_PLATFORM=windows`** |
+| `CC_SHADER_DIALECT` | `hlsl` \| `0` | report ANGLE's translated shader as HLSL — **auto-on for `CC_PLATFORM=windows`** |
 
 ```bash
 docker run -d -p 9222:9222 \
   -e CC_PLATFORM=windows -e CC_FINGERPRINT=user-7423 -e CC_BRAND=Edge \
   teamflatearth/clearcote
 ```
+
+### Windows persona on this Linux host
+
+Two things switch on automatically when `CC_PLATFORM=windows`, because they are exactly the places
+where running a Windows persona on a Linux host is readable as a contradiction:
+
+* **Widevine CDM** — a build branded Google Chrome that claims Windows and carries no CDM is
+  readable by any page.
+* **Shader dialect** — the persona advertises a Direct3D renderer, but ANGLE's Vulkan backend
+  answers `getTranslatedShaderSource()` with a SPIR-V dump, so the renderer string and the dialect
+  beside it name two different graphics backends.
+
+Neither applies to a Linux persona, so the default container is unchanged. Override either with
+`CC_WIDEVINE=0` / `CC_SHADER_DIALECT=0`. Rendering is unaffected by the dialect setting — only the
+debug-extension query changes — and engines older than **151 r15** ignore it. See
+[/docs/shader-dialect](https://www.clearcotelabs.com/docs/shader-dialect).
 
 ## Security
 

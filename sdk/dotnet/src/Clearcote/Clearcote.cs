@@ -85,6 +85,7 @@ public static class Clearcote
             Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
             () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null)).ConfigureAwait(false);
         var env = lease is not null ? License.WithRunToken(lease.Token, options.Env) : options.Env;
+        env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
         var browser = await WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
@@ -169,6 +170,7 @@ public static class Clearcote
             Version, options.Quiet,   // sdk_version = the SDK PACKAGE version
             () => Download.ResolvedEngineVersionAsync(licVersion, licKey is not null)).ConfigureAwait(false);
         var env = lease is not null ? License.WithRunToken(lease.Token, options.Env) : options.Env;
+        env = ShaderDialect.Apply(options.ShaderDialect, env);  // opt-in; no-op when unset
 
         var geometry = Geometry.Resolve(
             options.Headless, options.Fingerprint, args,
@@ -252,6 +254,10 @@ public static class Clearcote
             var psi = new ProcessStartInfo(exePath) { UseShellExecute = false };
             foreach (var a in engineArgs.Concat(cdpArgs)) psi.ArgumentList.Add(a);
             if (lease is not null) psi.Environment[License.RunTokenEnv] = lease.Token;
+            // serve() starts the engine itself, so the child inherits this process's environment;
+            // only the one variable needs setting.
+            var dialect = ShaderDialect.Normalize(options.ShaderDialect);
+            if (dialect is not null) psi.Environment[ShaderDialect.EnvVar] = dialect;
             var p = Process.Start(psi) ?? throw new Exception("clearcote serve: failed to start the engine process.");
             return Task.FromResult(p);
         }, exe).ConfigureAwait(false);

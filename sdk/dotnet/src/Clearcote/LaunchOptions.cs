@@ -44,6 +44,18 @@ public class LaunchOptions : FingerprintOptions
     public bool? DisablePrivacySandbox { get; set; }
     /// Environment variables for the browser process (the SDK adds CLEARCOTE_RUN_TOKEN when licensed).
     public IDictionary<string, string>? Env { get; set; }
+
+    /// Report ANGLE's translated shader in this dialect for
+    /// <c>WEBGL_debug_shaders.getTranslatedShaderSource()</c>. Only "hlsl" is understood.
+    ///
+    /// <para>Makes a Windows persona on a Linux host report HLSL, matching the Direct3D renderer
+    /// string it already advertises — without it the Vulkan backend answers with SPIR-V and the two
+    /// values contradict each other. Rendering is unaffected.</para>
+    ///
+    /// <para>OFF by default: the re-translation is a different code path from the one that
+    /// rendered, so a shader the real backend accepts but the HLSL translator rejects falls back to
+    /// the honest dialect. Turn it on if you hit this specific check. Needs a PRO engine 151 r15+.</para>
+    public string? ShaderDialect { get; set; }
     /// Browser channel (e.g. "chrome") passed to Playwright, if any.
     public string? Channel { get; set; }
     /// Slow down operations by N ms (Playwright slowMo).

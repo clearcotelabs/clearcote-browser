@@ -51,6 +51,7 @@ import { RELEASE, platformRelease } from "./release.js";
 import { fetchWidevine, seedWidevine, widevineArgs } from "./widevine.js";
 import { emitCoherenceWarnings } from "./warnings.js";
 import { fontLaunchEnv } from "./fonts.js";
+import { withShaderDialect, type ShaderDialect } from "./shaderdialect.js";
 import {
   applyHeadlessGeometry, fitWindowToPersona, installWindowFixup, moveWindowToOrigin,
   type AppliedGeometry,
@@ -155,8 +156,23 @@ interface EphemeralProfileOption {
   userDataDir?: string;
 }
 
+/** Opt-in shader-dialect reporting (see ./shaderdialect.ts). */
+interface ShaderDialectOption {
+  /** Report ANGLE's translated shader in this dialect for
+   * `WEBGL_debug_shaders.getTranslatedShaderSource()`.
+   *
+   * `"hlsl"` makes a Windows persona on a Linux host report HLSL, matching the Direct3D renderer
+   * string it already advertises — without it the Vulkan backend answers with SPIR-V and the two
+   * values contradict each other. Rendering is unaffected.
+   *
+   * OFF by default: the re-translation is a different code path from the one that rendered, so a
+   * shader the real backend accepts but the HLSL translator rejects falls back to the honest
+   * dialect. Turn it on if you hit this specific check. Needs a PRO engine 151 r15+. */
+  shaderDialect?: ShaderDialect;
+}
+
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
@@ -169,7 +185,8 @@ export interface PersistentContextOptions
     ExtensionsOption,
     HumanizeOptions,
     DownloadOptions,
-    LicenseOptions {
+    LicenseOptions,
+    ShaderDialectOption {
   /**
    * Seed + enable the opt-in Widevine CDM in this profile so DRM/EME works
    * (`requestMediaKeySystemAccess('com.widevine.alpha')` resolves) and the EME surface matches a
@@ -570,7 +587,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     options.profile && !isAutoProfile
       ? { ...resolveProfileOptions(options.profile as string | Profile), ...options }
       : options;
-  const { profile: _profile, profileSelect: _profileSelect, extensions, portableProfile, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest } = merged;
+  const { profile: _profile, profileSelect: _profileSelect, extensions, portableProfile, shaderDialect, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -609,7 +626,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …).
-  const launchEnv = fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env);
+  const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env));
   const runtimeEnv = lease ? withRunToken(lease.token, launchEnv) : launchEnv;
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined);
   // Headless: screen.* has to be handled alongside the viewport or the window reports a geometry no
@@ -644,7 +661,7 @@ export async function launchPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, portableProfile, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, ...rest } = merged;
+  const { profile: _profile, extensions, portableProfile, shaderDialect, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -690,7 +707,7 @@ export async function launchPersistentContext(
     // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
-  const ctxEnv = fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env);
+  const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env));
   const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv) : ctxEnv;
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined);
   // headless: the persona owns screen when it is running, so only the window needs fitting; with no
@@ -847,7 +864,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     ? { ...resolveProfileOptions(launchOpts.profile), ...launchOpts }
     : launchOpts;
   const {
-    profile: _profile, extensions, portableProfile, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
+    profile: _profile, extensions, portableProfile, shaderDialect, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
     args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
@@ -884,7 +901,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     // resolved lazily on cold checkout only (never per launch); telemetry, never gates the lease
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
-  const env = { ...process.env, ...(fontLaunchEnv(exe, undefined) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token } : {}) };
+  const env = { ...process.env, ...(withShaderDialect(shaderDialect, fontLaunchEnv(exe, undefined)) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token } : {}) };
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.

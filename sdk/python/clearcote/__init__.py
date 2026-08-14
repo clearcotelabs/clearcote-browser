@@ -27,6 +27,7 @@ from ._agent import AGENT_KEYS, OPENROUTER_BASE_URL, agent_args, run_agent_task
 from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args
 from ._fontpersona import ensure_persona_fonts, font_reachability
 from ._fonts import apply_font_env
+from ._shaderdialect import apply_shader_dialect
 from ._geometry import apply_headless_geometry, fit_window_to_persona, move_window_to_origin
 from ._humanize import install_humanize, install_humanize_on_context
 from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
@@ -666,10 +667,12 @@ def launch(**kwargs):
         _install_ephemeral_profile_cleanup(context, udd)
         return _install_persistent_as_browser(context)
 
+    shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     lease = _acquire_lease_from_kwargs(kwargs)  # opt-in; None in free mode
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare(kwargs)
     apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
+    apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
     if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
         inject_run_token(pw_kwargs, lease.token)
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
@@ -702,10 +705,12 @@ def launch_persistent_context(user_data_dir, **kwargs):
     kwargs.setdefault("ignore_default_args", ["--enable-automation"])
     if kwargs.get("widevine"):
         apply_widevine_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
+    shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     lease = _acquire_lease_from_kwargs(kwargs)  # opt-in; None in free mode
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare(kwargs)
     apply_font_env(exe, pw_kwargs)  # Linux: point FONTCONFIG_FILE at the bundled font clones
+    apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
     if lease:  # inject CLEARCOTE_RUN_TOKEN so the PRO engine gate lets the browser launch
         inject_run_token(pw_kwargs, lease.token)
     geom = None

@@ -139,6 +139,35 @@ cmd = [
 env = dict(os.environ)
 env.update(linux_font_env(exe))  # point FONTCONFIG_FILE at the bundled Windows-font clones
 
+# Shader dialect -- enabled ONLY for a Windows persona on this Linux host, the same condition as the
+# Widevine seeding above and for the same reason: it is where the absence is a measured
+# contradiction. The persona advertises a Direct3D renderer, but ANGLE's Vulkan backend answers
+# getTranslatedShaderSource() with a SPIR-V dump, so a page reads the renderer string and the
+# dialect beside it and sees two different graphics backends (audit: "ANGLE's translated shader is
+# written in the dialect the renderer string implies").
+#
+# A Linux persona is NOT flagged for this, so the default container behaviour is unchanged. Force
+# either way with CC_SHADER_DIALECT=hlsl / =0.
+#
+# Rendering is unaffected either way -- only the debug-extension query changes. Engines older than
+# 151 r15 ignore the variable and keep reporting their real dialect.
+_sd = os.environ.get("CC_SHADER_DIALECT")
+if _sd:
+    if _sd not in ("0", "false", "no"):
+        env["CLEARCOTE_SHADER_DIALECT"] = _sd
+        # Forcing it on a persona that does NOT claim Direct3D makes things worse, not better: the
+        # renderer would name OpenGL while the dialect says HLSL. Honoured (a custom CC_GPU_RENDERER
+        # may legitimately name D3D) but never silently.
+        if opts.get("platform") != "windows":
+            print("[clearcote] WARNING: CC_SHADER_DIALECT=%s with a %s persona. HLSL is only "
+                  "coherent next to a Direct3D renderer string; on a persona that names OpenGL "
+                  "this creates the contradiction it is meant to remove."
+                  % (_sd, opts.get("platform")), flush=True)
+elif opts.get("platform") == "windows":
+    env["CLEARCOTE_SHADER_DIALECT"] = "hlsl"
+if env.get("CLEARCOTE_SHADER_DIALECT"):
+    print("[clearcote] shader dialect: %s" % env["CLEARCOTE_SHADER_DIALECT"], flush=True)
+
 # A PRO engine refuses to launch without a run token: the licence gate reads CLEARCOTE_RUN_TOKEN
 # once at startup and exits if it is missing or invalid. The SDK's own launch() mints one, but this
 # entrypoint exec's chrome directly, so check a lease out here and inject it.
