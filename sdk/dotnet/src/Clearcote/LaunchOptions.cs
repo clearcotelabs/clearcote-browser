@@ -56,6 +56,17 @@ public class LaunchOptions : FingerprintOptions
     /// rendered, so a shader the real backend accepts but the HLSL translator rejects falls back to
     /// the honest dialect. Turn it on if you hit this specific check. Needs a PRO engine 151 r15+.</para>
     public string? ShaderDialect { get; set; }
+    /// Relay WebRTC's UDP through the SOCKS5 proxy using UDP ASSOCIATE, instead of letting it
+    /// egress on the host's own path.
+    ///
+    /// <para>By default clearcote denies non-proxied UDP, which keeps UDP from leaking around the
+    /// proxy but also means peer connections that need UDP never establish — stock Chromium cannot
+    /// proxy a datagram. Turn this on to get working UDP that still leaves from the proxy's
+    /// address.</para>
+    ///
+    /// <para>Applies only to a socks5:// proxy; ignored otherwise. Needs a PRO engine 151 r17+, and
+    /// a proxy that actually permits the ASSOCIATE command.</para>
+    public bool Socks5Udp { get; set; }
     /// Browser channel (e.g. "chrome") passed to Playwright, if any.
     public string? Channel { get; set; }
     /// Slow down operations by N ms (Playwright slowMo).

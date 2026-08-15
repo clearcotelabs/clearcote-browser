@@ -6,6 +6,7 @@ import re
 import sys
 import warnings
 
+_SOCKS5 = re.compile(r"^socks5", re.I)
 _SOCKS = re.compile(r"^socks", re.IGNORECASE)
 
 # Privacy Sandbox + intrusive web APIs a de-Googled stealth build should not expose (a build that
@@ -67,6 +68,29 @@ def quic_args(proxy):
     that no UDP egresses *around* the proxy (the #9 leak). No proxy -> leave QUIC on (real Chrome
     uses it, so disabling it everywhere would itself be a tell)."""
     return ["--disable-quic"] if (isinstance(proxy, dict) and proxy.get("server")) else []
+
+
+def socks5_udp_args(socks5_udp, proxy):
+    """Carry WebRTC's UDP through the SOCKS5 proxy with UDP ASSOCIATE (RFC 1928 section 7) instead
+    of letting it egress on the host's own path.
+
+    This is the transport ``webrtc_default_deny_args`` asks for. That default sets
+    ``disable_non_proxied_udp``, which on stock Chromium means "no UDP at all" because stock
+    Chromium cannot proxy a datagram -- so peer connections that genuinely need UDP simply fail.
+    With this option the engine opens a UDP association through the proxy and relays every datagram
+    over it, so UDP works AND still leaves from the proxy's address. The two compose: measured
+    against the proxy's own log, the association is established with the deny policy in force, so
+    enabling this does not require weakening the policy.
+
+    Emitted only for a ``socks5://`` proxy. UDP ASSOCIATE is a SOCKS5 command -- SOCKS4 has no
+    equivalent and an HTTP proxy carries only TCP -- so with any other scheme the switch would be
+    accepted and silently do nothing, which is worse than not sending it.
+
+    Needs a PRO engine 151 r17+; older binaries ignore the switch."""
+    if socks5_udp is not True:
+        return []
+    server = ((proxy or {}).get("server") or "").strip() if isinstance(proxy, dict) else ""
+    return ["--socks5-udp"] if _SOCKS5.match(server) else []
 
 
 def web_bluetooth_args():

@@ -59,6 +59,31 @@ export function quicArgs(proxy: PwProxy | undefined): string[] {
   return proxy && proxy.server ? ["--disable-quic"] : [];
 }
 
+/** Carry WebRTC's UDP through the SOCKS5 proxy with UDP ASSOCIATE (RFC 1928 §7) instead of letting
+ * it egress on the host's own path.
+ *
+ * This is the transport the {@link webrtcDefaultDenyArgs} note asks for. That default sets
+ * `disable_non_proxied_udp`, which on stock Chromium means "no UDP at all", because stock Chromium
+ * has no way to proxy a datagram — so peer connections that genuinely need UDP simply fail. With
+ * this option the engine opens a UDP association through the proxy and relays every datagram over
+ * it, so UDP works AND still leaves from the proxy's address. The two compose: measured against the
+ * proxy's own log, the association is established with the deny policy in force, so enabling this
+ * does not require weakening the policy.
+ *
+ * Emitted only for a `socks5://` proxy. UDP ASSOCIATE is a SOCKS5 command — SOCKS4 has no
+ * equivalent, and an HTTP proxy carries only TCP — so with any other scheme the switch would be
+ * accepted and silently do nothing, which is worse than not sending it.
+ *
+ * Needs a PRO engine 151 r17+; older binaries ignore the switch. Off by default: it is a real
+ * behaviour change (UDP starts flowing where the deny policy previously stopped it), and a proxy
+ * that advertises SOCKS5 but refuses ASSOCIATE — common among cheap residential pools — leaves the
+ * connection no worse off but no better either. */
+export function socks5UdpArgs(socks5Udp: boolean | undefined, proxy: PwProxy | undefined): string[] {
+  if (socks5Udp !== true) return [];
+  const server = (proxy?.server ?? "").trim();
+  return /^socks5/i.test(server) ? ["--socks5-udp"] : [];
+}
+
 /** Default WebRTC to disable_non_proxied_udp, so no UDP can egress around the proxy.
  *
  * This used to be skipped whenever `webrtcIp` was set, on the theory that the engine's srflx

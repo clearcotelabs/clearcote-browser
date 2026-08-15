@@ -52,6 +52,50 @@ public class LaunchOptsTests
     }
 
     [Fact]
+    public void Socks5UdpArgs_emitted_only_when_opted_in()
+    {
+        var socks5 = new ProxyOptions { Server = "socks5://gw.example.com:1080", Username = "u", Password = "p" };
+        Assert.Equal(new[] { "--socks5-udp" }, LaunchOpts.Socks5UdpArgs(true, socks5));
+        Assert.Empty(LaunchOpts.Socks5UdpArgs(false, socks5));
+    }
+
+    // UDP ASSOCIATE is a SOCKS5 command. Emitting the switch for a transport that cannot carry a
+    // datagram would be accepted and silently do nothing — the failure mode this guards against.
+    [Fact]
+    public void Socks5UdpArgs_silent_for_transports_that_cannot_relay_udp()
+    {
+        foreach (var server in new[] { "http://p:8080", "https://p:8443", "socks4://p:1080" })
+            Assert.Empty(LaunchOpts.Socks5UdpArgs(true, new ProxyOptions { Server = server }));
+    }
+
+    [Fact]
+    public void Socks5UdpArgs_silent_without_a_proxy()
+    {
+        Assert.Empty(LaunchOpts.Socks5UdpArgs(true, null));
+        Assert.Empty(LaunchOpts.Socks5UdpArgs(true, new ProxyOptions()));
+        Assert.Empty(LaunchOpts.Socks5UdpArgs(true, new ProxyOptions { Server = "" }));
+    }
+
+    [Fact]
+    public void Socks5UdpArgs_accepts_socks5h_and_is_case_insensitive()
+    {
+        Assert.Equal(new[] { "--socks5-udp" }, LaunchOpts.Socks5UdpArgs(true, new ProxyOptions { Server = "socks5h://p:1080" }));
+        Assert.Equal(new[] { "--socks5-udp" }, LaunchOpts.Socks5UdpArgs(true, new ProxyOptions { Server = "SOCKS5://p:1080" }));
+    }
+
+    // Verified against the proxy's own log: the association is established with the deny policy in
+    // force, so enabling UDP does not mean weakening the leak default.
+    [Fact]
+    public void Socks5UdpArgs_composes_with_the_webrtc_deny_default()
+    {
+        var socks5 = new ProxyOptions { Server = "socks5://gw.example.com:1080" };
+        var args = LaunchOpts.Socks5UdpArgs(true, socks5);
+        var combined = args.Concat(LaunchOpts.WebrtcDefaultDenyArgs(args, null)).ToList();
+        Assert.Contains("--socks5-udp", combined);
+        Assert.Contains("--webrtc-ip-handling-policy=disable_non_proxied_udp", combined);
+    }
+
+    [Fact]
     public void ExtensionArgs()
     {
         Assert.Empty(LaunchOpts.ExtensionArgs(null));

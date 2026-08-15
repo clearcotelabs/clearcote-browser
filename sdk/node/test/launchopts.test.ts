@@ -6,6 +6,7 @@ import {
   webBluetoothArgs,
   privacySandboxArgs,
   quicArgs,
+  socks5UdpArgs,
   webrtcDefaultDenyArgs,
 } from "../src/launchopts.js";
 
@@ -145,5 +146,44 @@ describe("webBluetoothArgs", () => {
     expect(enables).toHaveLength(1);
     expect(enables[0]).toContain("WebBluetooth");
     expect(enables[0]).toContain("SomethingElse");
+  });
+});
+
+describe("socks5UdpArgs", () => {
+  const socks5 = { server: "socks5://gw.example.com:1080", username: "u", password: "p" };
+
+  it("emits the switch for a socks5 proxy when opted in", () => {
+    expect(socks5UdpArgs(true, socks5)).toEqual(["--socks5-udp"]);
+  });
+
+  it("is off unless explicitly opted in", () => {
+    for (const v of [undefined, false]) expect(socks5UdpArgs(v, socks5)).toEqual([]);
+  });
+
+  // UDP ASSOCIATE is a SOCKS5 command. Emitting the switch for a transport that cannot carry a
+  // datagram would be accepted and silently do nothing -- the failure mode this guards against.
+  it("stays silent for schemes that cannot relay UDP", () => {
+    for (const server of ["http://p:8080", "https://p:8443", "socks4://p:1080"]) {
+      expect(socks5UdpArgs(true, { server })).toEqual([]);
+    }
+  });
+
+  it("stays silent with no proxy at all", () => {
+    expect(socks5UdpArgs(true, undefined)).toEqual([]);
+    expect(socks5UdpArgs(true, { server: "" })).toEqual([]);
+  });
+
+  it("accepts socks5h and is case-insensitive", () => {
+    expect(socks5UdpArgs(true, { server: "socks5h://p:1080" })).toEqual(["--socks5-udp"]);
+    expect(socks5UdpArgs(true, { server: "SOCKS5://p:1080" })).toEqual(["--socks5-udp"]);
+  });
+
+  // Verified against the proxy's own log: the association is established with the deny policy in
+  // force, so the two are additive and enabling UDP does not mean weakening the leak default.
+  it("composes with the webrtc deny default rather than replacing it", () => {
+    const args = [...socks5UdpArgs(true, socks5)];
+    const withDefault = [...args, ...webrtcDefaultDenyArgs(args, undefined)];
+    expect(withDefault).toContain("--socks5-udp");
+    expect(withDefault).toContain("--webrtc-ip-handling-policy=disable_non_proxied_udp");
   });
 });

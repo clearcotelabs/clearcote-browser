@@ -36,6 +36,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     merge_feature_flags,
     privacy_sandbox_args,
     quic_args,
+    socks5_udp_args,
     resolve_proxy,
     web_bluetooth_args,
     webrtc_default_deny_args,
@@ -323,6 +324,7 @@ def _prepare(kwargs):
     # the persona genuinely is de-Googled Chromium (brand="chromium"), and the wrong one under a
     # Chrome brand — which is why it is now a decision rather than a default.
     disable_privacy_sandbox = kwargs.pop("disable_privacy_sandbox", False)
+    socks5_udp = kwargs.pop("socks5_udp", False)  # relay WebRTC UDP via SOCKS5 UDP ASSOCIATE
     cache_dir = kwargs.pop("cache_dir", None)
     quiet = kwargs.pop("quiet", False)
     auto_update = kwargs.pop("auto_update", None)
@@ -368,6 +370,8 @@ def _prepare(kwargs):
     base = (fingerprint_args(fp) + agent_args(agent) + extension_args(extensions)
             + portable_args(portable_profile, encryption_key) + proxy_args)
     base += quic_args(proxy_opt)  # behind a proxy, disable QUIC so no HTTP/3 UDP egresses around it
+    # Opt-in: relay WebRTC UDP through the proxy rather than denying it outright.
+    base += socks5_udp_args(socks5_udp, proxy_opt)
     # Linux hosts hide navigator.bluetooth while exposing usb/serial/hid — an OS-origin tell on a
     # Windows persona. Restore it (no-op off Linux). See web_bluetooth_args.
     base += web_bluetooth_args()

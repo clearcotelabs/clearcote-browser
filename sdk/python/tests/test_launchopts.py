@@ -5,6 +5,7 @@ from clearcote._launchopts import (
     merge_feature_flags,
     privacy_sandbox_args,
     quic_args,
+    socks5_udp_args,
     resolve_proxy,
     webrtc_default_deny_args,
 )
@@ -129,3 +130,39 @@ def test_web_bluetooth_folds_into_one_enable_features(monkeypatch):
     enables = [a for a in merged if a.startswith("--enable-features=")]
     assert len(enables) == 1
     assert "WebBluetooth" in enables[0] and "SomethingElse" in enables[0]
+
+
+SOCKS5 = {"server": "socks5://gw.example.com:1080", "username": "u", "password": "p"}
+
+
+def test_socks5_udp_emitted_only_when_opted_in():
+    assert socks5_udp_args(True, SOCKS5) == ["--socks5-udp"]
+    assert socks5_udp_args(False, SOCKS5) == []
+    assert socks5_udp_args(None, SOCKS5) == []
+
+
+def test_socks5_udp_silent_for_transports_that_cannot_carry_datagrams():
+    # UDP ASSOCIATE is a SOCKS5 command. Emitting the switch for a transport that cannot relay a
+    # datagram would be accepted and silently do nothing -- the failure mode this guards against.
+    for server in ("http://p:8080", "https://p:8443", "socks4://p:1080"):
+        assert socks5_udp_args(True, {"server": server}) == []
+
+
+def test_socks5_udp_silent_without_a_proxy():
+    assert socks5_udp_args(True, None) == []
+    assert socks5_udp_args(True, {}) == []
+    assert socks5_udp_args(True, {"server": ""}) == []
+
+
+def test_socks5_udp_accepts_socks5h_and_is_case_insensitive():
+    assert socks5_udp_args(True, {"server": "socks5h://p:1080"}) == ["--socks5-udp"]
+    assert socks5_udp_args(True, {"server": "SOCKS5://p:1080"}) == ["--socks5-udp"]
+
+
+def test_socks5_udp_composes_with_the_webrtc_deny_default():
+    # Verified against the proxy's own log: the association is established with the deny policy in
+    # force, so enabling UDP does not mean weakening the leak default.
+    args = socks5_udp_args(True, SOCKS5)
+    combined = args + webrtc_default_deny_args(args, None)
+    assert "--socks5-udp" in combined
+    assert "--webrtc-ip-handling-policy=disable_non_proxied_udp" in combined

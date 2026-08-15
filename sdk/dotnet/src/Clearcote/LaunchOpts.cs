@@ -50,6 +50,31 @@ public static class LaunchOpts
     public static List<string> QuicArgs(ProxyOptions? proxy)
         => proxy is not null && !string.IsNullOrEmpty(proxy.Server) ? new() { "--disable-quic" } : new();
 
+    /// Carry WebRTC's UDP through the SOCKS5 proxy with UDP ASSOCIATE (RFC 1928 section 7) instead
+    /// of letting it egress on the host's own path.
+    ///
+    /// <para>This is the transport <see cref="WebrtcDefaultDenyArgs"/> asks for. That default sets
+    /// disable_non_proxied_udp, which on stock Chromium means "no UDP at all" because stock
+    /// Chromium cannot proxy a datagram — so peer connections that genuinely need UDP simply fail.
+    /// With this option the engine opens a UDP association through the proxy and relays every
+    /// datagram over it, so UDP works AND still leaves from the proxy's address. The two compose:
+    /// measured against the proxy's own log, the association is established with the deny policy in
+    /// force, so enabling this does not require weakening the policy.</para>
+    ///
+    /// <para>Emitted only for a socks5:// proxy. UDP ASSOCIATE is a SOCKS5 command — SOCKS4 has no
+    /// equivalent and an HTTP proxy carries only TCP — so with any other scheme the switch would be
+    /// accepted and silently do nothing, which is worse than not sending it.</para>
+    ///
+    /// <para>Needs a PRO engine 151 r17+; older binaries ignore the switch.</para>
+    public static List<string> Socks5UdpArgs(bool socks5Udp, ProxyOptions? proxy)
+    {
+        if (!socks5Udp) return new();
+        var server = proxy?.Server?.Trim() ?? string.Empty;
+        return server.StartsWith("socks5", StringComparison.OrdinalIgnoreCase)
+            ? new() { "--socks5-udp" }
+            : new();
+    }
+
     /// Default WebRTC to deny non-proxied UDP, so no UDP can egress around the proxy.
     ///
     /// This used to be skipped whenever a webrtcIp was set, on the theory that the engine's srflx

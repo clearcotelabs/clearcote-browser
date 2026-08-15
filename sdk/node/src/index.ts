@@ -43,6 +43,7 @@ import {
   mergeFeatureFlags,
   privacySandboxArgs,
   quicArgs,
+  socks5UdpArgs,
   webBluetoothArgs,
   webrtcDefaultDenyArgs,
   type PwProxy,
@@ -172,8 +173,22 @@ interface ShaderDialectOption {
   shaderDialect?: ShaderDialect;
 }
 
+/** Opt-in SOCKS5 UDP relaying (see {@link socks5UdpArgs}). */
+interface Socks5UdpOption {
+  /** Relay WebRTC's UDP through the SOCKS5 proxy using UDP ASSOCIATE, instead of letting it egress
+   * on the host's own path.
+   *
+   * By default clearcote denies non-proxied UDP, which keeps UDP from leaking around the proxy but
+   * also means peer connections that need UDP never establish — stock Chromium cannot proxy a
+   * datagram. Turn this on to get working UDP that still leaves from the proxy's address.
+   *
+   * Applies only to a `socks5://` proxy; ignored otherwise. Needs a PRO engine 151 r17+, and a
+   * proxy that actually permits the ASSOCIATE command. */
+  socks5Udp?: boolean;
+}
+
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, Socks5UdpOption {}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
@@ -187,7 +202,8 @@ export interface PersistentContextOptions
     HumanizeOptions,
     DownloadOptions,
     LicenseOptions,
-    ShaderDialectOption {
+    ShaderDialectOption,
+    Socks5UdpOption {
   /**
    * Seed + enable the opt-in Widevine CDM in this profile so DRM/EME works
    * (`requestMediaKeySystemAccess('com.widevine.alpha')` resolves) and the EME surface matches a
@@ -338,11 +354,12 @@ function assembleArgs(
   disablePrivacySandbox: boolean | undefined,
   webrtcIp: unknown,
   userArgs: string[],
-  proxyForQuic?: PwProxy
+  proxyForQuic?: PwProxy,
+  socks5Udp?: boolean
 ): string[] {
   // webBluetoothArgs: Linux hosts hide navigator.bluetooth while exposing usb/serial/hid, an
   // OS-origin tell on a Windows persona. No-op off Linux.
-  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic), ...webBluetoothArgs()];
+  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic), ...socks5UdpArgs(socks5Udp, proxyForQuic), ...webBluetoothArgs()];
   // DEFAULT FLIPPED IN 0.23.0 — opt IN to disabling, rather than opt out.
   //
   // Disabling Topics/FLEDGE/Shared Storage/Fenced Frames is coherent for a de-Googled persona, and
@@ -596,7 +613,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     options.profile && !isAutoProfile
       ? { ...resolveProfileOptions(options.profile as string | Profile), ...options }
       : options;
-  const { profile: _profile, profileSelect: _profileSelect, extensions, portableProfile, shaderDialect, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest } = merged;
+  const { profile: _profile, profileSelect: _profileSelect, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -637,7 +654,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …).
   const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env));
   const runtimeEnv = lease ? withRunToken(lease.token, launchEnv) : launchEnv;
-  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined);
+  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined, socks5Udp);
   // Headless: screen.* has to be handled alongside the viewport or the window reports a geometry no
   // real browser can (see ./geometry.ts). Probe a copy — viewport/screen are context options, which
   // chromium.launch() does not take — and carry the result to newPage/newContext.
@@ -670,7 +687,7 @@ export async function launchPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = options.profile ? { ...resolveProfileOptions(options.profile), ...options } : options;
-  const { profile: _profile, extensions, portableProfile, shaderDialect, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, ...rest } = merged;
+  const { profile: _profile, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -718,7 +735,7 @@ export async function launchPersistentContext(
   });
   const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env));
   const runtimeEnv = lease ? withRunToken(lease.token, ctxEnv) : ctxEnv;
-  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined);
+  const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined, socks5Udp);
   // headless: the persona owns screen when it is running, so only the window needs fitting; with no
   // persona the SDK overrides screen itself (see ./geometry.ts). Headed already set viewport: null.
   const geom = opts.headless === false
@@ -873,7 +890,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     ? { ...resolveProfileOptions(launchOpts.profile), ...launchOpts }
     : launchOpts;
   const {
-    profile: _profile, extensions, portableProfile, shaderDialect, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
+    profile: _profile, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
     args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
@@ -889,7 +906,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   ensureRunnableHere(exe);
   const engineArgs = assembleArgs(
     fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)],
-    proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs ?? [], proxyOpt);
+    proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs ?? [], proxyOpt, socks5Udp);
 
   const resolvedPort = port ?? (await freePort());
   const ownUdd = !uddOption;

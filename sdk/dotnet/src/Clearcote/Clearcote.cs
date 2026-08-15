@@ -82,7 +82,7 @@ public static class Clearcote
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
         var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
-            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy);
+            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp);
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         var licKey = License.ResolveLicenseKey(options.LicenseKey);
@@ -167,7 +167,7 @@ public static class Clearcote
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
         var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
-            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy);
+            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp);
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         var licKey = License.ResolveLicenseKey(options.LicenseKey);
@@ -232,7 +232,7 @@ public static class Clearcote
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
         var engineArgs = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
-            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy);
+            proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp);
 
         var port = options.Port ?? FreePort();
         var ownUdd = string.IsNullOrEmpty(options.UserDataDir);
@@ -299,13 +299,15 @@ public static class Clearcote
     /// fpArgs + extArgs + proxyArgs + quic + (privacy-sandbox unless disabled==false) + webrtc-deny,
     /// then userArgs appended last, then feature-flags collapsed. Mirrors index.ts assembleArgs.
     internal static List<string> AssembleArgs(List<string> fpArgs, List<string> extArgs, List<string> proxyArgs,
-        bool? disablePrivacySandbox, string? webrtcIp, IReadOnlyList<string> userArgs, ProxyOptions? proxyForQuic)
+        bool? disablePrivacySandbox, string? webrtcIp, IReadOnlyList<string> userArgs, ProxyOptions? proxyForQuic, bool socks5Udp)
     {
         var baseList = new List<string>();
         baseList.AddRange(fpArgs);
         baseList.AddRange(extArgs);
         baseList.AddRange(proxyArgs);
         baseList.AddRange(LaunchOpts.QuicArgs(proxyForQuic));
+        // Opt-in: relay WebRTC UDP through the proxy rather than denying it outright.
+        baseList.AddRange(LaunchOpts.Socks5UdpArgs(socks5Udp, proxyForQuic));
         // Linux hosts hide navigator.bluetooth while exposing usb/serial/hid — an OS-origin tell
         // on a Windows persona. Restore it (no-op off Linux). See LaunchOpts.WebBluetoothArgs.
         baseList.AddRange(LaunchOpts.WebBluetoothArgs());
