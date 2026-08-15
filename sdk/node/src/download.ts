@@ -14,7 +14,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -321,6 +321,158 @@ async function gpgVerifyAsync(
   }
 }
 
+export const MANIFEST = ".manifest.json";
+
+// Files Chromium cannot start without. A tree missing any of these does not fail at launch with a
+// usable error — it CHECK-crashes inside the browser process before Playwright can attach, e.g. a
+// missing icudtl.dat dies with "Invalid file descriptor to ICU data received" / "Check failed:
+// result" and exit code 0xC0000003. Cheap to stat, so this list is checked on EVERY resolve; the
+// full manifest (below) is checked once per process.
+const CRITICAL_WIN = ["chrome.exe", "chrome.dll", "chrome_elf.dll", "icudtl.dat", "snapshot_blob.bin", "resources.pak"];
+const CRITICAL_OTHER = ["icudtl.dat", "snapshot_blob.bin", "resources.pak"];
+
+const criticalNames = (): string[] => (process.platform === "win32" ? CRITICAL_WIN : CRITICAL_OTHER);
+
+const scanned = new Set<string>(); // browser dirs whose full manifest already verified this process
+
+/**
+ * Snapshot every extracted file's size next to the tree, so a LATER launch can tell a healthy
+ * install from one that antivirus, a full disk, or an interrupted copy has since eaten.
+ */
+export function writeManifest(base: string, browserDir: string): void {
+  const files: Record<string, number> = {};
+  const walk = (d: string): void => {
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      const p = path.join(d, ent.name);
+      if (ent.isDirectory()) {
+        walk(p);
+        continue;
+      }
+      try {
+        files[path.relative(browserDir, p).split(path.sep).join("/")] = statSync(p).size;
+      } catch {
+        /* best-effort */
+      }
+    }
+  };
+  walk(browserDir);
+  try {
+    writeFileSync(path.join(base, MANIFEST), JSON.stringify({ files }));
+  } catch {
+    /* a manifest is an optimisation, never a reason to fail an install */
+  }
+}
+
+/** Return `"<file> — <problem>"` for every missing / truncated entry. */
+function checkNames(browserDir: string, names: string[], sizes?: Record<string, number>): string[] {
+  const problems: string[] = [];
+  for (const name of names) {
+    const p = path.join(browserDir, ...name.split("/"));
+    let got: number;
+    try {
+      got = statSync(p).size;
+    } catch {
+      problems.push(`${name} — missing`);
+      continue;
+    }
+    const want = sizes?.[name];
+    if (want !== undefined && got !== want) problems.push(`${name} — ${got.toLocaleString("en-US")} bytes, expected ${want.toLocaleString("en-US")}`);
+    else if (want === undefined && got === 0) problems.push(`${name} — empty (0 bytes)`);
+  }
+  return problems;
+}
+
+/**
+ * Check an extracted browser tree; returns a list of problems ([] when healthy).
+ *
+ * Always checks the critical files (a few stats). When `base` holds a manifest written at install
+ * time, also checks every recorded file's exact size — once per process per tree by default, since
+ * a full tree is ~700 files; pass `full: true` to force it.
+ */
+export function verifyInstall(browserDir: string, base?: string, full?: boolean): string[] {
+  const problems = checkNames(browserDir, criticalNames());
+  if (problems.length) return problems;
+
+  const manifest = path.join(base ?? path.dirname(browserDir), MANIFEST);
+  const key = path.resolve(browserDir).toLowerCase();
+  if (full === false || (full === undefined && scanned.has(key)) || !existsSync(manifest)) return problems;
+  let sizes: Record<string, number>;
+  try {
+    sizes = (JSON.parse(readFileSync(manifest, "utf8")) as { files?: Record<string, number> }).files ?? {};
+  } catch {
+    return problems;
+  }
+  const found = checkNames(browserDir, Object.keys(sizes), sizes);
+  if (!found.length) scanned.add(key);
+  return found;
+}
+
+/**
+ * The message a user actually needs when the tree is damaged: what is wrong, and how to fix it —
+ * instead of the browser CHECK-crashing during startup with an ICU stack trace.
+ */
+export function brokenInstallError(browserDir: string, problems: string[], repairable = true): Error {
+  const shown = problems.slice(0, 8).map((p) => `    ${p}`).join("\n");
+  const more = problems.length > 8 ? `\n    ... and ${problems.length - 8} more` : "";
+  const fix = repairable
+    ? `Delete the folder and let Clearcote re-download it:\n    ${path.dirname(browserDir)}\n`
+    : "Re-create this browser directory from a complete copy (or unset CLEARCOTE_BINARY /\nexecutablePath and let Clearcote download and verify its own build).\n";
+  return new Error(
+    `Clearcote browser install is incomplete or corrupted:\n    ${browserDir}\n${shown}${more}\n\n` +
+      "The browser cannot start without these files — it would crash during startup with an\n" +
+      "ICU / 'Check failed' error before Playwright can attach.\n\n" +
+      `${fix}\n` +
+      "Common causes: antivirus quarantined a file, the disk filled up mid-install, or the\n" +
+      "directory was copied by something that did not finish (e.g. a bundled app copying it out\n" +
+      "of a packaged-app temp dir). Excluding the Clearcote cache directory from real-time\n" +
+      "antivirus scanning prevents a repeat.",
+  );
+}
+
+/**
+ * Validate the tree around a caller-supplied binary (`executablePath` / `CLEARCOTE_BINARY` — e.g. a
+ * browser bundled into a packaged app). Throws with a clear message when it is damaged.
+ *
+ * Deliberately lenient about LAYOUT, strict about COMPLETENESS: a caller may point at something
+ * that is not a flat Chromium tree at all (installed Google Chrome keeps its DLLs in a versioned
+ * subfolder), and refusing to launch that would be a false alarm. So the check only engages once
+ * the directory looks flat — at least one non-binary payload file sits next to the exe — and then
+ * every other payload file is required. That is exactly the damaged-copy case.
+ */
+export function checkInstall(exe: string | undefined): void {
+  if (!exe || !existsSync(exe)) return; // the launcher reports a missing binary better than we can
+  const browserDir = path.dirname(path.resolve(exe));
+  const payload = criticalNames().filter((n) => !n.toLowerCase().startsWith("chrome.ex"));
+  if (!payload.some((n) => existsSync(path.join(browserDir, n)))) return; // not a flat tree — nothing to assert
+  const problems = verifyInstall(browserDir);
+  if (problems.length) throw brokenInstallError(browserDir, problems, false);
+}
+
+/**
+ * The cached browser path for an install base, or null when absent or damaged.
+ *
+ * A damaged tree returns null (after wiping it) so the caller re-downloads: the `.verified` marker
+ * only records that the archive hashed correctly AT INSTALL TIME, and files can be eaten later.
+ */
+export function cachedBinary(base: string, binary: string, quiet?: boolean): string | null {
+  if (!existsSync(path.join(base, ".verified"))) return null;
+  const browserDir = path.join(base, "browser");
+  const cached = findFile(browserDir, binary);
+  if (!cached) return null;
+  const problems = verifyInstall(browserDir, base);
+  if (!problems.length) return cached;
+  log(quiet, `cached browser is damaged (${problems[0]}) — re-downloading`);
+  rmSync(browserDir, { recursive: true, force: true });
+  for (const marker of [".verified", MANIFEST]) rmSync(path.join(base, marker), { force: true });
+  return null;
+}
+
 /** Download + verify a resolved release into `base`, returning the extracted browser-binary path. */
 async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: DownloadOptions): Promise<string> {
   const browserDir = path.join(base, "browser");
@@ -402,6 +554,9 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
     // — closes the chrome_elf.dll scan race that otherwise poisons the path (see warmFiles).
     warmFiles(browserDir);
   }
+  // Record the finished tree BEFORE the .verified marker, so a launch never sees "verified" with
+  // no manifest to check it against.
+  writeManifest(base, browserDir);
   writeFileSync(path.join(base, ".verified"), `${rel.sha256}\n`);
   await rm(zipPath, { force: true }); // reclaim ~250 MB; keep only the extracted tree
   log(opts.quiet, `ready: ${exe}`);
@@ -556,8 +711,8 @@ export async function ensureVersion(
     return proEnsureBinary(opts.licenseKey as string, { apiBase: opts.apiBase, cacheDir: opts.cacheDir, quiet: opts.quiet, version: plan.version });
   }
   const base = path.join(opts.cacheDir || defaultCacheRoot(), plan.rel.tag);
-  if (existsSync(path.join(base, ".verified"))) {
-    const cached = findFile(path.join(base, "browser"), plan.rel.binary || "chrome");
+  {
+    const cached = cachedBinary(base, plan.rel.binary || "chrome", opts.quiet);
     if (cached) return cached;
   }
   return fetchAndVerify(plan.rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
@@ -628,8 +783,8 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
   };
 
   const base = path.join(opts.cacheDir || defaultCacheRoot(), rel.tag);
-  if (existsSync(path.join(base, ".verified"))) {
-    const cached = findFile(path.join(base, "browser"), rel.binary || "chrome.exe");
+  {
+    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet);
     if (cached) return cached;
   }
   return fetchAndVerify(rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
@@ -656,8 +811,8 @@ export async function ensureBinary(opts: DownloadOptions = {}): Promise<string> 
   }
 
   const base = path.join(cacheRoot, rel.tag);
-  if (existsSync(path.join(base, ".verified"))) {
-    const cached = findFile(path.join(base, "browser"), rel.binary || "chrome.exe");
+  {
+    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet);
     if (cached) return cached;
   }
   return fetchAndVerify(rel, base, opts);

@@ -110,7 +110,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.26.2"
+__version__ = "0.26.3"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -139,10 +139,16 @@ def _playwright():
 
 def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_update=None, pro=None,
                     version=None):
+    from .download import check_install
+
     if executable_path:
+        # Caller-supplied tree (often a browser bundled into a packaged app): we did not install it,
+        # so validate it here — a half-copied tree otherwise CHECK-crashes during browser startup.
+        check_install(executable_path)
         return executable_path
     env = os.environ.get("CLEARCOTE_BINARY")
     if env:
+        check_install(env)
         return env
     version = version or os.environ.get("CLEARCOTE_BROWSER_VERSION")
     if version:
@@ -150,8 +156,8 @@ def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_upda
         # catalog FIRST (clear error if it doesn't exist or needs a license), then route free vs pro.
         from .download import (
             _cache_root,
+            _cached,
             _fetch_and_verify,
-            _find,
             is_pro_revision_selector,
             pro_ensure_binary,
             resolve_version,
@@ -174,10 +180,9 @@ def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_upda
                                      cache_dir=cache_dir, quiet=quiet, version=payload)
         rel = payload  # free build resolved from the catalog
         base = os.path.join(cache_dir or _cache_root(), rel["tag"])
-        if os.path.exists(os.path.join(base, ".verified")):
-            cached = _find(os.path.join(base, "browser"), rel["binary"])
-            if cached:
-                return cached
+        cached = _cached(base, rel["binary"], quiet)
+        if cached:
+            return cached
         return _fetch_and_verify(rel, base, quiet)
     if pro:  # (license_key, api_base) -> the PRO (license-gated) pinned build via the site
         from .download import pro_ensure_binary

@@ -23,7 +23,7 @@ import type {
   LaunchOptions as PlaywrightLaunchOptions,
   Page,
 } from "playwright-core";
-import { ensureBinary, ensureVersion, proEnsureBinary, resolvedEngineVersion, warmFiles, type DownloadOptions } from "./download.js";
+import { checkInstall, ensureBinary, ensureVersion, proEnsureBinary, resolvedEngineVersion, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
 import { resolveGeo, type Geo } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
@@ -61,6 +61,7 @@ import { acquireLease, resolveLicenseKey, withRunToken, type LicenseOptions, typ
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
 export { proEnsureBinary, type ProDownloadOptions } from "./download.js";
+export { checkInstall, verifyInstall } from "./download.js";
 export { resolveGeo, type Geo } from "./geoip.js";
 export type { HumanizeOptions } from "./humanize.js";
 export { Profile, listProfiles, loadProfile, PROFILE_DIR, type ProfileOptions } from "./profile.js";
@@ -228,8 +229,16 @@ function ensureRunnableHere(exe: string): void {
 export async function executablePath(
   options: { executablePath?: string; version?: string; pro?: { licenseKey: string; licenseApiBase?: string } } & DownloadOptions = {}
 ): Promise<string> {
-  if (options.executablePath) return options.executablePath;
-  if (process.env.CLEARCOTE_BINARY) return process.env.CLEARCOTE_BINARY;
+  if (options.executablePath) {
+    // Caller-supplied tree (often a browser bundled into a packaged app): we did not install it, so
+    // validate it here — a half-copied tree otherwise CHECK-crashes during browser startup.
+    checkInstall(options.executablePath);
+    return options.executablePath;
+  }
+  if (process.env.CLEARCOTE_BINARY) {
+    checkInstall(process.env.CLEARCOTE_BINARY);
+    return process.env.CLEARCOTE_BINARY;
+  }
   const version = options.version || process.env.CLEARCOTE_BROWSER_VERSION;
   if (version) {
     // Explicit version selector: validate against the catalog FIRST (clear error if it doesn't

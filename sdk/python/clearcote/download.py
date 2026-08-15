@@ -64,6 +64,157 @@ def _find(dirpath, name):
     return None
 
 
+MANIFEST = ".manifest.json"
+
+# Files Chromium cannot start without. A tree missing any of these does not fail at launch with a
+# usable error — it CHECK-crashes inside the browser process before Playwright can attach, e.g. a
+# missing icudtl.dat dies with "Invalid file descriptor to ICU data received" / "Check failed:
+# result" and exit code 0xC0000003. Cheap to stat, so this list is checked on EVERY resolve; the
+# full manifest (below) is checked once per process.
+CRITICAL_FILES = {
+    "win32": ["chrome.exe", "chrome.dll", "chrome_elf.dll", "icudtl.dat",
+              "snapshot_blob.bin", "resources.pak"],
+    "other": ["icudtl.dat", "snapshot_blob.bin", "resources.pak"],
+}
+
+_scanned = set()  # browser dirs whose full manifest already verified in this process
+
+
+def _critical_names():
+    return CRITICAL_FILES["win32" if sys.platform == "win32" else "other"]
+
+
+def _write_manifest(base, browser_dir):
+    """Snapshot every extracted file's size next to the tree, so a LATER launch can tell a healthy
+    install from one that antivirus, a full disk, or an interrupted copy has since eaten."""
+    files = {}
+    for root, _dirs, names in os.walk(browser_dir):
+        for name in names:
+            path = os.path.join(root, name)
+            try:
+                files[os.path.relpath(path, browser_dir).replace("\\", "/")] = os.path.getsize(path)
+            except OSError:
+                pass
+    try:
+        with open(os.path.join(base, MANIFEST), "w", encoding="utf-8") as f:
+            json.dump({"files": files}, f)
+    except OSError:  # a manifest is an optimisation, never a reason to fail an install
+        pass
+
+
+def _check_names(browser_dir, names, sizes=None):
+    """Return a list of "<file> — <problem>" strings for missing / truncated entries."""
+    problems = []
+    for name in names:
+        path = os.path.join(browser_dir, name.replace("/", os.sep))
+        try:
+            got = os.path.getsize(path)
+        except OSError:
+            problems.append(f"{name} — missing")
+            continue
+        want = (sizes or {}).get(name)
+        if want is not None and got != want:
+            problems.append(f"{name} — {got:,} bytes, expected {want:,}")
+        elif want is None and got == 0:
+            problems.append(f"{name} — empty (0 bytes)")
+    return problems
+
+
+def verify_install(browser_dir, base=None, full=None):
+    """Check an extracted browser tree and return a list of problems ([] when healthy).
+
+    Always checks CRITICAL_FILES (a few stats). When ``base`` holds a manifest written at install
+    time, also checks every recorded file's exact size — once per process per tree by default,
+    since a full tree is ~700 files; pass ``full=True`` to force it."""
+    problems = _check_names(browser_dir, _critical_names())
+    if problems:
+        return problems
+
+    manifest = os.path.join(base or os.path.dirname(browser_dir), MANIFEST)
+    key = os.path.normcase(os.path.abspath(browser_dir))
+    if full is False or (full is None and key in _scanned) or not os.path.exists(manifest):
+        return problems
+    try:
+        with open(manifest, encoding="utf-8") as f:
+            sizes = (json.load(f) or {}).get("files") or {}
+    except (OSError, ValueError):
+        return problems
+    problems = _check_names(browser_dir, list(sizes), sizes)
+    if not problems:
+        _scanned.add(key)
+    return problems
+
+
+def broken_install_error(browser_dir, problems, repairable=True):
+    """The message a user actually needs when the tree is damaged: what is wrong, and how to fix
+    it — instead of the browser CHECK-crashing during startup with an ICU stack trace."""
+    shown = "\n".join(f"    {p}" for p in problems[:8])
+    more = f"\n    ... and {len(problems) - 8} more" if len(problems) > 8 else ""
+    fix = (
+        f"Delete the folder and let Clearcote re-download it:\n"
+        f"    {os.path.dirname(browser_dir)}\n"
+        if repairable else
+        "Re-create this browser directory from a complete copy (or unset CLEARCOTE_BINARY /\n"
+        "executable_path and let Clearcote download and verify its own build).\n"
+    )
+    return RuntimeError(
+        f"Clearcote browser install is incomplete or corrupted:\n    {browser_dir}\n"
+        f"{shown}{more}\n\n"
+        f"The browser cannot start without these files — it would crash during startup with an\n"
+        f"ICU / 'Check failed' error before Playwright can attach.\n\n"
+        f"{fix}\n"
+        "Common causes: antivirus quarantined a file, the disk filled up mid-install, or the\n"
+        "directory was copied by something that did not finish (e.g. a bundled app copying it out\n"
+        "of a PyInstaller temp dir). Excluding the Clearcote cache directory from real-time\n"
+        "antivirus scanning prevents a repeat."
+    )
+
+
+def check_install(exe):
+    """Validate the tree around a caller-supplied binary (``executable_path`` / ``CLEARCOTE_BINARY``
+    — e.g. a browser bundled into a packaged app). Raises with a clear message when it is damaged.
+
+    Deliberately lenient about LAYOUT, strict about COMPLETENESS: a caller may point at something
+    that is not a flat Chromium tree at all (installed Google Chrome keeps its DLLs in a versioned
+    subfolder), and refusing to launch that would be a false alarm. So the check only engages once
+    the directory looks flat — at least one non-binary payload file sits next to the exe — and then
+    every other payload file is required. That is exactly the damaged-copy case: most of the tree
+    present, one or two files eaten."""
+    if not exe or not os.path.exists(exe):
+        return  # the launcher reports a missing binary better than we can
+    browser_dir = os.path.dirname(os.path.abspath(exe))
+    payload = [n for n in _critical_names() if not n.lower().startswith("chrome.ex")]
+    if not any(os.path.exists(os.path.join(browser_dir, n)) for n in payload):
+        return  # not a flat Chromium tree (or not ours) — nothing we can meaningfully assert
+    problems = verify_install(browser_dir)
+    if problems:
+        raise broken_install_error(browser_dir, problems, repairable=False)
+
+
+def _cached(base, binary, quiet=False):
+    """The cached chrome path for an install base, or None when absent or damaged.
+
+    A damaged tree returns None so the caller re-downloads: the ``.verified`` marker only records
+    that the archive hashed correctly AT INSTALL TIME, and the files can be eaten afterwards."""
+    if not os.path.exists(os.path.join(base, ".verified")):
+        return None
+    browser_dir = os.path.join(base, "browser")
+    cached = _find(browser_dir, binary)
+    if not cached:
+        return None
+    problems = verify_install(browser_dir, base)
+    if problems:
+        _log(quiet, f"cached browser is damaged ({problems[0]}) — re-downloading")
+        shutil.rmtree(browser_dir, ignore_errors=True)
+        for marker in (".verified", MANIFEST):
+            try:
+                os.remove(os.path.join(base, marker))
+            except OSError:
+                pass
+        return None
+    return cached
+
+
 def _sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -346,6 +497,9 @@ def _fetch_and_verify(rel, base, quiet):
         # path (see warm_files). One-time cost on install; later cached launches skip it.
         warm_files(browser_dir)
 
+    # Record the finished tree BEFORE the .verified marker, so a launch never sees "verified" with
+    # no manifest to check it against.
+    _write_manifest(base, browser_dir)
     with open(os.path.join(base, ".verified"), "w", encoding="utf-8") as f:
         f.write(rel["sha256"] + "\n")
     try:
@@ -507,10 +661,9 @@ def ensure_binary(cache_dir=None, quiet=False, auto_update=None):
         rel = dict(RELEASE, unpinned=False)
 
     base = os.path.join(cache_root, rel["tag"])
-    if os.path.exists(os.path.join(base, ".verified")):
-        cached = _find(os.path.join(base, "browser"), rel.get("binary", "chrome.exe"))
-        if cached:
-            return cached
+    cached = _cached(base, rel.get("binary", "chrome.exe"), quiet)
+    if cached:
+        return cached
     return _fetch_and_verify(rel, base, quiet)
 
 
@@ -565,8 +718,7 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
         "unpinned": False,  # pinned -> sha256-only verify (no GPG), like the free pin
     }
     dst = os.path.join(cache_dir or _cache_root(), rel["tag"])
-    if os.path.exists(os.path.join(dst, ".verified")):
-        cached = _find(os.path.join(dst, "browser"), rel["binary"])
-        if cached:
-            return cached
+    cached = _cached(dst, rel["binary"], quiet)
+    if cached:
+        return cached
     return _fetch_and_verify(rel, dst, quiet)

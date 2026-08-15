@@ -65,6 +65,164 @@ public static class Download
         return null;
     }
 
+    /// Name of the file-size snapshot written next to an extracted tree at install time.
+    public const string Manifest = ".manifest.json";
+
+    // Files Chromium cannot start without. A tree missing any of these does not fail at launch with
+    // a usable error — it CHECK-crashes inside the browser process before Playwright can attach,
+    // e.g. a missing icudtl.dat dies with "Invalid file descriptor to ICU data received" / "Check
+    // failed: result" and exit code 0xC0000003. Cheap to stat, so this list is checked on EVERY
+    // resolve; the full manifest is checked once per process.
+    private static readonly string[] CriticalWin =
+        { "chrome.exe", "chrome.dll", "chrome_elf.dll", "icudtl.dat", "snapshot_blob.bin", "resources.pak" };
+    private static readonly string[] CriticalOther = { "icudtl.dat", "snapshot_blob.bin", "resources.pak" };
+
+    private static string[] CriticalNames() => OperatingSystem.IsWindows() ? CriticalWin : CriticalOther;
+
+    // Browser dirs whose full manifest already verified in this process.
+    private static readonly HashSet<string> Scanned = new(StringComparer.OrdinalIgnoreCase);
+
+    /// Snapshot every extracted file's size next to the tree, so a LATER launch can tell a healthy
+    /// install from one that antivirus, a full disk, or an interrupted copy has since eaten.
+    public static void WriteManifest(string @base, string browserDir)
+    {
+        var files = new Dictionary<string, long>(StringComparer.Ordinal);
+        try
+        {
+            foreach (var p in Directory.EnumerateFiles(browserDir, "*", SearchOption.AllDirectories))
+            {
+                try
+                {
+                    var rel = Path.GetRelativePath(browserDir, p).Replace(Path.DirectorySeparatorChar, '/');
+                    files[rel] = new FileInfo(p).Length;
+                }
+                catch { /* best-effort */ }
+            }
+            File.WriteAllText(Path.Combine(@base, Manifest), JsonSerializer.Serialize(new { files }));
+        }
+        catch { /* a manifest is an optimisation, never a reason to fail an install */ }
+    }
+
+    /// Return "&lt;file&gt; — &lt;problem&gt;" for every missing / truncated entry.
+    private static List<string> CheckNames(string browserDir, IEnumerable<string> names,
+                                           IReadOnlyDictionary<string, long>? sizes = null)
+    {
+        var problems = new List<string>();
+        foreach (var name in names)
+        {
+            var p = Path.Combine(browserDir, name.Replace('/', Path.DirectorySeparatorChar));
+            long got;
+            try
+            {
+                var info = new FileInfo(p);
+                if (!info.Exists) { problems.Add($"{name} — missing"); continue; }
+                got = info.Length;
+            }
+            catch { problems.Add($"{name} — missing"); continue; }
+
+            if (sizes is not null && sizes.TryGetValue(name, out var want))
+            {
+                if (got != want) problems.Add($"{name} — {got:N0} bytes, expected {want:N0}");
+            }
+            else if (sizes is null && got == 0)
+            {
+                problems.Add($"{name} — empty (0 bytes)");
+            }
+        }
+        return problems;
+    }
+
+    /// Check an extracted browser tree; returns the problems found (empty when healthy).
+    ///
+    /// Always checks the critical files (a few stats). When <paramref name="base"/> holds a manifest
+    /// written at install time, also checks every recorded file's exact size — once per process per
+    /// tree by default, since a full tree is ~700 files; pass <paramref name="full"/> to force it.
+    public static List<string> VerifyInstall(string browserDir, string? @base = null, bool? full = null)
+    {
+        var problems = CheckNames(browserDir, CriticalNames());
+        if (problems.Count > 0) return problems;
+
+        var manifest = Path.Combine(@base ?? Path.GetDirectoryName(browserDir.TrimEnd(Path.DirectorySeparatorChar))!, Manifest);
+        var key = Path.GetFullPath(browserDir);
+        bool memoised;
+        lock (Scanned) memoised = Scanned.Contains(key);
+        if (full == false || (full is null && memoised) || !File.Exists(manifest)) return problems;
+
+        Dictionary<string, long> sizes;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(manifest));
+            sizes = new Dictionary<string, long>(StringComparer.Ordinal);
+            if (doc.RootElement.TryGetProperty("files", out var files))
+                foreach (var f in files.EnumerateObject()) sizes[f.Name] = f.Value.GetInt64();
+        }
+        catch { return problems; }
+
+        var found = CheckNames(browserDir, sizes.Keys, sizes);
+        if (found.Count == 0) lock (Scanned) Scanned.Add(key);
+        return found;
+    }
+
+    /// The message a user actually needs when the tree is damaged: what is wrong, and how to fix it
+    /// — instead of the browser CHECK-crashing during startup with an ICU stack trace.
+    public static Exception BrokenInstallError(string browserDir, IReadOnlyList<string> problems, bool repairable = true)
+    {
+        var shown = string.Join("\n", problems.Take(8).Select(p => $"    {p}"));
+        var more = problems.Count > 8 ? $"\n    ... and {problems.Count - 8} more" : "";
+        var fix = repairable
+            ? $"Delete the folder and let Clearcote re-download it:\n    {Path.GetDirectoryName(browserDir.TrimEnd(Path.DirectorySeparatorChar))}\n"
+            : "Re-create this browser directory from a complete copy (or unset CLEARCOTE_BINARY /\nExecutablePath and let Clearcote download and verify its own build).\n";
+        return new Exception(
+            $"Clearcote browser install is incomplete or corrupted:\n    {browserDir}\n{shown}{more}\n\n" +
+            "The browser cannot start without these files — it would crash during startup with an\n" +
+            "ICU / 'Check failed' error before Playwright can attach.\n\n" +
+            fix + "\n" +
+            "Common causes: antivirus quarantined a file, the disk filled up mid-install, or the\n" +
+            "directory was copied by something that did not finish (e.g. a bundled app copying it out\n" +
+            "of a packaged-app temp dir). Excluding the Clearcote cache directory from real-time\n" +
+            "antivirus scanning prevents a repeat.");
+    }
+
+    /// Validate the tree around a caller-supplied binary (ExecutablePath / CLEARCOTE_BINARY — e.g. a
+    /// browser bundled into a packaged app). Throws with a clear message when it is damaged.
+    ///
+    /// Deliberately lenient about LAYOUT, strict about COMPLETENESS: a caller may point at something
+    /// that is not a flat Chromium tree at all (installed Google Chrome keeps its DLLs in a versioned
+    /// subfolder), and refusing to launch that would be a false alarm. So the check only engages once
+    /// the directory looks flat — at least one non-binary payload file sits next to the exe — and then
+    /// every other payload file is required. That is exactly the damaged-copy case.
+    public static void CheckInstall(string? exe)
+    {
+        if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) return; // the launcher reports this better
+        var browserDir = Path.GetDirectoryName(Path.GetFullPath(exe))!;
+        var payload = CriticalNames().Where(n => !n.StartsWith("chrome.ex", StringComparison.OrdinalIgnoreCase));
+        if (!payload.Any(n => File.Exists(Path.Combine(browserDir, n)))) return; // not a flat tree
+        var problems = VerifyInstall(browserDir);
+        if (problems.Count > 0) throw BrokenInstallError(browserDir, problems, repairable: false);
+    }
+
+    /// The cached browser path for an install base, or null when absent or damaged.
+    ///
+    /// A damaged tree returns null (after wiping it) so the caller re-downloads: the ".verified"
+    /// marker only records that the archive hashed correctly AT INSTALL TIME, and files can be eaten
+    /// afterwards.
+    public static string? CachedBinary(string @base, string binary, bool quiet = false)
+    {
+        if (!File.Exists(Path.Combine(@base, ".verified"))) return null;
+        var browserDir = Path.Combine(@base, "browser");
+        var cached = FindFile(browserDir, binary);
+        if (cached is null) return null;
+        var problems = VerifyInstall(browserDir, @base);
+        if (problems.Count == 0) return cached;
+
+        Log(quiet, $"cached browser is damaged ({problems[0]}) — re-downloading");
+        try { Directory.Delete(browserDir, recursive: true); } catch { }
+        lock (Scanned) Scanned.Remove(Path.GetFullPath(browserDir));
+        TryDelete(Path.Combine(@base, ".verified"));
+        TryDelete(Path.Combine(@base, Manifest));
+        return null;
+    }
+
     private static async Task<string> Sha256FileAsync(string file)
     {
         await using var fs = File.OpenRead(file);
@@ -291,6 +449,9 @@ public static class Download
             WinLaunch.WarmFiles(browserDir); // close the chrome_elf.dll first-launch AV race
         }
 
+        // Record the finished tree BEFORE the .verified marker, so a launch never sees "verified"
+        // with no manifest to check it against.
+        WriteManifest(@base, browserDir);
         await File.WriteAllTextAsync(Path.Combine(@base, ".verified"), rel.Sha256 + "\n").ConfigureAwait(false);
         TryDelete(zipPath);
         Log(quiet, $"ready: {exe}");
@@ -357,9 +518,8 @@ public static class Download
         };
 
         var @base = Path.Combine(opts.CacheDir ?? Native.CacheRoot(), rel.Tag);
-        if (File.Exists(Path.Combine(@base, ".verified")))
         {
-            var cached = FindFile(Path.Combine(@base, "browser"), rel.Binary);
+            var cached = CachedBinary(@base, rel.Binary, opts.Quiet);
             if (cached is not null) return cached;
         }
         return await FetchAndVerifyAsync(rel, @base, opts.Quiet).ConfigureAwait(false);
@@ -512,9 +672,8 @@ public static class Download
 
         var rel = plan.Rel!;
         var @base = Path.Combine(cacheDir ?? Native.CacheRoot(), rel.Tag);
-        if (File.Exists(Path.Combine(@base, ".verified")))
         {
-            var cached = FindFile(Path.Combine(@base, "browser"), rel.Binary);
+            var cached = CachedBinary(@base, rel.Binary, quiet);
             if (cached is not null) return cached;
         }
         return await FetchAndVerifyAsync(rel, @base, quiet).ConfigureAwait(false);
@@ -540,9 +699,8 @@ public static class Download
         }
 
         var @base = Path.Combine(cacheRoot, rel.Tag);
-        if (File.Exists(Path.Combine(@base, ".verified")))
         {
-            var cached = FindFile(Path.Combine(@base, "browser"), rel.Binary);
+            var cached = CachedBinary(@base, rel.Binary, opts.Quiet);
             if (cached is not null) return cached;
         }
         return await FetchAndVerifyAsync(rel, @base, opts.Quiet).ConfigureAwait(false);

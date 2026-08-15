@@ -33,9 +33,15 @@ public static class Clearcote
     public static async Task<string> ExecutablePathAsync(LaunchOptions? options = null)
     {
         options ??= new LaunchOptions();
-        if (!string.IsNullOrEmpty(options.ExecutablePath)) return options.ExecutablePath;
+        if (!string.IsNullOrEmpty(options.ExecutablePath))
+        {
+            // Caller-supplied tree (often a browser bundled into a packaged app): we did not install
+            // it, so validate it here — a half-copied tree otherwise CHECK-crashes during startup.
+            Download.CheckInstall(options.ExecutablePath);
+            return options.ExecutablePath;
+        }
         var envBin = Environment.GetEnvironmentVariable("CLEARCOTE_BINARY");
-        if (!string.IsNullOrEmpty(envBin)) return envBin;
+        if (!string.IsNullOrEmpty(envBin)) { Download.CheckInstall(envBin); return envBin; }
         var key = License.ResolveLicenseKey(options.LicenseKey);
         var version = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         if (!string.IsNullOrEmpty(version))
