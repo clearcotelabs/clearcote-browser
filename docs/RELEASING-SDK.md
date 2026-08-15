@@ -63,6 +63,11 @@ the same fields — it converts on first upload and does not reserve the name, s
    - `sdk/node/package.json` → `"version"`
    - `sdk/python/pyproject.toml` → `[project] version`
    - `sdk/python/clearcote/__init__.py` → `__version__`
+
+   Releasing the .NET SDK on the same version? It has **two more** spots, and a unit test fails the
+   publish if they disagree — `sdk/dotnet/src/Clearcote/Clearcote.csproj` (`<Version>`) and
+   `sdk/dotnet/src/Clearcote/Clearcote.cs` (`public const string Version`). See
+   [sdk/dotnet/PUBLISHING.md](../sdk/dotnet/PUBLISHING.md); it ships on its own `dotnet-v*` tag.
 2. Commit and push to `main`.
 3. Tag and push:
    ```bash
