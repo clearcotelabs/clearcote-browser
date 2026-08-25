@@ -28,7 +28,7 @@ except ImportError:
 
 MMDB_URL = "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb.zip"
 MMDB_MAX_AGE_DAYS = 30
-IPECHO_URLS = ("http://api.ipify.org", "http://ip-api.com/line/?fields=query")
+IPECHO_URLS = ("http://icanhazip.com", "http://api.ipify.org", "http://ip-api.com/line/?fields=query")
 IPAPI_URL = "http://ip-api.com/json/?fields=status,message,countryCode,timezone,lat,lon,query"
 # dotted record paths for the geoip-all-in-one schema (GeoLite2-City shaped)
 _PATHS = {"iso_code": "country.iso_code", "longitude": "location.longitude",
