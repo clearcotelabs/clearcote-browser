@@ -22,7 +22,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEB_DEPS="ca-certificates fonts-liberation libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
 libasound2 libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libatspi2.0-0 libxshmfence1 libx11-6 \
-libxcb1 libxext6 libxi6"
+libxcb1 libxext6 libxi6 xz-utils"
+# xz-utils: the Node SDK extracts .tar.xz with the system tar, which needs xz (Python has lzma built in).
 
 run_host() {
   local rc=0 tmp
@@ -31,8 +32,10 @@ run_host() {
 
   echo "== Python: pip install clearcote==$VERSION =="
   python3 -m venv "$tmp/venv"
-  "$tmp/venv/bin/pip" install -q "clearcote==$VERSION"
-  "$tmp/venv/bin/python" "$HERE/smoke_launch.py" || rc=1
+  # Windows venvs put the executables under Scripts/, POSIX under bin/
+  local vbin="$tmp/venv/bin"; [ -d "$vbin" ] || vbin="$tmp/venv/Scripts"
+  "$vbin/pip" install -q "clearcote==$VERSION"
+  "$vbin/python" "$HERE/smoke_launch.py" || rc=1
 
   echo "== Node: npm i clearcote@$VERSION =="
   ( cd "$tmp" && npm init -y >/dev/null 2>&1 && npm i -s "clearcote@$VERSION" >/dev/null 2>&1 )
@@ -44,15 +47,16 @@ run_host() {
 
 run_docker() {
   # Clean-room: bare debian, install system libs + both runtimes + the published SDK, then launch.
+  # node:20 image: Debian bookworm packages Node 18, and playwright-core now requires Node 20.
   docker run --rm \
     -e "CLEARCOTE_LICENSE_KEY=${CLEARCOTE_LICENSE_KEY:-}" \
     -e "VERSION=$VERSION" -e "DEB_DEPS=$DEB_DEPS" \
     -v "$HERE:/smoke:ro" \
-    debian:bookworm-slim bash -c '
+    node:20-bookworm-slim bash -c '
       set -e
       export DEBIAN_FRONTEND=noninteractive
       apt-get update -qq >/dev/null
-      apt-get install -y -qq python3 python3-venv python3-pip nodejs npm $DEB_DEPS >/dev/null 2>&1
+      apt-get install -y -qq python3 python3-venv python3-pip $DEB_DEPS >/dev/null 2>&1
       echo "container: $(python3 --version) | node $(node -v)"
       python3 -m venv /venv && /venv/bin/pip install -q clearcote==$VERSION
       /venv/bin/python /smoke/smoke_launch.py

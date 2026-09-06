@@ -68,3 +68,9 @@ your proof that these are the libs to document for users.
 - Python passes but Node fails (or vice-versa) → a one-SDK regression (e.g. the pro path landed in
   only one language, or a version was published from a stale tree).
 - Import fails (`exit 2`) → the package didn't install / the entry points are broken.
+
+> **Runtime requirements the bare image must meet (learned on the 0.28.0 release):** Node **20 or
+> newer** — `playwright-core ^1.49` resolves to a version that refuses Node 18, which is what Debian
+> bookworm packages, so the container uses the `node:20-bookworm-slim` image; and **`xz-utils`** —
+> the Node SDK extracts the `.tar.xz` engine archive with the system `tar`, which needs `xz`
+> (the Python SDK has `lzma` built in and does not). Both are in the script's dependency list now.
