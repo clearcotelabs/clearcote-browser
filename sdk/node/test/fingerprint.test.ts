@@ -91,6 +91,17 @@ describe("fingerprintArgs", () => {
     expect(fingerprintArgs({ disableGpuFingerprint: false })).not.toContain("--disable-gpu-fingerprint");
   });
 
+  it("persona schema is opt-in and the real-GPU declaration is a bare flag", () => {
+    // Default: no schema switch at all, so the engine stays on the frozen schema-1 derivation.
+    const none = fingerprintArgs({ fingerprint: "seed" });
+    expect(none.some((a) => a.startsWith("--fingerprint-schema"))).toBe(false);
+    expect(none).not.toContain("--fingerprint-gpu-backend-real");
+    const v2 = fingerprintArgs({ fingerprint: "seed", personaSchema: 2, realGpuHost: true });
+    expect(v2).toContain("--fingerprint-schema=2");
+    expect(v2).toContain("--fingerprint-gpu-backend-real");
+    expect(fingerprintArgs({ personaSchema: 2, realGpuHost: false })).not.toContain("--fingerprint-gpu-backend-real");
+  });
+
   it("disables farble noise only when fingerprintNoise === false", () => {
     expect(fingerprintArgs({ fingerprintNoise: false })).toContain("--disable-fingerprint-noise");
     expect(fingerprintArgs({ fingerprintNoise: true })).not.toContain("--disable-fingerprint-noise");

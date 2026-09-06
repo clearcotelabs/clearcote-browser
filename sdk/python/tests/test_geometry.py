@@ -560,6 +560,34 @@ def _measure_live(tmp_dir, tabs=1, **kwargs):
         ctx.close()
 
 
+# Headed launches need a display (Xvfb on Linux, the desktop on Windows). Opt in explicitly so the
+# default `pytest` run never pops windows on a developer machine.
+headed_live_only = pytest.mark.skipif(
+    not LIVE_EXE or not os.environ.get("CLEARCOTE_LIVE_HEADED"),
+    reason="set CLEARCOTE_LIVE_ENGINE and CLEARCOTE_LIVE_HEADED=1 to run headed geometry tests")
+
+# The seed that reproduced the window-box contradiction on r17/r18, headed with no_viewport, on
+# Windows AND Linux (2026-09-02): persona screen 1536x864, avail 1536x824, while the OS window kept
+# the host's default size -- inner 1689x1187 inside outer 1705x824. Pinned here so the exact persona
+# that failed is the one the release gate re-measures.
+WINDOW_BOX_REGRESSION_SEED = "verify-2026-09-02-A"
+
+
+@headed_live_only
+def test_live_headed_persona_window_fits_its_own_screen(tmp_path):
+    """Headed + no_viewport is the path the SDK deliberately leaves to the engine (no CDP resize),
+    so the engine's own window sizing must keep inner <= outer <= avail <= screen."""
+    m = _measure_live(tmp_path / "live-headed-persona", headless=False, no_viewport=True,
+                      fingerprint=WINDOW_BOX_REGRESSION_SEED)
+    assert m["screen"] == [1536, 864] and m["avail"] == [1536, 824], (
+        f"seed no longer derives the pinned persona screen; re-pin the regression seed: {m}")
+    assert geometry_is_coherent(m["screen"], m["avail"], m["inner"], m["outer"]), (
+        f"headed persona window escapes its own screen: {m}")
+    # The engine sizes the window at creation, before any page runs -- a page must never observe
+    # a resize.
+    assert m["resizes"] == 0, f"window was resized after page start: {m}"
+
+
 @live_only
 def test_live_regime_1_persona_owns_the_screen_and_the_window_is_maximized(tmp_path):
     """Seeded launch: the engine's persona supplies screen + avail (with a taskbar) and the SDK

@@ -117,6 +117,18 @@ export interface FingerprintOptions {
    */
   disableGpuFingerprint?: boolean;
   /**
+   * Persona schema version (engine >= 151 r19). 1 = the frozen original derivation (default);
+   * 2 = tier-coupled screen/GPU class + RAM-sized heap limit. A seed's schema-1 identity never
+   * changes; schema 2 is a separate identity space you opt into.
+   */
+  personaSchema?: 1 | 2;
+  /**
+   * Declare that this host renders with a real GPU (or a canvas bridge backs the pixels), so a
+   * schema-2 persona may claim a discrete GPU class. Off by default: on a software rasteriser the
+   * persona stays on the iGPU claim whatever its tier. Inert on schema 1.
+   */
+  realGpuHost?: boolean;
+  /**
    * Set `false` to turn OFF the per-eTLD+1 farbling NOISE (canvas/WebGL/audio/client-rects), so
    * those surfaces return their natural, unperturbed values. Use when a site's anti-bot ML scores
    * the noise pattern as "tampered". Identity spoofs (UA/screen/GPU/persona)
@@ -197,6 +209,8 @@ export const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "devicePixelRatio",
   "maxTouchPoints",
   "lightStealth",
+  "personaSchema",
+  "realGpuHost",
   "location",
   "timezone",
   "acceptLanguage",
@@ -478,6 +492,10 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // The two INDEPENDENT halves of the bundles above (engine >= Chromium 150 r12).
   if (o.gpuStringSpoof === false) args.push("--disable-gpu-string-spoof");
   if (o.canvasNoise === false) args.push("--disable-canvas-noise");
+  // Persona schema (see FingerprintOptions.personaSchema); the real-GPU declaration gates a
+  // schema-2 persona's discrete-GPU draw and is inert on schema 1.
+  set("fingerprint-schema", o.personaSchema);
+  if (o.realGpuHost) args.push("--fingerprint-gpu-backend-real");
   // fingerprintProfile imports a real captured fingerprint (path/object/JSON) — see
   // tools/fingerprint-collect. Its fields override the seed-derived persona; absent fields fall
   // back to the seed, so partial profiles stay coherent.

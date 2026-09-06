@@ -46,12 +46,21 @@ FINGERPRINT_KEYS = (
     "storage_quota",
     "canvas_bridge",
     "tls_profile",
+    # Persona schema version (engine >= 151 r19): 1 = the frozen original derivation (default),
+    # 2 = tier-coupled screen/GPU class + RAM-sized heap limit. A seed's schema-1 identity never
+    # changes; schema 2 is a separate identity space you opt into.
+    "persona_schema",
+    # Declare that this host renders with a real GPU (or a canvas bridge backs the pixels), so a
+    # schema-2 persona may claim a discrete GPU class. Off by default: on a software rasteriser the
+    # persona stays on the iGPU claim whatever its tier.
+    "real_gpu_host",
 )
 
 # kwarg -> switch name (without leading "--"). disable_gpu_fingerprint is a boolean flag,
 # handled separately below.
 _FLAGS = {
     "fingerprint": "fingerprint",
+    "persona_schema": "fingerprint-schema",
     "platform": "fingerprint-platform",
     "platform_version": "fingerprint-platform-version",
     "brand": "fingerprint-brand",
@@ -353,6 +362,11 @@ def fingerprint_args(opts):
     # Requires engine >= 150 r12; inert on older builds.
     if opts.get("canvas_noise") is False:
         args.append("--disable-canvas-noise")
+    # real_gpu_host=True: the engine may honour a schema-2 persona's discrete-GPU draw. Without it
+    # (or a canvas bridge) the persona claims the index-0 iGPU regardless of tier, because a GPU
+    # string the host's pixels cannot back is the stronger tell. Inert on schema 1.
+    if opts.get("real_gpu_host"):
+        args.append("--fingerprint-gpu-backend-real")
     # fingerprint_profile imports a real captured fingerprint (path/dict/JSON) — see
     # tools/fingerprint-collect. Its fields override the seed-derived persona; absent fields
     # fall back to the seed, so partial profiles stay coherent.

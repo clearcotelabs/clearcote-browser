@@ -122,9 +122,12 @@ def test_expired_cache_triggers_checkout(monkeypatch):
     _reset()
 
 
-def test_free_mode_no_key_no_calls(monkeypatch):
+def test_free_mode_no_key_no_calls(monkeypatch, tmp_path):
     _reset()
     monkeypatch.delenv("CLEARCOTE_LICENSE_KEY", raising=False)
+    # "no key" must also mean no ~/.clearcote/license.key: a machine that has ever used a PRO key
+    # persists one there, which made this test fail on exactly the machines that release the SDK.
+    monkeypatch.setattr(L.Path, "home", classmethod(lambda cls: tmp_path))
     calls, ok = _counter(); monkeypatch.setattr(L, "_post", ok)
     assert L.acquire_lease() is None
     assert len(calls) == 0

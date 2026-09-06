@@ -2,6 +2,9 @@
 // proxy resolution. Pure (input -> switches / cleaned proxy) so they're unit-testable and mirror
 // the Python SDK exactly.
 
+import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+
 /** A Playwright proxy descriptor. */
 export interface PwProxy {
   server?: string;
@@ -165,18 +168,93 @@ export function extensionArgs(paths?: string[]): string[] {
  * The credentials are forwarded to the engine as --socks5-credentials: clearcote implements RFC
  * 1929 username/password authentication, which stock Chromium does not, so no local relay is
  * needed. Everything else (http/https, or SOCKS without credentials) is left to Playwright. */
-export function resolveProxy(proxy: PwProxy | undefined): { args: string[]; proxy: PwProxy | undefined } {
+const switchCache = new Map<string, boolean>();
+
+/**
+ * Whether the engine binary that will run implements the command-line switch `name`.
+ *
+ * Chromium switch names are NUL-terminated C-string literals in the binary, so a NUL-delimited
+ * search is a capability probe that cannot collide with header names (HPACK's `proxy-authenticate`
+ * is not `\0proxy-auth\0`). On Windows the switches live in chrome.dll next to the launcher;
+ * elsewhere in the executable. Cached per (path, size, mtime). Any failure answers false, which
+ * selects the legacy (Playwright) path — slower, never silently broken.
+ */
+export function engineSupportsSwitch(exe: string | undefined, name: string): boolean {
+  try {
+    if (!exe) return false;
+    let file = exe;
+    if (process.platform === "win32") {
+      const dll = join(dirname(exe), "chrome.dll");
+      if (existsSync(dll)) file = dll;
+    }
+    const st = statSync(file);
+    const key = `${file}|${name}|${st.size}|${Math.floor(st.mtimeMs)}`;
+    const cached = switchCache.get(key);
+    if (cached !== undefined) return cached;
+    const needle = Buffer.from(`\0${name}\0`, "latin1");
+    const fd = openSync(file, "r");
+    let found = false;
+    try {
+      const chunk = Buffer.alloc(8 * 1024 * 1024);
+      let tail = Buffer.alloc(0);
+      for (;;) {
+        const n = readSync(fd, chunk, 0, chunk.length, null);
+        if (n <= 0) break;
+        const view = Buffer.concat([tail, chunk.subarray(0, n)]);
+        if (view.indexOf(needle) !== -1) { found = true; break; }
+        tail = Buffer.from(view.subarray(view.length - needle.length));
+      }
+    } finally {
+      closeSync(fd);
+    }
+    switchCache.set(key, found);
+    return found;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Warn (never throw) for each option the resolved engine cannot honour: Chromium ignores an
+ * unknown switch, so an older engine launches fine — but silently, which is worse than a warning.
+ */
+export function warnUnsupportedEngineOptions(exe: string | undefined, fingerprint: Record<string, unknown>, proxy: PwProxy | undefined, quiet?: boolean): string[] {
+  const out: string[] = [];
+  try {
+    if (String(fingerprint.personaSchema ?? "") === "2" && !engineSupportsSwitch(exe, "fingerprint-schema"))
+      out.push("clearcote: personaSchema: 2 (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
+    if (fingerprint.realGpuHost && !engineSupportsSwitch(exe, "fingerprint-gpu-backend-real"))
+      out.push("clearcote: realGpuHost (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
+    const server = (proxy?.server ?? "").trim();
+    if (server && /^socks/i.test(server) && (proxy?.username || proxy?.password) && !engineSupportsSwitch(exe, "socks5-credentials"))
+      out.push("clearcote: this engine build cannot authenticate to a SOCKS5 proxy (needs r17+); the proxy will reject the connection.");
+    if (!quiet) for (const m of out) console.warn(m);
+  } catch { /* never block a launch over a warning */ }
+  return out;
+}
+
+export function resolveProxy(proxy: PwProxy | undefined, engineSupportsProxyAuth = false): { args: string[]; proxy: PwProxy | undefined } {
   if (!proxy || typeof proxy !== "object") return { args: [], proxy };
   const server = (proxy.server ?? "").trim();
   const hasCreds = !!(proxy.username || proxy.password);
-  if (server && /^socks/i.test(server) && hasCreds) {
-    // Strip any userinfo already in the URL; the engine takes it via its own switch.
+  const isSocks = /^socks/i.test(server);
+  // http(s) credentials go to the engine only when it implements --proxy-auth (r19+). Older
+  // engines keep Playwright's handling: it works, at the cost of the interception side effects.
+  // Routing blindly would strip the credentials from Playwright and hand them to a switch the
+  // engine ignores: every request 407s.
+  const isHttp = /^https?:\/\//i.test(server) && engineSupportsProxyAuth;
+  if (server && hasCreds && (isSocks || isHttp)) {
+    // Strip any userinfo already in the URL; the engine takes it via its own switch. Userinfo left
+    // in --proxy-server is rejected by Chromium's proxy parser and the entry dropped (DIRECT).
     const bare = server.replace(/^([a-zA-Z0-9+.-]+:\/\/)[^/@]*@/, "$1");
     const creds = `${proxy.username ?? ""}:${proxy.password ?? ""}`;
-    return {
-      args: [`--proxy-server=${bare}`, `--socks5-credentials=${creds}`],
-      proxy: undefined,
-    };
+    // An http(s) proxy WITH credentials also goes to the engine (--proxy-auth, clearcote r19+):
+    // credentials given to Playwright make its driver enable Fetch interception and
+    // Network.setCacheDisabled for the whole context -- a transport tell unrelated to the persona.
+    const args = [`--proxy-server=${bare}`, `${isSocks ? "--socks5-credentials=" : "--proxy-auth="}${creds}`];
+    const bypass = (proxy.bypass ?? "").trim();
+    if (bypass) args.push(`--proxy-bypass-list=${bypass}`);
+    return { args, proxy: undefined };
   }
   return { args: [], proxy };
 }

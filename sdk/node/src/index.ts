@@ -40,6 +40,8 @@ import {
   extensionArgs,
   portableArgs,
   resolveProxy,
+  engineSupportsSwitch,
+  warnUnsupportedEngineOptions,
   mergeFeatureFlags,
   privacySandboxArgs,
   quicArgs,
@@ -618,16 +620,20 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
+  // The binary is resolved before the proxy route is chosen: http(s) credentials go to the
+  // engine's --proxy-auth only when THIS engine implements it (r19+); older engines keep
+  // Playwright's handling, which authenticates (routing blindly would leave every request at 407).
+  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
+  ensureRunnableHere(exe);
   // SOCKS5-with-credentials must go through --proxy-server (Playwright rejects it); drop it from PW.
-  const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined);
+  const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
+  warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
   // proxy unchanged unless it was rerouted to --proxy-server, in which case drop it from Playwright
   if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless, _userArgs: args ?? [] },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
-  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
-  ensureRunnableHere(exe);
   // profile:"auto" -> resolve a REAL captured fingerprint for this host and apply it as
   // fingerprintProfile. Deliberately does NOT set a seed: with no --fingerprint the farbling
   // machinery stays off, which is the whole reason this path survives strict scoring.
@@ -692,7 +698,10 @@ export async function launchPersistentContext(
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
   if (geoip) await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy);
-  const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined);
+  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
+  ensureRunnableHere(exe);
+  const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
+  warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
   if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless, _userArgs: args ?? [] },
@@ -725,8 +734,6 @@ export async function launchPersistentContext(
   }
   delete (opts as Record<string, unknown>).ignoreDefaultArgs;  // passed explicitly below
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
-  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
-  ensureRunnableHere(exe);
   // License (opt-in): check out a concurrency slot + inject CLEARCOTE_RUN_TOKEN. Inert in free mode.
   const lease = await acquireLease({
     licenseKey, licenseApiBase, quiet, sdkVersion: SDK_VERSION,
@@ -897,13 +904,14 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined;
   if (geoip) await applyGeoip(fingerprint, proxyOpt);
-  const { args: proxyArgs } = resolveProxy(proxyOpt);
+  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });  // capability-gated proxy route
+  ensureRunnableHere(exe);
+  const { args: proxyArgs } = resolveProxy(proxyOpt, engineSupportsSwitch(exe, "proxy-auth"));
+  warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt, quiet);
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless, _userArgs: userArgs ?? [] },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
-  const exe = await executablePath({ executablePath: exeOption, version, autoUpdate, cacheDir, quiet, pro: proSelector(licenseKey, licenseApiBase) });
-  ensureRunnableHere(exe);
   const engineArgs = assembleArgs(
     fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)],
     proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs ?? [], proxyOpt, socks5Udp);

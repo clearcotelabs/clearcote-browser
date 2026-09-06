@@ -170,6 +170,10 @@ async def test_async_launch_unpacks_prepare_sixtuple_and_threads_seed(monkeypatc
         async def new_page(self, **kw):
             return kw
 
+        # the launch path registers a "disconnected" handler to release the lease slot
+        def on(self, *_a, **_k):
+            return None
+
         async def new_context(self, **kw):
             return kw
 

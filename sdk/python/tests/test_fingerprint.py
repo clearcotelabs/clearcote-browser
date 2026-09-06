@@ -214,3 +214,15 @@ def test_window_size_only_for_android():
     # desktop personas never get an auto window-size.
     for plat in ("windows", "linux", "macos"):
         assert not any(a.startswith("--window-size") for a in fingerprint_args({"platform": plat}))
+
+
+def test_persona_schema_is_opt_in_and_real_gpu_host_is_a_flag():
+    # Default: no schema switch, so the engine stays on the frozen schema-1 derivation and a seed's
+    # identity never moves under an SDK upgrade.
+    none = fingerprint_args({"fingerprint": "seed"})
+    assert not any(a.startswith("--fingerprint-schema") for a in none)
+    assert "--fingerprint-gpu-backend-real" not in none
+    v2 = fingerprint_args({"fingerprint": "seed", "persona_schema": 2, "real_gpu_host": True})
+    assert "--fingerprint-schema=2" in v2
+    assert "--fingerprint-gpu-backend-real" in v2
+    assert "--fingerprint-gpu-backend-real" not in fingerprint_args({"persona_schema": 2, "real_gpu_host": False})

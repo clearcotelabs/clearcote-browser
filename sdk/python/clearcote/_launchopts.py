@@ -8,6 +8,7 @@ import warnings
 
 _SOCKS5 = re.compile(r"^socks5", re.I)
 _SOCKS = re.compile(r"^socks", re.IGNORECASE)
+_HTTP_PROXY = re.compile(r"^https?://", re.IGNORECASE)
 
 # Privacy Sandbox + intrusive web APIs a de-Googled stealth build should not expose (a build that
 # claims to be de-Googled while still answering document.browsingTopics()/navigator.runAdAuction
@@ -171,7 +172,87 @@ def portable_args(portable_profile=False, encryption_key=None):
     return []
 
 
-def resolve_proxy(proxy):
+_SWITCH_CACHE = {}
+
+
+def engine_supports_switch(exe, name):
+    """Whether the engine binary that will run implements the command-line switch ``name``.
+
+    Chromium switch names are NUL-terminated C-string literals in the binary, so a NUL-delimited
+    search for ``name`` is a capability probe that cannot collide with header names (HPACK's
+    ``proxy-authenticate`` is not ``\\0proxy-auth\\0``). On Windows the switches live in
+    ``chrome.dll`` next to the launcher; elsewhere in the executable itself. Cached per
+    (path, size, mtime). Any failure answers False, which selects the legacy (Playwright) path —
+    slower, never silently broken.
+    """
+    try:
+        import os
+        exe = str(exe or "")
+        if not exe:
+            return False
+        path = exe
+        if sys.platform.startswith("win"):
+            dll = os.path.join(os.path.dirname(exe), "chrome.dll")
+            if os.path.exists(dll):
+                path = dll
+        st = os.stat(path)
+        key = (path, name, st.st_size, int(st.st_mtime))
+        if key in _SWITCH_CACHE:
+            return _SWITCH_CACHE[key]
+        needle = b"\x00" + name.encode("ascii") + b"\x00"
+        found = False
+        with open(path, "rb") as fh:
+            tail = b""
+            while True:
+                chunk = fh.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                if needle in tail + chunk:
+                    found = True
+                    break
+                tail = chunk[-len(needle):]
+        _SWITCH_CACHE[key] = found
+        return found
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# Options that only exist from a given engine revision. An unknown switch is ignored by Chromium,
+# so an older engine launches fine -- but silently, which is worse than a warning.
+_ENGINE_OPTION_SWITCHES = (
+    ("persona_schema", "fingerprint-schema", "persona_schema=2 (engine r19+)"),
+    ("real_gpu_host", "fingerprint-gpu-backend-real", "real_gpu_host (engine r19+)"),
+)
+
+
+def warn_unsupported_engine_options(exe, fp, proxy, quiet=False):
+    """Warn once per launch for each option the resolved engine cannot honour. Never raises.
+
+    Silenced by ``quiet=True`` or ``CLEARCOTE_NO_WARN``, like the coherence warnings."""
+    import os
+    if quiet or os.environ.get("CLEARCOTE_NO_WARN"):
+        return
+    try:
+        for key, switch, label in _ENGINE_OPTION_SWITCHES:
+            v = (fp or {}).get(key)
+            # persona_schema matters only at 2; real_gpu_host only when truthy (note True == 1 in
+            # Python, so the two are tested separately rather than through one membership check)
+            wanted = (str(v) == "2") if key == "persona_schema" else bool(v)
+            if not wanted:
+                continue
+            if not engine_supports_switch(exe, switch):
+                warnings.warn(f"clearcote: {label} is not supported by this engine build and is ignored; "
+                              "upgrade the engine to use it.", stacklevel=3)
+        server = str((proxy or {}).get("server") or "") if isinstance(proxy, dict) else ""
+        has_creds = isinstance(proxy, dict) and bool(proxy.get("username") or proxy.get("password"))
+        if server and has_creds and _SOCKS.match(server) and not engine_supports_switch(exe, "socks5-credentials"):
+            warnings.warn("clearcote: this engine build cannot authenticate to a SOCKS5 proxy "
+                          "(needs r17+); the proxy will reject the connection.", stacklevel=3)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def resolve_proxy(proxy, engine_supports_proxy_auth=False):
     """Return ``(extra_args, proxy_for_playwright)`` for a Playwright proxy descriptor.
 
     Playwright rejects credentials in its proxy descriptor for SOCKS schemes, so a
@@ -181,16 +262,33 @@ def resolve_proxy(proxy):
 
     The credentials are forwarded to the engine as ``--socks5-credentials``: clearcote implements
     RFC 1929 username/password authentication, which stock Chromium does not, so no local relay is
-    needed. Everything else (http/https proxies, or SOCKS without credentials) is left to
-    Playwright unchanged."""
+    needed.
+
+    An ``http://`` / ``https://`` proxy WITH credentials takes the same route, via ``--proxy-auth``:
+    the engine answers the proxy's 407 itself (clearcote r19+). Handing the credentials to
+    Playwright instead makes its driver enable Fetch interception and ``Network.setCacheDisabled``
+    for the whole context -- every request then bypasses the cache and carries the interception's
+    side effects, a transport tell that has nothing to do with the persona. Proxies without
+    credentials are left to Playwright unchanged."""
     if not isinstance(proxy, dict):
         return [], proxy
     server = (proxy.get("server") or "").strip()
     has_creds = bool(proxy.get("username") or proxy.get("password"))
-    if server and _SOCKS.match(server) and has_creds:
-        # Strip any userinfo already in the URL; the engine takes it via its own switch.
+    # http(s) credentials go to the engine only when it implements --proxy-auth (r19+). Older
+    # engines keep Playwright's handling: it works, at the cost of the interception side effects.
+    http_to_engine = bool(_HTTP_PROXY.match(server)) and engine_supports_proxy_auth
+    if server and has_creds and (_SOCKS.match(server) or http_to_engine):
+        # Strip any userinfo already in the URL; the engine takes it via its own switch. Userinfo
+        # left in --proxy-server is rejected by Chromium's proxy parser and the entry is dropped,
+        # i.e. the browser would go DIRECT -- never emit it.
         bare = re.sub(r"^([a-zA-Z0-9+.-]+://)[^/@]*@", r"\1", server)
         creds = "%s:%s" % (proxy.get("username") or "", proxy.get("password") or "")
-        # drop the proxy from Playwright (it would reject a credentialed SOCKS descriptor)
-        return ["--proxy-server=" + bare, "--socks5-credentials=" + creds], None
+        switch = "--socks5-credentials=" if _SOCKS.match(server) else "--proxy-auth="
+        args = ["--proxy-server=" + bare, switch + creds]
+        bypass = (proxy.get("bypass") or "").strip()
+        if bypass:
+            args.append("--proxy-bypass-list=" + bypass)
+        # drop the proxy from Playwright: it would reject a credentialed SOCKS descriptor, and for
+        # http(s) it would turn on interception + cache-disable for the credentials we now own
+        return args, None
     return [], proxy

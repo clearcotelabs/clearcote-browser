@@ -31,7 +31,9 @@ from ._shaderdialect import apply_shader_dialect
 from ._geometry import apply_headless_geometry, fit_window_to_persona, move_window_to_origin
 from ._humanize import install_humanize, install_humanize_on_context
 from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
+    engine_supports_switch,
     extension_args,
+    warn_unsupported_engine_options,
     portable_args,
     merge_feature_flags,
     privacy_sandbox_args,
@@ -111,7 +113,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.27.0"
+__version__ = "0.28.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -362,7 +364,13 @@ def _prepare(kwargs):
     ensure_persona_fonts(fp, quiet=quiet)
     # SOCKS5-with-credentials must go through --proxy-server (Playwright rejects creds in its SOCKS
     # proxy descriptor); resolve_proxy returns proxy=None for that case so we drop it from Playwright.
-    proxy_args, proxy = resolve_proxy(kwargs.get("proxy"))
+    # http(s)-with-credentials goes to the engine's --proxy-auth ONLY when the binary that will run
+    # actually implements it (r19+); an older engine keeps Playwright's credential handling, which
+    # is slower and disables the cache but authenticates. Routing blindly would strip the
+    # credentials from Playwright and hand them to a switch the engine ignores: every request 407s.
+    proxy_args, proxy = resolve_proxy(kwargs.get("proxy"),
+                                      engine_supports_proxy_auth=engine_supports_switch(exe, "proxy-auth"))
+    warn_unsupported_engine_options(exe, fp, kwargs.get("proxy"), quiet=quiet)
     if proxy is None:
         kwargs.pop("proxy", None)
     else:

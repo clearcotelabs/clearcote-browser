@@ -2,6 +2,8 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   extensionArgs,
   resolveProxy,
+  engineSupportsSwitch,
+  warnUnsupportedEngineOptions,
   mergeFeatureFlags,
   webBluetoothArgs,
   privacySandboxArgs,
@@ -102,14 +104,75 @@ describe("resolveProxy", () => {
     ]);
   });
 
+  it("routes a credentialed http proxy to --proxy-server + --proxy-auth (engine answers the 407)", () => {
+    const r = resolveProxy({ server: "http://old:secret@h:3128", username: "u", password: "p" }, true);
+    expect(r.args).toEqual(["--proxy-server=http://h:3128", "--proxy-auth=u:p"]);
+    expect(r.proxy).toBeUndefined();
+  });
+
+  it("keeps the bypass list when it owns an https proxy", () => {
+    const r = resolveProxy({ server: "https://h:443", username: "u", password: "p", bypass: "*.internal" }, true);
+    expect(r.args).toEqual(["--proxy-server=https://h:443", "--proxy-auth=u:p", "--proxy-bypass-list=*.internal"]);
+  });
+
+  it("leaves credentialed http proxies to Playwright on engines without --proxy-auth (r18 and earlier, free)", () => {
+    // Routing them anyway would strip the credentials from Playwright and every request would 407.
+    const proxy = { server: "http://h:3128", username: "u", password: "p" };
+    expect(resolveProxy(proxy)).toEqual({ args: [], proxy });
+    expect(resolveProxy(proxy, false)).toEqual({ args: [], proxy });
+  });
+
+  it("socks5 routing does not depend on the --proxy-auth capability", () => {
+    const proxy = { server: "socks5://h:1080", username: "u", password: "p" };
+    expect(resolveProxy(proxy).args).toEqual(resolveProxy(proxy, true).args);
+    expect(resolveProxy(proxy).args.some((a) => a.startsWith("--socks5-credentials="))).toBe(true);
+  });
+
+  it("warnUnsupportedEngineOptions warns only for switches the engine lacks", async () => {
+    const fs = await import("node:fs"); const os = await import("node:os"); const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-warn-"));
+    const oldExe = path.join(dir, "old"); fs.writeFileSync(oldExe, Buffer.from("\0socks5-credentials\0", "latin1"));
+    const newExe = path.join(dir, "new"); fs.writeFileSync(newExe, Buffer.from("\0socks5-credentials\0\0fingerprint-schema\0\0fingerprint-gpu-backend-real\0\0proxy-auth\0", "latin1"));
+    const fp = { personaSchema: 2, realGpuHost: true };
+    const socks = { server: "socks5://h:1080", username: "u", password: "p" };
+    const oldMsgs = warnUnsupportedEngineOptions(oldExe, fp, socks, true);
+    expect(oldMsgs.some((m) => m.includes("personaSchema: 2"))).toBe(true);
+    expect(oldMsgs.some((m) => m.includes("realGpuHost"))).toBe(true);
+    expect(oldMsgs.some((m) => m.includes("SOCKS5"))).toBe(false);
+    expect(warnUnsupportedEngineOptions(newExe, fp, socks, true)).toEqual([]);
+    expect(warnUnsupportedEngineOptions(oldExe, { personaSchema: 1 }, undefined, true)).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("engineSupportsSwitch probes the NUL-delimited switch literal, not header names", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-switch-"));
+    const a = path.join(dir, "a.bin"); fs.writeFileSync(a, Buffer.from("xx\0proxy-authenticate\0yy", "latin1"));
+    const b = path.join(dir, "b.bin"); fs.writeFileSync(b, Buffer.from("xx\0proxy-auth\0yy", "latin1"));
+    expect(engineSupportsSwitch(a, "proxy-auth")).toBe(false);
+    expect(engineSupportsSwitch(b, "proxy-auth")).toBe(true);
+    expect(engineSupportsSwitch(path.join(dir, "missing"), "proxy-auth")).toBe(false);
+    expect(engineSupportsSwitch(undefined, "proxy-auth")).toBe(false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("leaves an http proxy without creds to Playwright", () => {
+    const proxy = { server: "http://h:3128" };
+    expect(resolveProxy(proxy)).toEqual({ args: [], proxy });
+  });
+
   it("leaves a SOCKS5 proxy without creds to Playwright", () => {
     const p = { server: "socks5://h:1080" };
     expect(resolveProxy(p)).toEqual({ args: [], proxy: p });
   });
 
-  it("leaves an authed HTTP proxy to Playwright", () => {
+  it("no longer leaves an authed HTTP proxy to Playwright when the engine implements --proxy-auth", () => {
     const p = { server: "http://h:8080", username: "u", password: "p" };
-    expect(resolveProxy(p)).toEqual({ args: [], proxy: p });
+    const r = resolveProxy(p, true);
+    expect(r.proxy).toBeUndefined();
+    expect(r.args).toContain("--proxy-auth=u:p");
   });
 });
 
