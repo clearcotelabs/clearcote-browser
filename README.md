@@ -347,12 +347,13 @@ Which Chromium majors are shipped or in progress, and when each tier gets them:
 
 | Chromium | Status | Free | Pro |
 |---|---|---|---|
-| **151** (`151.0.7922.108`) | ✅ Available | ~2 months after release | ✅ **Available now** |
+| **152** (`152.0.7977.82`) | ✅ Available | ~2 months after release | ✅ **Available now** |
+| **151** (`151.0.7922.108`) | ✅ Available | ~2 months after release | ✅ Available |
 | **150** (`150.0.7871.114`) | ✅ Available | ~2 months after release | ✅ Available |
 | **149** (`149.0.7827.114`) | ✅ Available | Available now | Available now |
 
 *A new major reaches Pro the day it's built; the free build gets that same fully open, reproducible
-major roughly two months later. Pick one with the SDK — `launch(version="151", license_key=...)` for
+major roughly two months later. Pick one with the SDK — `launch(version="152", license_key=...)` for
 Pro, `version="149"` for free — or omit it for the latest of your tier. Earlier Pro majors stay
 selectable. Requires SDK ≥ 0.16.0.*
 
