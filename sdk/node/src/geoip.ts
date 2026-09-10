@@ -20,7 +20,7 @@ import maxmind, { type Reader } from "maxmind";
 
 const MMDB_URL = "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb.zip";
 const MMDB_MAX_AGE_DAYS = 30;
-const IPECHO_URLS = ["http://api.ipify.org", "http://ip-api.com/line/?fields=query"];
+const IPECHO_URLS = ["http://icanhazip.com", "http://api.ipify.org", "http://ip-api.com/line/?fields=query"];
 const IPAPI_URL = "http://ip-api.com/json/?fields=status,message,countryCode,timezone,lat,lon,query";
 
 export interface Geo {
