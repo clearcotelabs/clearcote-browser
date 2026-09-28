@@ -2,8 +2,8 @@ name: Publish Docker image
 
 # Rebuild + push teamflatearth/clearcote whenever a new SDK version lands on PyPI. A new SDK
 # release is exactly when `pip install clearcote` resolves to a new pinned browser binary, so
-# the image must be rebuilt then. Runs AFTER "Publish PyPI SDK" succeeds (so the version is
-# actually installable), or manually via workflow_dispatch.
+# the image must be rebuilt then. Runs AFTER "Publish PyPI SDK" succeeds (the upload is done;
+# the first step still waits for pip's index to catch up), or manually via workflow_dispatch.
 on:
   workflow_run:
     workflows: ["Publish PyPI SDK"]
@@ -13,15 +13,27 @@ on:
       version:
         description: "clearcote SDK version to bake in (blank = current pyproject version)"
         required: false
+      dry_run:
+        description: "Dry run: wait for PyPI and build the image, but do not log in to Docker Hub or push"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+
+# One publish at a time, in order: the PyPI wait can hold a run for up to half an hour, and two
+# SDK releases inside that window must not finish out of order and leave `latest` on the older
+# one. Dry runs queue in their own group so they never displace a pending real publish.
+concurrency:
+  group: publish-docker-${{ inputs.dry_run == true && 'dry-run' || 'push' }}
+  cancel-in-progress: false
 
 jobs:
   publish:
     # only after a SUCCESSFUL PyPI publish (or a manual run)
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
@@ -30,18 +42,50 @@ jobs:
 
       - name: Resolve SDK version, wait for PyPI, read its pinned browser tag
         id: v
+        env:
+          SDK_INPUT: ${{ inputs.version }}
+          PYPI: https://pypi.org
+          WAIT_MINUTES: "30"
         run: |
-          SDK="${{ github.event.inputs.version }}"
+          SDK="$SDK_INPUT"
           [ -z "$SDK" ] && SDK=$(grep -m1 -oP '^version\s*=\s*"\K[^"]+' sdk/python/pyproject.toml)
-          # Wait until the exact version is actually pip-INSTALLABLE (up to 5 min) by retrying the
-          # REAL `pip install`. Gating on the /json API (as before) races: pypi.org/.../json goes
-          # live before pip's install index propagates, so the loop broke early and the install
-          # below then 404'd ("No matching distribution found for clearcote==<ver>").
-          for i in $(seq 1 30); do
-            pip install --quiet "clearcote==${SDK}" && break
-            echo "waiting for PyPI clearcote ${SDK} to become pip-installable ($i/30)..."; sleep 10
-            [ "$i" = 30 ] && { echo "::error::clearcote ${SDK} never became pip-installable on PyPI"; exit 1; }
+          # PyPI serves the /simple/ index that pip installs from with Cache-Control max-age=600
+          # through Fastly, cached separately from the JSON API. A fetch that lands just after the
+          # upload can keep the pre-upload page in the CDN for 10+ min while
+          # /pypi/clearcote/<ver>/json already lists the release: SDK 0.28.0, 0.30.0, 0.31.1 and
+          # 0.32.0 each saw the same stale version list for the old loop's whole 5 min (0.32.0
+          # installed on a rerun 10 min after the first fetch). So, under one $WAIT_MINUTES
+          # deadline with backoff:
+          #   1. wait for the JSON API to list the release (the upload happened; else the version
+          #      is wrong),
+          #   2. wait for pip on THIS runner to resolve it from the index (what the install below,
+          #      and the Docker build's own `pip install` a minute later, actually read),
+          #   3. install it ONCE, outside the loop, so a real install error fails with pip's own
+          #      message instead of being retried for half an hour and reported as lag.
+          deadline=$(( SECONDS + WAIT_MINUTES * 60 )); delay=10
+          wait_or_fail() {  # $1 = what we are waiting for, $2 = error once the deadline has passed
+            left=$(( deadline - SECONDS ))
+            if [ "$left" -le 0 ]; then echo "::error::$2"; exit 1; fi
+            delay=$(( delay > left ? left : delay ))  # so the last check lands on the deadline
+            echo "waiting ${delay}s: $1 ($(( (left + 59) / 60 )) min left)"
+            sleep "$delay"; delay=$(( delay * 3 / 2 > 60 ? 60 : delay * 3 / 2 ))
+          }
+          json="$PYPI/pypi/clearcote/$SDK/json"
+          until curl -fsS -o /dev/null "$json"; do
+            wait_or_fail "the PyPI JSON API does not list clearcote $SDK yet" \
+              "clearcote $SDK is not on PyPI: $json still fails after $WAIT_MINUTES min. Did \"Publish PyPI SDK\" upload it, and is the version right?"
           done
+          err="$RUNNER_TEMP/pip-download.err"
+          until pip download --quiet --disable-pip-version-check --no-cache-dir --no-deps \
+                  --index-url "$PYPI/simple/" --dest "$RUNNER_TEMP/clearcote-dl" "clearcote==$SDK" 2>"$err"; do
+            last=$(grep '^ERROR:' "$err" | tail -n1)
+            newest=$(grep -oP 'from versions: \K[^)]*' "$err" | awk -F', ' '{print $NF}')
+            echo "  pip: ${last:-$(tail -n1 "$err")}"
+            wait_or_fail "pip's index does not offer clearcote $SDK yet (newest it lists: ${newest:-?})" \
+              "clearcote $SDK is on PyPI ($json) but pip on this runner still cannot resolve it from $PYPI/simple/ after $WAIT_MINUTES min (newest it lists: ${newest:-?}; last pip error: ${last:-see above}). If that newest version is the previous release, this is PyPI CDN lag: re-run the failed job."
+          done
+          pip install --quiet --disable-pip-version-check --no-cache-dir --index-url "$PYPI/simple/" "clearcote==$SDK" ||
+            { echo "::error::pip resolves clearcote $SDK from the index, but installing it failed (see pip's output above). This is not PyPI lag."; exit 1; }
           # The browser tag MUST come from the SDK we just installed (so the image tag == the baked
           # binary), not the repo checkout (which may be ahead of the published SDK).
           BROWSER=$(python -c "from clearcote.release import platform_release; print(platform_release('linux')['tag'][1:])")
@@ -52,6 +96,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
+        if: ${{ !inputs.dry_run }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -61,7 +106,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: docker
-          push: true
+          # a dry run still builds (so the Dockerfile's own pip install runs) but pushes nothing
+          push: ${{ !inputs.dry_run }}
           platforms: linux/amd64
           build-args: |
             CLEARCOTE_SPEC===${{ steps.v.outputs.sdk }}
@@ -71,6 +117,13 @@ jobs:
             teamflatearth/clearcote:sdk-${{ steps.v.outputs.sdk }}
 
       - name: Summary
+        env:
+          DRY_RUN: ${{ inputs.dry_run == true }}
         run: |
-          echo "### Pushed \`teamflatearth/clearcote\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- \`latest\`, \`${{ steps.v.outputs.browser }}\`, \`sdk-${{ steps.v.outputs.sdk }}\` (browser binary v${{ steps.v.outputs.browser }})" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DRY_RUN" = true ]; then
+            echo "### Dry run: built \`teamflatearth/clearcote\`, pushed nothing" >> "$GITHUB_STEP_SUMMARY"
+            echo "- would have pushed \`latest\`, \`${{ steps.v.outputs.browser }}\`, \`sdk-${{ steps.v.outputs.sdk }}\` (browser binary v${{ steps.v.outputs.browser }})" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Pushed \`teamflatearth/clearcote\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- \`latest\`, \`${{ steps.v.outputs.browser }}\`, \`sdk-${{ steps.v.outputs.sdk }}\` (browser binary v${{ steps.v.outputs.browser }})" >> "$GITHUB_STEP_SUMMARY"
+          fi
