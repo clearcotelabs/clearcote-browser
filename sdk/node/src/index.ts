@@ -9,6 +9,11 @@
 // (auto-downloaded + SHA-256 checked on first use, then cached). Every Playwright launch option
 // (headless, proxy, args, timeout, ...) passes through; the fingerprint options below are added
 // as engine switches.
+//
+// Since 0.34.0 the same call can run the browser on Clearcote's servers instead: `launch({ cloud: true })`
+// (or CLEARCOTE_CLOUD=1) resolves to the same Playwright `Browser`, connected to a hosted session.
+// `Cloud` (./cloud.ts) is the rest of the hosted API: agent runs, profiles, recordings, events,
+// hand-off and webhooks.
 
 import { chromium } from "playwright-core";
 import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -63,6 +68,36 @@ import {
   applyHeadlessGeometry, fitServedWindow, fitWindowToWorkArea, installWindowFixup, servedGeometry,
 } from "./geometry.js";
 import { acquireLease, resolveLicenseKey, withRunToken, STALE_TOKEN_REFUSAL, type LicenseOptions, type LeaseSession } from "./license.js";
+import { Cloud, cloudRequested, launchCloud, verifyWebhook, type CloudLaunchOptions, type CloudProfile } from "./cloud.js";
+
+export {
+  Cloud,
+  CloudError,
+  CloudTimeoutError,
+  CloudBrowsers,
+  CloudRuns,
+  CloudProfiles,
+  CloudWebhooks,
+  verifyWebhook,
+  cloudRequested,
+  cloudSessionOf,
+  sessionBody,
+  filterCookies,
+  cookiesFromState,
+  DEFAULT_API_URL,
+  TERMINAL_RUN_STATUSES,
+  SESSION_FIELDS,
+  RUN_FIELDS,
+  SDK_SIDE_OPTIONS,
+  LOCAL_ONLY_OPTIONS,
+  type CloudOptions,
+  type CloudLaunchOptions,
+  type CloudSessionOptions,
+  type CloudProxy,
+  type CloudProfile,
+  type RunOptions,
+  type SyncOptions,
+} from "./cloud.js";
 
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
@@ -219,8 +254,26 @@ interface Socks5UdpOption {
   socks5Udp?: boolean;
 }
 
+/** Local or cloud: the one switch, and the account a cloud launch uses (a local launch ignores the
+ * account options, so code that always passes them switches with nothing but `cloud`). */
+interface CloudSwitchOption {
+  /** true (or a {@link Cloud} client): run the browser on Clearcote's servers and resolve to the same
+   * Playwright Browser. Unset follows CLEARCOTE_CLOUD=1|true|yes. See {@link CloudLaunchOptions}. */
+  cloud?: boolean | Cloud;
+  /** Cloud API key; defaults to CLEARCOTE_API_KEY. */
+  apiKey?: string;
+  /** Cloud API base URL; defaults to CLEARCOTE_API_URL, then https://www.clearcotelabs.com. */
+  apiUrl?: string;
+}
+
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, Socks5UdpOption, EngineExtrasOption {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption {}
+
+/** The account options a local launch drops (see CloudSwitchOption). */
+function withoutCloudOptions<T extends object>(options: T): T {
+  const { cloud: _c, apiKey: _k, apiUrl: _u, ...rest } = options as T & CloudSwitchOption;
+  return rest as T;
+}
 
 /** Options for {@link launchPersistentContext}. */
 export interface PersistentContextOptions
@@ -236,7 +289,8 @@ export interface PersistentContextOptions
     LicenseOptions,
     ShaderDialectOption,
     Socks5UdpOption,
-    EngineExtrasOption {
+    EngineExtrasOption,
+    CloudSwitchOption {
   /**
    * Seed + enable the opt-in Widevine CDM in this profile so DRM/EME works
    * (`requestMediaKeySystemAccess('com.widevine.alpha')` resolves) and the EME surface matches a
@@ -528,6 +582,7 @@ async function applyAutoProfile(
       licenseKey: opts.licenseKey,
       licenseApiBase: opts.apiBase,
       ephemeralProfile: false,
+      cloud: false, // the probe measures THIS host, whatever CLEARCOTE_CLOUD says
     }) as unknown as Promise<{
       newContext: () => Promise<{ newPage: () => Promise<unknown> }>;
       version?: () => string;
@@ -658,7 +713,8 @@ async function launchOnThrowawayProfile(prefix: string, options: PersistentConte
   const dir = mkdtempSync(join(tmpdir(), prefix));
   let context: BrowserContext;
   try {
-    context = await launchPersistentContext(dir, options);
+    // cloud: false — the caller already chose a local launch; CLEARCOTE_CLOUD must not re-route it.
+    context = await launchPersistentContext(dir, { ...options, cloud: false });
   } catch (e) {
     await removeProfileDir(dir);
     throw e;
@@ -729,16 +785,27 @@ export async function retryOnStaleRunToken<T>(lease: LeaseSession | null, start:
   }
 }
 
-export async function launch(options: LaunchOptions = {}): Promise<Browser> {
+/**
+ * LOCAL OR CLOUD. `cloud: true` runs the browser on Clearcote's servers instead and resolves to the
+ * same Playwright `Browser`, connected over CDP, with `humanize` applied here exactly as for a local
+ * browser. `cloud` unset follows CLEARCOTE_CLOUD=1|true|yes. The API key comes from `apiKey` or
+ * CLEARCOTE_API_KEY; the cloud options are {@link CloudLaunchOptions}, and an option a cloud browser
+ * cannot take (executablePath, args, userDataDir, ...) throws naming it. `close()` disconnects and
+ * ends the session.
+ */
+export async function launch(options: LaunchOptions | CloudLaunchOptions = {}): Promise<Browser> {
+  if (cloudRequested((options as CloudSwitchOption).cloud)) {
+    return (await launchCloud(options as Record<string, unknown>)) as Browser;
+  }
   // ephemeralProfile: false restores the pre-0.23 incognito launch. Kept because the persistent
   // path costs a directory create+delete per launch, which a caller spawning hundreds of
   // short-lived browsers may reasonably not want to pay for a CDM they never touch.
-  const { ephemeralProfile, userDataDir, ...restOpts } = options as LaunchOptions & {
+  const { ephemeralProfile, userDataDir, ...restOpts } = withoutCloudOptions(options as LaunchOptions) as LaunchOptions & {
     ephemeralProfile?: boolean;
     userDataDir?: string;
   };
   if (userDataDir !== undefined) {
-    return asBrowserLike(await launchPersistentContext(userDataDir, restOpts as PersistentContextOptions));
+    return asBrowserLike(await launchPersistentContext(userDataDir, { ...(restOpts as PersistentContextOptions), cloud: false }));
   }
   if (ephemeralProfile !== false) {
     return asBrowserLike(await launchOnThrowawayProfile("clearcote-run-", restOpts as PersistentContextOptions));
@@ -822,11 +889,40 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   return browser;
 }
 
+/** Options of a cloud {@link launchPersistentContext}: a cloud launch on a named cloud profile. */
+export interface CloudPersistentOptions extends Omit<CloudLaunchOptions, "profile"> {
+  /** The cloud profile whose cookies the session loads and saves back when the context closes. */
+  profile: CloudProfile;
+}
+
 /**
  * Launch Clearcote with a persistent profile directory and return a Playwright
  * {@link BrowserContext} (cookies, storage, etc. persist in `userDataDir`).
+ *
+ * CLOUD: `launchPersistentContext({ cloud: true, profile: "name" })` resolves to the context of a
+ * hosted session that loads the cloud profile `name` and saves it back when the context closes
+ * (which also ends the session). A cloud browser has no local directory: a `userDataDir` with
+ * `cloud: true` throws, pointing at `profile`.
  */
+export async function launchPersistentContext(options: CloudPersistentOptions): Promise<BrowserContext>;
+export async function launchPersistentContext(userDataDir: string, options?: PersistentContextOptions): Promise<BrowserContext>;
 export async function launchPersistentContext(
+  dirOrOptions: string | CloudPersistentOptions | null | undefined,
+  maybeOptions: PersistentContextOptions = {},
+): Promise<BrowserContext> {
+  const optionsFirst = dirOrOptions !== null && typeof dirOrOptions === "object";
+  const options = (optionsFirst ? dirOrOptions : maybeOptions) as PersistentContextOptions;
+  const userDataDir = optionsFirst ? undefined : (dirOrOptions as string | null | undefined);
+  if (cloudRequested(options.cloud)) {
+    return (await launchCloud(options as Record<string, unknown>, true, userDataDir)) as BrowserContext;
+  }
+  if (typeof userDataDir !== "string") {
+    throw new TypeError('launchPersistentContext() needs a userDataDir (or { cloud: true, profile: "name" } for a cloud profile)');
+  }
+  return launchLocalPersistentContext(userDataDir, withoutCloudOptions(options));
+}
+
+async function launchLocalPersistentContext(
   userDataDir: string,
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
@@ -940,7 +1036,8 @@ export interface LaunchAgentOptions extends PersistentContextOptions {
  */
 export async function launchAgent(options: LaunchAgentOptions = {}): Promise<BrowserContext> {
   const { userDataDir, ...rest } = options;
-  if (userDataDir !== undefined) return launchPersistentContext(userDataDir, rest);
+  // the agent drives the LOCAL engine's Actor framework: never a cloud browser
+  if (userDataDir !== undefined) return launchPersistentContext(userDataDir, { ...rest, cloud: false });
   return launchOnThrowawayProfile("clearcote-agent-", rest);
 }
 
@@ -1208,5 +1305,7 @@ export default {
   loadProfile,
   fetchWidevine,
   seedWidevine,
+  Cloud,
+  verifyWebhook,
   RELEASE,
 };

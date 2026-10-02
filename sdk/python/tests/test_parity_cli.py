@@ -43,7 +43,7 @@ def fake_cached_build(cache, tag, switches=()):
 
 def test_usage_documents_every_command():
     for c in ("install", "info", "doctor", "update", "clear-cache", "login", "logout", "serve",
-              "--quick", "--json", "--proxy", "version"):
+              "--quick", "--json", "--proxy", "version", "cloud"):
         assert c in _commands.usage()
 
 

@@ -10,11 +10,16 @@ STRUCTURED error instead of crashing the server; URL args are SSRF-checked (no l
 cloud-metadata unless opted in); file writes are confined to a sandbox dir; oversized text fields
 are capped so a response never floods the agent's context; the shared browser is guarded by an
 asyncio lock and rebuilt if it dies.
+
+Cloud: ``CLEARCOTE_CLOUD=1`` (with ``CLEARCOTE_API_KEY``) makes the shared browser a hosted Clearcote
+session instead of a local one; the tools are unchanged. With an API key set there is also
+``run_task``: a whole task run by the hosted agent (Clearcote Jet), returning its JSON result.
 """
 from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -33,6 +38,9 @@ _LOCAL = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 _WRITE = ToolAnnotations(readOnlyHint=False, openWorldHint=True)
 
 _TOOL_TIMEOUT = float(os.environ.get("CLEARCOTE_MCP_TOOL_TIMEOUT", "90"))
+# A run is a whole task (up to the run's own timeoutSec, 900 s by default), not one page action, so
+# run_task waits on its own, longer clock. It returns the run id when that runs out: the run carries on.
+_RUN_TIMEOUT = float(os.environ.get("CLEARCOTE_MCP_RUN_TIMEOUT", "900"))
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -40,16 +48,22 @@ def _env(name: str, default: str | None = None) -> str | None:
     return v if v is not None else default
 
 
+def _cloud_mode() -> bool:
+    """CLEARCOTE_CLOUD=1|true|yes: the shared browser is a hosted session (the SDK's own rule)."""
+    return (_env("CLOUD", "") or "").strip().lower() in ("1", "true", "yes")
+
+
 # ── error boundary ───────────────────────────────────────────────────────────
-def _safe(fn):
+def _safe(fn, timeout: float | None = None):
     """Per-tool wall-clock timeout + structured error, so a bad/slow call never wedges the server."""
     @functools.wraps(fn)
     async def wrap(*args, **kwargs):
+        limit = _TOOL_TIMEOUT if timeout is None else timeout
         try:
-            return await asyncio.wait_for(fn(*args, **kwargs), timeout=_TOOL_TIMEOUT)
+            return await asyncio.wait_for(fn(*args, **kwargs), timeout=limit)
         except asyncio.TimeoutError:
             return {"status": "error",
-                    "error": f"tool timed out after {_TOOL_TIMEOUT:.0f}s "
+                    "error": f"tool timed out after {limit:.0f}s "
                              f"(raise CLEARCOTE_MCP_TOOL_TIMEOUT for slow pages)"}
         except Exception as exc:  # noqa: BLE001 — deliberate catch-all at the tool boundary
             return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
@@ -150,6 +164,23 @@ def _persona_from_env() -> dict:
     return p
 
 
+def _cloud_persona_from_env() -> dict:
+    """The same persona env vars as options of a CLOUD launch. The local-only ones (CLEARCOTE_BINARY,
+    CLEARCOTE_SERVE_PORT) have no meaning for a hosted browser and are left out, so one MCP config
+    switches with CLEARCOTE_CLOUD alone. The proxy stays a URL: the SDK splits its credentials out."""
+    p: dict = {}
+    for env_key, opt in (("FINGERPRINT", "fingerprint"), ("PLATFORM", "platform"),
+                         ("BRAND", "brand"), ("TIMEZONE", "timezone"),
+                         ("ACCEPT_LANGUAGE", "accept_language"), ("PROXY", "proxy")):
+        v = _env(env_key)
+        if v:
+            p[opt] = v
+    if _env("GEOIP", "0") == "1":
+        p["geoip"] = True
+    p["headless"] = _env("HEADLESS", "1") != "0"
+    return p
+
+
 _browser: ClearcoteBrowser | None = None
 _lock: asyncio.Lock | None = None
 
@@ -167,7 +198,8 @@ async def _b() -> ClearcoteBrowser:
                 pass
             _browser = None
         if _browser is None:
-            inst = ClearcoteBrowser(_persona_from_env())
+            cloud = _cloud_mode()
+            inst = ClearcoteBrowser(_cloud_persona_from_env() if cloud else _persona_from_env(), cloud=cloud)
             await inst.start()
             _browser = inst
     return _browser
@@ -349,12 +381,63 @@ async def get_cdp_endpoint() -> dict:
     browser-use / Crawl4AI / Stagehand) can attach to the SAME browser with `connect_over_cdp`,
     keeping the stealth persona. This is the whole point of the drop-in model."""
     b = await _b()
+    if b.cloud:
+        return {"status": "error", "cloud_session": (b.cloud_session or {}).get("id"),
+                "error": "in cloud mode the browser's CDP URL is single-use and this server holds it; "
+                         "start your own hosted browser with clearcote.launch(cloud=True) instead"}
     return {"status": "ok", "cdp_url": b.cdp_url,
             "connect": {
                 "playwright_python": f"p.chromium.connect_over_cdp({b.cdp_url!r})",
                 "playwright_node": f'chromium.connectOverCDP("{b.cdp_url}")',
                 "puppeteer": f'puppeteer.connect({{ browserURL: "{b.cdp_url}" }})',
                 "browser_use": f'cdp_url="{b.cdp_url}"'}}
+
+
+def _async_cloud():
+    """The SDK's asyncio cloud client (clearcote 0.34+); CLEARCOTE_API_KEY / CLEARCOTE_API_URL."""
+    try:
+        from clearcote.cloud import AsyncCloud, CloudError, CloudTimeoutError
+    except ImportError:
+        raise RuntimeError("run_task needs clearcote 0.34 or newer: pip install -U clearcote") from None
+    return AsyncCloud(), CloudTimeoutError, CloudError
+
+
+async def run_task(task: str, url: str | None = None, schema_json: str | None = None) -> dict:
+    """Run a whole browser task on a Clearcote CLOUD browser with the hosted agent (Clearcote Jet)
+    and return its result: describe the goal in plain language, optionally the page to start on
+    (`url`) and a JSON Schema for the answer (`schema_json`, a JSON string whose top-level type is
+    "object" or "array"). Returns run_status (succeeded/failed/...), result (output, detail, url,
+    title, markdown, steps) and cost_eur. Billed to the API key's account."""
+    await _check_url(url)
+    schema = None
+    if schema_json:
+        try:
+            schema = json.loads(schema_json)
+        except ValueError as exc:
+            raise ValueError(f"schema_json is not valid JSON: {exc}") from None
+    cloud, timeout_error, cloud_error = _async_cloud()
+    created = await cloud.runs.create(task, url=url, schema=schema, wait=False)
+    try:
+        # on_update: report nothing on stderr; the result carries the outcome.
+        run = await cloud.runs.wait(created["id"], timeout=_RUN_TIMEOUT, on_update=lambda _v: None)
+    except timeout_error as exc:
+        last = exc.last or {}
+        return {"status": "error", "run_id": created["id"], "run_status": last.get("status"),
+                "error": f"the run is still {last.get('status') or 'running'} after {_RUN_TIMEOUT:.0f}s; it carries "
+                         "on in the cloud (raise CLEARCOTE_MCP_RUN_TIMEOUT to wait longer)"}
+    except cloud_error as exc:
+        # The run exists (and is billed) even though polling it failed: hand back its id.
+        return {"status": "error", "run_id": created["id"],
+                "error": f"CloudError: {exc} (the run may still be going; look it up by run_id)"}
+    result = run.get("result")
+    return {"status": "ok", "run_id": run.get("id"), "run_status": run.get("status"),
+            "result": _cap(result, {"markdown": 40000}) if isinstance(result, dict) else result,
+            "cost_eur": run.get("costEur")}
+
+
+# Registered only with an API key: without one the tool could do nothing but fail.
+if os.environ.get("CLEARCOTE_API_KEY"):
+    mcp.tool(annotations=_WRITE)(_safe(run_task, timeout=_RUN_TIMEOUT + 60))
 
 
 def main() -> None:

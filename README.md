@@ -369,6 +369,19 @@ const { connectUrl } = await fetch("https://www.clearcotelabs.com/api/v1/browser
 const browser = await chromium.connectOverCDP(connectUrl);   // your Playwright code from here
 ```
 
+Or let the SDK do it: the same `launch()` that starts a local Clearcote starts a hosted one with one
+flag, and returns the same Playwright `Browser` (`CLEARCOTE_CLOUD=1` flips existing code without an edit):
+
+```python
+from clearcote import launch                    # Node: launch({ cloud: true, country: "us" })
+browser = launch(cloud=True, country="us")      # CLEARCOTE_API_KEY=cc_live_...
+```
+
+The SDKs' `Cloud` client covers the rest of the hosted API: agent runs that take a task and return JSON,
+cookie sync into cloud profiles, recordings, the event timeline, hand-off to a person and signed webhooks.
+See "Local or cloud" in the [Python](sdk/python/README.md#local-or-cloud) and
+[Node](sdk/node/README.md#local-or-cloud) SDK READMEs.
+
 - **A residential IP, included.** Every session leaves through a real home connection. Pick a `country`, `state` or `city`, or leave it to us.
 - **The Clearcote engine on every session.** Fingerprint control compiled in and on by default: one tier, nothing to upgrade to.
 - **Identities that stay put.** The same `identity` label comes back as the same device on the same exit IP in every later session; timezone and language follow the exit IP on their own.

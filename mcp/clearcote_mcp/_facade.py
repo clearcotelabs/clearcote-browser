@@ -8,6 +8,11 @@ is preserved end to end.
 
 The facade owns a "current page" (the active tab) so an agent can call tools without repeating a
 URL; pass ``url`` to any read/act tool to navigate first.
+
+CLOUD MODE (``cloud=True``, from ``CLEARCOTE_CLOUD=1``): the browser is a hosted Clearcote session
+instead, from ``clearcote.async_api.launch(cloud=True)``. Every tool works the same; the one
+difference is that a cloud session's CDP URL is single-use and this server holds it, so there is no
+endpoint to hand to another client.
 """
 from __future__ import annotations
 
@@ -54,19 +59,53 @@ _ELEMENTS_JS = r"""() => {
 }"""
 
 
+def cloud_launch():
+    """``clearcote.async_api.launch``, checked to know ``cloud=`` (clearcote 0.34+). Older SDKs pass
+    unknown options through to Playwright, so the version is checked instead of trusting a call."""
+    try:
+        from clearcote.async_api import launch
+        from clearcote.cloud import AsyncCloud  # noqa: F401 -- only present on 0.34+
+    except ImportError:
+        raise RuntimeError("cloud mode needs clearcote 0.34 or newer: pip install -U clearcote") from None
+    return launch
+
+
 class ClearcoteBrowser:
     """One shared, stealth clearcote browser + its Playwright attachment."""
 
-    def __init__(self, persona: dict | None = None):
+    def __init__(self, persona: dict | None = None, cloud: bool = False):
         self._persona = persona or {}
+        self._cloud = cloud
         self._srv = None          # clearcote._serve.Server
         self._pw = None           # playwright async context manager
         self._browser = None      # playwright Browser (over CDP)
         self._ctx = None          # BrowserContext
         self._page = None         # current page
 
+    @property
+    def cloud(self) -> bool:
+        return self._cloud
+
+    @property
+    def cloud_session(self) -> dict | None:
+        """The hosted session (id, worker, expiresAt, ...) in cloud mode, else None."""
+        return getattr(self._browser, "cloud_session", None) if self._cloud else None
+
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def start(self):
+        if self._cloud:
+            # A hosted session: the SDK creates it, connects over CDP and owns the Playwright driver
+            # (closing the browser disconnects, stops that driver and ends the session).
+            launch = cloud_launch()
+            self._browser = await launch(cloud=True, **self._persona)
+            try:
+                self._ctx = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
+                self._page = self._ctx.pages[0] if self._ctx.pages else await self._ctx.new_page()
+            except BaseException:
+                # the caller never gets this instance, so nobody else would end the (billed) session
+                await self.close()
+                raise
+            return
         import clearcote
         from playwright.async_api import async_playwright
         loop = asyncio.get_running_loop()
@@ -79,6 +118,8 @@ class ClearcoteBrowser:
 
     def is_healthy(self) -> bool:
         try:
+            if self._cloud:
+                return bool(self._browser and self._browser.is_connected())
             return bool(self._srv and self._srv.is_alive() and self._browser and self._browser.is_connected())
         except Exception:
             return False
@@ -103,6 +144,7 @@ class ClearcoteBrowser:
 
     @property
     def cdp_url(self) -> str:
+        """The local endpoint any client can attach to; empty in cloud mode (single-use URL)."""
         return self._srv.cdp_url if self._srv else ""
 
     async def _pg(self, url: str | None):
@@ -243,5 +285,8 @@ class ClearcoteBrowser:
                 await pg.goto(prev, wait_until="domcontentloaded", timeout=15000)
         except Exception:
             pass
-        return {"status": "ok", "public_ip": info.get("ip") if isinstance(info, dict) else None,
-                "persona": {k: self._persona.get(k) for k in ("fingerprint", "platform", "brand", "proxy") if self._persona.get(k)}}
+        out = {"status": "ok", "public_ip": info.get("ip") if isinstance(info, dict) else None,
+               "persona": {k: self._persona.get(k) for k in ("fingerprint", "platform", "brand", "proxy") if self._persona.get(k)}}
+        if self._cloud:
+            out["cloud_session"] = (self.cloud_session or {}).get("id")
+        return out

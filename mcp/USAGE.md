@@ -32,6 +32,13 @@ If you prefer the Python entry point instead of `npx`:
     "env": { "CLEARCOTE_FINGERPRINT": "acct-1", "CLEARCOTE_PROXY": "http://user:pass@host:port", "CLEARCOTE_GEOIP": "1" } } } }
 ```
 
+**Cloud mode:** add `"CLEARCOTE_CLOUD": "1"` and `"CLEARCOTE_API_KEY": "cc_live_..."` to `env` and the
+same tools drive a hosted Clearcote session instead of a local browser. With the API key set the
+server also lists `run_task(task, url?, schema_json?)`, which hands a whole task to the hosted agent
+and returns its JSON result, e.g. `run_task("Find the price of the Pro plan", "https://example.com/pricing",
+'{"type":"object","properties":{"price":{"type":"string"}}}')`. A run can take minutes: the
+tool waits up to `CLEARCOTE_MCP_RUN_TIMEOUT` seconds (default 900) and otherwise returns the run id.
+
 Then just ask the agent to browse. A typical loop the model runs:
 `navigate` → `read_page` / `page_elements` → `click` / `fill_field` → `read_page` … and
 `save_profile` to keep a logged-in session for next time.

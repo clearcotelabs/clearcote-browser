@@ -17,6 +17,9 @@ inside an asyncio event loop, where the sync API raises
 ``It looks like you are using Playwright Sync API inside the asyncio loop``.
 
 Each launched browser/context owns its Playwright driver and stops it on ``close()``.
+
+``launch(cloud=True)`` (or ``CLEARCOTE_CLOUD=1``) returns the same async ``Browser`` connected to a
+hosted session instead; :class:`AsyncCloud` is the asyncio client for the rest of the hosted API.
 """
 
 import asyncio
@@ -29,7 +32,9 @@ import tempfile
 from . import (  # shared sync helpers
     _headed_no_viewport, _headless_geometry_kwargs, _prepare, _acquire_lease_from_kwargs,
     _is_win_launch_race, _is_stale_token_refusal, _with_geometry_args, _profile_dir_remover,
+    _drop_cloud_credentials,
 )
+from .cloud import AsyncCloud, CloudError, CloudTimeoutError, cloud_requested, launch_cloud_async, verify_webhook
 from ._launchopts import DEFAULT_IGNORED_ARGS
 from ._geometry import apply_headless_geometry, fit_window_to_work_area_async
 from ._license import inject_run_token
@@ -56,6 +61,10 @@ __all__ = [
     "list_profiles",
     "load_profile",
     "check_render_coherence",
+    "AsyncCloud",
+    "CloudError",
+    "CloudTimeoutError",
+    "verify_webhook",
     "RELEASE",
     "__version__",
 ]
@@ -224,10 +233,16 @@ async def _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, start)
         return await start()
 
 
-async def launch(**kwargs):
+async def launch(cloud=None, **kwargs):
     """Launch Clearcote and return a Playwright **async** ``Browser``. Same kwargs as the sync
     ``clearcote.launch`` (fingerprint, platform, brand, gpu_*, timezone, accept_language, proxy,
-    geoip, profile, canvas_bridge, humanize, ... + any Playwright launch option)."""
+    geoip, profile, canvas_bridge, humanize, ... + any Playwright launch option).
+
+    ``cloud=True`` (or ``CLEARCOTE_CLOUD=1`` with ``cloud`` unset) connects to a hosted session
+    instead, exactly like the sync ``launch(cloud=True)``."""
+    if cloud_requested(cloud):
+        return await launch_cloud_async(cloud, kwargs)
+    _drop_cloud_credentials(kwargs)
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
@@ -266,11 +281,20 @@ async def launch(**kwargs):
     return browser
 
 
-async def launch_persistent_context(user_data_dir, **kwargs):
+async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     """Launch Clearcote with a persistent profile dir; returns a Playwright **async**
     ``BrowserContext`` (cookies/storage persist in ``user_data_dir``).
 
-    Pass ``widevine=True`` to seed + enable the (opt-in) Widevine CDM so DRM/EME works."""
+    Pass ``widevine=True`` to seed + enable the (opt-in) Widevine CDM so DRM/EME works.
+
+    ``cloud=True`` with ``profile="name"``: the context of a hosted session on that cloud profile
+    (see the sync ``launch_persistent_context``)."""
+    if cloud_requested(cloud):
+        return await launch_cloud_async(cloud, kwargs, persistent=True, user_data_dir=user_data_dir)
+    if user_data_dir is None:
+        raise TypeError("launch_persistent_context() needs a user_data_dir "
+                        "(or cloud=True with profile=\"name\" for a cloud profile)")
+    _drop_cloud_credentials(kwargs)
     # Automation strip before the Widevine helper (it appends --disable-component-update rather than
     # clobbering ['--enable-automation']) — mirrors the sync path.
     kwargs.setdefault("ignore_default_args", list(DEFAULT_IGNORED_ARGS))
@@ -321,7 +345,8 @@ async def launch_agent(user_data_dir=None, **kwargs):
     ``run_agent_task``. Uses a persistent context (the Actor framework needs a regular profile): a
     fresh temp ``user_data_dir``, deleted when the context closes, unless you pass one to keep."""
     if user_data_dir is not None:
-        return await launch_persistent_context(user_data_dir, **kwargs)
+        # the agent drives the LOCAL engine's Actor framework: never a cloud browser
+        return await launch_persistent_context(user_data_dir, cloud=False, **kwargs)
     # The sync path's throwaway-profile handling, async: removed on close and at interpreter exit,
     # and at once when the launch fails (it used to leak one directory per failed launch).
     import atexit
@@ -329,7 +354,7 @@ async def launch_agent(user_data_dir=None, **kwargs):
     udd = tempfile.mkdtemp(prefix="clearcote-agent-")
     remove = _profile_dir_remover(udd)
     try:
-        context = await launch_persistent_context(udd, **kwargs)
+        context = await launch_persistent_context(udd, cloud=False, **kwargs)
     except BaseException:
         await asyncio.to_thread(remove)
         raise

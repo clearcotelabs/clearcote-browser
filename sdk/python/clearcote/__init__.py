@@ -16,6 +16,11 @@ Since 0.23.0 it launches on a throwaway PROFILE directory rather than incognito,
 incognito cannot load the Widevine CDM and its absence is itself a fingerprint on a build
 branded Google Chrome. The directory is deleted on close and on interpreter exit, so no state
 survives the run. ``ephemeral_profile=False`` restores the old incognito launch.
+
+Since 0.34.0 the same call can run the browser on Clearcote's servers instead: ``launch(cloud=True)``
+(or ``CLEARCOTE_CLOUD=1`` in the environment) returns the same Playwright ``Browser``, connected to
+a hosted session. :mod:`clearcote.cloud` has the rest of the hosted API (agent runs, profiles,
+recordings, events, hand-off, webhooks).
 """
 
 import atexit
@@ -86,9 +91,17 @@ from .download import (
 from .geoip import GeoipError, geoip_timeout_seconds, resolve_geo, resolve_geo_detailed, warn_on_egress_drift
 from .release import RELEASE
 from ._serve import Server, serve
+from .cloud import (
+    AsyncCloud, Cloud, CloudError, CloudTimeoutError, cloud_requested, launch_cloud, verify_webhook,
+)
 
 __all__ = [
     "launch",
+    "Cloud",
+    "AsyncCloud",
+    "CloudError",
+    "CloudTimeoutError",
+    "verify_webhook",
     "launch_persistent_context",
     "launch_agent",
     "serve",
@@ -148,7 +161,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.33.0"
+__version__ = "0.34.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -309,10 +322,11 @@ def _apply_auto_profile(fp, exe, select, quiet=False, pro=None, lease=None):
     # on every "auto" resolution.
     # _cc_lease: run the probe on the CALLER's slot. Checking out a second one deadlocks the
     # caller against itself on a per-browser plan, and the probe is strictly inside this launch.
+    # cloud=False: the probe measures THIS host, whatever CLEARCOTE_CLOUD says.
     host = measure_host(
         lambda **kw: launch(
             license_key=license_key, license_api_base=api_base, ephemeral_profile=False,
-            _cc_lease=lease, **kw
+            _cc_lease=lease, cloud=False, **kw
         ),
         exe,
         major,
@@ -673,8 +687,10 @@ def _launch_on_throwaway_profile(prefix, kwargs):
 
     udd = tempfile.mkdtemp(prefix=prefix)
     try:
-        # looked up at call time (module global), so tests can stand in for the real launch
-        context = launch_persistent_context(udd, **kwargs)
+        # looked up at call time (module global), so tests can stand in for the real launch.
+        # cloud=False: the caller already decided this is a local launch; CLEARCOTE_CLOUD must not
+        # send the inner call to the cloud.
+        context = launch_persistent_context(udd, cloud=False, **kwargs)
     except BaseException:
         _profile_dir_remover(udd)()
         raise
@@ -832,8 +848,22 @@ def _release_lease_on_failure(lease, start):
         raise
 
 
-def launch(**kwargs):
+def _drop_cloud_credentials(kwargs):
+    """api_key/api_url only pick the account a CLOUD launch uses. A local launch ignores them, so
+    code that always passes them switches between local and cloud with nothing but ``cloud``."""
+    kwargs.pop("api_key", None)
+    kwargs.pop("api_url", None)
+
+
+def launch(cloud=None, **kwargs):
     """Launch Clearcote and return a Playwright browser handle backed by a REAL Chrome profile.
+
+    LOCAL OR CLOUD. ``cloud=True`` runs the browser on Clearcote's servers instead and returns the
+    same Playwright ``Browser``, connected over CDP, with ``humanize`` applied here exactly as for a
+    local browser. ``cloud=None`` (the default) follows ``CLEARCOTE_CLOUD=1|true|yes``. The API key
+    comes from ``api_key=`` or ``CLEARCOTE_API_KEY``; the cloud options (``country``, ``identity``,
+    ``profile``, ``record``, ...) and the options a cloud browser cannot take are listed in
+    :mod:`clearcote.cloud`. ``close()`` disconnects and ends the session.
 
     Fingerprint kwargs: fingerprint, platform, platform_version, brand, brand_version,
     gpu_vendor, gpu_renderer, hardware_concurrency, location, timezone, accept_language,
@@ -854,13 +884,16 @@ def launch(**kwargs):
     relied on is preserved. Pass ``user_data_dir=`` to keep a profile instead (or call
     ``launch_persistent_context`` directly), and ``ephemeral_profile=False`` to opt back out.
     """
+    if cloud_requested(cloud):
+        return launch_cloud(cloud, kwargs)
+    _drop_cloud_credentials(kwargs)
     # ephemeral_profile=False restores the pre-0.23 incognito launch. Kept because the persistent
     # path costs a directory create+delete per launch, which a caller spawning hundreds of
     # short-lived browsers may reasonably not want to pay for a CDM they never touch.
     ephemeral = kwargs.pop("ephemeral_profile", True)
     explicit_dir = kwargs.pop("user_data_dir", None)
     if explicit_dir is not None:
-        return launch_persistent_context(explicit_dir, **kwargs)
+        return launch_persistent_context(explicit_dir, cloud=False, **kwargs)
     if ephemeral:
         return _install_persistent_as_browser(_launch_on_throwaway_profile("clearcote-run-", kwargs))
 
@@ -902,13 +935,24 @@ def launch(**kwargs):
     return browser
 
 
-def launch_persistent_context(user_data_dir, **kwargs):
+def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     """Launch Clearcote with a persistent profile directory; returns a Playwright
     ``BrowserContext`` (cookies/storage persist in ``user_data_dir``).
 
     Pass ``widevine=True`` to seed + enable the (opt-in, user-fetched) Widevine CDM so DRM/EME works
     (``requestMediaKeySystemAccess('com.widevine.alpha')`` resolves) and the EME surface matches a
-    real Chrome instead of being a no-Widevine tell."""
+    real Chrome instead of being a no-Widevine tell.
+
+    CLOUD: ``launch_persistent_context(cloud=True, profile="name")`` returns the context of a hosted
+    session that loads the cloud profile ``name`` and saves it back when the context closes (which
+    also ends the session). A cloud browser has no local directory, so ``user_data_dir`` with
+    ``cloud=True`` raises ValueError pointing at ``profile=``."""
+    if cloud_requested(cloud):
+        return launch_cloud(cloud, kwargs, persistent=True, user_data_dir=user_data_dir)
+    if user_data_dir is None:
+        raise TypeError("launch_persistent_context() needs a user_data_dir "
+                        "(or cloud=True with profile=\"name\" for a cloud profile)")
+    _drop_cloud_credentials(kwargs)
     # Set the default strip (DEFAULT_IGNORED_ARGS) BEFORE the Widevine helper so it appends
     # --disable-component-update to it rather than replacing it (which would lose the AutomationControlled
     # strip on Widevine launches).
@@ -964,7 +1008,8 @@ def launch_agent(user_data_dir=None, **kwargs):
     ``launch_persistent_context``) for the agent -- plain ``launch()`` is incognito, where the
     Actor framework can't attach the tab."""
     if user_data_dir is not None:
-        return launch_persistent_context(user_data_dir, **kwargs)
+        # the agent drives the LOCAL engine's Actor framework: never a cloud browser
+        return launch_persistent_context(user_data_dir, cloud=False, **kwargs)
     return _launch_on_throwaway_profile("clearcote-agent-", kwargs)
 
 

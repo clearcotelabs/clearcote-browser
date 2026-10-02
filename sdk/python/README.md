@@ -5,7 +5,8 @@ open, reproducible, anti-fingerprint Chromium build. `launch()` returns a standa
 `Browser`, so migrating is a one-line import change.
 
 The verified Clearcote binary is **auto-downloaded and SHA-256 checked** on first use, then cached —
-no zips or paths to manage.
+no zips or paths to manage. Or run the same code on a hosted Clearcote browser with
+`launch(cloud=True)`: see [Local or cloud](#local-or-cloud).
 
 > **Platform:** Clearcote ships **Windows x64** and **Linux x64** binaries; `launch()` runs on both
 > and the SDK auto-downloads the right one for your OS. On Linux the persona is Linux-native (Linux
@@ -168,6 +169,7 @@ clearcote login [key]      # validates the key, saves it to ~/.clearcote/license
 clearcote logout
 clearcote clear-cache
 clearcote serve [--port 9222] ...
+clearcote cloud run|sessions|stop|events|recording|profile sync|webhooks ...   # the hosted API, see Local or cloud
 ```
 
 `info` never downloads: it reports the SDK, the cached builds, which engine features the binary supports, a launch test (skipped with `--quick`), licence seats, fonts and missing system libraries.
@@ -389,6 +391,113 @@ browser = launch(
 )
 ```
 
+## Local or cloud
+
+The same `launch()` runs the browser on this machine or on Clearcote's servers. One flag picks which,
+and both return the same Playwright `Browser`:
+
+```python
+from clearcote import launch
+
+browser = launch(cloud=True, country="us", identity="acct-1", humanize=True)
+page = browser.new_page()
+page.goto("https://example.com")
+browser.close()                      # disconnects and ends the hosted session
+```
+
+Leave `cloud` unset and set `CLEARCOTE_CLOUD=1` to move existing code to the cloud without editing
+it. The API key comes from `api_key=` or `CLEARCOTE_API_KEY`, and `CLEARCOTE_API_URL` points the SDK
+at another server (https only: plain `http://` is accepted for `127.0.0.1`, `::1` and `localhost`
+alone, so the key never crosses a network unencrypted). `clearcote.async_api.launch(cloud=True)` is
+the asyncio twin.
+
+What changes in the cloud:
+
+- **Options.** `fingerprint`, `identity`, `platform`, `brand`, `timezone`, `locale` (or
+  `accept_language`), `geoip`, `headless`, `light_stealth`, `proxy` (`"managed"`, a URL, or
+  `{server, username, password}`), `country`/`state`/`city`, `proxy_session`, `timeout_sec`,
+  `idle_timeout_sec`, `max_gb`, `version`, `profile`, `url`, `adblock`, `keep_alive`, `record`,
+  `note`, `worker`. `humanize` and `show_cursor` run in the SDK, exactly as for a local browser.
+- **Local-only options are refused, by name.** `executable_path`, `args`, `user_data_dir`,
+  `extensions`, `ignore_default_args`, the finer persona switches (`gpu_vendor`, `webrtc_ip`, ...)
+  and the licence options raise `ValueError("<name> is not available for cloud browsers")` before
+  anything starts.
+- **Profiles are cloud profiles.** `profile="acct-1"` loads the cookies of a named cloud profile, and
+  `launch_persistent_context(cloud=True, profile="acct-1")` returns a context that also saves them
+  back when it closes. Fill one from a browser you are logged in to with `profiles.sync` (below).
+- **The session.** `browser.cloud_session` holds its `id`, `worker` and `expiresAt`. `close()`
+  disconnects and ends the session; a `keep_alive=True` session is left running (stop it with
+  `Cloud().browsers.stop(id)`).
+
+### The Cloud client
+
+Everything else the hosted API does is on `Cloud` (and `AsyncCloud`, the same methods awaitable):
+
+```python
+from clearcote.cloud import Cloud
+
+cloud = Cloud()                                   # CLEARCOTE_API_KEY
+
+# An agent run: a task in, JSON out
+run = cloud.runs.create(
+    "Log in with {{password}} and read the current plan's price",
+    url="https://example.com/login",
+    schema={"type": "object", "properties": {"price": {"type": "string"}}},
+    secrets={"password": {"value": "s3cret", "domains": ["example.com"]}},  # the model never sees it
+)
+print(run["status"], run["result"]["output"], run["costEur"]["total"])
+
+# Copy a logged-in state into a cloud profile: only the cookies a browser would use on the domains
+# you name (theirs, their subdomains', and parent-domain ones such as .example.com for www.example.com)
+cloud.profiles.sync("acct-1", login_url="https://example.com/login", domains=["example.com"])
+
+# Recordings, the event timeline, hand-off to a person
+s = cloud.browsers.create(record=True)
+cloud.browsers.events(s["id"])                    # {"events": [...], "next": ...}
+cloud.browsers.download_recording(s["id"], "session.mp4")
+```
+
+- `browsers`: `create(**options)`, `get(id)`, `list(status=, note=, limit=, before=)`, `stop(id)`,
+  `live(id, control=False)`, `share(id, control=, minutes=, recording=)`,
+  `handoff(id, reason=, timeout_sec=)`, `handoff_done(id)`, `wait_handoff(id, timeout=, poll=2.0)`,
+  `events(id, after=0, limit=)`, `recording_url(id)`, `download_recording(id, path)`.
+  `wait_handoff` on a session with no hand-off raises `CloudError` (code `NO_HANDOFF`).
+- `runs`: `create(task, url=, schema=, secrets=, wait=True, timeout=, poll=1.5, on_update=, **options)`
+  (the browser options above plus `max_steps`, `handoff`, `handoff_timeout_sec`), `get(id)`,
+  `list(limit=, before=)`, `cancel(id)`, `wait(id, timeout=, poll=1.5, on_update=)`. A run that
+  pauses for a person (`waiting_for_human`) is not finished: `on_update` hears about it, and without
+  one the live link is printed to stderr.
+- `profiles`: `list()`, `get(name)`, `delete(name)`, `import_cookies(name, cookies, mode="merge")`,
+  `sync(name, from_profile=DIR | from_cdp=URL | from_file=PATH | login_url=URL, domains=[...] |
+  all_domains=True, replace=False)`. `sync` refuses to run without `domains` or `all_domains=True`.
+- `webhooks`: `create(url, events=, description=)` (the answer carries the `secret`, shown once),
+  `list()`, `delete(id)`, `test(id)`
+
+Every method returns the parsed JSON of its endpoint. An API refusal raises
+`CloudError(status, code, message)` with the server's own message (`e.code` is e.g.
+`"PROFILE_IN_USE"`); a wait that runs out raises `CloudTimeoutError`, whose `.last` holds the last
+view (the run carries on on the server).
+
+Check a webhook delivery with the raw request body and the `Clearcote-Signature` header:
+
+```python
+from clearcote import verify_webhook
+
+event = verify_webhook(request_body, headers["Clearcote-Signature"], "whsec_...")  # ValueError if forged or stale
+```
+
+The same from the command line (`--json` for machine-readable output):
+
+```bash
+clearcote cloud run "Read the price of the Pro plan" --url https://example.com/pricing --schema price.json
+clearcote cloud run "Open my account page" --country us --profile acct-1 --persist-profile --max-steps 20
+clearcote cloud sessions
+clearcote cloud events bs_123
+clearcote cloud recording bs_123 -o session.mp4
+clearcote cloud profile sync acct-1 --login https://example.com/login --domain example.com
+clearcote cloud webhooks add https://hooks.example.com/clearcote --event run.finished
+```
+
 ## Fingerprint options
 
 All optional. Anything not listed here is passed straight through to Playwright
@@ -491,8 +600,9 @@ Profiles are JSON at `~/.clearcote/profiles/<name>.json` (set `CLEARCOTE_PROFILE
 
 ## API
 
-- `launch(**options)` → Playwright `Browser`. Pass `profile=` (a name, path, or `Profile`) to launch a saved persona.
-- `launch_persistent_context(user_data_dir, **options)` → Playwright `BrowserContext`.
+- `launch(**options)` → Playwright `Browser`. Pass `profile=` (a name, path, or `Profile`) to launch a saved persona; `cloud=True` for a hosted browser ([Local or cloud](#local-or-cloud)).
+- `launch_persistent_context(user_data_dir, **options)` → Playwright `BrowserContext`; `launch_persistent_context(cloud=True, profile="name")` for a cloud profile.
+- `Cloud(api_key=None, base_url=None)` / `AsyncCloud` — the hosted API (`browsers`, `runs`, `profiles`, `webhooks`); `CloudError`, `CloudTimeoutError`, `verify_webhook(raw_body, signature_header, secret, tolerance_sec=300)`.
 - `serve(**options)` → `Server` — a standing, stealthy CDP endpoint (`.cdp_url` / `.ws_url()` / `.close()`; context manager) any Playwright/Puppeteer/CDP client attaches to. Also exposed as the `clearcote-serve` CLI.
 - `executable_path(executable_path=None, cache_dir=None, quiet=False)` → `str` — resolve (download/verify if needed) the chrome.exe path.
 - `download(cache_dir=None, quiet=False)` → `str` — pre-fetch + verify without launching.

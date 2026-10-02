@@ -60,8 +60,10 @@ The **persona lives in the environment**, so the tool surface stays clean:
 | `CLEARCOTE_TIMEZONE` / `CLEARCOTE_ACCEPT_LANGUAGE` | explicit overrides |
 | `CLEARCOTE_HEADLESS` | `0` for a visible window (default headless) |
 | `CLEARCOTE_BINARY` | path to a specific Clearcote binary (optional) |
+| `CLEARCOTE_CLOUD` | `1` → the shared browser is a **hosted** Clearcote session instead (needs `CLEARCOTE_API_KEY`) |
+| `CLEARCOTE_API_KEY` | your `cc_live_...` key: cloud mode, and the `run_task` tool |
 
-Hardening knobs: `CLEARCOTE_MCP_TOOL_TIMEOUT` (s), `CLEARCOTE_MCP_WRITE_DIR` (sandbox for file
+Hardening knobs: `CLEARCOTE_MCP_TOOL_TIMEOUT` (s), `CLEARCOTE_MCP_RUN_TIMEOUT` (s, `run_task`; default 900), `CLEARCOTE_MCP_WRITE_DIR` (sandbox for file
 writes), `CLEARCOTE_MCP_ALLOW_ANY_PATH=1`, `CLEARCOTE_ALLOW_PRIVATE_EGRESS=1` (allow localhost /
 private targets), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`.
 
@@ -75,6 +77,31 @@ selectors) · `evaluate_js` · `wait_for` · `current_page` · `get_cookies` · 
 **Session** · `save_profile` / `load_profile` (cookies + storage)
 **Stealth / infra** · `get_egress_info` (public IP + active persona) · **`get_cdp_endpoint`** (attach any
 other CDP client to the same stealth browser)
+
+**Cloud** · `run_task(task, url?, schema_json?)`: a whole task run by the hosted agent (Clearcote
+Jet) on a cloud browser, returning its JSON result (`run_status`, `result.output`, `cost_eur`). Listed
+only when `CLEARCOTE_API_KEY` is set.
+
+## Cloud mode
+
+Set `CLEARCOTE_CLOUD=1` and `CLEARCOTE_API_KEY` and the shared browser runs on Clearcote's servers
+instead of this machine: nothing to download, a residential IP included. Every tool works the same,
+and the persona variables above still apply (`CLEARCOTE_BINARY` and `CLEARCOTE_SERVE_PORT` are
+local-only and ignored). The one difference: a cloud session's CDP URL is single-use and the server
+holds it, so `get_cdp_endpoint` has no endpoint to hand out; start your own hosted browser with
+`clearcote.launch(cloud=True)` instead. Needs `clearcote` 0.34 or newer.
+
+```json
+{
+  "mcpServers": {
+    "clearcote": {
+      "command": "npx",
+      "args": ["-y", "clearcote-mcp"],
+      "env": { "CLEARCOTE_CLOUD": "1", "CLEARCOTE_API_KEY": "cc_live_..." }
+    }
+  }
+}
+```
 
 ## Guardrails (built in)
 

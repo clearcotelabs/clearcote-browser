@@ -7,6 +7,7 @@
     clearcote login   [key]                                 save a licence key (validated first)
     clearcote logout                                        remove the saved key
     clearcote serve   [--port 9222] [--idle-timeout 300] ...  multi-identity CDP endpoint
+    clearcote cloud   run|sessions|stop|events|recording|profile sync|webhooks ...  the hosted API
     clearcote version
 
 ``info`` never downloads: it reports what is already cached and what a launch would resolve to.
@@ -35,6 +36,10 @@ USAGE
                   [--max-browsers 16] [--allow-origin <origin>]... [--allow-host <name>]... [--headed]
                   [--fingerprint <seed>] [--platform <os>] [--proxy <url>] [--timezone <tz>]
                   [--accept-language <l>] [--geoip]
+  clearcote cloud run <task> [--url <url>] [--schema <file.json>] [--secret <name>=<value>]... [--json]
+  clearcote cloud sessions | stop <id> | events <id> | recording <id> [-o <file.mp4>]
+  clearcote cloud profile sync <name> (--from-profile <dir> | --from-cdp <url> | --from-file <file> | --login <url>)
+  clearcote cloud webhooks add <url> | list | rm <id> | test <id>      (all flags: clearcote cloud --help)
   clearcote version
 
 INFO FLAGS
@@ -44,7 +49,34 @@ INFO FLAGS
 
 ENVIRONMENT
   CLEARCOTE_LICENSE_KEY, CLEARCOTE_RELEASE_CHANNEL, CLEARCOTE_GEOIP_TIMEOUT_SECONDS,
-  CLEARCOTE_LICENSE_THROUGH_PROXY, CLEARCOTE_BINARY, CLEARCOTE_CACHE, CLEARCOTE_SERVE_IDLE_TIMEOUT"""
+  CLEARCOTE_LICENSE_THROUGH_PROXY, CLEARCOTE_BINARY, CLEARCOTE_CACHE, CLEARCOTE_SERVE_IDLE_TIMEOUT,
+  CLEARCOTE_API_KEY, CLEARCOTE_API_URL, CLEARCOTE_CLOUD"""
+
+# `clearcote cloud --help`. Kept byte-identical to CLOUD_USAGE in the Node SDK's cli-commands.ts.
+CLOUD_USAGE = """clearcote cloud -- the hosted Clearcote API from the command line.
+
+USAGE
+  clearcote cloud run <task> [--url <url>] [--schema <file.json>] [--secret <name>=<value>]...
+                      [--secret-domain <name>=<host>]... [--handoff] [--record] [--json]
+                      [--country <cc>] [--state <s>] [--city <c>] [--proxy managed|<url>]
+                      [--profile <name> [--persist-profile]] [--fingerprint <seed>]
+                      [--timeout-sec <n>] [--max-steps <n>] [--note <text>]
+  clearcote cloud sessions [--json]
+  clearcote cloud stop <id> [--json]
+  clearcote cloud events <id> [--json]
+  clearcote cloud recording <id> [-o <file.mp4>] [--json]
+  clearcote cloud profile sync <name> (--from-profile <dir> | --from-cdp <url> | --from-file <state.json>
+                      | --login <url>) (--domain <domain>... | --all-domains) [--replace] [--json]
+  clearcote cloud webhooks add <url> [--event <type>]... [--json]
+  clearcote cloud webhooks list [--json]
+  clearcote cloud webhooks rm <id> [--json]
+  clearcote cloud webhooks test <id> [--json]
+
+  run waits for the result and exits 0 only when the run succeeded. profile sync uploads only the
+  cookies of the --domain names you list (subdomains included); --all-domains uploads every cookie.
+
+ENVIRONMENT
+  CLEARCOTE_API_KEY (required), CLEARCOTE_API_URL (default https://www.clearcotelabs.com)"""
 
 
 class CliExit(SystemExit):
@@ -144,7 +176,9 @@ def build_info(quick=False, proxy=None, launch_fn=None):
         if launch_fn is None:
             from . import launch as launch_fn  # noqa: N806
         try:
-            b = launch_fn(executable_path=pick["path"], headless=True, quiet=True, ephemeral_profile=False)
+            # cloud=False: this tests the LOCAL install, whatever CLEARCOTE_CLOUD says.
+            b = launch_fn(executable_path=pick["path"], headless=True, quiet=True, ephemeral_profile=False,
+                          cloud=False)
             try:
                 version = b.version
                 version = version() if callable(version) else version
@@ -299,6 +333,345 @@ def _parser():
     return ap
 
 
+# ── clearcote cloud ──────────────────────────────────────────────────────────────────────────────
+# Output is part of the contract: tests/test_parity_cloud_cli.py runs the Node CLI against the same
+# fake API and compares stdout byte for byte. Change a line here, change it in cli-commands.ts too.
+
+def _dump(obj):
+    _out(json.dumps(obj, indent=2, ensure_ascii=False))
+
+
+def _s(v):
+    return "-" if v is None else str(v)
+
+
+def _eur(v, places):
+    return f"€{v:.{places}f}" if isinstance(v, (int, float)) and not isinstance(v, bool) else "-"
+
+
+def format_run(run):
+    """The human summary `clearcote cloud run` prints."""
+    lines = [f"run {_s(run.get('id'))} {_s(run.get('status'))}"]
+    r = run.get("result") or {}
+    if r.get("status"):
+        lines.append(f"result  {r['status']}" + (f": {r['detail']}" if r.get("detail") else ""))
+    if r.get("url"):
+        lines.append(f"url     {r['url']}")
+    if r.get("title"):
+        lines.append(f"title   {r['title']}")
+    if r.get("outputError"):
+        lines.append(f"output  error: {r['outputError']}")
+    elif r.get("output") is not None:
+        lines.append("output  " + json.dumps(r["output"], indent=2, ensure_ascii=False))
+    cost = run.get("costEur")
+    if isinstance(cost, dict) and cost.get("total") is not None:
+        lines.append(f"cost    {_eur(cost['total'], 4)}")
+    return lines
+
+
+def _session_line(s):
+    line = f"{_s(s.get('id'))}  {_s(s.get('status'))}  {_s(s.get('createdAt'))}  {_eur(s.get('costEur'), 4)}"
+    return line + (f"  {s['note']}" if s.get("note") else "")
+
+
+# A --secret argument is never echoed back, not even a malformed one: it may be the bare secret.
+SECRET_SHAPE = "--secret wants <name>=<value> (the argument given is not shown: it may hold the secret)"
+
+
+def _parse_pairs(values, flag):
+    out = []
+    for raw in values or []:
+        name, sep, value = raw.partition("=")
+        if not sep or not name.strip() or not value:
+            fail(SECRET_SHAPE if flag == "--secret" else f"{flag} wants <name>=<value>, got '{raw}'", 2)
+        out.append((name.strip(), value))
+    return out
+
+
+def _secret_args(argv):
+    """Every --secret argument on the command line (``--secret x`` and ``--secret=x``), so an
+    argument error can be kept from printing one. ``--secret name value`` (a space typed for the
+    ``=``) counts the word after the name too: that is the value."""
+    found = []
+    for i, tok in enumerate(argv):
+        if tok == "--secret" and i + 1 < len(argv):
+            found.append(argv[i + 1])
+            if "=" not in argv[i + 1] and i + 2 < len(argv):
+                found.append(argv[i + 2])
+        elif tok.startswith("--secret="):
+            found.append(tok[len("--secret="):])
+    return [s for raw in found for s in (raw, raw.partition("=")[2]) if s]
+
+
+def cloud_secrets(secret_args, domain_args):
+    """--secret name=value and --secret-domain name=host as the API's ``secrets`` object: a plain
+    string, or ``{value, domains}`` once a domain is given for that name."""
+    secrets = dict(_parse_pairs(secret_args, "--secret"))
+    domains = {}
+    for name, host in _parse_pairs(domain_args, "--secret-domain"):
+        if name not in secrets:
+            fail(f"--secret-domain {name}: there is no --secret {name}=...", 2)
+        domains.setdefault(name, []).append(host.strip().lower())
+    return {n: ({"value": v, "domains": domains[n]} if n in domains else v) for n, v in secrets.items()}
+
+
+# `clearcote cloud run` browser/run options that take a value. Each maps to the Runs.create keyword
+# of the same name (the Python launch kwargs): --timeout-sec -> timeout_sec -> timeoutSec, ...
+RUN_OPTION_FLAGS = ("--country", "--state", "--city", "--proxy", "--profile", "--fingerprint",
+                    "--timeout-sec", "--max-steps", "--note")
+
+
+def _whole(value, flag):
+    if value is None:
+        return None
+    if not (value.isascii() and value.isdigit()):
+        fail(f"{flag} wants a whole number, got '{value}'", 2)
+    return int(value)
+
+
+def cloud_run_options(a):
+    """The browser and run options of ``clearcote cloud run`` as Runs.create keywords (unset ones
+    left out). ``--profile NAME`` loads a cloud profile; with ``--persist-profile`` the run also
+    saves it back."""
+    if a.persist_profile and not a.profile:
+        fail("--persist-profile needs --profile <name>", 2)
+    opts = {
+        "country": a.country, "state": a.state, "city": a.city, "proxy": a.proxy,
+        "profile": ({"name": a.profile, "persist": True} if a.persist_profile else a.profile) if a.profile else None,
+        "fingerprint": a.fingerprint, "timeout_sec": _whole(a.timeout_sec, "--timeout-sec"),
+        "max_steps": _whole(a.max_steps, "--max-steps"), "note": a.note,
+        "handoff": True if a.handoff else None, "record": True if a.record else None,
+    }
+    return {k: v for k, v in opts.items() if v is not None}
+
+
+def _run_progress(view):
+    if view.get("status") == "waiting_for_human":
+        from .cloud import _announce_handoff
+        _announce_handoff(view)
+    else:
+        sys.stderr.write(f"[clearcote] run {view.get('id')}: {view.get('status')}\n")
+        sys.stderr.flush()
+
+
+def _cloud_parser():
+    ap = argparse.ArgumentParser(prog="clearcote cloud", add_help=False, allow_abbrev=False)
+    sub = ap.add_subparsers(dest="cmd")
+    run = sub.add_parser("run", add_help=False, allow_abbrev=False)
+    ap.run_parser = run  # parsed on its own: the task words may sit between the flags, as in Node
+    run.add_argument("task", nargs="+")
+    run.add_argument("--url")
+    run.add_argument("--schema")
+    run.add_argument("--secret", action="append")
+    run.add_argument("--secret-domain", action="append")
+    run.add_argument("--handoff", action="store_true")
+    run.add_argument("--record", action="store_true")
+    run.add_argument("--json", action="store_true")
+    for flag in RUN_OPTION_FLAGS:
+        run.add_argument(flag)
+    run.add_argument("--persist-profile", action="store_true")
+    sub.add_parser("sessions", add_help=False, allow_abbrev=False).add_argument("--json", action="store_true")
+    for name in ("stop", "events"):
+        p = sub.add_parser(name, add_help=False, allow_abbrev=False)
+        p.add_argument("id")
+        p.add_argument("--json", action="store_true")
+    rec = sub.add_parser("recording", add_help=False, allow_abbrev=False)
+    rec.add_argument("id")
+    rec.add_argument("-o", "--output")
+    rec.add_argument("--json", action="store_true")
+    prof = sub.add_parser("profile", add_help=False, allow_abbrev=False).add_subparsers(dest="action")
+    sync = prof.add_parser("sync", add_help=False, allow_abbrev=False)
+    sync.add_argument("name")
+    sync.add_argument("--from-profile")
+    sync.add_argument("--from-cdp")
+    sync.add_argument("--from-file")
+    sync.add_argument("--login")
+    sync.add_argument("--domain", action="append")
+    sync.add_argument("--all-domains", action="store_true")
+    sync.add_argument("--replace", action="store_true")
+    sync.add_argument("--json", action="store_true")
+    hooks = sub.add_parser("webhooks", add_help=False, allow_abbrev=False).add_subparsers(dest="action")
+    add = hooks.add_parser("add", add_help=False, allow_abbrev=False)
+    add.add_argument("url")
+    add.add_argument("--event", action="append")
+    add.add_argument("--json", action="store_true")
+    hooks.add_parser("list", add_help=False, allow_abbrev=False).add_argument("--json", action="store_true")
+    for name in ("rm", "test"):
+        p = hooks.add_parser(name, add_help=False, allow_abbrev=False)
+        p.add_argument("id")
+        p.add_argument("--json", action="store_true")
+    return ap
+
+
+def _no_exit(parser, secrets=()):
+    """argparse exits on its own; route every (nested) parser's errors through fail(..., 2), and
+    never let one print a --secret value ("unrecognized arguments: ..." lists raw arguments)."""
+    def _error(message):
+        if any(s in message for s in secrets):
+            message = "invalid arguments (not shown: they include a --secret value)"
+        fail(message, 2)
+    parser.error = _error
+    group = parser._subparsers
+    for action in (group._group_actions if group else []):
+        for sp in (getattr(action, "choices", None) or {}).values():
+            _no_exit(sp, secrets)
+
+
+def _cloud(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        _out(CLOUD_USAGE)
+        return 0
+    if argv[0] not in ("run", "sessions", "stop", "events", "recording", "profile", "webhooks"):
+        fail(f"unknown cloud command '{argv[0]}'. Run `clearcote cloud --help`.", 2)
+    parser = _cloud_parser()
+    _no_exit(parser, _secret_args(argv))
+    if argv[0] == "run":
+        a = parser.run_parser.parse_intermixed_args(argv[1:])
+        a.cmd = "run"
+    else:
+        a = parser.parse_args(argv)
+    if a.cmd in ("profile", "webhooks") and not getattr(a, "action", None):
+        fail(f"`clearcote cloud {a.cmd}` needs a subcommand. Run `clearcote cloud --help`.", 2)
+    if a.cmd == "profile":
+        sources = [s for s in (a.from_profile, a.from_cdp, a.from_file, a.login) if s]
+        if len(sources) != 1:
+            fail("profile sync needs exactly one of --from-profile, --from-cdp, --from-file or --login", 2)
+        if a.domain and a.all_domains:
+            fail("pass --domain or --all-domains, not both", 2)
+        if not a.domain and not a.all_domains:
+            fail("refusing to upload every cookie: pass --domain <domain> (repeatable, subdomains included) "
+                 "or --all-domains", 2)
+    secrets = cloud_secrets(a.secret, a.secret_domain) if a.cmd == "run" else None
+    run_options = cloud_run_options(a) if a.cmd == "run" else None
+    schema = None
+    if a.cmd == "run" and a.schema:
+        try:
+            with open(a.schema, encoding="utf-8") as fh:
+                schema = json.load(fh)
+        except (OSError, ValueError) as e:
+            fail(f"--schema {a.schema}: {e}", 2)
+
+    from .cloud import Cloud, CloudError
+    try:
+        cloud = Cloud()
+        return _cloud_command(cloud, a, secrets, schema, run_options)
+    except CloudError as e:
+        detail = f" (HTTP {e.status}{', ' + e.code if e.code else ''})" if e.status else ""
+        fail(f"{e.message}{detail}")
+    except ValueError as e:
+        fail(str(e))
+    return 1
+
+
+def _cloud_command(cloud, a, secrets, schema, run_options=None):
+    if a.cmd == "run":
+        run = cloud.runs.create(" ".join(a.task), url=a.url, schema=schema, secrets=secrets or None,
+                                on_update=_run_progress, **(run_options or {}))
+        if a.json:
+            _dump(run)
+        else:
+            for line in format_run(run):
+                _out(line)
+        return 0 if run.get("status") == "succeeded" else 1
+
+    if a.cmd == "sessions":
+        data = cloud.browsers.list()
+        if a.json:
+            _dump(data)
+            return 0
+        sessions = (data or {}).get("sessions") or []
+        for s in sessions:
+            _out(_session_line(s))
+        if not sessions:
+            _out("no sessions")
+        if (data or {}).get("balanceEur") is not None:
+            _out(f"balance {_eur(data['balanceEur'], 2)}")
+        return 0
+
+    if a.cmd == "stop":
+        view = cloud.browsers.stop(a.id)
+        if a.json:
+            _dump(view)
+        else:
+            _out(f"stopped {a.id} ({_s((view or {}).get('status'))})")
+        return 0
+
+    if a.cmd == "events":
+        events, after = [], 0
+        while True:
+            page = cloud.browsers.events(a.id, after=after) or {}
+            batch = page.get("events") or []
+            events.extend(batch)
+            nxt = page.get("next")
+            if not batch or nxt is None or nxt == after:
+                break
+            after = nxt
+        if a.json:
+            _dump({"events": events})
+            return 0
+        for e in events:
+            data = e.get("data")
+            extra = ("  " + json.dumps(data, ensure_ascii=False, separators=(",", ":"))) if data else ""
+            _out(f"{_s(e.get('seq'))}  {_s(e.get('at'))}  {_s(e.get('type'))}{extra}")
+        if not events:
+            _out("no events")
+        return 0
+
+    if a.cmd == "recording":
+        path = a.output or f"{a.id}.mp4"
+        cloud.browsers.download_recording(a.id, path)
+        size = os.path.getsize(path)
+        if a.json:
+            _dump({"path": path, "bytes": size})
+        else:
+            _out(f"saved {path} ({size} bytes)")
+        return 0
+
+    if a.cmd == "profile":
+        res = cloud.profiles.sync(a.name, from_profile=a.from_profile, from_cdp=a.from_cdp,
+                                  from_file=a.from_file, login_url=a.login, domains=a.domain,
+                                  all_domains=a.all_domains, replace=a.replace) or {}
+        if a.json:
+            _dump(res)
+            return 0
+        _out(f"imported {_s(res.get('imported'))} cookies into profile {res.get('name') or a.name} "
+             f"({_s(res.get('cookies'))} in total)")
+        if res.get("domains"):
+            _out("domains  " + ", ".join(res["domains"]))
+        return 0
+
+    # webhooks
+    if a.action == "add":
+        res = cloud.webhooks.create(a.url, events=a.event) or {}
+        if a.json:
+            _dump(res)
+            return 0
+        _out(f"webhook {_s(res.get('id'))} -> {_s(res.get('url'))}")
+        _out("events  " + (", ".join(res.get("events") or []) or "all except ping"))
+        _out(f"secret  {_s(res.get('secret'))}")
+        _out("store the secret now: it is not shown again")
+        return 0
+    if a.action == "list":
+        data = cloud.webhooks.list() or {}
+        if a.json:
+            _dump(data)
+            return 0
+        hooks = data.get("webhooks") or []
+        for h in hooks:
+            ld = h.get("lastDelivery")
+            last = f"  last {_s(ld.get('status'))} {_s(ld.get('at'))}" if ld else ""
+            _out(f"{_s(h.get('id'))}  {_s(h.get('url'))}  {','.join(h.get('events') or []) or 'all'}{last}")
+        if not hooks:
+            _out("no webhooks")
+        return 0
+    res = cloud.webhooks.delete(a.id) if a.action == "rm" else cloud.webhooks.test(a.id)
+    if a.json:
+        _dump(res)
+    else:
+        _out(f"removed {a.id}" if a.action == "rm" else f"sent a ping to {a.id}")
+    return 0
+
+
 def _run(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
         _out(usage())
@@ -306,6 +679,8 @@ def _run(argv):
     if argv[0] in ("version", "--version"):
         _out(_sdk_version())
         return 0
+    if argv[0] == "cloud":
+        return _cloud(argv[1:])
     known = ("info", "doctor", "install", "update", "clear-cache", "login", "logout", "serve")
     if argv[0] not in known:
         fail(f"unknown command '{argv[0]}'. Run `clearcote --help`.", 2)

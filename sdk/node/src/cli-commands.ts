@@ -7,6 +7,7 @@
 //   clearcote login   [key]                                 save a licence key (validated first)
 //   clearcote logout                                        remove the saved key
 //   clearcote serve   [--port 9222] [--idle-timeout 300] …  multi-identity CDP endpoint
+//   clearcote cloud   run|sessions|stop|events|recording|profile sync|webhooks …  the hosted API
 //
 // `info` never downloads: it reports what is already cached and what a launch would resolve to.
 
@@ -35,6 +36,7 @@ import { defaultCacheRoot, listCachedBuilds } from "./download.js";
 import { geoCacheRoot } from "./geoip.js";
 import { GATED_ENGINE_SWITCHES } from "./launchopts.js";
 import { toProxySpec } from "./net.js";
+import { Cloud, CloudError, announceHandoff, type Json, type RunOptions } from "./cloud.js";
 
 const SDK_VERSION: string = (() => {
   try {
@@ -57,6 +59,10 @@ USAGE
                   [--max-browsers 16] [--allow-origin <origin>]... [--allow-host <name>]... [--headed]
                   [--fingerprint <seed>] [--platform <os>] [--proxy <url>] [--timezone <tz>]
                   [--accept-language <l>] [--geoip]
+  clearcote cloud run <task> [--url <url>] [--schema <file.json>] [--secret <name>=<value>]... [--json]
+  clearcote cloud sessions | stop <id> | events <id> | recording <id> [-o <file.mp4>]
+  clearcote cloud profile sync <name> (--from-profile <dir> | --from-cdp <url> | --from-file <file> | --login <url>)
+  clearcote cloud webhooks add <url> | list | rm <id> | test <id>      (all flags: clearcote cloud --help)
 
 INFO FLAGS
   --quick          skip everything that needs the network or a launch (seat count, launch test)
@@ -65,7 +71,34 @@ INFO FLAGS
 
 ENVIRONMENT
   CLEARCOTE_LICENSE_KEY, CLEARCOTE_RELEASE_CHANNEL, CLEARCOTE_GEOIP_TIMEOUT_SECONDS,
-  CLEARCOTE_LICENSE_THROUGH_PROXY, CLEARCOTE_BINARY, CLEARCOTE_CACHE, CLEARCOTE_SERVE_IDLE_TIMEOUT`;
+  CLEARCOTE_LICENSE_THROUGH_PROXY, CLEARCOTE_BINARY, CLEARCOTE_CACHE, CLEARCOTE_SERVE_IDLE_TIMEOUT,
+  CLEARCOTE_API_KEY, CLEARCOTE_API_URL, CLEARCOTE_CLOUD`;
+
+/** `clearcote cloud --help`. Kept byte-identical to CLOUD_USAGE in the Python SDK's _commands.py. */
+export const CLOUD_USAGE = `clearcote cloud -- the hosted Clearcote API from the command line.
+
+USAGE
+  clearcote cloud run <task> [--url <url>] [--schema <file.json>] [--secret <name>=<value>]...
+                      [--secret-domain <name>=<host>]... [--handoff] [--record] [--json]
+                      [--country <cc>] [--state <s>] [--city <c>] [--proxy managed|<url>]
+                      [--profile <name> [--persist-profile]] [--fingerprint <seed>]
+                      [--timeout-sec <n>] [--max-steps <n>] [--note <text>]
+  clearcote cloud sessions [--json]
+  clearcote cloud stop <id> [--json]
+  clearcote cloud events <id> [--json]
+  clearcote cloud recording <id> [-o <file.mp4>] [--json]
+  clearcote cloud profile sync <name> (--from-profile <dir> | --from-cdp <url> | --from-file <state.json>
+                      | --login <url>) (--domain <domain>... | --all-domains) [--replace] [--json]
+  clearcote cloud webhooks add <url> [--event <type>]... [--json]
+  clearcote cloud webhooks list [--json]
+  clearcote cloud webhooks rm <id> [--json]
+  clearcote cloud webhooks test <id> [--json]
+
+  run waits for the result and exits 0 only when the run succeeded. profile sync uploads only the
+  cookies of the --domain names you list (subdomains included); --all-domains uploads every cookie.
+
+ENVIRONMENT
+  CLEARCOTE_API_KEY (required), CLEARCOTE_API_URL (default https://www.clearcotelabs.com)`;
 
 function out(line = ""): void {
   process.stdout.write(line + "\n");
@@ -153,7 +186,8 @@ export async function buildInfo(flags: { quick?: boolean; proxy?: string }): Pro
     report.launch = { tested: false, reason: "no binary installed — run: clearcote install" };
   } else {
     try {
-      const b = await launch({ executablePath: pick.path, headless: true, quiet: true, ephemeralProfile: false });
+      // cloud: false — this tests the LOCAL install, whatever CLEARCOTE_CLOUD says.
+      const b = await launch({ executablePath: pick.path, headless: true, quiet: true, ephemeralProfile: false, cloud: false });
       const version = b.version();
       await b.close();
       report.launch = { tested: true, ok: true, version };
@@ -235,6 +269,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
   if (cmd === "version" || cmd === "--version") {
     out(SDK_VERSION);
+    return;
+  }
+
+  if (cmd === "cloud") {
+    const code = await cloudMain(rest);
+    if (code) process.exitCode = code;
     return;
   }
 
@@ -349,6 +389,296 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 
   fail(`unknown command '${cmd}'. Run \`clearcote --help\`.`, 2);
+}
+
+// ── clearcote cloud ────────────────────────────────────────────────────────────────────────────────
+// Output is part of the contract: the Python SDK's tests/test_parity_cloud_cli.py runs this CLI and
+// the Python one against the same fake API and compares stdout byte for byte. Change a line here,
+// change it in _commands.py too.
+
+/** A usage error inside `clearcote cloud`: message already on stderr, exit with `code`. */
+class CloudCliExit extends Error {
+  constructor(readonly code: number) {
+    super(`exit ${code}`);
+  }
+}
+
+function cloudFail(msg: string, code = 1): never {
+  process.stderr.write(`clearcote: ${msg}\n`);
+  throw new CloudCliExit(code);
+}
+
+const dump = (obj: unknown) => out(JSON.stringify(obj, null, 2));
+const str = (v: unknown) => (v === null || v === undefined ? "-" : String(v));
+const eur = (v: unknown, places: number) => (typeof v === "number" ? `€${v.toFixed(places)}` : "-");
+
+/** The human summary `clearcote cloud run` prints. */
+export function formatRun(run: Json): string[] {
+  const lines = [`run ${str(run?.id)} ${str(run?.status)}`];
+  const r = run?.result ?? {};
+  if (r.status) lines.push(`result  ${r.status}${r.detail ? `: ${r.detail}` : ""}`);
+  if (r.url) lines.push(`url     ${r.url}`);
+  if (r.title) lines.push(`title   ${r.title}`);
+  if (r.outputError) lines.push(`output  error: ${r.outputError}`);
+  else if (r.output !== undefined && r.output !== null) lines.push(`output  ${JSON.stringify(r.output, null, 2)}`);
+  const cost = run?.costEur;
+  if (cost && typeof cost === "object" && cost.total !== undefined && cost.total !== null) lines.push(`cost    ${eur(cost.total, 4)}`);
+  return lines;
+}
+
+function sessionLine(s: Json): string {
+  const line = `${str(s?.id)}  ${str(s?.status)}  ${str(s?.createdAt)}  ${eur(s?.costEur, 4)}`;
+  return line + (s?.note ? `  ${s.note}` : "");
+}
+
+// A --secret argument is never echoed back, not even a malformed one: it may be the bare secret.
+const SECRET_SHAPE = "--secret wants <name>=<value> (the argument given is not shown: it may hold the secret)";
+
+function parsePairs(values: string[] | undefined, flag: string): Array<[string, string]> {
+  return (values ?? []).map((raw) => {
+    const i = raw.indexOf("=");
+    const name = i < 0 ? "" : raw.slice(0, i).trim();
+    const value = i < 0 ? "" : raw.slice(i + 1);
+    if (!name || !value) cloudFail(flag === "--secret" ? SECRET_SHAPE : `${flag} wants <name>=<value>, got '${raw}'`, 2);
+    return [name, value];
+  });
+}
+
+/** --secret name=value and --secret-domain name=host as the API's `secrets` object: a plain string,
+ * or { value, domains } once a domain is given for that name. */
+export function cloudSecrets(secretArgs?: string[], domainArgs?: string[]): Record<string, unknown> {
+  const secrets = new Map(parsePairs(secretArgs, "--secret"));
+  const domains = new Map<string, string[]>();
+  for (const [name, host] of parsePairs(domainArgs, "--secret-domain")) {
+    if (!secrets.has(name)) cloudFail(`--secret-domain ${name}: there is no --secret ${name}=...`, 2);
+    domains.set(name, [...(domains.get(name) ?? []), host.trim().toLowerCase()]);
+  }
+  return Object.fromEntries([...secrets].map(([n, v]) => [n, domains.has(n) ? { value: v, domains: domains.get(n) } : v]));
+}
+
+// `clearcote cloud run` browser/run options that take a value, mapped to the Runs.create option of the
+// same meaning (the Python launch kwargs): --timeout-sec -> timeoutSec, --max-steps -> maxSteps, ...
+const RUN_OPTION_FLAGS = ["country", "state", "city", "proxy", "profile", "fingerprint", "timeout-sec", "max-steps", "note"];
+
+function whole(value: string | undefined, flag: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[0-9]+$/.test(value)) cloudFail(`${flag} wants a whole number, got '${value}'`, 2);
+  return Number(value);
+}
+
+/** The browser and run options of `clearcote cloud run` (unset ones left out). --profile NAME loads a
+ * cloud profile; with --persist-profile the run also saves it back. */
+export function cloudRunOptions(v: Record<string, Json>): Record<string, unknown> {
+  if (v["persist-profile"] && !v.profile) cloudFail("--persist-profile needs --profile <name>", 2);
+  const opts: Record<string, unknown> = {
+    country: v.country, state: v.state, city: v.city, proxy: v.proxy,
+    profile: v.profile ? (v["persist-profile"] ? { name: v.profile, persist: true } : v.profile) : undefined,
+    fingerprint: v.fingerprint, timeoutSec: whole(v["timeout-sec"], "--timeout-sec"),
+    maxSteps: whole(v["max-steps"], "--max-steps"), note: v.note,
+    handoff: v.handoff ? true : undefined, record: v.record ? true : undefined,
+  };
+  return Object.fromEntries(Object.entries(opts).filter(([, x]) => x !== undefined));
+}
+
+function runProgress(view: Json): void {
+  if (view?.status === "waiting_for_human") announceHandoff(view);
+  else process.stderr.write(`[clearcote] run ${view?.id}: ${view?.status}\n`);
+}
+
+type ParseOpts = Record<string, { type: "string" | "boolean"; multiple?: boolean; short?: string }>;
+
+function parse(args: string[], options: ParseOpts, positionals: number, what: string): { values: Record<string, Json>; pos: string[] } {
+  let r;
+  try {
+    r = parseArgs({ args, options: { ...options, json: { type: "boolean" } }, allowPositionals: true, strict: true });
+  } catch (e) {
+    cloudFail((e as Error).message, 2);
+  }
+  if (positionals >= 0 ? r.positionals.length !== positionals : r.positionals.length < 1) {
+    cloudFail(`\`clearcote cloud ${what}\`: wrong arguments. Run \`clearcote cloud --help\`.`, 2);
+  }
+  return { values: r.values as Record<string, Json>, pos: r.positionals };
+}
+
+/** `clearcote cloud …`: resolves to the exit code (0 ok, 1 failed, 2 usage). Never exits itself. */
+export async function cloudMain(argv: string[]): Promise<number> {
+  try {
+    return await cloudCommand(argv);
+  } catch (e) {
+    if (e instanceof CloudCliExit) return e.code;
+    if (e instanceof CloudError) {
+      process.stderr.write(`clearcote: ${e.message}${e.status ? ` (HTTP ${e.status}${e.code ? `, ${e.code}` : ""})` : ""}\n`);
+      return 1;
+    }
+    process.stderr.write(`clearcote: ${(e as Error)?.message ?? String(e)}\n`);
+    return 1;
+  }
+}
+
+async function cloudCommand(argv: string[]): Promise<number> {
+  const [cmd, ...rest] = argv;
+  if (!cmd || cmd === "-h" || cmd === "--help" || cmd === "help") {
+    out(CLOUD_USAGE);
+    return 0;
+  }
+  if (!["run", "sessions", "stop", "events", "recording", "profile", "webhooks"].includes(cmd)) {
+    cloudFail(`unknown cloud command '${cmd}'. Run \`clearcote cloud --help\`.`, 2);
+  }
+  if ((cmd === "profile" || cmd === "webhooks") && !rest[0]) {
+    cloudFail(`\`clearcote cloud ${cmd}\` needs a subcommand. Run \`clearcote cloud --help\`.`, 2);
+  }
+
+  if (cmd === "run") {
+    const { values: v, pos } = parse(rest, {
+      url: { type: "string" }, schema: { type: "string" }, secret: { type: "string", multiple: true },
+      "secret-domain": { type: "string", multiple: true }, handoff: { type: "boolean" }, record: { type: "boolean" },
+      ...Object.fromEntries(RUN_OPTION_FLAGS.map((f) => [f, { type: "string" as const }])),
+      "persist-profile": { type: "boolean" },
+    }, -1, "run");
+    const secrets = cloudSecrets(v.secret, v["secret-domain"]);
+    const runOptions = cloudRunOptions(v);
+    let schema: Json;
+    if (v.schema) {
+      try {
+        schema = JSON.parse(readFileSync(v.schema, "utf8"));
+      } catch (e) {
+        cloudFail(`--schema ${v.schema}: ${(e as Error).message}`, 2);
+      }
+    }
+    const cloud = new Cloud();
+    const run = await cloud.runs.create(pos.join(" "), {
+      url: v.url, schema, secrets: Object.keys(secrets).length ? (secrets as RunOptions["secrets"]) : undefined,
+      ...(runOptions as RunOptions), onUpdate: runProgress,
+    });
+    if (v.json) dump(run);
+    else formatRun(run).forEach((l) => out(l));
+    return run?.status === "succeeded" ? 0 : 1;
+  }
+
+  if (cmd === "sessions") {
+    const { values: v } = parse(rest, {}, 0, "sessions");
+    const data = (await new Cloud().browsers.list()) ?? {};
+    if (v.json) {
+      dump(data);
+      return 0;
+    }
+    const sessions: Json[] = data.sessions ?? [];
+    for (const s of sessions) out(sessionLine(s));
+    if (!sessions.length) out("no sessions");
+    if (data.balanceEur !== undefined && data.balanceEur !== null) out(`balance ${eur(data.balanceEur, 2)}`);
+    return 0;
+  }
+
+  if (cmd === "stop") {
+    const { values: v, pos } = parse(rest, {}, 1, "stop");
+    const view = await new Cloud().browsers.stop(pos[0]);
+    if (v.json) dump(view);
+    else out(`stopped ${pos[0]} (${str(view?.status)})`);
+    return 0;
+  }
+
+  if (cmd === "events") {
+    const { values: v, pos } = parse(rest, {}, 1, "events");
+    const cloud = new Cloud();
+    const events: Json[] = [];
+    let after = 0;
+    for (;;) {
+      const page = (await cloud.browsers.events(pos[0], { after })) ?? {};
+      const batch: Json[] = page.events ?? [];
+      events.push(...batch);
+      const next = page.next;
+      if (!batch.length || next === null || next === undefined || next === after) break;
+      after = next;
+    }
+    if (v.json) {
+      dump({ events });
+      return 0;
+    }
+    for (const e of events) {
+      const data = e?.data;
+      const extra = data && Object.keys(data).length ? `  ${JSON.stringify(data)}` : "";
+      out(`${str(e?.seq)}  ${str(e?.at)}  ${str(e?.type)}${extra}`);
+    }
+    if (!events.length) out("no events");
+    return 0;
+  }
+
+  if (cmd === "recording") {
+    const { values: v, pos } = parse(rest, { output: { type: "string", short: "o" } }, 1, "recording");
+    const path = v.output || `${pos[0]}.mp4`;
+    await new Cloud().browsers.downloadRecording(pos[0], path);
+    const size = statSync(path).size;
+    if (v.json) dump({ path, bytes: size });
+    else out(`saved ${path} (${size} bytes)`);
+    return 0;
+  }
+
+  if (cmd === "profile") {
+    if (rest[0] !== "sync") cloudFail(`unknown profile command '${rest[0]}'. Run \`clearcote cloud --help\`.`, 2);
+    const { values: v, pos } = parse(rest.slice(1), {
+      "from-profile": { type: "string" }, "from-cdp": { type: "string" }, "from-file": { type: "string" },
+      login: { type: "string" }, domain: { type: "string", multiple: true }, "all-domains": { type: "boolean" },
+      replace: { type: "boolean" },
+    }, 1, "profile sync");
+    const sources = [v["from-profile"], v["from-cdp"], v["from-file"], v.login].filter(Boolean);
+    if (sources.length !== 1) cloudFail("profile sync needs exactly one of --from-profile, --from-cdp, --from-file or --login", 2);
+    if (v.domain?.length && v["all-domains"]) cloudFail("pass --domain or --all-domains, not both", 2);
+    if (!v.domain?.length && !v["all-domains"]) {
+      cloudFail("refusing to upload every cookie: pass --domain <domain> (repeatable, subdomains included) or --all-domains", 2);
+    }
+    const res = (await new Cloud().profiles.sync(pos[0], {
+      fromProfile: v["from-profile"], fromCdp: v["from-cdp"], fromFile: v["from-file"], loginUrl: v.login,
+      domains: v.domain, allDomains: !!v["all-domains"], replace: !!v.replace,
+    })) ?? {};
+    if (v.json) {
+      dump(res);
+      return 0;
+    }
+    out(`imported ${str(res.imported)} cookies into profile ${res.name || pos[0]} (${str(res.cookies)} in total)`);
+    if (res.domains?.length) out(`domains  ${res.domains.join(", ")}`);
+    return 0;
+  }
+
+  // webhooks
+  const action = rest[0];
+  if (action === "add") {
+    const { values: v, pos } = parse(rest.slice(1), { event: { type: "string", multiple: true } }, 1, "webhooks add");
+    const res = (await new Cloud().webhooks.create(pos[0], { events: v.event })) ?? {};
+    if (v.json) {
+      dump(res);
+      return 0;
+    }
+    out(`webhook ${str(res.id)} -> ${str(res.url)}`);
+    out(`events  ${(res.events ?? []).join(", ") || "all except ping"}`);
+    out(`secret  ${str(res.secret)}`);
+    out("store the secret now: it is not shown again");
+    return 0;
+  }
+  if (action === "list") {
+    const { values: v } = parse(rest.slice(1), {}, 0, "webhooks list");
+    const data = (await new Cloud().webhooks.list()) ?? {};
+    if (v.json) {
+      dump(data);
+      return 0;
+    }
+    const hooks: Json[] = data.webhooks ?? [];
+    for (const h of hooks) {
+      const ld = h?.lastDelivery;
+      const last = ld ? `  last ${str(ld.status)} ${str(ld.at)}` : "";
+      out(`${str(h?.id)}  ${str(h?.url)}  ${(h?.events ?? []).join(",") || "all"}${last}`);
+    }
+    if (!hooks.length) out("no webhooks");
+    return 0;
+  }
+  if (action === "rm" || action === "test") {
+    const { values: v, pos } = parse(rest.slice(1), {}, 1, `webhooks ${action}`);
+    const cloud = new Cloud();
+    const res = action === "rm" ? await cloud.webhooks.delete(pos[0]) : await cloud.webhooks.test(pos[0]);
+    if (v.json) dump(res);
+    else out(action === "rm" ? `removed ${pos[0]}` : `sent a ping to ${pos[0]}`);
+    return 0;
+  }
+  return cloudFail(`unknown webhooks command '${action}'. Run \`clearcote cloud --help\`.`, 2);
 }
 
 /** `--proxy scheme://user:pass@host:port` as a launch proxy option with the credentials split out. */

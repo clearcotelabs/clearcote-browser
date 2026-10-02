@@ -51,7 +51,7 @@ function captureStdout(): { text: () => string } {
 
 describe("clearcote CLI", () => {
   it("documents every command and the info flags", () => {
-    for (const c of ["install", "info", "doctor", "update", "clear-cache", "login", "logout", "serve", "--quick", "--json", "--proxy"]) {
+    for (const c of ["install", "info", "doctor", "update", "clear-cache", "login", "logout", "serve", "cloud", "--quick", "--json", "--proxy"]) {
       expect(USAGE).toContain(c);
     }
   });
