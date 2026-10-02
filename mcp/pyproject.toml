@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clearcote-mcp"
-version = "0.1.1"
+version = "0.1.2"
 description = "MCP server for Clearcote — drive the open-source stealth Chromium from Claude Desktop, Cursor, Cline, and any MCP client."
 readme = "README.md"
 requires-python = ">=3.10"

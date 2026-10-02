@@ -1,6 +1,6 @@
 {
   "name": "clearcote-mcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP server for Clearcote — drive the open-source stealth Chromium from Claude Desktop, Cursor, Cline, and any MCP client.",
   "bin": { "clearcote-mcp": "cli.js" },
   "files": ["cli.js", "README.md"],
