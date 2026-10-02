@@ -12,6 +12,7 @@ URL; pass ``url`` to any read/act tool to navigate first.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 
@@ -180,7 +181,20 @@ class ClearcoteBrowser:
     # ── capture ──────────────────────────────────────────────────────────────
     async def screenshot(self, path: str, url: str | None = None, full_page: bool = True) -> dict:
         pg = await self._pg(url)
-        await pg.screenshot(path=path, full_page=full_page)
+        # Raw CDP, not pg.screenshot(): Playwright prepares the page first (by default an inline caret-color on every
+        # input, textarea and contenteditable, set and then restored), DOM changes the page can observe.
+        cdp = await self._ctx.new_cdp_session(pg)
+        try:
+            params = {"format": "png"}
+            if full_page:
+                size = (await cdp.send("Page.getLayoutMetrics"))["cssContentSize"]
+                params.update(captureBeyondViewport=True,
+                              clip={"x": 0, "y": 0, "width": size["width"], "height": size["height"], "scale": 1})
+            shot = await cdp.send("Page.captureScreenshot", params)
+        finally:
+            await cdp.detach()
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(shot["data"]))
         return {"status": "ok", "url": pg.url, "path": path}
 
     async def save_pdf(self, path: str, url: str | None = None) -> dict:
