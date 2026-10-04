@@ -484,10 +484,10 @@ def _prepare(kwargs):
     base += quic_args(proxy_opt)  # behind a proxy, disable QUIC so no HTTP/3 UDP egresses around it
     # Opt-in: relay WebRTC UDP through the proxy rather than denying it outright.
     base += socks5_udp_args(socks5_udp, proxy_opt)
-    # Linux hosts hide navigator.bluetooth while exposing usb/serial/hid — an OS-origin tell on a
-    # Windows persona. Restore it there, and NOT under a Linux claim, where genuine Chrome has no
-    # navigator.bluetooth either (measured against genuine 154). Keyed on what the page is told it
-    # is, not on the host. No-op off Linux. See web_bluetooth_args.
+    # navigator.bluetooth must follow the CLAIM, in both directions: a Linux build hides it while
+    # exposing usb/serial/hid (an OS-origin tell on a Windows persona), and a Windows build shows
+    # it under a Linux claim, which genuine Chrome on Linux does not. The host is never consulted;
+    # whichever switch agrees with this build's default is a no-op. See web_bluetooth_args.
     base += web_bluetooth_args(persona_platform(fp))
     if disable_privacy_sandbox:
         base += privacy_sandbox_args()

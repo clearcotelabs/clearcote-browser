@@ -456,9 +456,10 @@ function assembleArgs(
   socks5Udp?: boolean,
   extra?: { exe?: string; headed?: boolean; quiet?: boolean; allowThirdPartyCookies?: boolean; transparentProxy?: boolean },
 ): string[] {
-  // webBluetoothArgs: Linux hosts hide navigator.bluetooth while exposing usb/serial/hid, an
-  // OS-origin tell on a Windows persona — but a LINUX claim must not have it either (genuine
-  // Chrome 154 on Linux has none). Keyed on what the page is told it is. No-op off Linux.
+  // webBluetoothArgs: navigator.bluetooth must follow the CLAIM, in both directions. A Linux
+  // build hides it while exposing usb/serial/hid (an OS-origin tell on a Windows persona); a
+  // Windows build shows it under a LINUX claim, which genuine Chrome 154 on Linux does not. The
+  // host is never consulted; whichever switch agrees with this build's default is a no-op.
   const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic), ...socks5UdpArgs(socks5Udp, proxyForQuic),
     ...webBluetoothArgs(
       fpArgs.find((a) => a.startsWith("--fingerprint-platform="))?.slice("--fingerprint-platform=".length),

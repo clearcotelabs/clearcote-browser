@@ -228,37 +228,44 @@ describe("resolveProxy", () => {
 
 
 // --------------------------------------------------------------------------- web bluetooth
-// Web Bluetooth is compiled in but runtime-disabled on Linux only, so a Linux host serving a
-// Windows persona exposed navigator.usb/serial/hid but not navigator.bluetooth -- a combination
-// no real Windows Chrome produces. The flag restores it; off Linux it must stay a no-op.
-// It is keyed on the CLAIMED platform: under a LINUX claim genuine Chrome 154 has no
-// navigator.bluetooth either (measured 2026-10-04), so adding it there is a tell the other way.
+// Web Bluetooth is compiled in but its DEFAULT follows the build platform, so the same persona is
+// a tell in opposite directions depending on which build is running: a Linux build serving a
+// Windows persona exposed navigator.usb/serial/hid but not navigator.bluetooth (a combination no
+// real Windows Chrome produces), while a Windows build under a LINUX claim exposes
+// navigator.bluetooth, which genuine Chrome 154 on Linux does not have (measured 2026-10-04).
+// The switch is therefore derived from the CLAIM alone, on every host.
 describe("webBluetoothArgs", () => {
   const realPlatform = process.platform;
   const setPlatform = (p: string) =>
     Object.defineProperty(process, "platform", { value: p, configurable: true });
   afterEach(() => setPlatform(realPlatform));
 
-  it("emits the flag on linux for a desktop claim", () => {
-    setPlatform("linux");
-    for (const claimed of ["windows", "macos", "android", "chromeos"]) {
-      expect(webBluetoothArgs(claimed)).toEqual(["--enable-features=WebBluetooth"]);
-    }
-  });
-
-  it("withholds the flag under a linux claim", () => {
-    setPlatform("linux");
-    expect(webBluetoothArgs("linux")).toEqual([]);
-    expect(webBluetoothArgs()).toEqual([]); // bare call is conservative: host claims linux
-  });
-
-  it("is a no-op off linux", () => {
-    for (const p of ["win32", "darwin"]) {
+  it("enables for a desktop claim on every host", () => {
+    for (const p of ["linux", "win32", "darwin"]) {
       setPlatform(p);
-      for (const claimed of [undefined, "windows", "linux"]) {
-        expect(webBluetoothArgs(claimed)).toEqual([]);
+      for (const claimed of ["windows", "macos", "android", "chromeos"]) {
+        expect(webBluetoothArgs(claimed)).toEqual(["--enable-features=WebBluetooth"]);
       }
     }
+  });
+
+  // Withholding the ENABLE switch is not enough off Linux: measured on the r30 Windows build,
+  // `'bluetooth' in navigator` was still true under a Linux claim until --disable-features landed,
+  // because that build ships the feature stable.
+  it("disables under a linux claim on every host", () => {
+    for (const p of ["linux", "win32", "darwin"]) {
+      setPlatform(p);
+      expect(webBluetoothArgs("linux")).toEqual(["--disable-features=WebBluetooth"]);
+    }
+  });
+
+  // A bare call means no persona switches, so the page sees the real host OS and the switch has to
+  // agree with THAT, not with the build's default.
+  it("follows the host on a bare call", () => {
+    setPlatform("linux");
+    expect(webBluetoothArgs()).toEqual(["--disable-features=WebBluetooth"]);
+    setPlatform("win32");
+    expect(webBluetoothArgs()).toEqual(["--enable-features=WebBluetooth"]);
   });
 
   it("folds into a single --enable-features", () => {
@@ -271,6 +278,19 @@ describe("webBluetoothArgs", () => {
     expect(enables).toHaveLength(1);
     expect(enables[0]).toContain("WebBluetooth");
     expect(enables[0]).toContain("SomethingElse");
+  });
+
+  // Same hazard on the other side: Chromium honours only the LAST --disable-features too.
+  it("folds into a single --disable-features", () => {
+    setPlatform("win32");
+    const merged = mergeFeatureFlags([
+      ...webBluetoothArgs("linux"),
+      "--disable-features=SomethingElse",
+    ]);
+    const disables = merged.filter((a) => a.startsWith("--disable-features="));
+    expect(disables).toHaveLength(1);
+    expect(disables[0]).toContain("WebBluetooth");
+    expect(disables[0]).toContain("SomethingElse");
   });
 });
 

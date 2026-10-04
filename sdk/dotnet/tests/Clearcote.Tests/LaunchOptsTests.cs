@@ -191,36 +191,42 @@ public class LaunchOptsTests
     }
 
     // ----------------------------------------------------------------- web bluetooth
-    // Web Bluetooth is compiled in but runtime-disabled on Linux only, so a Linux host serving
-    // a Windows persona exposed navigator.usb/serial/hid but not navigator.bluetooth -- a
-    // combination no real Windows Chrome produces. It is keyed on the CLAIMED platform: under a
-    // LINUX claim genuine Chrome 154 has no navigator.bluetooth either (measured 2026-10-04), so
-    // adding it there is a tell in the opposite direction. The HOST check is still
-    // RuntimeInformation, so assert against the host this test actually runs on.
+    // Web Bluetooth is compiled in but its DEFAULT follows the build platform, so the same persona
+    // is a tell in opposite directions depending on which build is running: a Linux build serving
+    // a Windows persona exposed navigator.usb/serial/hid but not navigator.bluetooth (a
+    // combination no real Windows Chrome produces), while a Windows build under a LINUX claim
+    // exposes navigator.bluetooth, which genuine Chrome 154 on Linux does not have (measured
+    // 2026-10-04). The switch is derived from the CLAIM alone, so unlike the earlier version of
+    // these tests the HOST no longer enters into it and the assertions are unconditional.
     [Fact]
-    public void WebBluetoothArgs_EmittedForADesktopClaimOnLinux()
+    public void WebBluetoothArgs_EnabledForADesktopClaimOnEveryHost()
     {
-        var linux = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
-            System.Runtime.InteropServices.OSPlatform.Linux);
         foreach (var claimed in new[] { "windows", "macos", "android", "chromeos" })
-        {
-            var args = LaunchOpts.WebBluetoothArgs(claimed);
-            if (linux)
-                Assert.Equal(new[] { "--enable-features=WebBluetooth" }, args);
-            else
-                Assert.Empty(args);
-        }
+            Assert.Equal(new[] { "--enable-features=WebBluetooth" },
+                         LaunchOpts.WebBluetoothArgs(claimed));
     }
 
     [Fact]
-    public void WebBluetoothArgs_WithheldUnderALinuxClaim()
+    public void WebBluetoothArgs_DisabledUnderALinuxClaimOnEveryHost()
     {
-        // genuine Chrome 154 on Linux exposes no navigator.bluetooth at all
-        Assert.Empty(LaunchOpts.WebBluetoothArgs("linux"));
-        // a bare call stays conservative: on a Linux host that means claiming Linux
-        if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
-                System.Runtime.InteropServices.OSPlatform.Linux))
-            Assert.Empty(LaunchOpts.WebBluetoothArgs());
+        // Genuine Chrome 154 on Linux exposes no navigator.bluetooth at all. Withholding the
+        // ENABLE switch is not enough off Linux: measured on the r30 Windows build,
+        // 'bluetooth' in navigator was still true under a Linux claim until --disable-features
+        // landed, because that build ships the feature stable.
+        Assert.Equal(new[] { "--disable-features=WebBluetooth" },
+                     LaunchOpts.WebBluetoothArgs("linux"));
+    }
+
+    [Fact]
+    public void WebBluetoothArgs_BareCallFollowsTheHost()
+    {
+        // No claim means no persona switches, so the page sees the real host OS and the switch has
+        // to agree with THAT. Assert against the host this test actually runs on.
+        var expected = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+                           System.Runtime.InteropServices.OSPlatform.Linux)
+            ? "--disable-features=WebBluetooth"
+            : "--enable-features=WebBluetooth";
+        Assert.Equal(new[] { expected }, LaunchOpts.WebBluetoothArgs());
     }
 
     [Fact]
@@ -236,10 +242,21 @@ public class LaunchOptsTests
         var enables = merged.FindAll(a => a.StartsWith("--enable-features="));
         Assert.Single(enables);
         Assert.Contains("SomethingElse", enables[0]);
-        if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
-                System.Runtime.InteropServices.OSPlatform.Linux))
+        Assert.Contains("WebBluetooth", enables[0]);
+    }
+
+    [Fact]
+    public void WebBluetoothArgs_FoldIntoSingleDisableFeatures()
+    {
+        // Same hazard on the other side: only the LAST --disable-features is honoured.
+        var input = new List<string>(LaunchOpts.WebBluetoothArgs("linux"))
         {
-            Assert.Contains("WebBluetooth", enables[0]);
-        }
+            "--disable-features=SomethingElse",
+        };
+        var merged = LaunchOpts.MergeFeatureFlags(input);
+        var disables = merged.FindAll(a => a.StartsWith("--disable-features="));
+        Assert.Single(disables);
+        Assert.Contains("SomethingElse", disables[0]);
+        Assert.Contains("WebBluetooth", disables[0]);
     }
 }

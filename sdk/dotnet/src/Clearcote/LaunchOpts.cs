@@ -92,19 +92,27 @@ public static class LaunchOpts
     /// <summary>Switches to expose <c>navigator.bluetooth</c>, matching the platform the page is
     /// TOLD it is (empty off Linux, and empty under a Linux claim).</summary>
     /// <remarks>
-    /// Web Bluetooth is compiled into the engine but runtime-disabled on Linux only:
+    /// Web Bluetooth is compiled into the engine but its *default* follows the build platform:
     /// Chromium's runtime_enabled_features.json5 gives WebBluetooth status "stable" on Win/Mac/Android/
     /// ChromeOS and lets Linux fall through to "default": "experimental", and content_features.cc
-    /// declares kWebBluetooth FEATURE_DISABLED_BY_DEFAULT. So a Linux host serving a Windows persona
+    /// declares kWebBluetooth FEATURE_DISABLED_BY_DEFAULT. So the same persona is a tell in opposite
+    /// directions depending on which build is running: a Linux build serving a Windows persona
     /// reports navigator.usb, navigator.serial and navigator.hid but NOT navigator.bluetooth - a
-    /// combination no real Windows Chrome produces, and an OS-origin tell that survives every string
-    /// spoof. One flag restores it on the shipped binary; no rebuild is involved.
-    /// 
+    /// combination no real Windows Chrome produces - while a Windows build serving a Linux claim
+    /// reports navigator.bluetooth, which genuine Chrome on Linux does not have.
+    ///
+    /// Hence the switch is derived from the CLAIM alone and the host is never consulted: whichever
+    /// way the build's default falls, one of the two switches lands the page on the right answer,
+    /// and the one that agrees with the default is a no-op. Reading the host OS here was the
+    /// original bug, and reading it to decide whether to bother was the half-fix: skipping the
+    /// disable off Linux left a Windows host serving a Linux persona exposing the API (measured on
+    /// the r30 Windows build).
+    ///
     /// Verified against Chromium 150's bluetooth.idl: getDevices() is gated on WebBluetoothGetDevices
     /// and requestLEScan()/onadvertisementreceived on WebBluetoothScanning, both "experimental", so
     /// real stable Chrome exposes exactly {constructor, getAvailability, requestDevice} - which is what
-    /// this flag produces. getAvailability() resolves false and requestDevice() rejects NotFoundError
-    /// on a machine with no adapter, matching a real desktop without Bluetooth hardware.
+    /// the enable switch produces. getAvailability() resolves false and requestDevice() rejects
+    /// NotFoundError on a machine with no adapter, matching a real desktop without Bluetooth hardware.
     /// </remarks>
     /// <summary>Platforms whose stable Chrome ships Web Bluetooth.</summary>
     public static readonly string[] WebBluetoothPlatforms =
@@ -112,16 +120,12 @@ public static class LaunchOpts
 
     public static List<string> WebBluetoothArgs(string? claimedPlatform = null)
     {
-        // Win/Mac builds ship WebBluetooth stable; the flag would be a no-op there.
-        if (!System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
-                System.Runtime.InteropServices.OSPlatform.Linux))
-            return new List<string>();
-        // Gate on the CLAIMED platform, not the host: a Linux claim has no navigator.bluetooth on
-        // genuine Chrome either, so adding the flag there invents an API real Linux Chrome lacks.
+        // Gate on the CLAIMED platform, never the host.
         var claimed = (claimedPlatform ?? Fingerprint.HostPlatform).Trim().ToLowerInvariant();
-        if (System.Array.IndexOf(WebBluetoothPlatforms, claimed) < 0)
-            return new List<string>();
-        return new List<string> { "--enable-features=WebBluetooth" };
+        if (System.Array.IndexOf(WebBluetoothPlatforms, claimed) >= 0)
+            return new List<string> { "--enable-features=WebBluetooth" };
+        // A Linux claim has no navigator.bluetooth on genuine Chrome, whatever this build defaults to.
+        return new List<string> { "--disable-features=WebBluetooth" };
     }
 
     public static List<string> WebrtcDefaultDenyArgs(IEnumerable<string> args, string? webrtcIp = null)

@@ -180,34 +180,42 @@ def test_resolve_proxy_socks5_with_creds_does_not_warn():
 
 
 # --------------------------------------------------------------------------- web bluetooth
-# WHY THESE EXIST: Web Bluetooth is compiled into the engine but runtime-disabled on Linux only
-# (Chromium marks WebBluetooth "stable" on Win/Mac and lets Linux fall to "experimental"), so a
-# Linux host serving a Windows persona exposed navigator.usb/serial/hid but NOT
-# navigator.bluetooth -- a combination no real Windows Chrome produces. The flag restores it.
-# It must be keyed on the CLAIMED platform: under a Linux claim genuine Chrome has none either,
-# so adding it there is a tell in the opposite direction.
-def test_web_bluetooth_args_on_linux_for_a_desktop_claim(monkeypatch):
-    monkeypatch.setattr(_lo.sys, "platform", "linux")
-    for claimed in ("windows", "macos", "android", "chromeos"):
-        assert _lo.web_bluetooth_args(claimed) == ["--enable-features=WebBluetooth"], claimed
-
-
-def test_web_bluetooth_args_withheld_under_a_linux_claim(monkeypatch):
-    """Genuine Chrome 154 on Linux has NO navigator.bluetooth (measured 2026-10-04 against the
-    branded build, and against our own engine launched without the SDK). Adding the flag under a
-    Linux claim invented an API real Linux Chrome lacks, and ours answered getAvailability() ===
-    false -- "API present, no adapter" -- which genuine Linux Chrome cannot produce at all."""
-    monkeypatch.setattr(_lo.sys, "platform", "linux")
-    assert _lo.web_bluetooth_args("linux") == []
-    # a bare call must be conservative: on a Linux host that means claiming Linux
-    assert _lo.web_bluetooth_args() == []
-
-
-def test_web_bluetooth_args_noop_off_linux(monkeypatch):
-    for plat in ("win32", "darwin"):
+# WHY THESE EXIST: Web Bluetooth is compiled into the engine but its DEFAULT follows the build
+# platform (Chromium marks WebBluetooth "stable" on Win/Mac and lets Linux fall to "experimental"),
+# so the same persona is a tell in opposite directions depending on which build is running: a Linux
+# build serving a Windows persona exposed navigator.usb/serial/hid but NOT navigator.bluetooth,
+# while a Windows build under a Linux claim exposes navigator.bluetooth, which genuine Chrome on
+# Linux does not have. The switch is therefore derived from the CLAIM alone, on every host.
+def test_web_bluetooth_args_enabled_for_a_desktop_claim_on_every_host(monkeypatch):
+    for plat in ("linux", "win32", "darwin"):
         monkeypatch.setattr(_lo.sys, "platform", plat)
-        for claimed in (None, "windows", "linux"):
-            assert _lo.web_bluetooth_args(claimed) == [], (plat, claimed)
+        for claimed in ("windows", "macos", "android", "chromeos"):
+            assert _lo.web_bluetooth_args(claimed) == ["--enable-features=WebBluetooth"], (plat, claimed)
+
+
+def test_web_bluetooth_args_disabled_under_a_linux_claim_on_every_host(monkeypatch):
+    """Genuine Chrome 154 on Linux has NO navigator.bluetooth (measured 2026-10-04 against the
+    branded build, and against our own engine launched without the SDK). Leaving it on under a
+    Linux claim exposes an API real Linux Chrome lacks, and ours answered getAvailability() ===
+    false -- "API present, no adapter" -- which genuine Linux Chrome cannot produce at all.
+
+    Withholding the ENABLE switch is not enough off Linux: measured on the r30 Windows build,
+    ``'bluetooth' in navigator`` was still true under a Linux claim until --disable-features
+    landed, because that build ships the feature stable."""
+    for plat in ("linux", "win32", "darwin"):
+        monkeypatch.setattr(_lo.sys, "platform", plat)
+        assert _lo.web_bluetooth_args("linux") == ["--disable-features=WebBluetooth"], plat
+
+
+def test_web_bluetooth_args_bare_call_follows_the_host(monkeypatch):
+    """No claim means no persona switches, so the page sees the real host OS -- and the switch has
+    to agree with that, not with the build's default."""
+    monkeypatch.setattr(_lo.sys, "platform", "linux")
+    monkeypatch.setattr("clearcote._fingerprint.sys.platform", "linux")
+    assert _lo.web_bluetooth_args() == ["--disable-features=WebBluetooth"]
+    monkeypatch.setattr(_lo.sys, "platform", "win32")
+    monkeypatch.setattr("clearcote._fingerprint.sys.platform", "win32")
+    assert _lo.web_bluetooth_args() == ["--enable-features=WebBluetooth"]
 
 
 def test_persona_platform_is_the_claim_not_the_host(monkeypatch):
@@ -229,6 +237,17 @@ def test_web_bluetooth_folds_into_one_enable_features(monkeypatch):
     enables = [a for a in merged if a.startswith("--enable-features=")]
     assert len(enables) == 1
     assert "WebBluetooth" in enables[0] and "SomethingElse" in enables[0]
+
+
+def test_web_bluetooth_disable_folds_into_one_disable_features(monkeypatch):
+    """Same hazard on the other side: the Linux-claim switch is a --disable-features, and
+    Chromium honours only the last of those too."""
+    monkeypatch.setattr(_lo.sys, "platform", "win32")
+    merged = _lo.merge_feature_flags(
+        _lo.web_bluetooth_args("linux") + ["--disable-features=SomethingElse"])
+    disables = [a for a in merged if a.startswith("--disable-features=")]
+    assert len(disables) == 1
+    assert "WebBluetooth" in disables[0] and "SomethingElse" in disables[0]
 
 
 SOCKS5 = {"server": "socks5://gw.example.com:1080", "username": "u", "password": "p"}

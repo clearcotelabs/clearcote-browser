@@ -240,11 +240,11 @@ if _wv_on:
         print("[clearcote] widevine unavailable (continuing without DRM): %r" % exc, flush=True)
 
 args = fingerprint_args(opts)
-# Web Bluetooth is runtime-disabled on Linux only, so a Linux container serving a desktop persona
-# reports navigator.usb/serial/hid but NOT navigator.bluetooth -- a combination no real desktop
-# Chrome produces. web_bluetooth_args() restores it for a desktop CLAIM and withholds it for a
-# linux claim, where genuine Chrome has none either (empty on non-Linux hosts). The SDK's launch()
-# adds this already; this entrypoint builds its own argv, so it has to ask for it too.
+# Web Bluetooth's default follows the BUILD platform, so a Linux container serving a desktop
+# persona reports navigator.usb/serial/hid but NOT navigator.bluetooth -- a combination no real
+# desktop Chrome produces. web_bluetooth_args() enables it for a desktop CLAIM and disables it
+# for a linux claim, where genuine Chrome has none either; the host is never consulted. The SDK's
+# launch() adds this already; this entrypoint builds its own argv, so it has to ask for it too.
 port = os.environ.get("CC_PORT", "9222")               # externally exposed port
 internal = os.environ.get("CC_INTERNAL_PORT", "9223")  # chrome's loopback DevTools port
 

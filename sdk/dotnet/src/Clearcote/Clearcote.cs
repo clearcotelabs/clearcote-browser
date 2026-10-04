@@ -380,10 +380,11 @@ public static class Clearcote
         baseList.AddRange(LaunchOpts.QuicArgs(proxyForQuic));
         // Opt-in: relay WebRTC UDP through the proxy rather than denying it outright.
         baseList.AddRange(LaunchOpts.Socks5UdpArgs(socks5Udp, proxyForQuic));
-        // Linux hosts hide navigator.bluetooth while exposing usb/serial/hid — an OS-origin tell
-        // on a Windows persona — but a LINUX claim must not have it either (genuine Chrome 154 on
-        // Linux has none). Keyed on what the page is TOLD it is, read back out of the already-built
-        // persona switches. No-op off Linux. See LaunchOpts.WebBluetoothArgs.
+        // navigator.bluetooth must follow the CLAIM, in both directions: a Linux build hides it
+        // while exposing usb/serial/hid (an OS-origin tell on a Windows persona), and a Windows
+        // build shows it under a LINUX claim, which genuine Chrome 154 on Linux does not. Read
+        // back out of the already-built persona switches; the host is never consulted.
+        // See LaunchOpts.WebBluetoothArgs.
         const string platFlag = "--fingerprint-platform=";
         baseList.AddRange(LaunchOpts.WebBluetoothArgs(
             fpArgs.Find(a => a.StartsWith(platFlag, System.StringComparison.Ordinal))?[platFlag.Length..]));

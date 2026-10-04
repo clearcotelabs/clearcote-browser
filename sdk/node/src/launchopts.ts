@@ -112,36 +112,39 @@ export function socks5UdpArgs(socks5Udp: boolean | undefined, proxy: PwProxy | u
  * a transport that actually carries UDP (SOCKS5 with UDP ASSOCIATE, or a full tunnel) and can set
  * their own policy to opt out. */
 /**
- * Switches to expose `navigator.bluetooth`, matching the platform the page is TOLD it is.
+ * Switch to make `navigator.bluetooth` match the platform the page is TOLD it is.
  *
- * Web Bluetooth is compiled into the engine but runtime-disabled on Linux only:
+ * Web Bluetooth is compiled into the engine but its *default* follows the build platform:
  * Chromium's runtime_enabled_features.json5 gives WebBluetooth status "stable" on Win/Mac/Android/
  * ChromeOS and lets Linux fall through to "default": "experimental", and content_features.cc
- * declares kWebBluetooth FEATURE_DISABLED_BY_DEFAULT. Two tells fall out of that, in opposite
- * directions:
- *   - a Linux host serving a WINDOWS (or macOS/Android) persona reports navigator.usb, serial and
- *     hid but NOT navigator.bluetooth, which no real Windows Chrome produces. The flag restores it.
- *   - a Linux host serving a LINUX claim must NOT have it. Measured 2026-10-04 against genuine
- *     Chrome 154 on Linux: `'bluetooth' in navigator` is false, so adding the flag invented an API
- *     genuine Linux Chrome does not expose (and ours answered getAvailability() === false, i.e.
+ * declares kWebBluetooth FEATURE_DISABLED_BY_DEFAULT. So the same persona is a tell in opposite
+ * directions depending on which build is running, and neither is what the page should see:
+ *   - a Linux build serving a WINDOWS (or macOS/Android) persona reports navigator.usb, serial and
+ *     hid but NOT navigator.bluetooth, which no real Windows Chrome produces.
+ *   - a Windows build serving a LINUX claim reports navigator.bluetooth, which genuine Chrome on
+ *     Linux does not have. Measured 2026-10-04 against genuine Chrome 154 on Linux:
+ *     `'bluetooth' in navigator` is false (and ours answered getAvailability() === false, i.e.
  *     "API present, no adapter", a state genuine Linux Chrome cannot produce).
- * Hence the gate is the CLAIMED platform, not process.platform: passing the host here was the bug.
- * 
+ * Hence the switch is derived from the CLAIM alone and the host is never consulted: whichever way
+ * the build's default falls, one of the two switches lands the page on the right answer, and the
+ * one that agrees with the default is a no-op. Reading process.platform here was the original bug,
+ * and reading it to decide whether to bother was the half-fix: skipping the disable off Linux left
+ * a Windows host serving a Linux persona exposing the API (measured on the r30 Windows build).
+ *
  * Verified against Chromium 150's bluetooth.idl: getDevices() is gated on WebBluetoothGetDevices
  * and requestLEScan()/onadvertisementreceived on WebBluetoothScanning, both "experimental", so
  * real stable Chrome exposes exactly {constructor, getAvailability, requestDevice} - which is what
- * this flag produces. getAvailability() resolves false and requestDevice() rejects NotFoundError
- * on a machine with no adapter, matching a real desktop without Bluetooth hardware.
+ * the enable switch produces. getAvailability() resolves false and requestDevice() rejects
+ * NotFoundError on a machine with no adapter, matching a real desktop without Bluetooth hardware.
  */
 /** Platforms whose stable Chrome ships Web Bluetooth. */
 export const WEB_BLUETOOTH_PLATFORMS = ["windows", "macos", "mac", "android", "chromeos"];
 
 export function webBluetoothArgs(claimedPlatform?: string): string[] {
-  if (process.platform !== "linux") return []; // Win/Mac ship it stable
   const claimed = (claimedPlatform ?? hostPersonaPlatform()).trim().toLowerCase();
-  // a Linux claim has no navigator.bluetooth on genuine Chrome either
-  if (!WEB_BLUETOOTH_PLATFORMS.includes(claimed)) return [];
-  return ["--enable-features=WebBluetooth"];
+  if (WEB_BLUETOOTH_PLATFORMS.includes(claimed)) return ["--enable-features=WebBluetooth"];
+  // a Linux claim has no navigator.bluetooth on genuine Chrome, whatever this build's default is
+  return ["--disable-features=WebBluetooth"];
 }
 
 export function webrtcDefaultDenyArgs(args: string[], _webrtcIp?: unknown): string[] {
