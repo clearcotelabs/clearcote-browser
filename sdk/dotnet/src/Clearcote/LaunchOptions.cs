@@ -107,6 +107,58 @@ public class LaunchOptions : FingerprintOptions
     /// Emulated screen size (CDP screenWidth/screenHeight) for the context. See
     /// <see cref="ViewportSize"/> for how it interacts with the SDK default.
     public ScreenSize? ScreenSize { get; set; }
+
+    // ── local or cloud ───────────────────────────────────────────────────────
+    // A cloud launch takes the persona options that also exist for a hosted browser (Fingerprint,
+    // Platform, Brand, Timezone, AcceptLanguage, LightStealth, Geoip, Headless, Proxy, Version) plus the
+    // ones below, and refuses every option only a browser on this machine can take, naming it. A local
+    // launch ignores everything in this section, so code that always sets ApiKey switches with nothing
+    // but Cloud (or CLEARCOTE_CLOUD).
+
+    /// True runs the browser on Clearcote's servers and returns the same Playwright types. Null follows
+    /// CLEARCOTE_CLOUD (1, true or yes means cloud); an explicit value always wins over it.
+    public bool? Cloud { get; set; }
+    /// A configured <see cref="global::Clearcote.Cloud"/> client to launch with (implies cloud unless
+    /// <see cref="Cloud"/> is false). Otherwise one is made from <see cref="ApiKey"/> / <see cref="ApiUrl"/>.
+    public Cloud? CloudClient { get; set; }
+    /// Cloud API key; defaults to CLEARCOTE_API_KEY.
+    public string? ApiKey { get; set; }
+    /// Cloud API base URL; defaults to CLEARCOTE_API_URL, then https://www.clearcotelabs.com.
+    public string? ApiUrl { get; set; }
+    /// Cloud: a stable device label; the same identity gets the same device on every session.
+    public string? Identity { get; set; }
+    /// Cloud: the exit country of the included residential connection (ISO code, e.g. "us").
+    public string? Country { get; set; }
+    /// Cloud: the exit region within <see cref="Country"/>.
+    public string? State { get; set; }
+    /// Cloud: the exit city within <see cref="Country"/>.
+    public string? City { get; set; }
+    /// Cloud: keep the same exit IP across sessions that share this label.
+    public string? ProxySession { get; set; }
+    /// Cloud: the longest the session may run, in seconds.
+    public int? TimeoutSec { get; set; }
+    /// Cloud: end the session after this many seconds without a client.
+    public int? IdleTimeoutSec { get; set; }
+    /// Cloud: stop the session once it has used this much traffic.
+    public double? MaxGb { get; set; }
+    /// Cloud: a named cookie store on the server. A name loads it; <c>Persist = true</c> also saves it
+    /// back when the session ends (LaunchPersistentContextAsync does that by default).
+    public CloudProfile? Profile { get; set; }
+    /// Cloud: the page the session opens on.
+    public string? Url { get; set; }
+    /// Cloud: block ads and trackers on the hosted browser.
+    public bool? Adblock { get; set; }
+    /// Cloud: drag slide-to-verify challenges automatically (the server's default is on); false turns it off.
+    public bool? SolveSliders { get; set; }
+    /// Cloud: keep the session running after this client disconnects; stop it with
+    /// <c>cloud.Browsers.StopAsync(id)</c>.
+    public bool? KeepAlive { get; set; }
+    /// Cloud: record the session (see <c>cloud.Browsers.DownloadRecordingAsync</c>).
+    public bool? Record { get; set; }
+    /// Cloud: a free-text note shown with the session in the dashboard and in Browsers.ListAsync.
+    public string? Note { get; set; }
+    /// Cloud: run on this worker.
+    public string? Worker { get; set; }
 }
 
 /// Options for <see cref="Clearcote.ServeAsync"/> — a standing, stealthy CDP endpoint.

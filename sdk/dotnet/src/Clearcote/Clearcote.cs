@@ -28,6 +28,8 @@ public static class Clearcote
         finally { PwLock.Release(); }
     }
 
+    internal static Task<IPlaywright> PlaywrightInstanceAsync() => PlaywrightAsync();
+
     /// Resolve the chrome binary path: explicit ExecutablePath &gt; CLEARCOTE_BINARY env &gt; PRO (when
     /// licensed) &gt; free auto-download. Downloads + SHA-256-verifies as needed.
     public static async Task<string> ExecutablePathAsync(LaunchOptions? options = null)
@@ -77,9 +79,17 @@ public static class Clearcote
     /// var page = await browser.NewPageAsync(new() { ViewportSize = ViewportSize.NoViewport });
     /// await Geometry.FitWindowToWorkAreaAsync(page);
     /// </code>
+    /// <para>
+    /// CLOUD. With <c>Cloud = true</c> (or CLEARCOTE_CLOUD=1) the browser runs on Clearcote's servers
+    /// instead and this returns the same Playwright <see cref="IBrowser"/>, connected over CDP; its
+    /// NewPageAsync/NewContextAsync default to no emulated viewport, and CloseAsync disconnects and ends
+    /// the hosted session. Options only a browser on this machine can take are refused by name before
+    /// anything is created. See <see cref="Cloud"/> for the rest of the hosted API.
+    /// </para>
     /// </remarks>
     public static async Task<IBrowser> LaunchAsync(LaunchOptions? options = null)
     {
+        if (CloudLaunch.Requested(options)) return await CloudLaunch.LaunchBrowserAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
@@ -150,9 +160,17 @@ public static class Clearcote
     /// padding: on Windows the browser holds handles under the profile for a short window after
     /// close, so a single removal silently fails and the directory leaks.
     /// </para>
+    /// <para>
+    /// CLOUD. With <c>Cloud = true</c> (or CLEARCOTE_CLOUD=1) this returns the fresh context of a hosted
+    /// browser instead, so code written against this method moves to the cloud unedited. Closing the
+    /// context ends the hosted session. A <see cref="LaunchOptions.Profile"/> loads that cloud profile's
+    /// cookies (and saves them back only with <c>Persist = true</c>).
+    /// </para>
     /// </remarks>
     public static async Task<IBrowserContext> LaunchEphemeralProfileAsync(LaunchOptions? options = null)
     {
+        if (CloudLaunch.Requested(options))
+            return await CloudLaunch.LaunchContextAsync(options ?? new LaunchOptions(), persistent: false, userDataDir: null).ConfigureAwait(false);
         var dir = Path.Combine(Path.GetTempPath(), "clearcote-run-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
         IBrowserContext context;
@@ -182,8 +200,12 @@ public static class Clearcote
     }
 
     /// Launch a persistent context (a saved profile dir) and return a Playwright <see cref="IBrowserContext"/>.
+    /// A cloud launch keeps its cookies in a cloud profile instead of a directory: use the overload
+    /// without <paramref name="userDataDir"/>.
     public static async Task<IBrowserContext> LaunchPersistentContextAsync(string userDataDir, LaunchOptions? options = null)
     {
+        if (CloudLaunch.Requested(options))
+            return await CloudLaunch.LaunchContextAsync(options!, persistent: true, userDataDir).ConfigureAwait(false);
         options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
@@ -244,6 +266,20 @@ public static class Clearcote
         if (geometry.Mode != Geometry.Mode.None)
             await Geometry.InstallWindowFixupAsync(context, args).ConfigureAwait(false);
         return context;
+    }
+
+    /// A persistent CLOUD context: <c>new() { Cloud = true, Profile = "name" }</c> opens the hosted browser
+    /// with that cloud profile's cookies and saves them back when the context closes (set
+    /// <c>Profile = new CloudProfile { Name = "name", Persist = false }</c> to load only). Closing the
+    /// context ends the hosted session. A local persistent context needs a directory: use the overload
+    /// that takes one.
+    public static async Task<IBrowserContext> LaunchPersistentContextAsync(LaunchOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (!CloudLaunch.Requested(options))
+            throw new ArgumentException(
+                "LaunchPersistentContextAsync needs a userDataDir (or Cloud = true with Profile = \"name\" for a cloud profile)");
+        return await CloudLaunch.LaunchContextAsync(options, persistent: true, userDataDir: null).ConfigureAwait(false);
     }
 
     /// Launch a standing, stealthy CDP endpoint (a direct engine spawn, not through Playwright) any

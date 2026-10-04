@@ -83,6 +83,52 @@ var context = await Clearcote.Clearcote.LaunchPersistentContextAsync("./profile-
 });
 ```
 
+## Local or cloud
+
+The same call can run the browser on Clearcote's hosted servers instead of this machine. `Cloud = true`
+(or `CLEARCOTE_CLOUD=1`, which moves existing code without editing it) returns the same Playwright types,
+connected over CDP:
+
+```csharp
+// API key: ApiKey, or CLEARCOTE_API_KEY (create one in the Clearcote dashboard)
+var browser = await Clearcote.Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, Country = "us" });
+var page = await browser.NewPageAsync();   // no emulated viewport, as for a local browser
+await page.GotoAsync("https://example.com");
+await browser.CloseAsync();                // disconnects and ends the hosted session
+```
+
+- `LaunchEphemeralProfileAsync` moves to the cloud the same way and returns the session's own context.
+- `LaunchPersistentContextAsync(new LaunchOptions { Cloud = true, Profile = "acct-1" })` opens a named
+  cloud profile and saves its cookies back when the context closes.
+- The persona options a hosted browser also has carry over: `Fingerprint`, `Platform`, `Brand`, `Timezone`,
+  `AcceptLanguage`, `LightStealth`, `Geoip`, `Headless`, `Proxy` (`new() { Server = "managed" }` for the
+  included residential connection) and `Version`. Cloud-only: `Identity`, `Country`, `State`, `City`,
+  `ProxySession`, `TimeoutSec`, `IdleTimeoutSec`, `MaxGb`, `Url`, `Adblock`, `SolveSliders`, `KeepAlive`,
+  `Record`, `Note` and `Worker`.
+- An option only a browser on this machine can take (`ExecutablePath`, `Args`, `Extensions`, a user data
+  directory, ...) stops the launch with an error naming it, before anything is created.
+- `Cloud.SessionOf(browser)` returns the hosted session (id, expiry, ...). `Humanize` works on a cloud
+  page as on a local one.
+
+The rest of the hosted API is on `Cloud`:
+
+```csharp
+var cloud = new Cloud();   // CLEARCOTE_API_KEY; CLEARCOTE_API_URL points it at another server
+var run = await cloud.Runs.CreateAsync("Find the price of the cheapest plan",
+    new RunOptions { Url = "https://example.com" });
+Console.WriteLine(run?["result"]?["output"]);
+```
+
+`Browsers` (sessions, live view, sharing, hand-off to a person, the event timeline, recordings), `Runs` (a
+task in, JSON out), `Profiles` (import cookies, or sync them from a local profile directory, a CDP endpoint, a
+storage-state file or a login in a local window, only for the domains you name unless you set `AllDomains`)
+and `Webhooks`. Every method returns the endpoint's parsed JSON as a `JsonNode`; a refused request throws
+`CloudException` with the server's own message and `Code`. `Cloud.VerifyWebhook(body, header, secret)`
+checks a delivery's signature. The API is reached over https only (plain http is accepted for this machine
+alone), and a recording download never sends your API key to the storage host.
+
+The `clearcote cloud` command line ships with the Node and Python packages only.
+
 ## Human input (`Humanize`)
 
 Playwright's input is instant: a click presses and releases in the same millisecond, a keystroke
@@ -181,14 +227,15 @@ await Geometry.FitWindowToWorkAreaAsync(page);
 ## Environment variables
 
 `CLEARCOTE_LICENSE_KEY`, `CLEARCOTE_LICENSE_API`, `CLEARCOTE_INSTANCE_ID`, `CLEARCOTE_BINARY`,
-`CLEARCOTE_CACHE`, `CLEARCOTE_AUTO_UPDATE`.
+`CLEARCOTE_CACHE`, `CLEARCOTE_AUTO_UPDATE`; for the cloud, `CLEARCOTE_CLOUD`, `CLEARCOTE_API_KEY` and
+`CLEARCOTE_API_URL`.
 
 ## Scope
 
 This SDK covers the core: persona → engine switches, free + PRO binary resolution (download / verify /
 extract / cache, with the Windows first-launch AV-race work-around), the full floating-concurrency licensing
-client, `LaunchAsync` / `LaunchPersistentContextAsync` / `ServeAsync` / `ExecutablePathAsync`, and the default
-stealth args. The higher-level add-ons in the Node/Python SDKs — the humanized cursor, in-browser AI agent,
+client, `LaunchAsync` / `LaunchPersistentContextAsync` / `ServeAsync` / `ExecutablePathAsync`, the default
+stealth args, and cloud mode with the full hosted API (see [Local or cloud](#local-or-cloud)). The higher-level add-ons in the Node/Python SDKs — the humanized cursor, in-browser AI agent,
 Widevine/EME helper, saved-profile manager, and render-coherence linter — are planned follow-ups; the
 underlying engine switches are all reachable today via `Args`.
 
