@@ -361,6 +361,23 @@ export function lightStealthScreen(seed?: string | number): { width: number; hei
  * older than 152 r22 would read "off" as an ordinary seed and build a persona from it, the opposite
  * of what was asked.
  */
+/** The persona platform name for the machine we are running on. */
+export function hostPersonaPlatform(): string {
+  return (
+    ({ win32: "windows", linux: "linux", darwin: "macos" } as Record<string, string>)[process.platform] ?? "windows"
+  );
+}
+
+/**
+ * The platform this launch CLAIMS to be: the explicit persona platform, else the host's own.
+ * Pass-through sends no persona switches, so the engine presents the real host OS.
+ * Switches that depend on what the page will BELIEVE must read this, not process.platform.
+ */
+export function personaPlatform(o: { platform?: string; fingerprint?: unknown }): string {
+  if (isFingerprintPassthrough(o.fingerprint)) return hostPersonaPlatform();
+  return (o.platform ?? hostPersonaPlatform()).trim().toLowerCase();
+}
+
 export function isFingerprintPassthrough(value: unknown): boolean {
   // Only the string "off". Seeds such as 0, "0", "no" or "false" stay seeds: a caller looping
   // `fingerprint: i` from 0 must still get a persona for i = 0.
@@ -486,9 +503,7 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // Default the persona platform to the HOST OS so it's coherent with the binary the SDK ships for
   // this machine (Windows binary -> windows, Linux binary -> linux). Override via
   // platform: "windows" | "linux" | "macos".
-  const hostPlatform =
-    ({ win32: "windows", linux: "linux", darwin: "macos" } as Record<string, string>)[process.platform] ?? "windows";
-  set("fingerprint-platform", o.platform ?? hostPlatform);
+  set("fingerprint-platform", o.platform ?? hostPersonaPlatform());
   set("fingerprint-platform-version", o.platformVersion);
   // clearcote presents as Google Chrome (its UA says "Chrome/<v>"); default the UA-CH brand to
   // "chrome" so navigator.userAgentData advertises "Google Chrome", not bare "Chromium" (a

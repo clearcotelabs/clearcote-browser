@@ -193,21 +193,34 @@ public class LaunchOptsTests
     // ----------------------------------------------------------------- web bluetooth
     // Web Bluetooth is compiled in but runtime-disabled on Linux only, so a Linux host serving
     // a Windows persona exposed navigator.usb/serial/hid but not navigator.bluetooth -- a
-    // combination no real Windows Chrome produces. Platform is decided by RuntimeInformation,
-    // so assert against the host this test actually runs on rather than faking it.
+    // combination no real Windows Chrome produces. It is keyed on the CLAIMED platform: under a
+    // LINUX claim genuine Chrome 154 has no navigator.bluetooth either (measured 2026-10-04), so
+    // adding it there is a tell in the opposite direction. The HOST check is still
+    // RuntimeInformation, so assert against the host this test actually runs on.
     [Fact]
-    public void WebBluetoothArgs_MatchesHostPlatform()
+    public void WebBluetoothArgs_EmittedForADesktopClaimOnLinux()
     {
-        var args = LaunchOpts.WebBluetoothArgs();
+        var linux = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+            System.Runtime.InteropServices.OSPlatform.Linux);
+        foreach (var claimed in new[] { "windows", "macos", "android", "chromeos" })
+        {
+            var args = LaunchOpts.WebBluetoothArgs(claimed);
+            if (linux)
+                Assert.Equal(new[] { "--enable-features=WebBluetooth" }, args);
+            else
+                Assert.Empty(args);
+        }
+    }
+
+    [Fact]
+    public void WebBluetoothArgs_WithheldUnderALinuxClaim()
+    {
+        // genuine Chrome 154 on Linux exposes no navigator.bluetooth at all
+        Assert.Empty(LaunchOpts.WebBluetoothArgs("linux"));
+        // a bare call stays conservative: on a Linux host that means claiming Linux
         if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
                 System.Runtime.InteropServices.OSPlatform.Linux))
-        {
-            Assert.Equal(new[] { "--enable-features=WebBluetooth" }, args);
-        }
-        else
-        {
-            Assert.Empty(args);
-        }
+            Assert.Empty(LaunchOpts.WebBluetoothArgs());
     }
 
     [Fact]
@@ -215,7 +228,7 @@ public class LaunchOptsTests
     {
         // Chromium honours only the LAST --enable-features, so a second occurrence would
         // silently drop WebBluetooth.
-        var input = new List<string>(LaunchOpts.WebBluetoothArgs())
+        var input = new List<string>(LaunchOpts.WebBluetoothArgs("windows"))
         {
             "--enable-features=SomethingElse",
         };

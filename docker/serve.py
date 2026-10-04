@@ -22,6 +22,7 @@ import time
 from clearcote import executable_path
 from clearcote._fingerprint import fingerprint_args
 from clearcote._fonts import linux_font_env
+from clearcote._fingerprint import persona_platform
 from clearcote._launchopts import merge_feature_flags, web_bluetooth_args
 
 PROFILE_DIR = os.environ.get("CC_PROFILE_DIR", "/tmp/cc-profile")
@@ -241,7 +242,8 @@ if _wv_on:
 args = fingerprint_args(opts)
 # Web Bluetooth is runtime-disabled on Linux only, so a Linux container serving a desktop persona
 # reports navigator.usb/serial/hid but NOT navigator.bluetooth -- a combination no real desktop
-# Chrome produces. web_bluetooth_args() restores it (and is empty on non-Linux). The SDK's launch()
+# Chrome produces. web_bluetooth_args() restores it for a desktop CLAIM and withholds it for a
+# linux claim, where genuine Chrome has none either (empty on non-Linux hosts). The SDK's launch()
 # adds this already; this entrypoint builds its own argv, so it has to ask for it too.
 port = os.environ.get("CC_PORT", "9222")               # externally exposed port
 internal = os.environ.get("CC_INTERNAL_PORT", "9223")  # chrome's loopback DevTools port
@@ -334,7 +336,7 @@ base_args = [
     "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
     f"--remote-debugging-port={internal}", "--remote-allow-origins=*",
     "--user-data-dir=%s" % PROFILE_DIR,
-] + mode_args + window_args + args + web_bluetooth_args() + proxy_args + extra
+] + mode_args + window_args + args + web_bluetooth_args(persona_platform(opts)) + proxy_args + extra
 # Chromium keeps only the LAST --enable-features / --disable-features on the line rather than
 # concatenating them, so the layers here would silently clobber each other: web_bluetooth_args
 # enables one, CC_WEBRTC_MDNS=off disables another, and CC_EXTRA_ARGS may carry the caller's own.

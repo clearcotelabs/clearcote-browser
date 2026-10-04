@@ -308,6 +308,27 @@ def _light_stealth_values(seed):
     }
 
 
+def host_persona_platform():
+    """The persona platform name for the machine we are running on."""
+    return {"win32": "windows", "linux": "linux", "darwin": "macos"}.get(sys.platform, "windows")
+
+
+def persona_platform(opts):
+    """The platform this launch CLAIMS to be: the explicit persona platform, else the host's own.
+
+    Pass-through sends no persona switches at all, so the engine presents the real host OS; every
+    other mode (seeded, profile, light_stealth, bare) ends up with --fingerprint-platform set, either
+    from the caller or from the host default in fingerprint_args.
+
+    Switches that depend on what the page will BELIEVE -- rather than on what the host is -- have to
+    read this and not sys.platform. See web_bluetooth_args.
+    """
+    if is_fingerprint_passthrough(opts.get("fingerprint")):
+        return host_persona_platform()
+    claimed = opts.get("platform")
+    return str(claimed).strip().lower() if claimed else host_persona_platform()
+
+
 def fingerprint_args(opts):
     """Build the Chromium switches for a dict of fingerprint options."""
     args = []
@@ -363,8 +384,7 @@ def fingerprint_args(opts):
     # this machine (Windows binary -> windows persona, Linux binary -> linux persona) rather than a
     # seed-derived OS that could vary. Override explicitly via platform="windows"/"linux"/"macos".
     if not opts.get("platform"):
-        host = {"win32": "windows", "linux": "linux", "darwin": "macos"}.get(sys.platform, "windows")
-        args.append(f"--fingerprint-platform={host}")
+        args.append(f"--fingerprint-platform={host_persona_platform()}")
     # clearcote presents as Google Chrome (its UA string says "Chrome/<v>"), so default the
     # UA-CH brand to "chrome" — otherwise navigator.userAgentData advertises only "Chromium",
     # a UA/UA-CH mismatch some bot detectors flag. Override via brand="edge" etc.

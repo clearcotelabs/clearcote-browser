@@ -89,7 +89,8 @@ public static class LaunchOpts
     /// Callers who need working WebRTC through a proxy want a transport that carries UDP (SOCKS5
     /// with UDP ASSOCIATE, or a full tunnel) and can set their own policy to opt out.
     /// webrtcIp is accepted and ignored, for call-site compatibility.
-    /// <summary>Switches to expose <c>navigator.bluetooth</c> on Linux hosts (empty elsewhere).</summary>
+    /// <summary>Switches to expose <c>navigator.bluetooth</c>, matching the platform the page is
+    /// TOLD it is (empty off Linux, and empty under a Linux claim).</summary>
     /// <remarks>
     /// Web Bluetooth is compiled into the engine but runtime-disabled on Linux only:
     /// Chromium's runtime_enabled_features.json5 gives WebBluetooth status "stable" on Win/Mac/Android/
@@ -105,11 +106,20 @@ public static class LaunchOpts
     /// this flag produces. getAvailability() resolves false and requestDevice() rejects NotFoundError
     /// on a machine with no adapter, matching a real desktop without Bluetooth hardware.
     /// </remarks>
-    public static List<string> WebBluetoothArgs()
+    /// <summary>Platforms whose stable Chrome ships Web Bluetooth.</summary>
+    public static readonly string[] WebBluetoothPlatforms =
+        { "windows", "macos", "mac", "android", "chromeos" };
+
+    public static List<string> WebBluetoothArgs(string? claimedPlatform = null)
     {
         // Win/Mac builds ship WebBluetooth stable; the flag would be a no-op there.
         if (!System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
                 System.Runtime.InteropServices.OSPlatform.Linux))
+            return new List<string>();
+        // Gate on the CLAIMED platform, not the host: a Linux claim has no navigator.bluetooth on
+        // genuine Chrome either, so adding the flag there invents an API real Linux Chrome lacks.
+        var claimed = (claimedPlatform ?? Fingerprint.HostPlatform).Trim().ToLowerInvariant();
+        if (System.Array.IndexOf(WebBluetoothPlatforms, claimed) < 0)
             return new List<string>();
         return new List<string> { "--enable-features=WebBluetooth" };
     }

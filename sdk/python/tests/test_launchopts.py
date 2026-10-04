@@ -184,15 +184,40 @@ def test_resolve_proxy_socks5_with_creds_does_not_warn():
 # (Chromium marks WebBluetooth "stable" on Win/Mac and lets Linux fall to "experimental"), so a
 # Linux host serving a Windows persona exposed navigator.usb/serial/hid but NOT
 # navigator.bluetooth -- a combination no real Windows Chrome produces. The flag restores it.
-def test_web_bluetooth_args_on_linux(monkeypatch):
+# It must be keyed on the CLAIMED platform: under a Linux claim genuine Chrome has none either,
+# so adding it there is a tell in the opposite direction.
+def test_web_bluetooth_args_on_linux_for_a_desktop_claim(monkeypatch):
     monkeypatch.setattr(_lo.sys, "platform", "linux")
-    assert _lo.web_bluetooth_args() == ["--enable-features=WebBluetooth"]
+    for claimed in ("windows", "macos", "android", "chromeos"):
+        assert _lo.web_bluetooth_args(claimed) == ["--enable-features=WebBluetooth"], claimed
+
+
+def test_web_bluetooth_args_withheld_under_a_linux_claim(monkeypatch):
+    """Genuine Chrome 154 on Linux has NO navigator.bluetooth (measured 2026-10-04 against the
+    branded build, and against our own engine launched without the SDK). Adding the flag under a
+    Linux claim invented an API real Linux Chrome lacks, and ours answered getAvailability() ===
+    false -- "API present, no adapter" -- which genuine Linux Chrome cannot produce at all."""
+    monkeypatch.setattr(_lo.sys, "platform", "linux")
+    assert _lo.web_bluetooth_args("linux") == []
+    # a bare call must be conservative: on a Linux host that means claiming Linux
+    assert _lo.web_bluetooth_args() == []
 
 
 def test_web_bluetooth_args_noop_off_linux(monkeypatch):
     for plat in ("win32", "darwin"):
         monkeypatch.setattr(_lo.sys, "platform", plat)
-        assert _lo.web_bluetooth_args() == [], plat
+        for claimed in (None, "windows", "linux"):
+            assert _lo.web_bluetooth_args(claimed) == [], (plat, claimed)
+
+
+def test_persona_platform_is_the_claim_not_the_host(monkeypatch):
+    from clearcote import _fingerprint as _fp
+    monkeypatch.setattr(_fp.sys, "platform", "linux")
+    assert _fp.persona_platform({}) == "linux"                        # bare: host's own
+    assert _fp.persona_platform({"platform": "windows"}) == "windows"  # explicit persona wins
+    assert _fp.persona_platform({"platform": "Windows "}) == "windows"  # normalised
+    # pass-through sends no persona switches, so the engine presents the real host OS
+    assert _fp.persona_platform({"platform": "windows", "fingerprint": "off"}) == "linux"
 
 
 def test_web_bluetooth_folds_into_one_enable_features(monkeypatch):
@@ -200,7 +225,7 @@ def test_web_bluetooth_folds_into_one_enable_features(monkeypatch):
     --enable-features, so a second occurrence would silently drop WebBluetooth."""
     monkeypatch.setattr(_lo.sys, "platform", "linux")
     merged = _lo.merge_feature_flags(
-        _lo.web_bluetooth_args() + ["--enable-features=SomethingElse"])
+        _lo.web_bluetooth_args("windows") + ["--enable-features=SomethingElse"])
     enables = [a for a in merged if a.startswith("--enable-features=")]
     assert len(enables) == 1
     assert "WebBluetooth" in enables[0] and "SomethingElse" in enables[0]

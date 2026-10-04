@@ -381,8 +381,12 @@ public static class Clearcote
         // Opt-in: relay WebRTC UDP through the proxy rather than denying it outright.
         baseList.AddRange(LaunchOpts.Socks5UdpArgs(socks5Udp, proxyForQuic));
         // Linux hosts hide navigator.bluetooth while exposing usb/serial/hid — an OS-origin tell
-        // on a Windows persona. Restore it (no-op off Linux). See LaunchOpts.WebBluetoothArgs.
-        baseList.AddRange(LaunchOpts.WebBluetoothArgs());
+        // on a Windows persona — but a LINUX claim must not have it either (genuine Chrome 154 on
+        // Linux has none). Keyed on what the page is TOLD it is, read back out of the already-built
+        // persona switches. No-op off Linux. See LaunchOpts.WebBluetoothArgs.
+        const string platFlag = "--fingerprint-platform=";
+        baseList.AddRange(LaunchOpts.WebBluetoothArgs(
+            fpArgs.Find(a => a.StartsWith(platFlag, System.StringComparison.Ordinal))?[platFlag.Length..]));
         // DEFAULT FLIPPED IN 0.23.0 — opt IN to disabling, rather than opt out.
         //
         // Disabling Topics/FLEDGE/Shared Storage/Fenced Frames is coherent for a de-Googled

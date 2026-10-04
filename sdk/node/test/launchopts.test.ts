@@ -231,28 +231,40 @@ describe("resolveProxy", () => {
 // Web Bluetooth is compiled in but runtime-disabled on Linux only, so a Linux host serving a
 // Windows persona exposed navigator.usb/serial/hid but not navigator.bluetooth -- a combination
 // no real Windows Chrome produces. The flag restores it; off Linux it must stay a no-op.
+// It is keyed on the CLAIMED platform: under a LINUX claim genuine Chrome 154 has no
+// navigator.bluetooth either (measured 2026-10-04), so adding it there is a tell the other way.
 describe("webBluetoothArgs", () => {
   const realPlatform = process.platform;
   const setPlatform = (p: string) =>
     Object.defineProperty(process, "platform", { value: p, configurable: true });
   afterEach(() => setPlatform(realPlatform));
 
-  it("emits the flag on linux", () => {
+  it("emits the flag on linux for a desktop claim", () => {
     setPlatform("linux");
-    expect(webBluetoothArgs()).toEqual(["--enable-features=WebBluetooth"]);
+    for (const claimed of ["windows", "macos", "android", "chromeos"]) {
+      expect(webBluetoothArgs(claimed)).toEqual(["--enable-features=WebBluetooth"]);
+    }
+  });
+
+  it("withholds the flag under a linux claim", () => {
+    setPlatform("linux");
+    expect(webBluetoothArgs("linux")).toEqual([]);
+    expect(webBluetoothArgs()).toEqual([]); // bare call is conservative: host claims linux
   });
 
   it("is a no-op off linux", () => {
     for (const p of ["win32", "darwin"]) {
       setPlatform(p);
-      expect(webBluetoothArgs()).toEqual([]);
+      for (const claimed of [undefined, "windows", "linux"]) {
+        expect(webBluetoothArgs(claimed)).toEqual([]);
+      }
     }
   });
 
   it("folds into a single --enable-features", () => {
     setPlatform("linux");
     const merged = mergeFeatureFlags([
-      ...webBluetoothArgs(),
+      ...webBluetoothArgs("windows"),
       "--enable-features=SomethingElse",
     ]);
     const enables = merged.filter((a) => a.startsWith("--enable-features="));

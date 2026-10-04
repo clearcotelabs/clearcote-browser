@@ -293,8 +293,19 @@ public static class Fingerprint
         return null;
     }
 
-    private static string HostPlatform =>
+    /// <summary>The persona platform name for the machine we are running on.</summary>
+    internal static string HostPlatform =>
         Native.OsTag switch { "windows" => "windows", "linux" => "linux", "macos" => "macos", _ => "windows" };
+
+    /// <summary>The platform this launch CLAIMS to be: the explicit persona platform, else the
+    /// host's own. Pass-through sends no persona switches, so the engine presents the real host OS.
+    /// Switches that depend on what the page will BELIEVE must read this, not the host.</summary>
+    internal static string PersonaPlatform(FingerprintOptions? o)
+    {
+        if (o is null) return HostPlatform;
+        if (IsFingerprintPassthrough(o.Fingerprint)) return HostPlatform;
+        return (o.Platform ?? HostPlatform).Trim().ToLowerInvariant();
+    }
 
     /// True when <paramref name="value"/> asks for PASS-THROUGH debug mode: exactly "off" (any case,
     /// surrounding whitespace ignored). "0", "no", "false", "disable" and the like are ordinary seeds.

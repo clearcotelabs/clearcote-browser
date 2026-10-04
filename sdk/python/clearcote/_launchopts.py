@@ -95,17 +95,30 @@ def socks5_udp_args(socks5_udp, proxy):
     return ["--socks5-udp"] if _SOCKS5.match(server) else []
 
 
-def web_bluetooth_args():
-    """Switches to expose ``navigator.bluetooth`` on Linux hosts (empty elsewhere).
+#: Platforms whose stable Chrome ships Web Bluetooth. Chromium's runtime_enabled_features.json5
+#: gives WebBluetooth status "stable" on Win/Mac/Android/ChromeOS/iOS and lets Linux fall through to
+#: "default": "experimental"; content_features.cc declares kWebBluetooth FEATURE_DISABLED_BY_DEFAULT.
+WEB_BLUETOOTH_PLATFORMS = frozenset({"windows", "macos", "mac", "android", "chromeos"})
 
-    Web Bluetooth is compiled into the engine but runtime-disabled on Linux only:
-    Chromium's runtime_enabled_features.json5 gives WebBluetooth status "stable" on Win/Mac/Android/
-    ChromeOS and lets Linux fall through to "default": "experimental", and content_features.cc
-    declares kWebBluetooth FEATURE_DISABLED_BY_DEFAULT. So a Linux host serving a Windows persona
-    reports navigator.usb, navigator.serial and navigator.hid but NOT navigator.bluetooth - a
-    combination no real Windows Chrome produces, and an OS-origin tell that survives every string
-    spoof. One flag restores it on the shipped binary; no rebuild is involved.
-    
+
+def web_bluetooth_args(claimed_platform=None):
+    """Switches to expose ``navigator.bluetooth``, matching the platform the page is TOLD it is.
+
+    Web Bluetooth is compiled into the engine but runtime-disabled on Linux only (see
+    WEB_BLUETOOTH_PLATFORMS). Two different tells fall out of that, in opposite directions:
+
+    * A Linux host serving a WINDOWS (or macOS/Android) persona reports navigator.usb, serial and
+      hid but NOT navigator.bluetooth - a combination no real Windows Chrome produces. The flag
+      restores it on the shipped binary; no rebuild is involved.
+    * A Linux host serving a LINUX claim must NOT have it. Measured 2026-10-04 against genuine
+      Chrome 154 on Linux: ``'bluetooth' in navigator`` is false, and false again for our own engine
+      launched without the SDK - so adding the flag there invented an API genuine Linux Chrome does
+      not expose, and ours answered ``getAvailability() === false``, i.e. "API present, no adapter",
+      which genuine Linux Chrome cannot produce at all.
+
+    Hence the gate is the CLAIMED platform, not ``sys.platform``: passing the host here was the bug.
+    ``claimed_platform`` defaults to the host's own name, which keeps a bare call conservative.
+
     Verified against Chromium 150's bluetooth.idl: getDevices() is gated on WebBluetoothGetDevices
     and requestLEScan()/onadvertisementreceived on WebBluetoothScanning, both "experimental", so
     real stable Chrome exposes exactly {constructor, getAvailability, requestDevice} - which is what
@@ -114,6 +127,11 @@ def web_bluetooth_args():
     """
     if not sys.platform.startswith("linux"):
         return []  # Win/Mac builds ship it stable; the flag would be a no-op
+    if claimed_platform is None:
+        from ._fingerprint import host_persona_platform
+        claimed_platform = host_persona_platform()
+    if str(claimed_platform).strip().lower() not in WEB_BLUETOOTH_PLATFORMS:
+        return []  # a Linux claim has no navigator.bluetooth on genuine Chrome either
     return ["--enable-features=WebBluetooth"]
 
 

@@ -457,8 +457,13 @@ function assembleArgs(
   extra?: { exe?: string; headed?: boolean; quiet?: boolean; allowThirdPartyCookies?: boolean; transparentProxy?: boolean },
 ): string[] {
   // webBluetoothArgs: Linux hosts hide navigator.bluetooth while exposing usb/serial/hid, an
-  // OS-origin tell on a Windows persona. No-op off Linux.
-  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic), ...socks5UdpArgs(socks5Udp, proxyForQuic), ...webBluetoothArgs()];
+  // OS-origin tell on a Windows persona — but a LINUX claim must not have it either (genuine
+  // Chrome 154 on Linux has none). Keyed on what the page is told it is. No-op off Linux.
+  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic), ...socks5UdpArgs(socks5Udp, proxyForQuic),
+    ...webBluetoothArgs(
+      fpArgs.find((a) => a.startsWith("--fingerprint-platform="))?.slice("--fingerprint-platform=".length),
+    ),
+  ];
   // DEFAULT FLIPPED IN 0.23.0 — opt IN to disabling, rather than opt out.
   //
   // Disabling Topics/FLEDGE/Shared Storage/Fenced Frames is coherent for a de-Googled persona, and

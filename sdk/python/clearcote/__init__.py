@@ -30,7 +30,12 @@ import time
 import warnings
 
 from ._agent import AGENT_KEYS, OPENROUTER_BASE_URL, agent_args, run_agent_task
-from ._fingerprint import FINGERPRINT_KEYS, fingerprint_args, is_fingerprint_passthrough
+from ._fingerprint import (
+    FINGERPRINT_KEYS,
+    fingerprint_args,
+    is_fingerprint_passthrough,
+    persona_platform,
+)
 from ._fontpersona import ensure_persona_fonts, font_reachability
 from ._fonts import apply_font_env
 from ._shaderdialect import apply_shader_dialect
@@ -480,8 +485,10 @@ def _prepare(kwargs):
     # Opt-in: relay WebRTC UDP through the proxy rather than denying it outright.
     base += socks5_udp_args(socks5_udp, proxy_opt)
     # Linux hosts hide navigator.bluetooth while exposing usb/serial/hid — an OS-origin tell on a
-    # Windows persona. Restore it (no-op off Linux). See web_bluetooth_args.
-    base += web_bluetooth_args()
+    # Windows persona. Restore it there, and NOT under a Linux claim, where genuine Chrome has no
+    # navigator.bluetooth either (measured against genuine 154). Keyed on what the page is told it
+    # is, not on the host. No-op off Linux. See web_bluetooth_args.
+    base += web_bluetooth_args(persona_platform(fp))
     if disable_privacy_sandbox:
         base += privacy_sandbox_args()
     user = list(extra_args or [])
