@@ -416,8 +416,12 @@ What changes in the cloud:
 - **Options.** `fingerprint`, `identity`, `platform`, `brand`, `timezone`, `locale` (or
   `accept_language`), `geoip`, `headless`, `light_stealth`, `proxy` (`"managed"`, a URL, or
   `{server, username, password}`), `country`/`state`/`city`, `proxy_session`, `timeout_sec`,
-  `idle_timeout_sec`, `max_gb`, `version`, `profile`, `url`, `adblock`, `keep_alive`, `record`,
-  `note`, `worker`. `humanize` and `show_cursor` run in the SDK, exactly as for a local browser.
+  `idle_timeout_sec`, `max_gb`, `version`, `profile`, `url`, `adblock`, `solve_sliders`,
+  `keep_alive`, `record`, `note`, `worker`. `humanize` and `show_cursor` run in the SDK, exactly as for
+  a local browser.
+- **Slider challenges are solved for you.** A cloud browser drags slide-to-verify challenges (a handle
+  to the end of a bar, or a puzzle piece into its gap) by itself, in any tab or frame. Pass
+  `solve_sliders=False` when your script handles them.
 - **Local-only options are refused, by name.** `executable_path`, `args`, `user_data_dir`,
   `extensions`, `ignore_default_args`, the finer persona switches (`gpu_vendor`, `webrtc_ip`, ...)
   and the licence options raise `ValueError("<name> is not available for cloud browsers")` before

@@ -173,6 +173,7 @@ SESSION_FIELDS = {
     "profile": "profile",
     "url": "url",
     "adblock": "adblock",
+    "solve_sliders": "solveSliders",
     "keep_alive": "keepAlive",
     "record": "record",
     "note": "note",
