@@ -157,12 +157,11 @@ async def test_install_humanize_wraps_new_page():
 
 
 # ---- regression: async launch must unpack _prepare's 6-tuple (PR #9) ----
-async def test_async_launch_unpacks_prepare_sixtuple_and_threads_seed(monkeypatch):
+async def test_async_launch_unpacks_prepare_sixtuple_and_threads_seed(monkeypatch, tmp_path):
     """_prepare returns 6 values (…, effective seed). The async launch paths must
     unpack 6 (not 5) and pass the profile-aware seed to install_humanize. Before the
     fix these unpacked 5 -> `ValueError: too many values to unpack (expected 5, got 6)`
     the moment launch()/launch_persistent_context() was actually awaited."""
-    import tempfile
     captured = {}
 
     class _FakeBrowserObj:
@@ -218,7 +217,7 @@ async def test_async_launch_unpacks_prepare_sixtuple_and_threads_seed(monkeypatc
     assert captured["humanize"] is True
 
     # launch_persistent_context(): same 6-unpack + seed threading.
-    context = await async_api.launch_persistent_context(tempfile.mkdtemp())
+    context = await async_api.launch_persistent_context(str(tmp_path))
     assert context is not None
     assert captured["ctx_seed"] == "eff-seed-123"
 

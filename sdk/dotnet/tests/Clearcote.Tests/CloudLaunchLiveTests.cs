@@ -227,6 +227,11 @@ internal sealed class LocalChromium : IAsyncDisposable
         foreach (var a in new[] { "--headless=new", "--remote-debugging-port=0", $"--user-data-dir={udd}", "--no-first-run",
                                   "--no-default-browser-check", "--disable-gpu", "about:blank" })
             psi.ArgumentList.Add(a);
+        // The browser's own temp files go inside its profile, so DisposeAsync takes them too: its singleton-socket
+        // directory on Linux (orphaned by the kill below, one per test) and its component-updater downloads on
+        // Windows (chromiumcrx_*) would otherwise be left in the machine's temp directory.
+        var temp = Directory.CreateDirectory(Path.Combine(udd, "tmp")).FullName;
+        foreach (var k in new[] { "TMPDIR", "TMP", "TEMP" }) psi.Environment[k] = temp;
         var proc = System.Diagnostics.Process.Start(psi)!;
         var deadline = DateTime.UtcNow.AddSeconds(30);
         while (DateTime.UtcNow < deadline)

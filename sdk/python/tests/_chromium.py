@@ -10,10 +10,12 @@ import glob
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 
 def find_chromium():
@@ -45,7 +47,15 @@ class LocalChromium:
                 "--no-first-run", "--no-default-browser-check", "--disable-gpu", "about:blank"]
         if sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0:
             args.insert(1, "--no-sandbox")
-        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # The browser's own temp files go inside its profile, so __exit__ takes them too: its
+        # singleton-socket directory on Linux (orphaned whenever the browser is killed) and its
+        # component-updater downloads on Windows (chromiumcrx_*) would otherwise outlive the run.
+        temp = os.path.join(self._udd, "tmp")
+        os.mkdir(temp)
+        env = {**os.environ, "TMPDIR": temp, "TMP": temp, "TEMP": temp}
+        # Its own process group on Linux/macOS, so __exit__ can end the helper processes along with it.
+        self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env,
+                                     start_new_session=os.name != "nt")
         found = threading.Event()
 
         def read():
@@ -67,7 +77,22 @@ class LocalChromium:
         return self.proc is not None and self.proc.poll() is None
 
     def __exit__(self, *_a):
-        if self.proc is not None:
+        if self.proc is not None and os.name != "nt":
+            # The whole process group: the browser exits at once on a signal, but its helper processes
+            # went on writing the profile for 10+ s, so the rmtree below lost to them and left it behind.
+            try:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.proc.wait(10)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(self.proc.pid, 0)
+                except ProcessLookupError:
+                    break  # nobody left in the group
+                time.sleep(0.05)
+        elif self.proc is not None:
             self.proc.terminate()
             try:
                 self.proc.wait(10)

@@ -1,8 +1,10 @@
 """Import + fallback behaviour for ``profile="auto"``. Mirrors the Node SDK's
 profileimport/profileauto tests, against a REAL local HTTP server rather than mocks."""
 
+import atexit
 import json
 import os
+import shutil
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -12,6 +14,9 @@ import pytest
 
 ROOT = tempfile.mkdtemp(prefix="cc-pyauto-")
 os.environ["CLEARCOTE_PROFILE_DIR"] = os.path.join(ROOT, "cache")
+# Removed at interpreter exit, not module teardown: CLEARCOTE_PROFILE_DIR is read once, at import, so ROOT
+# stays the profile directory for every test module that runs after this one.
+atexit.register(shutil.rmtree, ROOT, True)
 
 from clearcote._profileauto import (  # noqa: E402
     _reset_hint,

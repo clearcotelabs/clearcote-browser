@@ -18,7 +18,9 @@ import { FINGERPRINT_KEYS } from "../src/fingerprint.js";
 import { AGENT_KEYS } from "../src/agent.js";
 import { API_KEY, LIVE, RECORDING, startFakeCloud, type FakeCloud } from "./helpers/fake-cloud.js";
 
-const ENV = ["CLEARCOTE_API_KEY", "CLEARCOTE_API_URL", "CLEARCOTE_CLOUD"];
+// HOME and the licence key too: a local launch here must never find a real key (~/.clearcote/license.key on a
+// developer machine) and take a real lease from the licence server.
+const ENV = ["CLEARCOTE_API_KEY", "CLEARCOTE_API_URL", "CLEARCOTE_CLOUD", "CLEARCOTE_LICENSE_KEY", "HOME", "USERPROFILE"];
 const saved: Record<string, string | undefined> = {};
 let api: FakeCloud;
 let tmp: string;
@@ -30,6 +32,9 @@ beforeEach(async () => {
   process.env.CLEARCOTE_API_URL = api.url;
   delete process.env.CLEARCOTE_CLOUD;
   tmp = mkdtempSync(join(tmpdir(), "cc-cloud-"));
+  process.env.HOME = tmp;
+  process.env.USERPROFILE = tmp;
+  delete process.env.CLEARCOTE_LICENSE_KEY;
 });
 
 afterEach(async () => {
@@ -62,8 +67,10 @@ describe("local or cloud", () => {
     await launch({ country: "us" } as never);
     expect(connect).toHaveBeenCalledTimes(1);
     expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ country: "us" });
-    // local: fails on the missing binary, without ever talking to the API
-    await expect(launch({ cloud: false, executablePath: join(tmp, "missing", "chrome"), apiKey: "k", quiet: true })).rejects.toThrow();
+    // local: fails starting the browser, without ever talking to the API. A stand-in launcher: Playwright's own
+    // leaves a playwright-artifacts-* directory in the temp dir when the executable does not exist.
+    vi.spyOn(chromium, "launchPersistentContext").mockRejectedValue(new Error("browser failed to start"));
+    await expect(launch({ cloud: false, executablePath: join(tmp, "missing", "chrome"), apiKey: "k", quiet: true })).rejects.toThrow("browser failed to start");
     expect(api.requests("POST")).toHaveLength(1);
     expect(connect).toHaveBeenCalledTimes(1);
   });

@@ -1,8 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { linuxFontEnv, fontLaunchEnv } from "../src/fonts.js";
+import { removeAfterFile, tempDir } from "./helpers/temp.js";
+
+// linuxFontEnv points fontconfig at a cache shared by every launch on the machine (<tmp>/cc-fc-cache).
+// Remove it afterwards only when these tests are what created it — never a real one already in use.
+const FC_CACHE = join(tmpdir(), "cc-fc-cache");
+if (!existsSync(FC_CACHE)) removeAfterFile(FC_CACHE);
 
 const withPlatform = (plat: string, fn: () => void) => {
   const orig = Object.getOwnPropertyDescriptor(process, "platform");
@@ -15,7 +21,7 @@ const withPlatform = (plat: string, fn: () => void) => {
 };
 
 function makeBundle() {
-  const dir = mkdtempSync(join(tmpdir(), "ccfonts-"));
+  const dir = tempDir("ccfonts-");
   const fonts = join(dir, "fonts");
   mkdirSync(fonts);
   writeFileSync(
@@ -46,7 +52,7 @@ describe("linuxFontEnv", () => {
 
   it("returns {} on linux when the binary ships no fonts/ bundle", () => {
     withPlatform("linux", () => {
-      const dir = mkdtempSync(join(tmpdir(), "ccnofont-"));
+      const dir = tempDir("ccnofont-");
       expect(linuxFontEnv(join(dir, "chrome"))).toEqual({});
     });
   });

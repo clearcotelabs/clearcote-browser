@@ -1,6 +1,22 @@
 import os
+import shutil
+import tempfile
+
+import pytest
 
 from clearcote import _fonts
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _no_font_cache_left_behind():
+    """linux_font_env points fontconfig at a cache shared by every launch on the machine
+    (<tmp>/cc-fc-cache). Remove it afterwards only when these tests are what created it, never a
+    real one already in use."""
+    cache = os.path.join(tempfile.gettempdir(), "cc-fc-cache")
+    existed = os.path.exists(cache)
+    yield
+    if not existed:
+        shutil.rmtree(cache, ignore_errors=True)
 
 
 def _make_bundle(tmp_path):

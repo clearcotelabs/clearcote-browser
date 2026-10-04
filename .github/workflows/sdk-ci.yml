@@ -38,7 +38,15 @@ jobs:
           cache-dependency-path: sdk/node/package-lock.json
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      # In a temp directory of its own, which the run must leave empty: every directory a test makes
+      # is removed again, so a run never piles up in a developer's or runner's temp directory.
+      - name: npm test (must leave its temp directory empty)
+        run: |
+          export TMPDIR="$RUNNER_TEMP/sdk-test-tmp"
+          mkdir -p "$TMPDIR"
+          npm test
+          left="$(ls -A "$TMPDIR")"
+          if [ -n "$left" ]; then echo "::error::the test run left these in its temp directory:"; echo "$left"; exit 1; fi
 
   python:
     name: python SDK tests
@@ -53,7 +61,14 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install --upgrade pip
       - run: pip install -e ".[test]"
-      - run: pytest -q
+      # As for Node; pytest keeps only the (empty) base of its tmp_path directories, see pyproject.toml.
+      - name: pytest (must leave its temp directory empty)
+        run: |
+          export TMPDIR="$RUNNER_TEMP/sdk-test-tmp"
+          mkdir -p "$TMPDIR"
+          pytest -q
+          left="$(ls -A "$TMPDIR" | grep -v '^pytest-of-' || true)"
+          if [ -n "$left" ]; then echo "::error::the test run left these in its temp directory:"; echo "$left"; exit 1; fi
 
   release-pin:
     name: version-drift guard

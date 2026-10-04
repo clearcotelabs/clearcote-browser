@@ -12,19 +12,17 @@ and async surfaces — fails HERE. Because the publish workflows gate on this su
 (sdk-ci.yml), a launch that can't launch can no longer be released.
 """
 import inspect
-import tempfile
 
 import clearcote
 from clearcote import async_api
 
 
-def _fake_exe():
+def _fake_exe(tmp_path):
     """A real (empty) file so `_prepare` uses it as the explicit executable_path and
-    never tries to download a binary."""
-    f = tempfile.NamedTemporaryFile(prefix="fake-chrome-", suffix=".exe", delete=False)
-    f.write(b"\x00")
-    f.close()
-    return f.name
+    never tries to download a binary. In the test's tmp_path, so nothing outlives the run."""
+    exe = tmp_path / "fake-chrome.exe"
+    exe.write_bytes(b"\x00")
+    return str(exe)
 
 
 class _FakeBrowser:
@@ -65,19 +63,19 @@ def _patch_sync(monkeypatch, cap):
                         lambda c, h, s, seed=None: cap.__setitem__("seed", seed))
 
 
-def test_sync_launch_invokes_and_threads_seed(monkeypatch):
+def test_sync_launch_invokes_and_threads_seed(monkeypatch, tmp_path):
     cap = {}
     _patch_sync(monkeypatch, cap)
-    browser = clearcote.launch(executable_path=_fake_exe(), fingerprint="seed-SYNC")
+    browser = clearcote.launch(executable_path=_fake_exe(tmp_path), fingerprint="seed-SYNC")
     assert browser is not None
     assert cap["seed"] == "seed-SYNC"  # _prepare's effective seed reached the humanizer
 
 
-def test_sync_launch_persistent_context_invokes_and_threads_seed(monkeypatch):
+def test_sync_launch_persistent_context_invokes_and_threads_seed(monkeypatch, tmp_path):
     cap = {}
     _patch_sync(monkeypatch, cap)
     ctx = clearcote.launch_persistent_context(
-        tempfile.mkdtemp(), executable_path=_fake_exe(), fingerprint="seed-LPC")
+        str(tmp_path / "profile"), executable_path=_fake_exe(tmp_path), fingerprint="seed-LPC")
     assert ctx is not None
     assert cap["seed"] == "seed-LPC"
 
@@ -112,19 +110,19 @@ def _patch_async(monkeypatch, cap):
     monkeypatch.setattr(async_api, "install_humanize_on_context", _fake_ihc)
 
 
-async def test_async_launch_invokes_and_threads_seed(monkeypatch):
+async def test_async_launch_invokes_and_threads_seed(monkeypatch, tmp_path):
     cap = {}
     _patch_async(monkeypatch, cap)
-    browser = await async_api.launch(executable_path=_fake_exe(), fingerprint="seed-ASYNC")
+    browser = await async_api.launch(executable_path=_fake_exe(tmp_path), fingerprint="seed-ASYNC")
     assert browser is not None
     assert cap["seed"] == "seed-ASYNC"
 
 
-async def test_async_launch_persistent_context_invokes_and_threads_seed(monkeypatch):
+async def test_async_launch_persistent_context_invokes_and_threads_seed(monkeypatch, tmp_path):
     cap = {}
     _patch_async(monkeypatch, cap)
     ctx = await async_api.launch_persistent_context(
-        tempfile.mkdtemp(), executable_path=_fake_exe(), fingerprint="seed-ALPC")
+        str(tmp_path / "profile"), executable_path=_fake_exe(tmp_path), fingerprint="seed-ALPC")
     assert ctx is not None
     assert cap["seed"] == "seed-ALPC"
 

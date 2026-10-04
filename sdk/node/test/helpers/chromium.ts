@@ -3,7 +3,7 @@
 // Which binary: CLEARCOTE_TEST_BINARY (a Clearcote build), else a Chromium Playwright has downloaded.
 // Neither -> the tests skip. Mirrors sdk/python/tests/_chromium.py.
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -37,7 +37,14 @@ export class LocalChromium {
     const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${this.udd}`, "--no-first-run",
       "--no-default-browser-check", "--disable-gpu", "about:blank"];
     if (process.platform === "linux" && process.getuid?.() === 0) args.unshift("--no-sandbox");
-    this.proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"] });
+    // The browser's own temp files go inside its profile, so stop() takes them too: its singleton-socket
+    // directory on Linux (orphaned whenever the browser is killed) and its component-updater downloads on
+    // Windows (chromiumcrx_*) would otherwise be left in the machine's temp directory.
+    const temp = join(this.udd, "tmp");
+    mkdirSync(temp);
+    const env = { ...process.env, TMPDIR: temp, TMP: temp, TEMP: temp };
+    // Its own process group on Linux/macOS, so stop() can end the helper processes along with it.
+    this.proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"], env, detached: process.platform !== "win32" });
     this.wsUrl = await new Promise<string>((resolve, reject) => {
       let buf = "";
       const timer = setTimeout(() => reject(new Error(`${exe} did not open a CDP endpoint`)), 30_000);
@@ -59,12 +66,28 @@ export class LocalChromium {
   }
 
   async stop(): Promise<void> {
-    if (this.proc && this.alive()) {
-      const exited = new Promise((r) => this.proc!.once("exit", r));
-      this.proc.kill("SIGTERM");
+    const proc = this.proc;
+    const group = process.platform !== "win32" && proc?.pid !== undefined ? -proc.pid : null;
+    if (proc && this.alive()) {
+      const exited = new Promise((r) => proc.once("exit", r));
+      // The whole process group on Linux/macOS: the browser exits within ~50 ms of a SIGTERM, but its helper
+      // processes went on writing Default/ for 10+ s, so the delete below kept failing (ENOTEMPTY) and left
+      // the profile behind in 2-3 of 7 runs.
+      if (group !== null) {
+        try { process.kill(group, "SIGKILL"); } catch { /* already gone */ }
+      } else {
+        proc.kill("SIGTERM");
+      }
       await Promise.race([exited, new Promise((r) => setTimeout(r, 10_000))]);
     }
-    // Chromium's helper processes can still be writing under the profile for a moment after exit.
+    if (group !== null) {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        try { process.kill(group, 0); } catch { break; } // ESRCH: nobody left in the group
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+    // On Windows the browser can still hold handles under the profile for a moment after exit.
     try { if (this.udd) rmSync(this.udd, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch { /* temp sweeper gets it */ }
   }
 }

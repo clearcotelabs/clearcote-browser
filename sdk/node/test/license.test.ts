@@ -3,12 +3,12 @@
 // call). These tests are hermetic — the only network is a mocked `fetch`.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveLicenseKey, resolveInstanceId } from "../src/license.js";
 import { proEnsureBinary } from "../src/download.js";
 import { executablePath } from "../src/index.js";
+import { tempDir } from "./helpers/temp.js";
 
 describe("resolveInstanceId (stable per-machine id: env > file > generated+persisted)", () => {
   const OLD = {
@@ -30,7 +30,7 @@ describe("resolveInstanceId (stable per-machine id: env > file > generated+persi
 
   it("persists to ~/.clearcote/instance_id and is stable across calls (a restart reuses its slot)", () => {
     delete process.env.CLEARCOTE_INSTANCE_ID;
-    const home = mkdtempSync(join(tmpdir(), "cc-home-"));
+    const home = tempDir("cc-home-");
     process.env.HOME = home; // POSIX
     process.env.USERPROFILE = home; // Windows
     const a = resolveInstanceId();

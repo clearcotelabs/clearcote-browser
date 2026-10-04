@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, basename } from "node:path";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join, basename, dirname } from "node:path";
 import { warmFiles } from "../src/download.js";
 import { isWinLaunchRace, winAvRetry } from "../src/index.js";
+import { removeAfterFile, tempDir } from "./helpers/temp.js";
 
 // The Windows first-launch antivirus-scan race work-around (SDK 0.12.1): a freshly-extracted,
 // unsigned chrome.exe can fail its first launch with "spawn UNKNOWN" / "side-by-side configuration
@@ -11,7 +11,7 @@ import { isWinLaunchRace, winAvRetry } from "../src/index.js";
 // pre-scans to prevent it; winAvRetry re-scans + retries, then relaunches from a fresh copy.
 describe("Windows first-launch AV race work-around", () => {
   it("warmFiles reads a tree (forcing the AV scan) without throwing", () => {
-    const d = mkdtempSync(join(tmpdir(), "cc-warm-"));
+    const d = tempDir("cc-warm-");
     writeFileSync(join(d, "chrome.exe"), Buffer.alloc(1000));
     mkdirSync(join(d, "locales"));
     writeFileSync(join(d, "locales", "en-US.pak"), Buffer.alloc(500));
@@ -41,7 +41,7 @@ describe("Windows first-launch AV race work-around", () => {
     const orig = Object.getOwnPropertyDescriptor(process, "platform")!;
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
     try {
-      const bdir = join(mkdtempSync(join(tmpdir(), "cc-recov-")), "browser");
+      const bdir = join(tempDir("cc-recov-"), "browser");
       mkdirSync(bdir, { recursive: true });
       writeFileSync(join(bdir, "chrome.exe"), Buffer.from("stub"));
       const exe = join(bdir, "chrome.exe");
@@ -49,6 +49,7 @@ describe("Windows first-launch AV race work-around", () => {
         if (e === exe) throw new Error("BrowserType.launch: spawn UNKNOWN"); // poisoned path always fails
         return { ok: true, exe: e }; // a fresh path launches cleanly
       }, exe)) as { ok: boolean; exe: string };
+      removeAfterFile(dirname(dirname(result.exe))); // the recovered copy: <tmp>/clearcote-recover-*/browser/chrome.exe
       expect(result.ok).toBe(true);
       expect(result.exe).not.toBe(exe); // launched from a recovered copy on a different path
       expect(basename(result.exe)).toBe("chrome.exe");

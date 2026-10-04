@@ -3,11 +3,11 @@
 // lease_scope "browser" and one live lease per launch_id, a paid key gets the machine-shared lease —
 // and HOME is a temp dir so the on-disk cache and instance_id are isolated.
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { acquireLease, ConcurrencyLimitError, LicenseError, tokenPlan, newLaunchId } from "../src/license.js";
+import { tempDir } from "./helpers/temp.js";
 
 const realFetch = globalThis.fetch;
 
@@ -75,7 +75,7 @@ function backend(plan: string, opts: { limit?: number; failNetwork?: boolean } =
 
 let seq = 0;
 function isolate(plan: string): string {
-  const home = mkdtempSync(join(tmpdir(), "cc-perbrowser-"));
+  const home = tempDir("cc-perbrowser-");
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   delete process.env.CLEARCOTE_INSTANCE_ID;

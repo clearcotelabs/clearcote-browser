@@ -32,7 +32,7 @@ clearcote-agent = "clearcote.cli:main"
 clearcote-serve = "clearcote._serve:_cli_main"
 
 [project.optional-dependencies]
-test = ["pytest>=7", "pytest-asyncio>=0.23"]
+test = ["pytest>=7.3", "pytest-asyncio>=0.23"]
 
 [project.urls]
 Homepage = "https://github.com/clearcotelabs/clearcote-browser"
@@ -41,6 +41,9 @@ Issues = "https://github.com/clearcotelabs/clearcote-browser/issues"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Keep tmp_path directories only for tests that failed (for debugging): by default pytest keeps the
+# last three runs in full, browser profiles and fake binaries included.
+tmp_path_retention_policy = "failed"
 
 [tool.hatch.build.targets.wheel]
 packages = ["clearcote"]

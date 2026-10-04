@@ -7,6 +7,7 @@ _win_av_retry() re-scans + retries, then relaunches from a fresh copy (a poisone
 recovers in place)."""
 
 import os
+import shutil
 
 import clearcote
 from clearcote import _is_win_launch_race, _win_av_retry
@@ -73,10 +74,15 @@ def test_retry_recovers_from_a_fresh_copy_when_path_stays_poisoned(monkeypatch, 
         return ("ok", e)  # any fresh path launches cleanly
 
     result = _win_av_retry(do, exe)
-    assert result[0] == "ok"
-    assert result[1] != exe  # launched from a recovered copy on a different path
-    assert os.path.basename(result[1]) == "chrome.exe"
-    assert os.path.exists(result[1])  # the fresh copy really exists on disk
+    recovered = os.path.dirname(os.path.dirname(result[1]))  # <tmp>/clearcote-recover-*/browser/chrome.exe
+    try:
+        assert result[0] == "ok"
+        assert result[1] != exe  # launched from a recovered copy on a different path
+        assert os.path.basename(result[1]) == "chrome.exe"
+        assert os.path.exists(result[1])  # the fresh copy really exists on disk
+    finally:
+        if os.path.basename(recovered).startswith("clearcote-recover-"):
+            shutil.rmtree(recovered, ignore_errors=True)
 
 
 def test_retry_reraises_non_race_errors(monkeypatch):
