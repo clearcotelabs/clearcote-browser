@@ -852,8 +852,10 @@ public static class License
     }
 
     /// Start a browser; if it fails to start, release the lease before re-throwing. On a per-browser plan
-    /// (the free tier) the slot would otherwise stay taken until the lease TTL.
-    public static async Task<T> ReleaseLeaseOnFailureAsync<T>(LeaseSession? lease, Func<Task<T>> start)
+    /// (the free tier) the slot would otherwise stay taken until the lease TTL. <paramref name="launchToken"/>
+    /// (the launch's run-token file) goes too: a paid lease is shared, so stopping it only drops a reference,
+    /// and the file stayed in the temp directory until the process exited.
+    public static async Task<T> ReleaseLeaseOnFailureAsync<T>(LeaseSession? lease, Func<Task<T>> start, LaunchToken? launchToken = null)
     {
         try
         {
@@ -862,6 +864,7 @@ public static class License
         catch
         {
             if (lease is not null) { try { await lease.StopAsync().ConfigureAwait(false); } catch { /* the start failure is what matters */ } }
+            try { launchToken?.Release(); } catch { /* likewise */ }
             throw;
         }
     }

@@ -45,16 +45,22 @@ def test_resolve_instance_id_persists_and_is_stable(monkeypatch, tmp_path):
 
 
 # ── _resolve_binary precedence: explicit path > CLEARCOTE_BINARY > pro > free ──
-def test_resolve_binary_explicit_path_wins(monkeypatch):
-    monkeypatch.setenv("CLEARCOTE_BINARY", "/opt/env/chrome")
+def test_resolve_binary_explicit_path_wins(monkeypatch, tmp_path):
+    custom = tmp_path / "custom-chrome"
+    custom.write_bytes(b"")  # a real file: the SDK refuses a named binary that does not exist
+    env = tmp_path / "env-chrome"
+    env.write_bytes(b"")  # a real file: the SDK refuses a named binary that does not exist
+    monkeypatch.setenv("CLEARCOTE_BINARY", str(env))
     # explicit path beats the env binary and never triggers a download
-    assert clearcote._resolve_binary("/opt/custom/chrome", pro=("cc_lic_x", None)) == "/opt/custom/chrome"
+    assert clearcote._resolve_binary(str(custom), pro=("cc_lic_x", None)) == str(custom)
 
 
-def test_resolve_binary_env_wins_over_pro(monkeypatch):
-    monkeypatch.setenv("CLEARCOTE_BINARY", "/opt/env/chrome")
+def test_resolve_binary_env_wins_over_pro(monkeypatch, tmp_path):
+    env = tmp_path / "env-chrome"
+    env.write_bytes(b"")  # a real file: the SDK refuses a named binary that does not exist
+    monkeypatch.setenv("CLEARCOTE_BINARY", str(env))
     # even with a pro selector, the explicit env binary short-circuits (no network)
-    assert clearcote._resolve_binary(None, pro=("cc_lic_x", None)) == "/opt/env/chrome"
+    assert clearcote._resolve_binary(None, pro=("cc_lic_x", None)) == str(env)
 
 
 def test_resolve_binary_pro_selector_routes_to_pro(monkeypatch):

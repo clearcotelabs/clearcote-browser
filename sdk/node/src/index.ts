@@ -16,7 +16,7 @@
 // hand-off and webhooks.
 
 import { chromium } from "playwright-core";
-import { cpSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -354,10 +354,12 @@ export async function executablePath(
   if (options.executablePath) {
     // Caller-supplied tree (often a browser bundled into a packaged app): we did not install it, so
     // validate it here — a half-copied tree otherwise CHECK-crashes during browser startup.
+    requireBinary(options.executablePath);
     checkInstall(options.executablePath);
     return options.executablePath;
   }
   if (process.env.CLEARCOTE_BINARY) {
+    requireBinary(process.env.CLEARCOTE_BINARY);
     checkInstall(process.env.CLEARCOTE_BINARY);
     return process.env.CLEARCOTE_BINARY;
   }
@@ -835,13 +837,30 @@ function asBrowserLike(context: BrowserContext): Browser {
 /**
  * Start a browser; if it fails to start, release the lease before re-throwing. On a per-browser plan
  * (the free tier) the slot would otherwise stay taken until the lease TTL. Exported for tests.
+ *
+ * `launchToken` (the launch's run-token file) goes too: a paid lease is shared, so its stop() only drops
+ * a reference, and the file stayed in the temp directory until the process exited.
  */
-export async function releaseLeaseOnFailure<T>(lease: LeaseSession | null, start: () => Promise<T>): Promise<T> {
+export async function releaseLeaseOnFailure<T>(
+  lease: LeaseSession | null, start: () => Promise<T>, launchToken?: { release(): void } | null,
+): Promise<T> {
   try {
     return await start();
   } catch (e) {
     try { await lease?.stop(); } catch { /* ignore: the original failure is what matters */ }
+    launchToken?.release();
     throw e;
+  }
+}
+
+/**
+ * A browser the caller named must exist. Handed a missing one, Playwright fails only after creating
+ * temp directories it then leaves behind (playwright-artifacts-*, playwright_chromiumdev_profile-*),
+ * and a licensed launch would have taken a lease first. Same message as the .NET SDK.
+ */
+function requireBinary(path: string): void {
+  if (!existsSync(path)) {
+    throw new Error(`Clearcote binary not found at '${path}'. Set executablePath / CLEARCOTE_BINARY, or let the SDK auto-download it.`);
   }
 }
 
@@ -959,7 +978,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
       ...(env ? { env } : {}),
       args: [...engineArgs, ...(geom?.args ?? [])],
     });
-  }, exe)));
+  }, exe)), launchToken);
   // Release the concurrency slot + remove the run-token file when the browser closes.
   if (lease) browser.on("disconnected", () => { void lease.stop(); launchToken?.release(); });
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
@@ -1081,7 +1100,7 @@ async function launchLocalPersistentContext(
       ...(env ? { env } : {}),
       args: [...engineArgs, ...(geom?.args ?? [])],
     });
-  }, exe)));
+  }, exe)), launchToken);
   if (lease) context.on("close", () => { void lease.stop(); launchToken?.release(); });
   if (geom) await installWindowFixup(context, engineArgs);
   installHumanizeOnContext(context, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona

@@ -67,10 +67,10 @@ describe("local or cloud", () => {
     await launch({ country: "us" } as never);
     expect(connect).toHaveBeenCalledTimes(1);
     expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ country: "us" });
-    // local: fails starting the browser, without ever talking to the API. A stand-in launcher: Playwright's own
-    // leaves a playwright-artifacts-* directory in the temp dir when the executable does not exist.
-    vi.spyOn(chromium, "launchPersistentContext").mockRejectedValue(new Error("browser failed to start"));
-    await expect(launch({ cloud: false, executablePath: join(tmp, "missing", "chrome"), apiKey: "k", quiet: true })).rejects.toThrow("browser failed to start");
+    // local: refused on the missing binary before any browser starts, without ever talking to the API
+    const local = vi.spyOn(chromium, "launchPersistentContext");
+    await expect(launch({ cloud: false, executablePath: join(tmp, "missing", "chrome"), apiKey: "k", quiet: true })).rejects.toThrow(/Clearcote binary not found/);
+    expect(local).not.toHaveBeenCalled();
     expect(api.requests("POST")).toHaveLength(1);
     expect(connect).toHaveBeenCalledTimes(1);
   });

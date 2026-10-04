@@ -3,9 +3,19 @@
 // helpful message instead of getting stuck. Hermetic: the catalog fetch is mocked, no real network.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { resolveVersion } from "../src/download.js";
 import { CATALOG_FALLBACK } from "../src/release.js";
 import { executablePath } from "../src/index.js";
+import { tempDir } from "./helpers/temp.js";
+
+/** A real (empty) file: the SDK refuses a caller-named binary that does not exist. */
+function fakeBinary(): string {
+  const exe = join(tempDir("cc-exe-"), "chrome");
+  writeFileSync(exe, "");
+  return exe;
+}
 
 const CATALOG = {
   schema: 1,
@@ -90,14 +100,16 @@ describe("resolveVersion (validate-first, tier-aware)", () => {
 
 describe("backwards compatibility: version must not change existing precedence", () => {
   it("an explicit executablePath wins over a version selector", async () => {
-    expect(await executablePath({ executablePath: "/opt/x/chrome", version: "150" })).toBe("/opt/x/chrome");
+    const exe = fakeBinary();
+    expect(await executablePath({ executablePath: exe, version: "150" })).toBe(exe);
   });
 
   it("CLEARCOTE_BINARY wins over a version selector (legacy env path unaffected)", async () => {
     const OLD = process.env.CLEARCOTE_BINARY;
-    process.env.CLEARCOTE_BINARY = "/opt/env/chrome";
+    const exe = fakeBinary();
+    process.env.CLEARCOTE_BINARY = exe;
     try {
-      expect(await executablePath({ version: "150" })).toBe("/opt/env/chrome");
+      expect(await executablePath({ version: "150" })).toBe(exe);
     } finally {
       if (OLD === undefined) delete process.env.CLEARCOTE_BINARY;
       else process.env.CLEARCOTE_BINARY = OLD;

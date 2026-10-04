@@ -193,6 +193,16 @@ def _playwright():
     return _pw
 
 
+def _require_binary(path):
+    """A browser the caller named must exist. Handed a missing one, Playwright fails only after
+    creating temp directories it then leaves behind (playwright-artifacts-*,
+    playwright_chromiumdev_profile-*). Same message as the Node and .NET SDKs."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Clearcote binary not found at '{path}'. Set executable_path / CLEARCOTE_BINARY, or let "
+            "the SDK auto-download it.")
+
+
 def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_update=None, pro=None,
                     version=None, release_channel=None):
     from .download import check_install
@@ -200,10 +210,12 @@ def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_upda
     if executable_path:
         # Caller-supplied tree (often a browser bundled into a packaged app): we did not install it,
         # so validate it here — a half-copied tree otherwise CHECK-crashes during browser startup.
+        _require_binary(executable_path)
         check_install(executable_path)
         return executable_path
     env = os.environ.get("CLEARCOTE_BINARY")
     if env:
+        _require_binary(env)
         check_install(env)
         return env
     # Validated on every download path (a typo must never silently select a different build) and
@@ -928,9 +940,13 @@ def _retry_on_stale_run_token(lease, pw_kwargs, launch_token, start):
         return start()
 
 
-def _release_lease_on_failure(lease, start):
+def _release_lease_on_failure(lease, start, launch_token=None):
     """Run ``start()``; if the browser fails to start, release the lease before re-raising. On a
-    per-browser plan (the free tier) the slot would otherwise stay taken until the lease TTL."""
+    per-browser plan (the free tier) the slot would otherwise stay taken until the lease TTL.
+
+    ``launch_token`` (the launch's run-token file, ``(path, release)``) goes too: a paid lease is
+    shared, so its stop() only drops a reference, and the file stayed in the temp directory until the
+    interpreter exited."""
     try:
         return start()
     except BaseException:
@@ -939,7 +955,17 @@ def _release_lease_on_failure(lease, start):
                 lease.stop()
             except Exception:  # noqa: BLE001
                 pass
+        _release_launch_token(launch_token)
         raise
+
+
+def _release_launch_token(launch_token):
+    """Remove a launch's run-token file (``(path, release)`` or None); never raises."""
+    if launch_token:
+        try:
+            launch_token[1]()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _drop_cloud_credentials(kwargs):
@@ -1014,7 +1040,7 @@ def launch(cloud=None, **kwargs):
     browser = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
         lease, pw_kwargs, launch_token, lambda: _win_av_retry(
             lambda e: _playwright().chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe
-        )))
+        )), launch_token)
     if lease:  # release the concurrency slot + remove the run-token file when the browser closes
         def _on_disconnect(_b=None, _lease=lease, _lt=launch_token, _own=owns_lease):
             if _own:  # a borrowed slot belongs to the caller: only drop this launch's token file
@@ -1079,7 +1105,7 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
                 user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
             ),
             exe,
-        )))
+        )), launch_token)
     if lease:  # release the concurrency slot + remove the run-token file when the context closes
         def _on_close(_c=None, _lease=lease, _lt=launch_token, _own=owns_lease):
             if _own:  # a borrowed slot belongs to the caller: only drop this launch's token file

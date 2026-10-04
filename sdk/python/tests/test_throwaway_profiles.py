@@ -121,6 +121,12 @@ def pw(monkeypatch):
                 state["on_launch"](user_data_dir)
             return _FakeContext(user_data_dir, state["shutdown"])
 
+        def launch(self, **kw):
+            state["dirs"].append(None)  # incognito: no profile directory
+            if state["fail"]:
+                raise state["fail"]
+            return _FakeContext()
+
     class _PW:
         chromium = _Chromium()
 
@@ -398,4 +404,64 @@ def test_a_browser_left_open_at_exit_loses_its_profile_after_the_driver_has_clos
                        text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     assert "launched" in r.stdout and "clearcote-run-" in r.stdout  # the launch really happened
+    assert os.listdir(temp) == []
+
+
+# --------------------------------------------------------------------- licensed launch that fails
+@pytest.fixture
+def paid_licence(monkeypatch):
+    """A licence server answering checkout for a paid plan (a machine-shared lease), with a key of its
+    own so no lease from another test is reused."""
+    import base64
+    import json
+    import time
+    import uuid
+
+    import clearcote._license as L
+
+    token = base64.urlsafe_b64encode(json.dumps({"v": 1, "plan": "pro", "n": 1}).encode()).decode().rstrip("=") + ".sig"
+
+    def post(url, key, body, timeout=15.0, proxy=None):
+        if url.endswith("/checkout"):
+            return 200, {"lease_id": "L1", "token": token, "exp": time.time() + 900, "lease_ttl_sec": 810,
+                         "heartbeat_interval_sec": 270, "concurrency": {"used": 1, "limit": 5}}
+        return 200, {}
+
+    monkeypatch.setattr(L, "_post", post)
+    return {"license_key": f"cc_lic_pro_{uuid.uuid4().hex}", "license_api_base": "http://test.local"}
+
+
+# A licensed launch writes a run-token file for the engine (<tmp>/clearcote-rt-*.tok) before the
+# browser starts. When the browser then failed to start, the lease was released but the file stayed in
+# the temp directory until the interpreter exited (a paid lease is shared, so its stop() only drops a
+# reference) -- and for good when the process was killed.
+@pytest.mark.parametrize("ephemeral", [True, False])
+def test_a_licensed_launch_that_fails_to_start_leaves_no_run_token_file(temp, exe, pw, paid_licence, ephemeral):
+    pw["fail"] = RuntimeError(BROWSER_FAILED)
+    with pytest.raises(RuntimeError, match=BROWSER_FAILED):
+        clearcote.launch(executable_path=exe, headless=False, ephemeral_profile=ephemeral, **paid_licence)
+    assert len(pw["dirs"]) == 1  # the browser really was asked to start, under a lease
+    assert os.listdir(temp) == []
+
+
+async def test_async_licensed_launch_that_fails_to_start_leaves_no_run_token_file(tmp_path, temp, exe, async_pw,
+                                                                                 paid_licence):
+    async_pw["fail"] = RuntimeError(BROWSER_FAILED)
+    with pytest.raises(RuntimeError, match=BROWSER_FAILED):
+        await async_api.launch_persistent_context(str(tmp_path / "profile"), executable_path=exe, headless=False,
+                                                  **paid_licence)
+    assert os.listdir(temp) == []
+
+
+# ------------------------------------------------------------------------ a binary that is not there
+# Handed an executable that does not exist, Playwright fails only after creating temp directories it
+# then leaves behind (playwright-artifacts-*, plus playwright_chromiumdev_profile-* for launch()).
+@pytest.mark.parametrize("how", ["executable_path", "CLEARCOTE_BINARY"])
+def test_a_missing_binary_is_refused_before_any_browser_starts(tmp_path, temp, pw, monkeypatch, how):
+    missing = str(tmp_path / "nowhere" / ("chrome.exe" if os.name == "nt" else "chrome"))
+    if how == "CLEARCOTE_BINARY":
+        monkeypatch.setenv("CLEARCOTE_BINARY", missing)
+    with pytest.raises(FileNotFoundError, match="Clearcote binary not found"):
+        clearcote.launch(headless=False, **({"executable_path": missing} if how == "executable_path" else {}))
+    assert pw["dirs"] == []
     assert os.listdir(temp) == []

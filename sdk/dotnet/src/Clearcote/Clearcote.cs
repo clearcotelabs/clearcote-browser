@@ -129,7 +129,7 @@ public static class Clearcote
                 IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
                 Env = envFor(),
                 Proxy = ToPwProxy(proxy),
-            }), exe))).ConfigureAwait(false);
+            }), exe)), launchToken).ConfigureAwait(false);
 
         // Release the concurrency slot + remove the run-token file when the browser closes.
         if (lease is not null) browser.Disconnected += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };
@@ -244,7 +244,7 @@ public static class Clearcote
                         ? ViewportSize.NoViewport
                         : null),
                 ScreenSize = options.ScreenSize,
-            }), exe))).ConfigureAwait(false);
+            }), exe)), launchToken).ConfigureAwait(false);
 
         // Release the concurrency slot + remove the run-token file when the context closes.
         if (lease is not null) context.Close += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };

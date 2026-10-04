@@ -3,12 +3,19 @@
 // call). These tests are hermetic — the only network is a mocked `fetch`.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveLicenseKey, resolveInstanceId } from "../src/license.js";
 import { proEnsureBinary } from "../src/download.js";
 import { executablePath } from "../src/index.js";
 import { tempDir } from "./helpers/temp.js";
+
+/** A real (empty) file: the SDK refuses a caller-named binary that does not exist. */
+function fakeBinary(): string {
+  const exe = join(tempDir("cc-exe-"), "chrome");
+  writeFileSync(exe, "");
+  return exe;
+}
 
 describe("resolveInstanceId (stable per-machine id: env > file > generated+persisted)", () => {
   const OLD = {
@@ -62,15 +69,17 @@ describe("resolveLicenseKey (explicit > env > file)", () => {
 
 describe("executablePath precedence (an explicit binary always wins over pro/free)", () => {
   it("returns an explicit executablePath with no download", async () => {
-    expect(await executablePath({ executablePath: "/opt/custom/chrome" })).toBe("/opt/custom/chrome");
+    const exe = fakeBinary();
+    expect(await executablePath({ executablePath: exe })).toBe(exe);
   });
 
   it("returns CLEARCOTE_BINARY before selecting the PRO or free binary", async () => {
     const OLD = process.env.CLEARCOTE_BINARY;
-    process.env.CLEARCOTE_BINARY = "/opt/env/chrome";
+    const exe = fakeBinary();
+    process.env.CLEARCOTE_BINARY = exe;
     try {
       // Even WITH a pro selector present, the explicit env binary short-circuits (no fetch).
-      expect(await executablePath({ pro: { licenseKey: "cc_lic_x" } })).toBe("/opt/env/chrome");
+      expect(await executablePath({ pro: { licenseKey: "cc_lic_x" } })).toBe(exe);
     } finally {
       if (OLD === undefined) delete process.env.CLEARCOTE_BINARY;
       else process.env.CLEARCOTE_BINARY = OLD;

@@ -308,6 +308,33 @@ public class LicensePerBrowserTests
         }
     }
 
+    /// A licensed launch writes a run-token file for the engine (&lt;tmp&gt;/clearcote-rt-*.tok) before the browser
+    /// starts. When the browser then failed to start, the lease was released but the file stayed in the temp
+    /// directory until the process exited: a paid lease is shared, so stopping it only drops a reference.
+    [Fact]
+    public async Task Paid_a_launch_that_fails_to_start_leaves_no_run_token_file()
+    {
+        var be = new Backend("pro", limit: 5);
+        var (s, _, _) = Setup(be);
+        var temp = TestTemp.Create("cc-rt-");
+        using (s)
+        {
+            s.Env("TMPDIR", temp).Env("TMP", temp).Env("TEMP", temp);
+            // There, so the launch gets as far as starting it under a lease, and not a browser, so that fails.
+            var exe = Path.Combine(temp, OperatingSystem.IsWindows() ? "chrome.exe" : "chrome");
+            File.WriteAllText(exe, "");
+            var udd = Directory.CreateDirectory(Path.Combine(temp, "profile")).FullName;
+            try
+            {
+                await Assert.ThrowsAnyAsync<Exception>(() =>
+                    Clearcote.LaunchPersistentContextAsync(udd, new LaunchOptions { ExecutablePath = exe, Quiet = true }));
+                Assert.NotEmpty(be.Bodies("checkout"));
+                Assert.Empty(Directory.GetFiles(temp, "clearcote-rt-*.tok"));
+            }
+            finally { TestTemp.Remove(temp); }
+        }
+    }
+
     [Fact]
     public async Task ReleaseLeaseOnFailure_success_does_not_release_and_failure_rethrows_original()
     {

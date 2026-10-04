@@ -313,6 +313,50 @@ describe("throwaway profiles are never left behind", () => {
     expect(existsSync(join(precious, "SingletonSocket"))).toBe(true);
   });
 
+  // A licensed launch writes a run-token file for the engine (<tmp>/clearcote-rt-*.tok) before the
+  // browser starts. When the browser then failed to start, the lease was released but the file stayed
+  // in the temp directory until the process exited (a paid lease is shared, so its stop() only drops a
+  // reference) — and for good when the process was killed.
+  it.each([
+    ["launch()", {}],
+    ["launch({ ephemeralProfile: false })", { ephemeralProfile: false }],
+  ])("%s: a licensed launch that fails to start leaves no run-token file behind", async (_name, extra) => {
+    const realFetch = globalThis.fetch;
+    const token = Buffer.from(JSON.stringify({ v: 1, plan: "pro", n: 1 })).toString("base64url") + ".sig";
+    globalThis.fetch = (async (url: unknown) => {
+      if (String(url).endsWith("/checkout")) {
+        return new Response(JSON.stringify({
+          lease_id: "L1", token, exp: Math.floor(Date.now() / 1000) + 900, lease_ttl_sec: 810,
+          heartbeat_interval_sec: 270, concurrency: { used: 1, limit: 5 },
+        }), { status: 200 });
+      }
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      stub.failLaunch = new Error("browser failed to start");
+      const key = `cc_lic_pro_${Date.now()}_${Math.random().toString(36).slice(2)}`; // its own lease
+      await expect(launch({ ...base(), ...extra, licenseKey: key, licenseApiBase: "http://test.local" }))
+        .rejects.toThrow("browser failed to start");
+      expect(stub.launches).toHaveLength(1); // the browser really was asked to start, under a lease
+      expect(leftovers()).toEqual([]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  // Handed an executable that does not exist, Playwright fails only after creating its temp
+  // directories (playwright-artifacts-*, plus playwright_chromiumdev_profile-* for launch()), which it
+  // leaves behind — and a licensed launch had taken a lease by then.
+  it.each([
+    ["executablePath", (missing: string) => launch({ ...base(), executablePath: missing })],
+    ["CLEARCOTE_BINARY", (missing: string) => { process.env.CLEARCOTE_BINARY = missing; return launch({ headless: false, quiet: true }); }],
+  ])("a missing %s is refused before any browser is started", async (_name, start) => {
+    const missing = join(root, "nowhere", process.platform === "win32" ? "chrome.exe" : "chrome");
+    await expect(start(missing)).rejects.toThrow(/Clearcote binary not found/);
+    expect(stub.launches).toEqual([]);
+    expect(leftovers()).toEqual([]);
+  });
+
   // One process-exit hook per launch, never removed: a caller running hundreds of short-lived
   // browsers piled them up (MaxListenersExceededWarning past 10).
   it("a closed launch leaves no process-exit hook behind", async () => {

@@ -32,7 +32,7 @@ import tempfile
 from . import (  # shared sync helpers
     _headed_no_viewport, _headless_geometry_kwargs, _prepare, _acquire_lease_from_kwargs,
     _is_win_launch_race, _is_stale_token_refusal, _with_geometry_args, _profile_dir_remover,
-    _browser_process_files, _drop_cloud_credentials,
+    _browser_process_files, _drop_cloud_credentials, _release_launch_token,
 )
 from .cloud import AsyncCloud, CloudError, CloudTimeoutError, cloud_requested, launch_cloud_async, verify_webhook
 from ._launchopts import DEFAULT_IGNORED_ARGS
@@ -265,6 +265,7 @@ async def launch(cloud=None, **kwargs):
     except BaseException:
         if lease:
             lease.stop()
+        _release_launch_token(launch_token)  # a shared paid lease keeps it otherwise (see the sync helper)
         await pw.stop()
         raise
     _bind_driver(browser, pw)
@@ -325,6 +326,7 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     except BaseException:
         if lease:
             lease.stop()
+        _release_launch_token(launch_token)  # a shared paid lease keeps it otherwise (see the sync helper)
         await pw.stop()
         raise
     _bind_driver(context, pw)

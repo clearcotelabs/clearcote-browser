@@ -86,14 +86,18 @@ def test_bundled_fallback_lists_only_downloadable_builds():
 import clearcote  # noqa: E402
 
 
-def test_explicit_path_wins_over_version():
+def test_explicit_path_wins_over_version(tmp_path):
+    exe = tmp_path / "chrome"
+    exe.write_bytes(b"")  # a real file: the SDK refuses a named binary that does not exist
     # an explicit executable_path short-circuits before any catalog/version resolution
-    assert clearcote._resolve_binary("/opt/x/chrome", version="150") == "/opt/x/chrome"
+    assert clearcote._resolve_binary(str(exe), version="150") == str(exe)
 
 
-def test_env_binary_wins_over_version(monkeypatch):
-    monkeypatch.setenv("CLEARCOTE_BINARY", "/opt/env/chrome")
-    assert clearcote._resolve_binary(None, version="150") == "/opt/env/chrome"
+def test_env_binary_wins_over_version(monkeypatch, tmp_path):
+    env = tmp_path / "env-chrome"
+    env.write_bytes(b"")  # a real file: the SDK refuses a named binary that does not exist
+    monkeypatch.setenv("CLEARCOTE_BINARY", str(env))
+    assert clearcote._resolve_binary(None, version="150") == str(env)
 
 
 def test_no_version_keeps_legacy_path_and_never_fetches_catalog(monkeypatch):
