@@ -16,7 +16,7 @@
 // hand-off and webhooks.
 
 import { chromium } from "playwright-core";
-import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -672,35 +672,109 @@ async function applyProfileAuto(
 }
 
 /**
- * Delete a throwaway profile directory once its context closes.
+ * Delete a throwaway profile directory — but only once the browser that used it has EXITED.
  *
- * THE RETRY IS NOT DEFENSIVE PADDING — a single attempt measurably does not work. On Windows the
- * browser still holds handles under the profile directory for a short window after `close()`
- * resolves, so the first removal throws EBUSY/EPERM. Measured on the first build of this change
- * (Python port): the directory survived a close plus a 1.5s wait and leaked silently.
+ * NOT ON THE `close` EVENT. Playwright emits it when the browser's pipe drops, which on Linux is
+ * ~100 ms BEFORE the browser process exits, and Chrome keeps writing the profile until then. Deleting
+ * it at that point either fails (ENOTEMPTY: 28 of 30 traced launches) or succeeds and Chrome writes
+ * the directory back — Default/, Local State, first_party_sets.db — after the cleanup has marked
+ * itself done, so nothing retries. That left a clearcote-run-* directory in /tmp on the 0.36.0 release
+ * smoke run. It also deleted the SingletonSocket link Chrome uses to find its own socket directory,
+ * which then leaked as an org.chromium.Chromium.* directory.
  *
- * Two triggers, because neither alone is enough: `close` covers an orderly shutdown, and the
- * process-exit hook covers a script that throws or is interrupted with the browser still open.
- * Both funnel through one idempotent remove.
+ * So no trigger deletes a profile under a live browser:
+ *  - close(): Playwright resolves it only after the browser process has exited, so the directory is
+ *    removed right then — and is gone by the time the caller's `await close()` returns;
+ *  - `close` with no close() call (the browser crashed, or its last window was closed): wait for the
+ *    browser's process to exit first (its pid is in the profile, see browserProcessFiles);
+ *  - process exit: Playwright's own exit handler, registered at launch and so run before this one, has
+ *    killed the browser by then.
+ *
+ * THE RETRY IS NOT DEFENSIVE PADDING — on Windows the browser can still hold handles under the
+ * profile for a moment, so the first removal throws EBUSY/EPERM (measured on the Python port: the
+ * directory survived a close plus a 1.5 s wait).
  */
 function installEphemeralProfileCleanup(context: BrowserContext, userDataDir: string): void {
+  const browser = browserProcessFiles(userDataDir);
   let done = false;
-  const remove = async () => {
+  // Synchronous: an exit handler cannot await, and an unresolved promise at exit removes nothing. It
+  // retries all the same: on Windows the killed browser's handles outlive it for a moment, and a single
+  // attempt left the profile behind (1 of 3 exits with the browser open on 0.36.0).
+  const onExit = () => {
     if (done) return;
-    done = await removeProfileDir(userDataDir);
+    const pause = new Int32Array(new SharedArrayBuffer(4));
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        if (browser.socketDir) rmSync(browser.socketDir, { recursive: true, force: true });
+        rmSync(userDataDir, { recursive: true, force: true });
+        return;
+      } catch {
+        Atomics.wait(pause, 0, 0, 50 * (attempt + 1)); // 50→400 ms, ~1.8 s at most
+      }
+    }
   };
-  context.on("close", () => { void remove(); });
-  // Synchronous: an exit handler cannot await, and an unresolved promise at exit removes nothing.
-  process.once("exit", () => {
-    if (done) return;
-    try { rmSync(userDataDir, { recursive: true, force: true }); } catch { /* temp sweeper gets it */ }
-  });
+  let removing: Promise<void> | null = null;
+  const removeAfterExit = (): Promise<void> => (removing ??= (async () => {
+    if (await waitForProcessExit(browser.pid)) done = await removeProfileDir(userDataDir, browser.socketDir);
+    if (done) process.off("exit", onExit); // one hook per launch would otherwise pile up for the process's life
+    else removing = null; // still running, or out of retries: a later trigger tries again
+  })());
+  let closing = false;
+  const close = context.close.bind(context);
+  context.close = async (...args: Parameters<BrowserContext["close"]>) => {
+    closing = true;
+    try {
+      return await close(...args);
+    } finally {
+      await removeAfterExit();
+    }
+  };
+  context.on("close", () => { if (!closing) void removeAfterExit(); });
+  process.once("exit", onExit);
 }
 
-/** Remove a profile directory, retrying while the browser still holds handles (see above). */
-async function removeProfileDir(userDataDir: string): Promise<boolean> {
+/**
+ * The browser's pid and its singleton-socket directory, read from the symlinks Chrome keeps in its
+ * profile on Linux and macOS while it runs: SingletonLock -> "<hostname>-<pid>" and SingletonSocket ->
+ * "<tmp>/org.chromium.Chromium.XXXXXX/SingletonSocket". Read right after launch, while both exist.
+ * Windows has neither: nothing to wait for, and there its file locks make an early delete fail rather
+ * than succeed.
+ */
+function browserProcessFiles(userDataDir: string): { pid: number | null; socketDir: string | null } {
+  let pid: number | null = null;
+  let socketDir: string | null = null;
+  try {
+    const n = Number(readlinkSync(join(userDataDir, "SingletonLock")).split("-").pop());
+    if (Number.isInteger(n) && n > 0) pid = n;
+  } catch { /* no lock: nothing to wait for */ }
+  try {
+    const dir = dirname(readlinkSync(join(userDataDir, "SingletonSocket")));
+    // Only ever Chrome's own temp directory: the path comes out of a file, so never delete just anything.
+    if (/^(org\.chromium\.Chromium|com\.google\.Chrome)\./.test(basename(dir))) socketDir = dir;
+  } catch { /* no socket */ }
+  return { pid, socketDir };
+}
+
+/** Wait for a process to exit: true once it has (or when there is no pid), false if still running at the deadline. */
+async function waitForProcessExit(pid: number | null, timeoutMs = 10_000): Promise<boolean> {
+  if (pid === null) return true;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ESRCH") return true; // EPERM: alive, someone else's
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+/** Remove a profile directory (and the browser's socket dir), retrying while the browser still holds handles (see above). */
+async function removeProfileDir(userDataDir: string, socketDir: string | null = null): Promise<boolean> {
   for (let attempt = 0; attempt < 6; attempt++) {
     try {
+      if (socketDir) rmSync(socketDir, { recursive: true, force: true });
       rmSync(userDataDir, { recursive: true, force: true });
       return true;
     } catch {

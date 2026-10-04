@@ -156,9 +156,10 @@ public static class Clearcote
     /// explicit. Both expose <c>NewPageAsync()</c>, so most call sites port by changing one word.
     /// </para>
     /// <para>
-    /// The directory is removed on close and again on process exit. The retry is not defensive
-    /// padding: on Windows the browser holds handles under the profile for a short window after
-    /// close, so a single removal silently fails and the directory leaks.
+    /// The directory is removed on close — once the browser process has exited, so it is gone when
+    /// <c>CloseAsync</c> returns — and at process exit, which closes a context still open first. The
+    /// retry is not defensive padding: on Windows the browser holds handles under the profile for a
+    /// short window after close, so a single removal silently fails and the directory leaks.
     /// </para>
     /// <para>
     /// CLOUD. With <c>Cloud = true</c> (or CLEARCOTE_CLOUD=1) this returns the fresh context of a hosted
@@ -178,24 +179,11 @@ public static class Clearcote
         catch
         {
             // A launch that fails (e.g. geoip failing closed) must not leak the throwaway profile dir.
-            try { Directory.Delete(dir, recursive: true); } catch { }
+            new ThrowawayProfile(dir).Remove();
             throw;
         }
-
-        var done = false;
-        void Remove()
-        {
-            if (done) return;
-            for (var attempt = 0; attempt < 6; attempt++)
-            {
-                try { Directory.Delete(dir, recursive: true); done = true; return; }
-                catch (DirectoryNotFoundException) { done = true; return; }
-                catch (IOException) { Thread.Sleep(250 * (attempt + 1)); }
-                catch (UnauthorizedAccessException) { Thread.Sleep(250 * (attempt + 1)); }
-            }
-        }
-        context.Close += (_, _) => Remove();
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => Remove();
+        // Deleted once the browser has exited, never under it: see ThrowawayProfile.
+        new ThrowawayProfile(dir).Attach(context);
         return context;
     }
 

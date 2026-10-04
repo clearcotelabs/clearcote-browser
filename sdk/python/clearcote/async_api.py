@@ -32,7 +32,7 @@ import tempfile
 from . import (  # shared sync helpers
     _headed_no_viewport, _headless_geometry_kwargs, _prepare, _acquire_lease_from_kwargs,
     _is_win_launch_race, _is_stale_token_refusal, _with_geometry_args, _profile_dir_remover,
-    _drop_cloud_credentials,
+    _browser_process_files, _drop_cloud_credentials,
 )
 from .cloud import AsyncCloud, CloudError, CloudTimeoutError, cloud_requested, launch_cloud_async, verify_webhook
 from ._launchopts import DEFAULT_IGNORED_ARGS
@@ -347,23 +347,35 @@ async def launch_agent(user_data_dir=None, **kwargs):
     if user_data_dir is not None:
         # the agent drives the LOCAL engine's Actor framework: never a cloud browser
         return await launch_persistent_context(user_data_dir, cloud=False, **kwargs)
-    # The sync path's throwaway-profile handling, async: removed on close and at interpreter exit,
-    # and at once when the launch fails (it used to leak one directory per failed launch).
-    import atexit
-
+    # The sync path's throwaway-profile handling, async: removed once the browser has exited --
+    # after close(), or when it went away by itself -- and at interpreter exit; and at once when the
+    # launch fails (it used to leak one directory per failed launch). Never on the bare "close"
+    # event: that fires while the browser is still writing the profile (see the sync
+    # _install_ephemeral_profile_cleanup).
     udd = tempfile.mkdtemp(prefix="clearcote-agent-")
-    remove = _profile_dir_remover(udd)
     try:
         context = await launch_persistent_context(udd, cloud=False, **kwargs)
     except BaseException:
-        await asyncio.to_thread(remove)
+        await asyncio.to_thread(_profile_dir_remover(udd, *_browser_process_files(udd)))
         raise
+    remove = _profile_dir_remover(udd, *_browser_process_files(udd))
+    closing = False
+    orig_close = context.close
+
+    async def close(*args, **kw):
+        nonlocal closing
+        closing = True
+        try:
+            return await orig_close(*args, **kw)
+        finally:
+            await asyncio.to_thread(remove)  # waits and retries with sleeps: off the event loop
 
     async def _on_close(*_a):
-        await asyncio.to_thread(remove)  # retries with sleeps: keep them off the event loop
+        if not closing:
+            await asyncio.to_thread(remove)
 
+    context.close = close
     context.on("close", _on_close)
-    atexit.register(remove)
     return context
 
 

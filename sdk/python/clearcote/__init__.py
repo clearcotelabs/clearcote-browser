@@ -623,18 +623,25 @@ def _install_headless_geometry(browser, args=None):
 
 
 def _install_ephemeral_profile_cleanup(context, user_data_dir):
-    """Delete the throwaway profile directory once the context closes.
+    """Delete the throwaway profile directory -- once the browser that used it has EXITED.
 
     THE DIRECTORY IS THE COST OF THE PERSISTENT DEFAULT, so it has to be paid back reliably.
     A Chromium profile is 5-50MB and this session's audit found 570 leaked browser directories
     on one developer machine from earlier tooling — the failure mode is silent until a disk
     fills, which is exactly when it is most expensive.
 
-    Two triggers, because neither alone is enough:
-      * ``close`` fires on an orderly ``context.close()``;
-      * the atexit hook covers the interpreter exiting with the context still open, which is what
-        a crashing script or a KeyboardInterrupt actually does.
-    Both funnel through one idempotent remove, so running twice is harmless.
+    NEVER UNDER A LIVE BROWSER. Playwright fires ``close`` when the browser's pipe drops, which on
+    Linux is ~100 ms BEFORE the browser process exits, and Chrome keeps writing the profile until
+    then. Deleting it from that handler either raised mid-walk or succeeded -- and Chrome wrote the
+    directory back (Default/, Local State, first_party_sets.db) after the cleanup had marked itself
+    done: 2 of 10 launches on Linux, and one clearcote-run-* per release smoke run. So:
+      * ``close()`` is wrapped: Playwright returns from it only once the browser process has
+        exited, so the profile is removed right after, and is gone when the caller's close returns;
+      * ``close`` without a close() call (a crash, the window closed) waits for the browser's
+        process to exit first (its pid is in the profile, see _browser_process_files);
+      * at interpreter exit, one sweep runs AFTER the driver has stopped and closed its browsers
+        (see _sweep_throwaway_profiles).
+    All funnel through one idempotent remove, so running twice is harmless.
 
     THE RETRY IS NOT DEFENSIVE PADDING — a single attempt measurably does not work. On Windows the
     browser process still holds handles under the profile directory for a short window after
@@ -647,49 +654,129 @@ def _install_ephemeral_profile_cleanup(context, user_data_dir):
     their traceback is not — but it must not be swallowed on the first try either, which is how
     570 directories accumulate without anyone noticing.
     """
-    import atexit
+    remove = _profile_dir_remover(user_data_dir, *_browser_process_files(user_data_dir))
+    closing = {"v": False}
+    orig_close = context.close
 
-    cleanup = _profile_dir_remover(user_data_dir)
-    context.on("close", cleanup)
-    atexit.register(cleanup)
-    return cleanup
+    def close(*args, **kwargs):
+        closing["v"] = True
+        try:
+            return orig_close(*args, **kwargs)
+        finally:
+            remove()
+
+    def on_close(*_a):
+        if not closing["v"]:
+            remove()
+
+    context.close = close
+    context.on("close", on_close)
+    return remove
 
 
-def _profile_dir_remover(user_data_dir):
-    """An idempotent remove of ``user_data_dir`` that retries while the browser still holds
-    handles under it (see _install_ephemeral_profile_cleanup for why one attempt is not enough)."""
+def _browser_process_files(user_data_dir):
+    """``(pid, socket_dir)`` of the browser running on ``user_data_dir``, read from the symlinks
+    Chrome keeps in its profile on Linux and macOS while it runs: SingletonLock ->
+    "<hostname>-<pid>", SingletonSocket -> "<tmp>/org.chromium.Chromium.XXXXXX/SingletonSocket"
+    (the socket directory leaks when the browser is killed rather than closed). Read right after
+    launch, while both exist. Windows has neither: nothing to wait for, and there its file locks
+    make an early delete fail rather than succeed."""
+    if os.name == "nt":
+        return None, None
+    pid = socket_dir = None
+    try:
+        pid = int(os.readlink(os.path.join(user_data_dir, "SingletonLock")).rsplit("-", 1)[-1])
+    except (OSError, ValueError):
+        pass
+    try:
+        d = os.path.dirname(os.readlink(os.path.join(user_data_dir, "SingletonSocket")))
+        # only ever Chrome's own temp directory: the path comes out of a file
+        if os.path.basename(d).startswith(("org.chromium.Chromium.", "com.google.Chrome.")):
+            socket_dir = d
+    except OSError:
+        pass
+    return pid, socket_dir
+
+
+def _wait_for_exit(pid, timeout):
+    """True once process ``pid`` has exited (or there is none to wait for); False if it is still
+    running after ``timeout`` seconds."""
+    if pid is None or pid <= 0 or os.name == "nt":  # os.kill(pid, 0) TERMINATES it on Windows
+        return True
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            pass  # EPERM: alive, and another user's (the pid was reused) -- wait out the timeout
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+_THROWAWAY_PROFILES = {}  # user_data_dir -> its remover, until the directory is gone
+
+
+def _sweep_throwaway_profiles():
+    """Interpreter exit: remove every throwaway profile still on disk -- a script that ended (or
+    crashed) with its browser open. Registered at import, see below."""
+    for remove in list(_THROWAWAY_PROFILES.values()):
+        remove(final=True)
+
+
+# Registered at IMPORT, so before the first launch registers _stop_quietly(_pw): atexit runs
+# last-in-first-out, so this sweep runs AFTER the driver has stopped -- and closed its browsers. A
+# hook registered per launch ran first instead, deleted the profile under the still-running
+# browser, and the browser wrote it back while the driver closed it (5 of 5 launches on Linux).
+atexit.register(_sweep_throwaway_profiles)
+
+
+def _profile_dir_remover(user_data_dir, pid=None, socket_dir=None):
+    """An idempotent remove of ``user_data_dir`` (and the browser's ``socket_dir``) that first waits
+    for the browser ``pid`` on it to exit, then retries while the browser still holds handles under
+    it (see _install_ephemeral_profile_cleanup for why). Returns True once the directory is gone;
+    until then it stays registered for the interpreter-exit sweep."""
     import shutil
-    import time
 
     done = {"v": False}
 
-    def cleanup(*_a):
+    def cleanup(*_a, final=False):
         if done["v"]:
-            return
+            return True
+        # Deleting under a running browser is what leaked: it writes the directory back. So not
+        # yet -- a later trigger retries. At exit there is none: delete anyway after the wait.
+        if not _wait_for_exit(pid, 5.0 if final else 10.0) and not final:
+            return False
+        if socket_dir:
+            shutil.rmtree(socket_dir, ignore_errors=True)
         for attempt in range(6):
             try:
                 shutil.rmtree(user_data_dir)
-                done["v"] = True
-                return
-            except FileNotFoundError:
-                done["v"] = True  # already gone: someone else won the race, which is success
-                return
             except OSError:
-                if attempt == 5:
-                    break
+                # FileNotFoundError included: rmtree raises it for ANY entry that vanished during
+                # the walk, not only for the directory itself -- so only the check below is "gone".
+                pass
+            if not os.path.lexists(user_data_dir):
+                done["v"] = True
+                _THROWAWAY_PROFILES.pop(user_data_dir, None)
+                return True
+            if attempt < 5:
                 time.sleep(0.25 * (attempt + 1))  # 0.25→1.5s, ~5s total
-        # Out of attempts. Leave it for the atexit pass (the browser is usually gone by then);
-        # if that fails too the OS temp sweeper reclaims it, and `done` stays False so the
-        # atexit hook genuinely retries rather than short-circuiting.
-        shutil.rmtree(user_data_dir, ignore_errors=True)
+        # Out of attempts: left registered for the exit sweep (the browser is usually gone by
+        # then); if that fails too the OS temp sweeper reclaims it.
+        return False
 
+    _THROWAWAY_PROFILES[user_data_dir] = cleanup
     return cleanup
 
 
 def _launch_on_throwaway_profile(prefix, kwargs):
     """A persistent context on a fresh temp profile the caller never named, so never sees again:
-    removed when the context closes and at interpreter exit -- and at once when the launch fails,
-    which used to leak one directory per failed launch."""
+    removed once its browser has exited -- after close(), or when it went away by itself -- and at
+    interpreter exit; and at once when the launch fails, which used to leak one directory per
+    failed launch."""
     import tempfile
 
     udd = tempfile.mkdtemp(prefix=prefix)
@@ -699,7 +786,7 @@ def _launch_on_throwaway_profile(prefix, kwargs):
         # send the inner call to the cloud.
         context = launch_persistent_context(udd, cloud=False, **kwargs)
     except BaseException:
-        _profile_dir_remover(udd)()
+        _profile_dir_remover(udd, *_browser_process_files(udd))()
         raise
     _install_ephemeral_profile_cleanup(context, udd)
     return context

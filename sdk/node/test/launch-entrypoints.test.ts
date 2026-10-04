@@ -7,7 +7,8 @@
 // them — option merging, binary resolution, arg assembly, temp-directory handling — runs for real.
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
 import { createServer, type Server as HttpServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import type { EventEmitter } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -19,6 +20,11 @@ const stub = vi.hoisted(() => ({
   launches: [] as Array<{ kind: "persistent" | "incognito"; userDataDir?: string; opts: Record<string, unknown> }>,
   spawns: [] as string[][],
   failLaunch: null as Error | null,
+  // The stand-in browser: what it leaves in its profile at launch, and what it does while it shuts down.
+  browser: {
+    onLaunch: null as null | ((userDataDir: string) => void),
+    shutdown: null as null | ((userDataDir: string) => Promise<void>),
+  },
   host: {
     os_family: "windows", browser_major: 153, gpu_vendor: "intel",
     screen_width: 1920, screen_height: 1080, device_pixel_ratio: 1,
@@ -30,18 +36,25 @@ const stub = vi.hoisted(() => ({
 vi.mock("playwright-core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("playwright-core")>();
   const { EventEmitter } = await import("node:events");
-  const fakeContext = () => {
+  const fakeContext = (userDataDir?: string) => {
     const ctx = new EventEmitter() as EventEmitter & Record<string, unknown>;
     ctx.pages = () => [];
     ctx.browser = () => null;
-    ctx.close = async () => { ctx.emit("close", ctx); };
+    // As real Playwright does: "close" is emitted when the browser's pipe drops, and close() resolves
+    // only once the browser process has exited — which on Linux is ~100 ms later, and Chrome keeps
+    // writing its profile in between.
+    ctx.close = async () => {
+      ctx.emit("close", ctx);
+      if (userDataDir && stub.browser.shutdown) await stub.browser.shutdown(userDataDir);
+    };
     return ctx;
   };
   const chromium = {
     launchPersistentContext: async (userDataDir: string, opts: Record<string, unknown>) => {
       stub.launches.push({ kind: "persistent", userDataDir, opts });
       if (stub.failLaunch) throw stub.failLaunch;
-      return fakeContext();
+      stub.browser.onLaunch?.(userDataDir);
+      return fakeContext(userDataDir);
     },
     launch: async (opts: Record<string, unknown>) => {
       stub.launches.push({ kind: "incognito", opts });
@@ -120,6 +133,8 @@ beforeEach(() => {
   stub.launches.length = 0;
   stub.spawns.length = 0;
   stub.failLaunch = null;
+  stub.browser.onLaunch = null;
+  stub.browser.shutdown = null;
 });
 
 afterEach(() => {
@@ -230,6 +245,80 @@ describe("throwaway profiles are never left behind", () => {
     await context.close();
     await new Promise((r) => setTimeout(r, 50));
     expect(existsSync(udd)).toBe(true);
+  });
+
+  // Regression (0.35.0/0.36.0 release smoke on Linux: a clearcote-run-* directory left in /tmp per
+  // run). The profile was deleted on the "close" event, while the browser was still shutting down;
+  // Chrome then wrote the directory back (Default/, Local State) after the cleanup had marked itself
+  // done, so nothing ever retried.
+  it.each([
+    ["launch()", () => launch(base()) as unknown as Promise<{ close(): Promise<void> }>],
+    ["launchAgent()", () => launchAgent(base()) as Promise<{ close(): Promise<void> }>],
+  ])("%s: close() removes the profile only after the browser has exited, so its last writes cannot outlive it", async (_name, start) => {
+    stub.browser.shutdown = async (udd) => {
+      await new Promise((r) => setTimeout(r, 20));
+      mkdirSync(join(udd, "Default"), { recursive: true });
+      writeFileSync(join(udd, "Local State"), "{}");
+    };
+    const browser = await start();
+    const dir = stub.launches.at(-1)!.userDataDir!;
+    await browser.close();
+    expect(existsSync(dir)).toBe(false);
+    expect(leftovers()).toEqual([]);
+  });
+
+  // The browser can also go away by itself (a crash, its last window closed): no close() to wait for.
+  // Chrome names its pid in the SingletonLock symlink ("<host>-<pid>") on Linux and macOS.
+  it.skipIf(process.platform === "win32")("a browser that exits on its own: the profile is removed once its process has exited, not when its pipe drops", async () => {
+    const real = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    const proc = real.spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    try {
+      stub.browser.onLaunch = (udd) => symlinkSync(`test-host-${proc.pid}`, join(udd, "SingletonLock"));
+      const browser = await launch(base());
+      const dir = stub.launches.at(-1)!.userDataDir!;
+      (browser as unknown as EventEmitter).emit("close", browser); // the pipe dropped
+      await new Promise((r) => setTimeout(r, 300));
+      expect(existsSync(dir)).toBe(true); // still shutting down: deleting it now is what leaked
+      const exited = new Promise((r) => proc.once("exit", r));
+      proc.kill();
+      await exited;
+      await vi.waitFor(() => expect(existsSync(dir)).toBe(false));
+      expect(leftovers()).toEqual([]);
+    } finally {
+      proc.kill();
+    }
+  });
+
+  // Chrome keeps its singleton socket in a temp directory of its own, found through the profile's
+  // SingletonSocket symlink. A browser that never shuts down cleanly (killed at process exit) leaves
+  // it behind: 71 org.chromium.Chromium.* directories in one Linux machine's /tmp in a single day.
+  it.skipIf(process.platform === "win32")("removes the browser's singleton-socket directory with the profile", async () => {
+    const socketDir = join(temp, "org.chromium.Chromium.Ab12Cd");
+    mkdirSync(socketDir);
+    writeFileSync(join(socketDir, "SingletonSocket"), "");
+    stub.browser.onLaunch = (udd) => symlinkSync(join(socketDir, "SingletonSocket"), join(udd, "SingletonSocket"));
+    const browser = await launch(base());
+    await browser.close();
+    expect(leftovers()).toEqual([]);
+  });
+
+  it.skipIf(process.platform === "win32")("never deletes a SingletonSocket target that is not Chrome's own temp directory", async () => {
+    const precious = join(root, "precious");
+    mkdirSync(precious);
+    writeFileSync(join(precious, "SingletonSocket"), "");
+    stub.browser.onLaunch = (udd) => symlinkSync(join(precious, "SingletonSocket"), join(udd, "SingletonSocket"));
+    const browser = await launch(base());
+    await browser.close();
+    expect(leftovers()).toEqual([]);
+    expect(existsSync(join(precious, "SingletonSocket"))).toBe(true);
+  });
+
+  // One process-exit hook per launch, never removed: a caller running hundreds of short-lived
+  // browsers piled them up (MaxListenersExceededWarning past 10).
+  it("a closed launch leaves no process-exit hook behind", async () => {
+    const before = process.listenerCount("exit");
+    for (let i = 0; i < 3; i++) await (await launch(base())).close();
+    expect(process.listenerCount("exit")).toBe(before);
   });
 });
 

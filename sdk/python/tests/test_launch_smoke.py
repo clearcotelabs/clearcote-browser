@@ -30,7 +30,8 @@ def _fake_exe():
 class _FakeBrowser:
     """Stands in for a Playwright ``Browser``. ``new_page``/``new_context`` are present because
     the SDK wraps them to default the page geometry (no_viewport when headed, screen+viewport when
-    headless) — a fake without them would not exercise the wrap the real object gets."""
+    headless) — a fake without them would not exercise the wrap the real object gets. ``close``
+    likewise: the throwaway-profile cleanup wraps it."""
 
     def on(self, *a, **k):
         pass
@@ -40,6 +41,9 @@ class _FakeBrowser:
 
     def new_context(self, **kw):
         return kw
+
+    def close(self, **kw):
+        pass
 
 
 # --------------------------------------------------------------------------- sync

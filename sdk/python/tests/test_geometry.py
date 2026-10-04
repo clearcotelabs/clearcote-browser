@@ -441,6 +441,9 @@ class _Capture:
             def new_context(self, **kw):
                 return _FakeCtx(with_page=False)
 
+            def close(self, **kw):
+                pass
+
         class _Chromium:
             def launch(self, **kw):
                 cap.launch_kwargs = kw

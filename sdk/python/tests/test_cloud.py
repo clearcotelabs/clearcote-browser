@@ -88,6 +88,9 @@ def test_nested_local_launches_ignore_the_env(monkeypatch, tmp_path):
         def new_page(self, **kw):
             return kw
 
+        def close(self, **_kw):
+            pass
+
     class Chromium:
         def launch_persistent_context(self, udd, **kw):
             calls.append(udd)
