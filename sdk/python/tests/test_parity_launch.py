@@ -276,6 +276,9 @@ def served_line(monkeypatch, tmp_path):
         def terminate(self):
             pass
 
+        def kill(self):  # close() falls back to it when a browser outlives terminate()
+            pass
+
         def wait(self, timeout=None):
             return 0
 
