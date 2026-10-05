@@ -215,6 +215,26 @@ public sealed class CloudTests : IAsyncLifetime
     }
 
     [Fact]
+    public void ChallengeService_is_true_or_the_APIs_fields_in_camelCase()
+    {
+        AssertJson("""{"challengeService":true}""", Cloud.SessionBody(new CloudSessionOptions { ChallengeService = true }, run: false));
+        AssertJson("{}", Cloud.SessionBody(new CloudSessionOptions { ChallengeService = false }, run: false));
+        AssertJson("""
+            {"challengeService":{"categories":["token","clearance"],"sites":["shop.example"],"key":"own","apiKey":"k-123456789",
+             "mode":"report","maxSolves":5,"maxSpendEur":0.2}}
+            """, Cloud.SessionBody(new CloudSessionOptions
+        {
+            ChallengeService = new CloudChallengeService
+            {
+                Categories = new[] { "token", "clearance" }, Sites = new[] { "shop.example" }, Key = "own", ApiKey = "k-123456789",
+                Mode = "report", MaxSolves = 5, MaxSpendEur = 0.2,
+            },
+        }, run: false));
+        AssertJson("""{"challengeService":{"key":"managed"}}""",
+            Cloud.SessionBody(CloudLaunch.SessionOptionsOf(new LaunchOptions { ChallengeService = new CloudChallengeService { Key = "managed" } }), run: false));
+    }
+
+    [Fact]
     public void LaunchOptions_map_onto_the_session_with_the_local_names()
     {
         var s = Cloud.SessionBody(CloudLaunch.SessionOptionsOf(new LaunchOptions

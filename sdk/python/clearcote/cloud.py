@@ -175,6 +175,7 @@ SESSION_FIELDS = {
     "adblock": "adblock",
     "solve_sliders": "solveSliders",
     "solve_checkboxes": "solveCheckboxes",
+    "challenge_service": "challengeService",
     "keep_alive": "keepAlive",
     "record": "record",
     "note": "note",
@@ -284,6 +285,34 @@ def _cloud_profile(value):
     return dict(value) if isinstance(value, dict) else value
 
 
+# challenge_service's own fields: the API's names, and the snake_case ones a Python caller may use.
+_CHALLENGE_FIELDS = {
+    "categories": "categories", "sites": "sites", "key": "key", "mode": "mode",
+    "api_key": "apiKey", "apiKey": "apiKey",
+    "max_solves": "maxSolves", "maxSolves": "maxSolves",
+    "max_spend_eur": "maxSpendEur", "maxSpendEur": "maxSpendEur",
+}
+
+
+def _cloud_challenge_service(value):
+    """The challenge service (off unless asked for): ``True``, or a dict of what it may do
+    (``categories``, ``sites``, ``key``, ``api_key``, ``mode``, ``max_solves``, ``max_spend_eur``; the
+    API's camelCase names work too). Values are the API's to check; a field it does not have is refused
+    here, so a typo fails at once instead of silently."""
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError('challenge_service must be True or a dict like {"categories": [...], "key": "own"}')  # noqa: TRY004
+    out = {}
+    for k, v in value.items():
+        if k not in _CHALLENGE_FIELDS:
+            raise ValueError(f"challenge_service.{k} is not a field (use categories, sites, key, api_key, mode, "
+                             "max_solves, max_spend_eur)")
+        if v is not None:
+            out[_CHALLENGE_FIELDS[k]] = v
+    return out
+
+
 def session_body(options, run=False):
     """Map launch()/create() keyword options to the API's JSON body.
 
@@ -303,6 +332,8 @@ def session_body(options, run=False):
             value = _cloud_proxy(value)
         elif key == "profile":
             value = _cloud_profile(value)
+        elif key == "challenge_service":
+            value = _cloud_challenge_service(value)
         body[fields[key]] = value
     return body
 

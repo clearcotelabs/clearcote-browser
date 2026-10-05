@@ -159,6 +159,7 @@ def test_every_documented_option_maps_to_its_api_field():
         "timeout_sec": 600, "idle_timeout_sec": 120, "max_gb": 0.5, "version": "153", "profile": "acct-1",
         "url": "https://example.com", "adblock": True, "solve_sliders": False, "solve_checkboxes": False, "keep_alive": True, "record": True,
         "note": "n", "worker": "w1", "identity": "acct-1", "proxy": "managed",
+        "challenge_service": {"categories": ["token"], "key": "own"},
     })
     assert body == {
         "fingerprint": "seed-1", "platform": "windows", "brand": "Chrome", "timezone": "Europe/Amsterdam",
@@ -167,7 +168,25 @@ def test_every_documented_option_maps_to_its_api_field():
         "idleTimeoutSec": 120, "maxGb": 0.5, "version": "153", "profile": "acct-1",
         "url": "https://example.com", "adblock": True, "solveSliders": False, "solveCheckboxes": False, "keepAlive": True, "record": True,
         "note": "n", "worker": "w1", "identity": "acct-1", "proxy": "managed",
+        "challengeService": {"categories": ["token"], "key": "own"},
     }
+
+
+def test_challenge_service_takes_true_or_a_dict_in_either_casing():
+    assert session_body({"challenge_service": True}) == {"challengeService": True}
+    body = session_body({"challenge_service": {
+        "categories": ["token", "clearance"], "sites": ["shop.example"], "key": "own", "api_key": "k-123456789",
+        "mode": "report", "max_solves": 5, "max_spend_eur": 0.2, "maxSolves": None,
+    }})
+    assert body == {"challengeService": {
+        "categories": ["token", "clearance"], "sites": ["shop.example"], "key": "own", "apiKey": "k-123456789",
+        "mode": "report", "maxSolves": 5, "maxSpendEur": 0.2,
+    }}
+    assert session_body({"challenge_service": {"maxSpendEur": 1}}) == {"challengeService": {"maxSpendEur": 1}}
+    with pytest.raises(ValueError, match=r"challenge_service\.cats is not a field"):
+        session_body({"challenge_service": {"cats": ["token"]}})
+    with pytest.raises(ValueError, match="challenge_service must be True or a dict"):
+        session_body({"challenge_service": "yes"})
 
 
 def test_none_values_are_left_out():

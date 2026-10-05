@@ -67,6 +67,27 @@ public sealed class CloudProfile
     public static implicit operator CloudProfile(string name) => new() { Name = name };
 }
 
+/// The challenge service (off unless asked for): challenges the free slider and checkbox actions cannot
+/// clear go to a solving service, with your own key or ours (billed per solve). <c>true</c> converts to
+/// all defaults: <c>ChallengeService = true</c>. Values are the API's to check.
+public sealed class CloudChallengeService
+{
+    /// "token", "score", "clearance", "block-page", "image". Null = auto (all but "score").
+    public IList<string>? Categories { get; set; }
+    /// Only on these hosts (and their subdomains). Null = every site.
+    public IList<string>? Sites { get; set; }
+    /// "own" (your solving-service key: stored in the dashboard, or ApiKey) or "managed" (ours).
+    public string? Key { get; set; }
+    /// Your solving-service key for this session (sent sealed, never shown again).
+    public string? ApiKey { get; set; }
+    /// "report": only report what the pages show; nothing is asked or paid for.
+    public string? Mode { get; set; }
+    public int? MaxSolves { get; set; }
+    public double? MaxSpendEur { get; set; }
+    internal bool AllDefaults { get; init; }
+    public static implicit operator CloudChallengeService?(bool on) => on ? new() { AllDefaults = true } : null;
+}
+
 /// The browser options of a cloud session (POST /api/v1/browsers), by their API names.
 public class CloudSessionOptions
 {
@@ -99,6 +120,8 @@ public class CloudSessionOptions
     public bool? SolveSliders { get; set; }
     /// Click "verify you are human" checkboxes automatically (the server's default is on); false turns it off.
     public bool? SolveCheckboxes { get; set; }
+    /// The challenge service (default off): <c>true</c>, or what it may do.
+    public CloudChallengeService? ChallengeService { get; set; }
     /// Keep the session running after the client disconnects (stop it with Browsers.StopAsync).
     public bool? KeepAlive { get; set; }
     public bool? Record { get; set; }
@@ -691,6 +714,7 @@ public sealed class Cloud
         Put("adblock", o.Adblock);
         Put("solveSliders", o.SolveSliders);
         Put("solveCheckboxes", o.SolveCheckboxes);
+        if (o.ChallengeService is not null) b["challengeService"] = ChallengeServiceNode(o.ChallengeService);
         Put("keepAlive", o.KeepAlive);
         Put("record", o.Record);
         Put("note", o.Note);
@@ -732,6 +756,21 @@ public sealed class Cloud
         var o = new JsonObject { ["server"] = spec.ServerString };
         if (spec.Username is not null) o["username"] = spec.Username;
         if (spec.Password is not null) o["password"] = spec.Password;
+        return o;
+    }
+
+    /// The API's names, written by hand: the default serializer would send PascalCase.
+    internal static JsonNode ChallengeServiceNode(CloudChallengeService c)
+    {
+        var o = new JsonObject();
+        if (c.Categories is not null) o["categories"] = new JsonArray(c.Categories.Select(x => (JsonNode?)JsonValue.Create(x)).ToArray());
+        if (c.Sites is not null) o["sites"] = new JsonArray(c.Sites.Select(x => (JsonNode?)JsonValue.Create(x)).ToArray());
+        if (c.Key is not null) o["key"] = c.Key;
+        if (c.ApiKey is not null) o["apiKey"] = c.ApiKey;
+        if (c.Mode is not null) o["mode"] = c.Mode;
+        if (c.MaxSolves is not null) o["maxSolves"] = c.MaxSolves;
+        if (c.MaxSpendEur is not null) o["maxSpendEur"] = c.MaxSpendEur;
+        if (c.AllDefaults && o.Count == 0) return JsonValue.Create(true)!;
         return o;
     }
 

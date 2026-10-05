@@ -103,8 +103,9 @@ await browser.CloseAsync();                // disconnects and ends the hosted se
 - The persona options a hosted browser also has carry over: `Fingerprint`, `Platform`, `Brand`, `Timezone`,
   `AcceptLanguage`, `LightStealth`, `Geoip`, `Headless`, `Proxy` (`new() { Server = "managed" }` for the
   included residential connection) and `Version`. Cloud-only: `Identity`, `Country`, `State`, `City`,
-  `ProxySession`, `TimeoutSec`, `IdleTimeoutSec`, `MaxGb`, `Url`, `Adblock`, `SolveSliders`, `SolveCheckboxes`, `KeepAlive`,
-  `Record`, `Note` and `Worker`. `SlowMo` and `Timeout` go to the CDP connect, where `Timeout` defaults to
+  `ProxySession`, `TimeoutSec`, `IdleTimeoutSec`, `MaxGb`, `Url`, `Adblock`, `SolveSliders`, `SolveCheckboxes`,
+  `ChallengeService` (default off: `true`, or a `CloudChallengeService` with categories, sites, your key or ours,
+  report mode and limits), `KeepAlive`, `Record`, `Note` and `Worker`. `SlowMo` and `Timeout` go to the CDP connect, where `Timeout` defaults to
   120 s (the browser starts as you connect).
 - An option only a browser on this machine can take (`ExecutablePath`, `Args`, `Extensions`, a user data
   directory, ...) stops the launch with an error naming it, before anything is created.

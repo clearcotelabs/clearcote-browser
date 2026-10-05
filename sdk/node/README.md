@@ -332,7 +332,7 @@ What changes in the cloud:
   `locale` (or `acceptLanguage`), `geoip`, `headless`, `lightStealth`, `proxy` (`"managed"`, a URL, or
   `{ server, username, password }`), `country`/`state`/`city`, `proxySession`, `timeoutSec`,
   `idleTimeoutSec`, `maxGb`, `version`, `profile`, `url`, `adblock`, `solveSliders`, `solveCheckboxes`,
-  `keepAlive`, `record`, `note`, `worker`. `humanize` and `showCursor` run in the SDK, exactly as for a local browser.
+  `challengeService`, `keepAlive`, `record`, `note`, `worker`. `humanize` and `showCursor` run in the SDK, exactly as for a local browser.
   `timeout` and `slowMo` go to the CDP connect, where `timeout` defaults to 120 s (the browser starts as you connect).
 - **Slider challenges are solved for you.** A cloud browser drags slide-to-verify challenges (a handle
   to the end of a bar, or a puzzle piece into its gap) by itself, in any tab or frame. Pass
@@ -340,6 +340,11 @@ What changes in the cloud:
 - **Human-check checkboxes are clicked for you.** A separate option: a cloud browser clicks "verify you
   are human" boxes by itself, in any tab or frame. Pass `solveCheckboxes: false` when your script handles
   them.
+- **Harder challenges can go to a solving service (off by default).** `challengeService: true`, or
+  `{ categories, sites, key, apiKey, mode, maxSolves, maxSpendEur }`: what the free actions cannot clear is
+  solved with your own solving-service key (`key: "own"`, stored in the dashboard or passed as `apiKey`) or
+  ours (`key: "managed"`, billed per solve). `mode: "report"` only reports what the pages show. See the
+  [hosted browsers docs](https://www.clearcotelabs.com/docs/hosted-browsers#challenge-service).
 - **Local-only options are refused, by name.** `executablePath`, `args`, `userDataDir`, `extensions`,
   `ignoreDefaultArgs`, the finer persona switches (`gpuVendor`, `webrtcIp`, ...) and the licence
   options throw `<name> is not available for cloud browsers` before anything starts.

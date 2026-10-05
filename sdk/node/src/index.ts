@@ -95,6 +95,7 @@ export {
   type CloudSessionOptions,
   type CloudProxy,
   type CloudProfile,
+  type CloudChallengeService,
   type RunOptions,
   type SyncOptions,
 } from "./cloud.js";

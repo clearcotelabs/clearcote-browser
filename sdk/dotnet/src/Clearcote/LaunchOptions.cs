@@ -156,6 +156,9 @@ public class LaunchOptions : FingerprintOptions
     public bool? SolveSliders { get; set; }
     /// Cloud: click "verify you are human" checkboxes automatically (the server's default is on); false turns it off.
     public bool? SolveCheckboxes { get; set; }
+    /// Cloud: the challenge service (default off): <c>true</c>, or what it may do (categories, sites, your key
+    /// or ours, report mode, maxSolves, maxSpendEur).
+    public CloudChallengeService? ChallengeService { get; set; }
     /// Cloud: keep the session running after this client disconnects; stop it with
     /// <c>cloud.Browsers.StopAsync(id)</c>.
     public bool? KeepAlive { get; set; }

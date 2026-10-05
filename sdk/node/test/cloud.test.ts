@@ -14,6 +14,7 @@ import {
   Cloud, CloudError, CloudTimeoutError, cloudRequested, cloudSessionOf, cookiesFromState, filterCookies,
   launch, launchPersistentContext, sessionBody, verifyWebhook, LOCAL_ONLY_OPTIONS, SESSION_FIELDS, Profile,
 } from "../src/index.js";
+import { runBody } from "../src/cloud.js";
 import { FINGERPRINT_KEYS } from "../src/fingerprint.js";
 import { AGENT_KEYS } from "../src/agent.js";
 import { API_KEY, LIVE, RECORDING, startFakeCloud, type FakeCloud } from "./helpers/fake-cloud.js";
@@ -117,10 +118,20 @@ describe("option mapping", () => {
       geoip: false, headless: false, lightStealth: true, country: "us", state: "ca", city: "los angeles",
       proxySession: "sticky-1", timeoutSec: 600, idleTimeoutSec: 120, maxGb: 0.5, version: "153", profile: "acct-1",
       url: "https://example.com", adblock: true, solveSliders: false, solveCheckboxes: false, keepAlive: true, record: true, note: "n", worker: "w1",
-      identity: "acct-1", proxy: "managed",
+      identity: "acct-1", proxy: "managed", challengeService: { categories: ["token"], key: "own" as const },
     };
     const { acceptLanguage, ...same } = opts;
     expect(sessionBody(opts)).toEqual({ ...same, locale: acceptLanguage });
+  });
+
+  it("challengeService: true, or an object with the API's fields (values are the API's to check); anything else is refused here", () => {
+    expect(sessionBody({ challengeService: true })).toEqual({ challengeService: true });
+    const full = { categories: ["token", "clearance"], sites: ["shop.example"], key: "managed", apiKey: undefined, mode: "report", maxSolves: 5, maxSpendEur: 0.2 };
+    expect(sessionBody({ challengeService: full })).toEqual({ challengeService: full });
+    expect(() => sessionBody({ challengeService: { max_solves: 3 } })).toThrow(/challengeService\.max_solves is not a field \(use categories, sites, key, apiKey, mode, maxSolves, maxSpendEur\)/);
+    expect(() => sessionBody({ challengeService: "yes" })).toThrow(/challengeService must be true or an object/);
+    expect(() => sessionBody({ challengeService: ["token"] })).toThrow(/challengeService must be true or an object/);
+    expect(runBody("t", { challengeService: { key: "own" } } as never)).toMatchObject({ task: "t", challengeService: { key: "own" } });
   });
 
   it("leaves undefined/null out and refuses locale + acceptLanguage together", () => {

@@ -162,6 +162,7 @@ export const SESSION_FIELDS: Readonly<Record<string, string>> = {
   adblock: "adblock",
   solveSliders: "solveSliders",
   solveCheckboxes: "solveCheckboxes",
+  challengeService: "challengeService",
   keepAlive: "keepAlive",
   record: "record",
   note: "note",
@@ -255,6 +256,37 @@ function cloudProfile(value: unknown): unknown {
   return typeof value === "string" ? value : { ...(value as object) };
 }
 
+/** The challenge service (off unless asked for): true, or what it may do. Field values are the API's to
+ * check; the SDK only refuses a field the API does not have, so a typo fails here and not silently. */
+export type CloudChallengeService =
+  | boolean
+  | {
+      /** "auto" (the default): token, clearance, block-page and image; "score" only when listed. */
+      categories?: "auto" | ("token" | "score" | "clearance" | "block-page" | "image")[];
+      /** Only on these hosts (and their subdomains). */
+      sites?: string[];
+      /** "own": your solving-service key (stored in the dashboard, or apiKey); "managed": ours, billed per solve. */
+      key?: "own" | "managed";
+      /** Your solving-service key for this session (sent sealed; never shown again). */
+      apiKey?: string;
+      /** "report": only report what the pages show; nothing is asked or paid for. */
+      mode?: "solve" | "report";
+      maxSolves?: number;
+      maxSpendEur?: number;
+    };
+
+const CHALLENGE_FIELDS = ["categories", "sites", "key", "apiKey", "mode", "maxSolves", "maxSpendEur"];
+
+function cloudChallengeService(value: unknown): unknown {
+  if (typeof value === "boolean") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new Error("challengeService must be true or an object like { categories, key }");
+  }
+  const extra = Object.keys(value).filter((k) => !CHALLENGE_FIELDS.includes(k)).sort();
+  if (extra.length) throw new Error(`challengeService.${extra[0]} is not a field (use ${CHALLENGE_FIELDS.join(", ")})`);
+  return { ...(value as object) };
+}
+
 /** Map launch()/create() options to the API's JSON body. Throws naming the first option a cloud
  * browser (or run) cannot take. undefined/null values are left out, so an optional setting can be
  * passed through unconditionally. */
@@ -268,6 +300,7 @@ export function sessionBody(options: Record<string, unknown>, run = false): Reco
     let value: unknown = raw;
     if (key === "proxy") value = cloudProxy(raw);
     else if (key === "profile") value = cloudProfile(raw);
+    else if (key === "challengeService") value = cloudChallengeService(raw);
     body[fields[key]] = value;
   }
   return body;
@@ -316,6 +349,8 @@ export interface CloudSessionOptions {
   solveSliders?: boolean;
   /** Default true: the server clicks "verify you are human" checkboxes for you. false leaves them to your script. */
   solveCheckboxes?: boolean;
+  /** Default off: challenges the free actions cannot clear go to a solving service, with your key or ours. */
+  challengeService?: CloudChallengeService;
   keepAlive?: boolean;
   record?: boolean;
   note?: string;
