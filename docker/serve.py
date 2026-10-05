@@ -23,7 +23,7 @@ from clearcote import executable_path
 from clearcote._fingerprint import fingerprint_args
 from clearcote._fonts import linux_font_env
 from clearcote._fingerprint import persona_platform
-from clearcote._launchopts import merge_feature_flags, web_bluetooth_args
+from clearcote._launchopts import merge_feature_flags, serve_infobar_args, web_bluetooth_args
 
 PROFILE_DIR = os.environ.get("CC_PROFILE_DIR", "/tmp/cc-profile")
 
@@ -337,6 +337,10 @@ base_args = [
     f"--remote-debugging-port={internal}", "--remote-allow-origins=*",
     "--user-data-dir=%s" % PROFILE_DIR,
 ] + mode_args + window_args + args + web_bluetooth_args(persona_platform(opts)) + proxy_args + extra
+# --no-sandbox is on Chromium's "unsupported command-line flag" list, and the warning bar it raises sits
+# on the first tab: 56px off that tab's innerHeight, a frame (outer - inner) no real Chrome has. The
+# SDK's serve() keeps it off the same way: --disable-infobars headless, --test-type headful.
+base_args += serve_infobar_args(headless, base_args)
 # Chromium keeps only the LAST --enable-features / --disable-features on the line rather than
 # concatenating them, so the layers here would silently clobber each other: web_bluetooth_args
 # enables one, CC_WEBRTC_MDNS=off disables another, and CC_EXTRA_ARGS may carry the caller's own.
