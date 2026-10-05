@@ -53,6 +53,7 @@
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import type { BrowserContext, Page } from "playwright-core";
+import { connectCdp, type CdpConnection } from "./cdpws.js";
 import { lightStealthScreen } from "./fingerprint.js";
 
 /**
@@ -520,59 +521,17 @@ export async function fitWindowOverCdp(
   }
 }
 
-/** A minimal CDP client on Node's built-in WebSocket (Node 22+), or null where there is none. */
-async function openCdp(wsUrl: string, timeoutMs: number): Promise<(CdpSend & { close(): void }) | null> {
-  const WS = (globalThis as { WebSocket?: new (url: string) => WebSocket }).WebSocket;
-  if (!WS) return null;
-  const ws = new WS(wsUrl);
-  await new Promise<void>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("CDP connect timed out")), timeoutMs);
-    ws.onopen = () => { clearTimeout(t); resolve(); };
-    ws.onerror = () => { clearTimeout(t); reject(new Error("CDP connect failed")); };
-  });
-  let next = 0;
-  const pending = new Map<number, { resolve(v: Record<string, unknown>): void; reject(e: Error): void }>();
-  ws.onmessage = (ev) => {
-    let m: { id?: number; result?: Record<string, unknown>; error?: { message: string } };
-    try { m = JSON.parse(String(ev.data)); } catch { return; }
-    const p = m.id === undefined ? undefined : pending.get(m.id);
-    if (!p) return;
-    pending.delete(m.id!);
-    if (m.error) p.reject(new Error(m.error.message));
-    else p.resolve(m.result ?? {});
-  };
-  ws.onclose = () => {
-    for (const p of pending.values()) p.reject(new Error("CDP connection closed"));
-    pending.clear();
-  };
-  return {
-    send(method, params = {}, sessionId) {
-      return new Promise((resolve, reject) => {
-        const id = ++next;
-        const t = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timed out`)); }, timeoutMs);
-        pending.set(id, {
-          resolve: (v) => { clearTimeout(t); resolve(v); },
-          reject: (e) => { clearTimeout(t); reject(e); },
-        });
-        ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
-      });
-    },
-    close() {
-      try { ws.close(); } catch { /* ignore */ }
-    },
-  };
-}
-
 /** {@link fitWindowOverCdp} on the SDK's own short connection to a served browser. Never throws. */
 export async function fitServedWindow(
   wsUrl: string | undefined,
   opts: { persona: boolean; windowSize?: Size | null; timeoutMs?: number },
 ): Promise<ServedFit | null> {
   if (!wsUrl) return null;
-  let cdp: (CdpSend & { close(): void }) | null = null;
+  let cdp: CdpConnection | null = null;
   try {
-    cdp = await openCdp(wsUrl, opts.timeoutMs ?? 5000);
-    return cdp ? await fitWindowOverCdp(cdp, opts) : null;
+    // The SDK's own WebSocket client, not Node's global one: that only exists from Node 22 on.
+    cdp = await connectCdp(wsUrl, opts.timeoutMs ?? 5000);
+    return await fitWindowOverCdp(cdp, opts);
   } catch {
     return null;
   } finally {

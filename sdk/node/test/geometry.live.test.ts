@@ -9,13 +9,15 @@
  * sniffed the string and played along. A real browser is the only thing that catches that class of
  * mismatch, and each SDK's binding has its own quirks.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Page } from "playwright-core";
-import { launch, launchPersistentContext } from "../src/index.js";
+import { launch, launchPersistentContext, serveNeedsNoSandbox } from "../src/index.js";
 import { geometryIsCoherent, headlessGeometry, servedDisplay } from "../src/geometry.js";
+import { runFitChild } from "./helpers/fit-child.js";
+import { removeAfterFile, tempDir } from "./helpers/temp.js";
 
 const LIVE_EXE = process.env.CLEARCOTE_LIVE_ENGINE;
 
@@ -159,5 +161,71 @@ describe.runIf(LIVE_EXE)("live engine geometry", () => {
     expect(second.inner).toEqual(first.inner);
     expect(second.outer).toEqual(first.outer);
     expect(second.resizes).toBe(0);
+  }, 150_000);
+});
+
+/**
+ * serve() in a Node with no global WebSocket: Node 20, which the SDK supports, or a newer one run with
+ * `--no-experimental-websocket`. The fit used to ride on that global and was skipped without it, so
+ * the served display was right and the window stayed the engine's default (945-1050px wide inside a
+ * 1366-1920px screen), and sites served their tablet layout.
+ */
+async function serveWithoutWebSocket(opts: Record<string, unknown>) {
+  const userDataDir = tempDir("cc-live-serve-");
+  const r = await runFitChild({
+    FIT_MODE: "serve",
+    // No --no-sandbox: serve() adds it itself where it is needed (root on Linux), and anywhere else its
+    // "unsupported command-line flag" infobar would come out of the page's height.
+    FIT_SERVE_OPTS: JSON.stringify({ executablePath: LIVE_EXE, quiet: true, userDataDir, ...opts }),
+  }, 120_000);
+  // The profile is removed after the file; the browser has to be gone first.
+  for (let i = 0; i < 100; i++) {
+    try { process.kill(r.pid as number, 0); } catch { break; }
+    await new Promise((res) => setTimeout(res, 150));
+  }
+  // On Linux and macOS a serve() close, which does not wait for the browser, leaves the engine's
+  // singleton-socket directory in the temp directory; the profile still links to it.
+  try { removeAfterFile(dirname(readlinkSync(join(userDataDir, "SingletonSocket")))); } catch { /* none */ }
+  expect(r.webSocket).toBe("undefined");   // the child really had none
+  return r as unknown as Awaited<ReturnType<typeof read>>;
+}
+
+/**
+ * serve() adds --no-sandbox itself as root on Linux, and the engine then shows its "unsupported
+ * command-line flag" infobar, which takes ~50px off the page's height. Not what these tests are about.
+ */
+const servedFrameIsPlain = !serveNeedsNoSandbox(process.platform, process.getuid?.(), []);
+
+describe.runIf(LIVE_EXE)("live engine geometry: serve() in a Node without a global WebSocket", () => {
+  it("regime 2 (lightStealth): the served window is maximized into the seed's display", async () => {
+    const m = await serveWithoutWebSocket({ fingerprint: "live-serve-node", lightStealth: true });
+    const d = servedDisplay({ seed: "live-serve-node", lightStealth: true });
+    expect(m.screen).toEqual([d.width, d.height]);
+    expect(m.avail).toEqual([d.availWidth, d.availHeight]);
+    expect(m.outer).toEqual(m.avail);
+    expectOnScreen(m);
+    if (servedFrameIsPlain) expectPlausibleFrame(m);
+  }, 150_000);
+
+  it("windowSize is honoured inside the work area and clamped past it", async () => {
+    const d = servedDisplay({ screenWidth: 1366, screenHeight: 768 });
+    const clamped = await serveWithoutWebSocket({ screenWidth: 1366, screenHeight: 768, windowSize: { width: 1920, height: 1080 } });
+    expect(clamped.avail).toEqual([d.availWidth, d.availHeight]);
+    expect(clamped.outer).toEqual(clamped.avail);
+    expectOnScreen(clamped);
+    const inside = await serveWithoutWebSocket({ screenWidth: 1366, screenHeight: 768, windowSize: { width: 1280, height: 700 } });
+    expect(inside.outer).toEqual([1280, 700]);
+    expectOnScreen(inside);
+  }, 300_000);
+
+  it("regime 1: the persona's display and a window maximized into it", async () => {
+    // The seed of the launch() regime-1 test above: its persona reserves a taskbar.
+    const m = await serveWithoutWebSocket({ fingerprint: "live-geo-node" });
+    expect(m.avail[1]).toBeLessThan(m.screen[1]);
+    // Past the real 800x600 headless display: the display was made the persona's own first.
+    expect(m.outer[0]).toBeGreaterThan(800);
+    expect(m.outer).toEqual(m.avail);
+    expectOnScreen(m);
+    if (servedFrameIsPlain) expectPlausibleFrame(m);
   }, 150_000);
 });
