@@ -9,7 +9,7 @@
  * sniffed the string and played along. A real browser is the only thing that catches that class of
  * mismatch, and each SDK's binding has its own quirks.
  */
-import { mkdtempSync, readlinkSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -17,7 +17,7 @@ import type { Page } from "playwright-core";
 import { launch, launchPersistentContext, serveNeedsNoSandbox } from "../src/index.js";
 import { geometryIsCoherent, headlessGeometry, servedDisplay } from "../src/geometry.js";
 import { runFitChild } from "./helpers/fit-child.js";
-import { removeAfterFile, tempDir } from "./helpers/temp.js";
+import { tempDir } from "./helpers/temp.js";
 
 const LIVE_EXE = process.env.CLEARCOTE_LIVE_ENGINE;
 
@@ -178,14 +178,12 @@ async function serveWithoutWebSocket(opts: Record<string, unknown>) {
     // "unsupported command-line flag" infobar would come out of the page's height.
     FIT_SERVE_OPTS: JSON.stringify({ executablePath: LIVE_EXE, quiet: true, userDataDir, ...opts }),
   }, 120_000);
-  // The profile is removed after the file; the browser has to be gone first.
-  for (let i = 0; i < 100; i++) {
-    try { process.kill(r.pid as number, 0); } catch { break; }
-    await new Promise((res) => setTimeout(res, 150));
-  }
-  // On Linux and macOS a serve() close, which does not wait for the browser, leaves the engine's
-  // singleton-socket directory in the temp directory; the profile still links to it.
-  try { removeAfterFile(dirname(readlinkSync(join(userDataDir, "SingletonSocket")))); } catch { /* none */ }
+  // close() returned once the browser had exited, and took the engine's singleton-socket directory
+  // (Linux and macOS; the caller's profile still links to it) along: the profile is all that is left.
+  expect(() => process.kill(r.pid as number, 0)).toThrow();
+  let socket: string | null = null;
+  try { socket = readlinkSync(join(userDataDir, "SingletonSocket")); } catch { /* none on Windows */ }
+  if (socket) expect(existsSync(dirname(socket))).toBe(false);
   expect(r.webSocket).toBe("undefined");   // the child really had none
   return r as unknown as Awaited<ReturnType<typeof read>>;
 }

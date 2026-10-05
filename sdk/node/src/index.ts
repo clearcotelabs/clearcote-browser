@@ -17,7 +17,7 @@
 
 import { chromium } from "playwright-core";
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -700,22 +700,7 @@ async function applyProfileAuto(
 function installEphemeralProfileCleanup(context: BrowserContext, userDataDir: string): void {
   const browser = browserProcessFiles(userDataDir);
   let done = false;
-  // Synchronous: an exit handler cannot await, and an unresolved promise at exit removes nothing. It
-  // retries all the same: on Windows the killed browser's handles outlive it for a moment, and a single
-  // attempt left the profile behind (1 of 3 exits with the browser open on 0.36.0).
-  const onExit = () => {
-    if (done) return;
-    const pause = new Int32Array(new SharedArrayBuffer(4));
-    for (let attempt = 0; attempt < 8; attempt++) {
-      try {
-        if (browser.socketDir) rmSync(browser.socketDir, { recursive: true, force: true });
-        rmSync(userDataDir, { recursive: true, force: true });
-        return;
-      } catch {
-        Atomics.wait(pause, 0, 0, 50 * (attempt + 1)); // 50→400 ms, ~1.8 s at most
-      }
-    }
-  };
+  const onExit = () => { if (!done) removeProfileDirSync(userDataDir, browser.socketDir); };
   let removing: Promise<void> | null = null;
   const removeAfterExit = (): Promise<void> => (removing ??= (async () => {
     if (await waitForProcessExit(browser.pid)) done = await removeProfileDir(userDataDir, browser.socketDir);
@@ -773,18 +758,102 @@ async function waitForProcessExit(pid: number | null, timeoutMs = 10_000): Promi
   }
 }
 
-/** Remove a profile directory (and the browser's socket dir), retrying while the browser still holds handles (see above). */
-async function removeProfileDir(userDataDir: string, socketDir: string | null = null): Promise<boolean> {
+/**
+ * Remove a profile directory (and the browser's socket dir), retrying while the browser still holds
+ * handles (see above). A null profile: only the socket dir, for a profile that is the caller's.
+ */
+async function removeProfileDir(userDataDir: string | null, socketDir: string | null = null): Promise<boolean> {
   for (let attempt = 0; attempt < 6; attempt++) {
     try {
       if (socketDir) rmSync(socketDir, { recursive: true, force: true });
-      rmSync(userDataDir, { recursive: true, force: true });
+      if (userDataDir) rmSync(userDataDir, { recursive: true, force: true });
       return true;
     } catch {
       await new Promise((r) => setTimeout(r, 250 * (attempt + 1))); // 0.25→1.5s, ~5s total
     }
   }
   return false;
+}
+
+/**
+ * removeProfileDir for process exit. Synchronous: an exit handler cannot await, and an unresolved
+ * promise at exit removes nothing. It retries all the same: on Windows the killed browser's handles
+ * outlive it for a moment, and a single attempt left the profile behind (1 of 3 exits with the browser
+ * open on 0.36.0).
+ */
+function removeProfileDirSync(userDataDir: string | null, socketDir: string | null): void {
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      if (socketDir) rmSync(socketDir, { recursive: true, force: true });
+      if (userDataDir) rmSync(userDataDir, { recursive: true, force: true });
+      return;
+    } catch {
+      Atomics.wait(pause, 0, 0, 50 * (attempt + 1)); // 50→400 ms, ~1.8 s at most
+    }
+  }
+}
+
+/**
+ * Stop a browser serve() started, and wait for it to exit: SIGTERM (on Windows, TerminateProcess),
+ * then SIGKILL once `graceMs` has passed. True once it has exited.
+ */
+async function stopServedBrowser(proc: ChildProcess, graceMs: number): Promise<boolean> {
+  const exited = () => proc.exitCode !== null || proc.signalCode !== null;
+  const waitForExit = (ms: number) => new Promise<boolean>((resolve) => {
+    if (exited()) return resolve(true);
+    const onExit = () => { clearTimeout(timer); resolve(true); };
+    const timer = setTimeout(() => { proc.off("exit", onExit); resolve(exited()); }, ms);
+    proc.once("exit", onExit);
+  });
+  if (exited()) return true;
+  try { proc.kill("SIGTERM"); } catch { /* gone */ }
+  if (await waitForExit(graceMs)) return true;
+  try { proc.kill("SIGKILL"); } catch { /* gone */ }
+  return waitForExit(5_000);
+}
+
+/**
+ * stopServedBrowser for process exit, where nothing can be awaited. Nor can the child's exit be seen
+ * the usual way: the event loop reaps exited children, and it no longer runs, so an exited browser
+ * stays a zombie that signal 0 still finds. Linux reads its state from /proc, macOS asks ps.
+ */
+function stopServedBrowserSync(proc: ChildProcess, graceMs: number): boolean {
+  const pid = proc.pid;
+  if (pid === undefined || proc.exitCode !== null || proc.signalCode !== null) return true;
+  const gone = (): boolean => {
+    try {
+      process.kill(pid, 0); // on Windows this asks whether the process is still active
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === "ESRCH";
+    }
+    if (process.platform === "win32") return false;
+    if (process.platform === "linux") {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, "utf8"); // "<pid> (<name>) <state> ..."
+        return stat[stat.lastIndexOf(")") + 2] === "Z";
+      } catch {
+        return true;
+      }
+    }
+    // ps prints the state, Z for a zombie, and nothing once the pid is gone.
+    const ps = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+    if (ps.error) return false;
+    const state = (ps.stdout ?? "").trim();
+    return state === "" || state.startsWith("Z");
+  };
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  const waitForExit = (ms: number) => {
+    for (const deadline = Date.now() + ms; ;) {
+      if (gone()) return true;
+      if (Date.now() >= deadline) return false;
+      Atomics.wait(pause, 0, 0, 25);
+    }
+  };
+  try { proc.kill("SIGTERM"); } catch { /* gone */ }
+  if (waitForExit(graceMs)) return true;
+  try { proc.kill("SIGKILL"); } catch { /* gone */ }
+  return waitForExit(2_000);
 }
 
 /**
@@ -1175,8 +1244,30 @@ export interface ServeOptions extends LaunchOptions {
   windowSize?: { width: number; height: number };
 }
 
-/** Handle for a standing clearcote CDP endpoint. Use `.cdpUrl` with any CDP client. */
+/**
+ * Handle for a standing clearcote CDP endpoint. Use `.cdpUrl` with any CDP client.
+ *
+ * close() WAITS FOR THE BROWSER TO EXIT, then removes what it leaves in the temp directory: the
+ * profile serve() made, and on Linux and macOS the browser's singleton-socket directory
+ * (org.chromium.Chromium.*), whichever profile it ran on. A browser stopped with a signal never
+ * removes that directory itself, and close() used to signal it and return at once: every serve() +
+ * close() left one behind, and the profile went while the browser was still writing it.
+ */
 export class Server {
+  /** Where the browser's singleton socket lives, read while it runs (see browserProcessFiles). */
+  private readonly socketDir: string | null;
+  private closing: Promise<void> | null = null;
+  private cleanedUp = false;
+  // Process exit: Node runs no async work there, so close()'s steps run synchronously.
+  private readonly onProcessExit = (): void => {
+    if (this.cleanedUp) return;
+    stopServedBrowserSync(this.proc, 5_000);
+    this.lease?.stop().catch(() => { /* best-effort */ });
+    this.launchToken?.release();
+    removeProfileDirSync(this.ownUdd ? this.userDataDir : null, this.socketDir ?? browserProcessFiles(this.userDataDir).socketDir);
+    this.cleanedUp = true;
+  };
+
   constructor(
     private readonly proc: ChildProcess,
     readonly host: string,
@@ -1185,7 +1276,11 @@ export class Server {
     private readonly ownUdd: boolean,
     private readonly lease?: LeaseSession | null,
     private readonly launchToken?: { file: string; release(): void } | null,
-  ) {}
+  ) {
+    // Now, while the browser runs: one that shuts down cleanly unlinks it from the profile.
+    this.socketDir = browserProcessFiles(userDataDir).socketDir;
+    process.once("exit", this.onProcessExit);
+  }
   /** HTTP CDP base — pass to `connectOverCDP` / `puppeteer.connect({ browserURL })`. */
   get cdpUrl(): string {
     return `http://${this.host}:${this.port}`;
@@ -1206,22 +1301,22 @@ export class Server {
   isAlive(): boolean {
     return this.proc.exitCode === null && !this.proc.killed;
   }
-  async close(): Promise<void> {
-    try {
-      this.proc.kill("SIGTERM");
-    } catch {
-      /* ignore */
-    }
-    // Release the concurrency slot (best-effort) + remove the run-token file.
-    try { await this.lease?.stop(); } catch { /* ignore */ }
-    this.launchToken?.release();
-    if (this.ownUdd) {
-      try {
-        rmSync(this.userDataDir, { recursive: true, force: true });
-      } catch {
-        /* ignore */
-      }
-    }
+  /**
+   * Stop the browser and wait for it to exit (SIGTERM, then SIGKILL after 10 s), release the licence
+   * slot, then remove the temp profile serve() made and the browser's socket directory.
+   */
+  close(): Promise<void> {
+    return (this.closing ??= (async () => {
+      if (this.cleanedUp) return;
+      const socketDir = this.socketDir ?? browserProcessFiles(this.userDataDir).socketDir;
+      await stopServedBrowser(this.proc, 10_000);
+      // Release the concurrency slot (best-effort) + remove the run-token file.
+      try { await this.lease?.stop(); } catch { /* ignore */ }
+      this.launchToken?.release();
+      await removeProfileDir(this.ownUdd ? this.userDataDir : null, socketDir);
+      this.cleanedUp = true;
+      process.off("exit", this.onProcessExit); // one per serve() would otherwise pile up
+    })());
   }
 }
 
@@ -1356,16 +1451,12 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     }
     await new Promise((r) => setTimeout(r, 250));
   }
+  const srv = new Server(proc, host, resolvedPort, userDataDir, ownUdd, lease, launchToken);
   if (!ready) {
-    try { proc.kill(); } catch { /* ignore */ }
-    try { await lease?.stop(); } catch { /* ignore */ }
-    launchToken?.release();
-    if (ownUdd) { try { rmSync(userDataDir, { recursive: true, force: true }); } catch { /* ignore */ } }
+    await srv.close();
     throw new Error(
       `clearcote serve: CDP endpoint at http://${host}:${resolvedPort} did not come up within ${readyTimeoutMs}ms`);
   }
-  const srv = new Server(proc, host, resolvedPort, userDataDir, ownUdd, lease, launchToken);
-  process.once("exit", () => { void srv.close(); });
   // Before any client attaches: the window onto the work area (and, under a persona, the headless
   // display onto the persona's). Its own connection, closed again; never fails the launch.
   if (geometry) await fitServedWindow(await srv.wsUrl().catch(() => undefined), { persona: geometry.persona, windowSize });

@@ -355,17 +355,13 @@ public static class Clearcote
                 catch { await Task.Delay(250).ConfigureAwait(false); }
             }
         }
+        var srv = new Server(proc, host, port, userDataDir, ownUdd, lease, launchToken);
         if (!ready)
         {
-            try { proc.Kill(true); } catch { }
-            if (lease is not null) { try { await lease.StopAsync().ConfigureAwait(false); } catch { } }
-            launchToken?.Release();
-            if (ownUdd) { try { Directory.Delete(userDataDir, true); } catch { } }
+            await srv.CloseAsync().ConfigureAwait(false);  // the engine, the lease, the run-token file, the temp directories
             throw new Exception($"clearcote serve: CDP endpoint at http://{host}:{port} did not come up within {options.ReadyTimeoutMs}ms");
         }
 
-        var srv = new Server(proc, host, port, userDataDir, ownUdd, lease, launchToken);
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { srv.CloseAsync().GetAwaiter().GetResult(); } catch { } };
         // Before any client attaches: the window onto the work area (and, under a persona, the headless
         // display onto the persona's). Its own connection, closed again; never fails the launch.
         if (geometry is not null)
@@ -460,6 +456,13 @@ public static class Clearcote
 
 /// A running Clearcote CDP endpoint (from <see cref="Clearcote.ServeAsync"/>). Attach a client with
 /// ConnectOverCDP(<see cref="CdpUrl"/>). Call <see cref="CloseAsync"/> to stop it.
+/// <remarks>
+/// CloseAsync WAITS FOR THE ENGINE TO EXIT, then removes what it leaves in the temp directory: the
+/// profile ServeAsync made, and on Linux and macOS the engine's singleton-socket directory
+/// (org.chromium.Chromium.*), whichever profile it ran on. A killed engine never removes that
+/// directory itself, and CloseAsync used to kill it and return at once: every ServeAsync + CloseAsync
+/// left one behind.
+/// </remarks>
 public sealed class Server
 {
     private readonly Process _proc;
@@ -467,10 +470,18 @@ public sealed class Server
     private readonly bool _ownUdd;
     private readonly LeaseSession? _lease;
     private readonly LaunchToken? _launchToken;
+    private readonly string? _socketDir;
+    private readonly EventHandler _onProcessExit;
+    private readonly object _gate = new();
+    private Task? _closing;
 
     internal Server(Process proc, string host, int port, string userDataDir, bool ownUdd, LeaseSession? lease, LaunchToken? launchToken = null)
     {
         _proc = proc; Host = host; Port = port; _userDataDir = userDataDir; _ownUdd = ownUdd; _lease = lease; _launchToken = launchToken;
+        // Now, while the engine runs: one that shuts down cleanly unlinks it from the profile.
+        _socketDir = ThrowawayProfile.BrowserProcessFiles(userDataDir).SocketDir;
+        _onProcessExit = (_, _) => { try { CloseAsync().GetAwaiter().GetResult(); } catch { } };
+        AppDomain.CurrentDomain.ProcessExit += _onProcessExit;
     }
 
     public string Host { get; }
@@ -493,13 +504,28 @@ public sealed class Server
 
     public bool IsAlive { get { try { return !_proc.HasExited; } catch { return false; } } }
 
-    /// Stop the engine, release the lease (best-effort), and remove an owned temp profile dir.
-    public async Task CloseAsync()
+    /// Stop the engine and wait for it to exit, release the lease (best-effort), then remove the temp
+    /// profile ServeAsync made and the engine's singleton-socket directory. Closes once.
+    public Task CloseAsync()
     {
-        try { if (!_proc.HasExited) _proc.Kill(true); } catch { }
+        lock (_gate) return _closing ??= CloseCoreAsync();
+    }
+
+    private async Task CloseCoreAsync()
+    {
+        var socketDir = _socketDir ?? ThrowawayProfile.BrowserProcessFiles(_userDataDir).SocketDir;
+        try { if (!_proc.HasExited) _proc.Kill(entireProcessTree: true); } catch { }
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await _proc.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch { }   // still running at the deadline: remove what can be removed all the same
         // Release the concurrency slot (best-effort) + remove the run-token file.
         if (_lease is not null) { try { await _lease.StopAsync().ConfigureAwait(false); } catch { } }
         _launchToken?.Release();
-        if (_ownUdd) { try { Directory.Delete(_userDataDir, true); } catch { } }
+        if (socketDir is not null) { try { Directory.Delete(socketDir, recursive: true); } catch { } }
+        if (_ownUdd) ThrowawayProfile.DeleteDirectory(_userDataDir);
+        AppDomain.CurrentDomain.ProcessExit -= _onProcessExit;  // one per ServeAsync would otherwise pile up
     }
 }

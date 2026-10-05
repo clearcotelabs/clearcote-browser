@@ -110,23 +110,30 @@ internal sealed class ThrowawayProfile
             if (Done) return true;
             if (!WaitForExit(_pid, TimeSpan.FromSeconds(final ? 5 : 10)) && !final) return false;
             if (_socketDir is not null) { try { Directory.Delete(_socketDir, recursive: true); } catch { } }
-            for (var attempt = 0; attempt < 6; attempt++)
-            {
-                try { Directory.Delete(Dir, recursive: true); }
-                // DirectoryNotFoundException included: it is thrown for ANY entry that vanished during
-                // the walk, not only for the directory itself — so only the check below means gone.
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
-                if (!Directory.Exists(Dir))
-                {
-                    Done = true;
-                    if (_onProcessExit is not null) AppDomain.CurrentDomain.ProcessExit -= _onProcessExit;
-                    return true;
-                }
-                if (attempt < 5) Thread.Sleep(250 * (attempt + 1));
-            }
-            return false;
+            if (!DeleteDirectory(Dir)) return false;
+            Done = true;
+            if (_onProcessExit is not null) AppDomain.CurrentDomain.ProcessExit -= _onProcessExit;
+            return true;
         }
+    }
+
+    /// <summary>
+    /// Delete <paramref name="dir"/>, retrying while a browser that has just exited still holds handles
+    /// under it (Windows, see above). True once it is gone.
+    /// </summary>
+    internal static bool DeleteDirectory(string dir)
+    {
+        for (var attempt = 0; attempt < 6; attempt++)
+        {
+            try { Directory.Delete(dir, recursive: true); }
+            // DirectoryNotFoundException included: it is thrown for ANY entry that vanished during
+            // the walk, not only for the directory itself — so only the check below means gone.
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            if (!Directory.Exists(dir)) return true;
+            if (attempt < 5) Thread.Sleep(250 * (attempt + 1));
+        }
+        return false;
     }
 
     /// <summary>

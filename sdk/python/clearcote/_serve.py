@@ -46,10 +46,38 @@ def _free_port() -> int:
     return p
 
 
+#: Seconds close() gives the browser to exit after SIGTERM before it kills it.
+_CLOSE_GRACE = 10.0
+
+
+def _stop_browser(process, grace):
+    """Stop a browser serve() started and wait for it to exit: SIGTERM (TerminateProcess on
+    Windows), then SIGKILL once ``grace`` seconds have passed. True once it has exited."""
+    for stop, timeout in ((process.terminate, grace), (process.kill, 5.0)):
+        try:
+            stop()
+        except Exception:  # noqa: BLE001 -- already gone
+            pass
+        try:
+            process.wait(timeout=timeout)
+            return True
+        except Exception:  # noqa: BLE001 -- TimeoutExpired: still running
+            pass
+    return False
+
+
 class Server:
-    """Handle for a standing clearcote CDP endpoint. Use ``.cdp_url`` with any CDP client."""
+    """Handle for a standing clearcote CDP endpoint. Use ``.cdp_url`` with any CDP client.
+
+    close() WAITS FOR THE BROWSER TO EXIT, then removes what it leaves in the temp directory: the
+    profile serve() made, and on Linux and macOS the browser's singleton-socket directory
+    (org.chromium.Chromium.*), whichever profile it ran on. A browser stopped with a signal never
+    removes that directory itself: every serve() + close() left one behind.
+    """
 
     def __init__(self, process, host, port, user_data_dir, own_udd, lease=None, launch_token=None):
+        from . import _browser_process_files
+
         self.process = process
         self.host = host
         self.port = port
@@ -58,6 +86,8 @@ class Server:
         self._lease = lease  # licence handle, released in close(); None in free mode
         self._launch_token = launch_token  # (file, release) for CLEARCOTE_RUN_TOKEN_FILE, or None
         self._closed = False
+        # Now, while the browser runs: one that shuts down cleanly unlinks it from the profile.
+        self._socket_dir = _browser_process_files(user_data_dir)[1]
 
     @property
     def cdp_url(self) -> str:
@@ -82,17 +112,15 @@ class Server:
         return self.process.poll() is None
 
     def close(self):
+        """Stop the browser and wait for it to exit (SIGTERM, then SIGKILL after 10 s), release the
+        licence slot, then remove the temp profile serve() made and the browser's socket directory."""
         if self._closed:
             return
         self._closed = True
-        try:
-            self.process.terminate()
-            self.process.wait(timeout=10)
-        except Exception:
-            try:
-                self.process.kill()
-            except Exception:
-                pass
+        from . import _browser_process_files, _profile_dir_remover
+
+        socket_dir = self._socket_dir or _browser_process_files(self.user_data_dir)[1]
+        _stop_browser(self.process, _CLOSE_GRACE)
         if self._lease:
             try:
                 self._lease.stop()  # release the concurrency slot back to the plan
@@ -104,7 +132,12 @@ class Server:
             except Exception:  # noqa: BLE001 -- best-effort; the file is in a temp dir
                 pass
         if self._own_udd:
-            shutil.rmtree(self.user_data_dir, ignore_errors=True)
+            # retried while the browser's handles outlive it (Windows); a directory that will not go
+            # is left to the interpreter-exit sweep
+            _profile_dir_remover(self.user_data_dir, socket_dir=socket_dir)()
+        elif socket_dir:
+            shutil.rmtree(socket_dir, ignore_errors=True)
+        atexit.unregister(self.close)  # one per serve() would otherwise pile up
 
     def __enter__(self):
         return self
@@ -219,28 +252,12 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
             break
         except Exception:
             time.sleep(0.25)
+    srv = Server(proc, host, port, user_data_dir, own_udd, lease=lease, launch_token=launch_token)
     if not ready:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        if lease:
-            try:
-                lease.stop()  # release the concurrency slot; the machine lease checks in at exit
-            except Exception:  # noqa: BLE001 -- never let licence teardown break server shutdown
-                pass
-        if launch_token:
-            try:
-                launch_token[1]()  # remove the run-token file
-            except Exception:  # noqa: BLE001
-                pass
-        if own_udd:
-            shutil.rmtree(user_data_dir, ignore_errors=True)
+        srv.close()  # the browser, the licence slot, the run-token file and the temp directories
         raise RuntimeError(
             "clearcote serve: CDP endpoint at http://%s:%d did not come up within %.0fs"
             % (host, port, ready_timeout))
-
-    srv = Server(proc, host, port, user_data_dir, own_udd, lease=lease, launch_token=launch_token)
     atexit.register(srv.close)
     # Before any client attaches: the window onto the work area (and, under a persona, the headless
     # display onto the persona's). Its own connection, closed again; never fails the launch.
