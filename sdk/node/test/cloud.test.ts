@@ -116,7 +116,7 @@ describe("option mapping", () => {
       fingerprint: "seed-1", platform: "windows", brand: "Chrome", timezone: "Europe/Amsterdam", acceptLanguage: "nl-NL",
       geoip: false, headless: false, lightStealth: true, country: "us", state: "ca", city: "los angeles",
       proxySession: "sticky-1", timeoutSec: 600, idleTimeoutSec: 120, maxGb: 0.5, version: "153", profile: "acct-1",
-      url: "https://example.com", adblock: true, solveSliders: false, keepAlive: true, record: true, note: "n", worker: "w1",
+      url: "https://example.com", adblock: true, solveSliders: false, solveCheckboxes: false, keepAlive: true, record: true, note: "n", worker: "w1",
       identity: "acct-1", proxy: "managed",
     };
     const { acceptLanguage, ...same } = opts;

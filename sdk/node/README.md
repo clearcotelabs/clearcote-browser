@@ -331,11 +331,14 @@ What changes in the cloud:
 - **Options** keep the API's names: `fingerprint`, `identity`, `platform`, `brand`, `timezone`,
   `locale` (or `acceptLanguage`), `geoip`, `headless`, `lightStealth`, `proxy` (`"managed"`, a URL, or
   `{ server, username, password }`), `country`/`state`/`city`, `proxySession`, `timeoutSec`,
-  `idleTimeoutSec`, `maxGb`, `version`, `profile`, `url`, `adblock`, `solveSliders`, `keepAlive`,
-  `record`, `note`, `worker`. `humanize` and `showCursor` run in the SDK, exactly as for a local browser.
+  `idleTimeoutSec`, `maxGb`, `version`, `profile`, `url`, `adblock`, `solveSliders`, `solveCheckboxes`,
+  `keepAlive`, `record`, `note`, `worker`. `humanize` and `showCursor` run in the SDK, exactly as for a local browser.
 - **Slider challenges are solved for you.** A cloud browser drags slide-to-verify challenges (a handle
   to the end of a bar, or a puzzle piece into its gap) by itself, in any tab or frame. Pass
   `solveSliders: false` when your script handles them.
+- **Human-check checkboxes are clicked for you.** A separate option: a cloud browser clicks "verify you
+  are human" boxes by itself, in any tab or frame. Pass `solveCheckboxes: false` when your script handles
+  them.
 - **Local-only options are refused, by name.** `executablePath`, `args`, `userDataDir`, `extensions`,
   `ignoreDefaultArgs`, the finer persona switches (`gpuVendor`, `webrtcIp`, ...) and the licence
   options throw `<name> is not available for cloud browsers` before anything starts.

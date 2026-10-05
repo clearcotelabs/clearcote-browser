@@ -157,7 +157,7 @@ def test_every_documented_option_maps_to_its_api_field():
         "accept_language": "nl-NL", "geoip": False, "headless": False, "light_stealth": True,
         "country": "us", "state": "ca", "city": "los angeles", "proxy_session": "sticky-1",
         "timeout_sec": 600, "idle_timeout_sec": 120, "max_gb": 0.5, "version": "153", "profile": "acct-1",
-        "url": "https://example.com", "adblock": True, "solve_sliders": False, "keep_alive": True, "record": True,
+        "url": "https://example.com", "adblock": True, "solve_sliders": False, "solve_checkboxes": False, "keep_alive": True, "record": True,
         "note": "n", "worker": "w1", "identity": "acct-1", "proxy": "managed",
     })
     assert body == {
@@ -165,7 +165,7 @@ def test_every_documented_option_maps_to_its_api_field():
         "locale": "nl-NL", "geoip": False, "headless": False, "lightStealth": True, "country": "us",
         "state": "ca", "city": "los angeles", "proxySession": "sticky-1", "timeoutSec": 600,
         "idleTimeoutSec": 120, "maxGb": 0.5, "version": "153", "profile": "acct-1",
-        "url": "https://example.com", "adblock": True, "solveSliders": False, "keepAlive": True, "record": True,
+        "url": "https://example.com", "adblock": True, "solveSliders": False, "solveCheckboxes": False, "keepAlive": True, "record": True,
         "note": "n", "worker": "w1", "identity": "acct-1", "proxy": "managed",
     }
 

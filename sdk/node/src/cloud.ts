@@ -161,6 +161,7 @@ export const SESSION_FIELDS: Readonly<Record<string, string>> = {
   url: "url",
   adblock: "adblock",
   solveSliders: "solveSliders",
+  solveCheckboxes: "solveCheckboxes",
   keepAlive: "keepAlive",
   record: "record",
   note: "note",
@@ -309,6 +310,8 @@ export interface CloudSessionOptions {
   adblock?: boolean;
   /** Default true: the server drags slide-to-verify challenges for you. false leaves them to your script. */
   solveSliders?: boolean;
+  /** Default true: the server clicks "verify you are human" checkboxes for you. false leaves them to your script. */
+  solveCheckboxes?: boolean;
   keepAlive?: boolean;
   record?: boolean;
   note?: string;

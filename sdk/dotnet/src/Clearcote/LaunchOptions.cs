@@ -150,6 +150,8 @@ public class LaunchOptions : FingerprintOptions
     public bool? Adblock { get; set; }
     /// Cloud: drag slide-to-verify challenges automatically (the server's default is on); false turns it off.
     public bool? SolveSliders { get; set; }
+    /// Cloud: click "verify you are human" checkboxes automatically (the server's default is on); false turns it off.
+    public bool? SolveCheckboxes { get; set; }
     /// Cloud: keep the session running after this client disconnects; stop it with
     /// <c>cloud.Browsers.StopAsync(id)</c>.
     public bool? KeepAlive { get; set; }

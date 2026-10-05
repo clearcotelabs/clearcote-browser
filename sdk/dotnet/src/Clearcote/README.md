@@ -103,7 +103,7 @@ await browser.CloseAsync();                // disconnects and ends the hosted se
 - The persona options a hosted browser also has carry over: `Fingerprint`, `Platform`, `Brand`, `Timezone`,
   `AcceptLanguage`, `LightStealth`, `Geoip`, `Headless`, `Proxy` (`new() { Server = "managed" }` for the
   included residential connection) and `Version`. Cloud-only: `Identity`, `Country`, `State`, `City`,
-  `ProxySession`, `TimeoutSec`, `IdleTimeoutSec`, `MaxGb`, `Url`, `Adblock`, `SolveSliders`, `KeepAlive`,
+  `ProxySession`, `TimeoutSec`, `IdleTimeoutSec`, `MaxGb`, `Url`, `Adblock`, `SolveSliders`, `SolveCheckboxes`, `KeepAlive`,
   `Record`, `Note` and `Worker`.
 - An option only a browser on this machine can take (`ExecutablePath`, `Args`, `Extensions`, a user data
   directory, ...) stops the launch with an error naming it, before anything is created.

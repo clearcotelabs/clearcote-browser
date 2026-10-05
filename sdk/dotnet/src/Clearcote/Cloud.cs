@@ -97,6 +97,8 @@ public class CloudSessionOptions
     public bool? Adblock { get; set; }
     /// Drag slide-to-verify challenges automatically (the server's default is on); false turns it off.
     public bool? SolveSliders { get; set; }
+    /// Click "verify you are human" checkboxes automatically (the server's default is on); false turns it off.
+    public bool? SolveCheckboxes { get; set; }
     /// Keep the session running after the client disconnects (stop it with Browsers.StopAsync).
     public bool? KeepAlive { get; set; }
     public bool? Record { get; set; }
@@ -688,6 +690,7 @@ public sealed class Cloud
         Put("url", o.Url);
         Put("adblock", o.Adblock);
         Put("solveSliders", o.SolveSliders);
+        Put("solveCheckboxes", o.SolveCheckboxes);
         Put("keepAlive", o.KeepAlive);
         Put("record", o.Record);
         Put("note", o.Note);

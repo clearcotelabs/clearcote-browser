@@ -30,7 +30,7 @@ internal static class CloudLaunch
     {
         "Fingerprint", "Platform", "Brand", "Timezone", "AcceptLanguage", "LightStealth", "Geoip", "Headless",
         "Proxy", "Version", "Identity", "Country", "State", "City", "ProxySession", "TimeoutSec", "IdleTimeoutSec",
-        "MaxGb", "Profile", "Url", "Adblock", "SolveSliders", "KeepAlive", "Record", "Note", "Worker",
+        "MaxGb", "Profile", "Url", "Adblock", "SolveSliders", "SolveCheckboxes", "KeepAlive", "Record", "Note", "Worker",
     };
 
     // ... and those handled on THIS side: the switch, the account, and Playwright's connect options.
@@ -78,7 +78,7 @@ internal static class CloudLaunch
             Headless = o.Headless, Proxy = o.Proxy, Version = o.Version, Identity = o.Identity,
             Country = o.Country, State = o.State, City = o.City, ProxySession = o.ProxySession,
             TimeoutSec = o.TimeoutSec, IdleTimeoutSec = o.IdleTimeoutSec, MaxGb = o.MaxGb, Profile = o.Profile,
-            Url = o.Url, Adblock = o.Adblock, SolveSliders = o.SolveSliders, KeepAlive = o.KeepAlive, Record = o.Record, Note = o.Note, Worker = o.Worker,
+            Url = o.Url, Adblock = o.Adblock, SolveSliders = o.SolveSliders, SolveCheckboxes = o.SolveCheckboxes, KeepAlive = o.KeepAlive, Record = o.Record, Note = o.Note, Worker = o.Worker,
         };
     }
 

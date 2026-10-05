@@ -174,6 +174,7 @@ SESSION_FIELDS = {
     "url": "url",
     "adblock": "adblock",
     "solve_sliders": "solveSliders",
+    "solve_checkboxes": "solveCheckboxes",
     "keep_alive": "keepAlive",
     "record": "record",
     "note": "note",

@@ -201,14 +201,14 @@ public sealed class CloudTests : IAsyncLifetime
             Fingerprint = "seed-1", Platform = "windows", Brand = "Chrome", Timezone = "Europe/Amsterdam", Locale = "nl-NL",
             Geoip = false, Headless = false, LightStealth = true, Country = "us", State = "ca", City = "los angeles",
             ProxySession = "sticky-1", TimeoutSec = 600, IdleTimeoutSec = 120, MaxGb = 0.5, Version = "153", Profile = "acct-1",
-            Url = "https://example.com", Adblock = true, SolveSliders = false, KeepAlive = true, Record = true, Note = "n", Worker = "w1", Identity = "acct-1",
+            Url = "https://example.com", Adblock = true, SolveSliders = false, SolveCheckboxes = false, KeepAlive = true, Record = true, Note = "n", Worker = "w1", Identity = "acct-1",
             Proxy = new ProxyOptions { Server = "managed" },
         }, run: false);
         AssertJson("""
             {"fingerprint":"seed-1","platform":"windows","brand":"Chrome","timezone":"Europe/Amsterdam","locale":"nl-NL",
              "geoip":false,"headless":false,"lightStealth":true,"country":"us","state":"ca","city":"los angeles",
              "proxySession":"sticky-1","timeoutSec":600,"idleTimeoutSec":120,"maxGb":0.5,"version":"153","profile":"acct-1",
-             "url":"https://example.com","adblock":true,"solveSliders":false,"keepAlive":true,"record":true,"note":"n","worker":"w1","identity":"acct-1",
+             "url":"https://example.com","adblock":true,"solveSliders":false,"solveCheckboxes":false,"keepAlive":true,"record":true,"note":"n","worker":"w1","identity":"acct-1",
              "proxy":"managed"}
             """, body);
         AssertJson("{}", Cloud.SessionBody(new CloudSessionOptions(), run: false));
@@ -220,9 +220,9 @@ public sealed class CloudTests : IAsyncLifetime
         var s = Cloud.SessionBody(CloudLaunch.SessionOptionsOf(new LaunchOptions
         {
             AcceptLanguage = "de-DE", Fingerprint = "f", Headless = true, Country = "de", Quiet = true, SlowMo = 5, ApiKey = "k",
-            SolveSliders = false,
+            SolveSliders = false, SolveCheckboxes = false,
         }), run: false);
-        AssertJson("""{"locale":"de-DE","fingerprint":"f","headless":true,"country":"de","solveSliders":false}""", s);
+        AssertJson("""{"locale":"de-DE","fingerprint":"f","headless":true,"country":"de","solveSliders":false,"solveCheckboxes":false}""", s);
         // Geoip is a plain bool locally: off is "unset" (the server's own default applies), on is sent
         AssertJson("{}", Cloud.SessionBody(CloudLaunch.SessionOptionsOf(new LaunchOptions { Geoip = false }), run: false));
         AssertJson("""{"geoip":true}""", Cloud.SessionBody(CloudLaunch.SessionOptionsOf(new LaunchOptions { Geoip = true }), run: false));
