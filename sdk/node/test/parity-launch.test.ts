@@ -178,3 +178,20 @@ describe("serve as root", () => {
     expect(serveNeedsNoSandbox("win32", undefined, [])).toBe(false);
   });
 });
+
+describe("serve: the unsupported-flag infobar", () => {
+  it("headless: --disable-infobars, whatever else is on the line, and never twice", async () => {
+    const { serveInfobarArgs } = await import("../src/index.js");
+    expect(serveInfobarArgs(true, [])).toEqual(["--disable-infobars"]);
+    expect(serveInfobarArgs(true, ["--no-sandbox"])).toEqual(["--disable-infobars"]);
+    expect(serveInfobarArgs(true, ["--disable-infobars"])).toEqual([]);
+  });
+
+  it("headed: --test-type only with --no-sandbox, and never twice", async () => {
+    const { serveInfobarArgs } = await import("../src/index.js");
+    expect(serveInfobarArgs(false, [])).toEqual([]);
+    expect(serveInfobarArgs(false, ["--ignore-certificate-errors"])).toEqual([]);
+    expect(serveInfobarArgs(false, ["--no-sandbox"])).toEqual(["--test-type"]);
+    expect(serveInfobarArgs(false, ["--no-sandbox", "--test-type=browser"])).toEqual([]);
+  });
+});

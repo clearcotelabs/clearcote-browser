@@ -16,6 +16,7 @@ from clearcote._launchopts import (
     engine_extras_args,
     gate_engine_switches,
     gpu_blocklist_args,
+    serve_infobar_args,
     serve_needs_no_sandbox,
 )
 from clearcote.download import pro_download_url, resolve_release_channel
@@ -228,6 +229,78 @@ def test_serve_needs_no_sandbox():
     assert serve_needs_no_sandbox("linux", 1000, []) is False
     assert serve_needs_no_sandbox("linux", 0, ["--no-sandbox"]) is False
     assert serve_needs_no_sandbox("win32", None, []) is False
+
+
+# -- serve: the "unsupported command-line flag" infobar ------------------------------------------
+
+def test_serve_infobar_args_headless_always_disables_infobars_once():
+    assert serve_infobar_args(True, []) == ["--disable-infobars"]
+    assert serve_infobar_args(True, ["--no-sandbox"]) == ["--disable-infobars"]
+    assert serve_infobar_args(True, ["--disable-infobars"]) == []
+
+
+def test_serve_infobar_args_headed_test_type_only_with_no_sandbox_and_once():
+    assert serve_infobar_args(False, []) == []
+    assert serve_infobar_args(False, ["--ignore-certificate-errors"]) == []
+    assert serve_infobar_args(False, ["--no-sandbox"]) == ["--test-type"]
+    assert serve_infobar_args(False, ["--no-sandbox", "--test-type=browser"]) == []
+
+
+@pytest.fixture
+def served_line(monkeypatch, tmp_path):
+    """serve() up to a stand-in browser process: the engine command line it spawns."""
+    import clearcote._geometry as _geometry
+    import clearcote._serve as _serve
+    home = tmp_path / "home"
+    home.mkdir()
+    for k in ("HOME", "USERPROFILE"):  # no licence on this machine may select PRO or take a lease
+        monkeypatch.setenv(k, str(home))
+    for k in ("CLEARCOTE_LICENSE_KEY", "CLEARCOTE_BINARY"):
+        monkeypatch.delenv(k, raising=False)
+    exe = fake_engine(tmp_path, NEW)
+    monkeypatch.setattr(clearcote, "_resolve_binary", lambda *a, **k: exe)
+    monkeypatch.setattr(clearcote, "_guard", lambda exe: None)
+    monkeypatch.setattr(_geometry, "fit_served_window", lambda *a, **k: None)
+    monkeypatch.setattr(_serve.urllib.request, "urlopen", lambda *a, **k: None)  # the endpoint is "up"
+    lines = []
+
+    class Proc:
+        pid = 4242
+
+        def __init__(self, cmd, **_kw):
+            lines.append(cmd)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(_serve.subprocess, "Popen", Proc)
+
+    def run(**kwargs):
+        clearcote.serve(quiet=True, user_data_dir=str(tmp_path / "udd"), **kwargs).close()
+        return lines[-1]
+    return run
+
+
+def test_serve_headless_puts_disable_infobars_on_the_engine_command_line(served_line):
+    for args in ([], ["--no-sandbox"]):
+        line = served_line(args=args)
+        assert line.count("--disable-infobars") == 1, line
+        assert not any(a.startswith("--test-type") for a in line), line
+
+
+def test_serve_headed_puts_test_type_on_the_command_line_only_with_no_sandbox(served_line):
+    # As root on Linux serve() adds --no-sandbox itself, and --test-type comes with it.
+    as_root = serve_needs_no_sandbox(sys.platform, getattr(os, "getuid", lambda: None)(), [])
+    line = served_line(headless=False)
+    assert line.count("--test-type") == (1 if as_root else 0), line
+    assert "--disable-infobars" not in line, line
+    assert served_line(headless=False, args=["--no-sandbox"]).count("--test-type") == 1
 
 
 # -- end to end through _prepare (the real arg assembly both launch paths and serve use) ----------

@@ -310,6 +310,8 @@ public static class Clearcote
         // Chromium refuses to start as root without --no-sandbox, and serve spawns the binary itself,
         // so Playwright's own --no-sandbox is missing: serve in a root container just timed out.
         if (LaunchOpts.ServeNeedsNoSandbox(Native.OsTag, LaunchOpts.EffectiveUid(), engineArgs)) cdpArgs.Add("--no-sandbox");
+        // ...and the warning bar that flag (or any of the caller's on Chromium's list) puts on the first tab.
+        cdpArgs.AddRange(LaunchOpts.ServeInfobarArgs(options.Headless != false, engineArgs.Concat(cdpArgs)));
         // Headless geometry for a raw endpoint: the display and window are set browser-wide, since no
         // client's context options or CDP overrides would reach every page (see Geometry).
         var geometry = Geometry.ServedGeometry(engineArgs, options.Fingerprint, options.LightStealth == true,

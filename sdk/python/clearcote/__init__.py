@@ -48,6 +48,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     engine_supports_switch,
     gate_engine_switches,
     gpu_blocklist_args,
+    serve_infobar_args,
     serve_needs_no_sandbox,
     extension_args,
     warn_unsupported_engine_options,

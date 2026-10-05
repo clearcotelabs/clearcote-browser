@@ -168,7 +168,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     from . import _acquire_lease_from_kwargs, _prepare_or_release, _win_av_retry
     from ._fonts import linux_font_env, linux_locale_env
     from ._geometry import fit_served_window, served_geometry, validate_window_size
-    from ._launchopts import serve_needs_no_sandbox
+    from ._launchopts import serve_infobar_args, serve_needs_no_sandbox
     from ._warnings import emit_warnings, serve_exposure_warnings
 
     window_size = validate_window_size(window_size)
@@ -215,6 +215,8 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     # Playwright's own --no-sandbox is missing: `clearcote serve` in a root container just timed out.
     if serve_needs_no_sandbox(sys.platform, getattr(os, "getuid", lambda: None)(), args):
         cdp.append("--no-sandbox")
+    # ...and the warning bar that flag (or any of the caller's on Chromium's list) puts on the first tab.
+    cdp.extend(serve_infobar_args(headless, args + cdp))
     # Headless geometry for a raw endpoint: the display and window are set browser-wide, since no
     # client's context options or CDP overrides would reach every page (see _geometry).
     geometry = served_geometry(args, _seed, light_stealth=light_stealth, headless=headless)

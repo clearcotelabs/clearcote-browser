@@ -97,7 +97,7 @@ vi.mock("../src/profileauto.js", async (importOriginal) => ({
   resolveAuto: async () => ({ profile: stub.serviceProfile, selection: { entry: { id: "svc-1" } }, source: "service" }),
 }));
 
-import { launch, launchAgent, launchPersistentContext, serve } from "../src/index.js";
+import { launch, launchAgent, launchPersistentContext, serve, serveNeedsNoSandbox } from "../src/index.js";
 import { resolveLicenseKey } from "../src/license.js";
 
 afterAll(() => {
@@ -388,6 +388,42 @@ describe("serve() proxy switches", () => {
       const srv = await serve({ ...base(), port, proxy: { server: "http://127.0.0.1:3128" } });
       expect(stub.spawns.at(-1)!.filter((a) => a.startsWith("--proxy-server="))).toEqual(["--proxy-server=http://127.0.0.1:3128"]);
       await srv.close();
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe("serve(): the unsupported-flag infobar", () => {
+  // Any flag on Chromium's list (--no-sandbox among them) puts a warning bar on the first tab, ~56px
+  // off its innerHeight. The switch that suppresses it has to reach the engine's command line.
+  it("headless: --disable-infobars on the command line, with or without --no-sandbox", async () => {
+    const { port, close } = await fakeCdpEndpoint();
+    try {
+      for (const args of [[], ["--no-sandbox"]]) {
+        const srv = await serve({ ...base(), headless: true, port, args });
+        const line = stub.spawns.at(-1)!;
+        expect(line.filter((a) => a === "--disable-infobars")).toHaveLength(1);
+        expect(line.some((a) => a.startsWith("--test-type"))).toBe(false);
+        await srv.close();
+      }
+    } finally {
+      await close();
+    }
+  });
+
+  it("headed: --test-type only when --no-sandbox is on the command line", async () => {
+    const { port, close } = await fakeCdpEndpoint();
+    try {
+      // As root on Linux serve() adds --no-sandbox itself, and --test-type comes with it.
+      const asRoot = serveNeedsNoSandbox(process.platform, process.getuid?.(), []);
+      const plain = await serve({ ...base(), port });
+      expect(stub.spawns.at(-1)!.filter((a) => a === "--test-type")).toHaveLength(asRoot ? 1 : 0);
+      expect(stub.spawns.at(-1)).not.toContain("--disable-infobars");
+      await plain.close();
+      const unsandboxed = await serve({ ...base(), port, args: ["--no-sandbox"] });
+      expect(stub.spawns.at(-1)!.filter((a) => a === "--test-type")).toHaveLength(1);
+      await unsandboxed.close();
     } finally {
       await close();
     }

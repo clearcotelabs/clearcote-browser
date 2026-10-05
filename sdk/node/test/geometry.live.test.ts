@@ -13,8 +13,8 @@ import { existsSync, mkdtempSync, readlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { Page } from "playwright-core";
-import { launch, launchPersistentContext, serveNeedsNoSandbox } from "../src/index.js";
+import { chromium, type Page } from "playwright-core";
+import { launch, launchPersistentContext, serve } from "../src/index.js";
 import { geometryIsCoherent, headlessGeometry, servedDisplay } from "../src/geometry.js";
 import { runFitChild } from "./helpers/fit-child.js";
 import { tempDir } from "./helpers/temp.js";
@@ -165,6 +165,18 @@ describe.runIf(LIVE_EXE)("live engine geometry", () => {
 });
 
 /**
+ * After a serve() closed: close() returned once the browser had exited, and took the engine's
+ * singleton-socket directory (Linux and macOS; the caller's profile still links to it) along, so the
+ * profile is all that is left.
+ */
+function afterServed(pid: number | undefined, userDataDir: string) {
+  if (pid) expect(() => process.kill(pid, 0)).toThrow();
+  let socket: string | null = null;
+  try { socket = readlinkSync(join(userDataDir, "SingletonSocket")); } catch { /* none on Windows */ }
+  if (socket) expect(existsSync(dirname(socket))).toBe(false);
+}
+
+/**
  * serve() in a Node with no global WebSocket: Node 20, which the SDK supports, or a newer one run with
  * `--no-experimental-websocket`. The fit used to ride on that global and was skipped without it, so
  * the served display was right and the window stayed the engine's default (945-1050px wide inside a
@@ -174,25 +186,13 @@ async function serveWithoutWebSocket(opts: Record<string, unknown>) {
   const userDataDir = tempDir("cc-live-serve-");
   const r = await runFitChild({
     FIT_MODE: "serve",
-    // No --no-sandbox: serve() adds it itself where it is needed (root on Linux), and anywhere else its
-    // "unsupported command-line flag" infobar would come out of the page's height.
+    // No --no-sandbox: serve() adds it itself where it is needed (root on Linux).
     FIT_SERVE_OPTS: JSON.stringify({ executablePath: LIVE_EXE, quiet: true, userDataDir, ...opts }),
   }, 120_000);
-  // close() returned once the browser had exited, and took the engine's singleton-socket directory
-  // (Linux and macOS; the caller's profile still links to it) along: the profile is all that is left.
-  expect(() => process.kill(r.pid as number, 0)).toThrow();
-  let socket: string | null = null;
-  try { socket = readlinkSync(join(userDataDir, "SingletonSocket")); } catch { /* none on Windows */ }
-  if (socket) expect(existsSync(dirname(socket))).toBe(false);
+  afterServed(r.pid as number | undefined, userDataDir);
   expect(r.webSocket).toBe("undefined");   // the child really had none
   return r as unknown as Awaited<ReturnType<typeof read>>;
 }
-
-/**
- * serve() adds --no-sandbox itself as root on Linux, and the engine then shows its "unsupported
- * command-line flag" infobar, which takes ~50px off the page's height. Not what these tests are about.
- */
-const servedFrameIsPlain = !serveNeedsNoSandbox(process.platform, process.getuid?.(), []);
 
 describe.runIf(LIVE_EXE)("live engine geometry: serve() in a Node without a global WebSocket", () => {
   it("regime 2 (lightStealth): the served window is maximized into the seed's display", async () => {
@@ -202,7 +202,7 @@ describe.runIf(LIVE_EXE)("live engine geometry: serve() in a Node without a glob
     expect(m.avail).toEqual([d.availWidth, d.availHeight]);
     expect(m.outer).toEqual(m.avail);
     expectOnScreen(m);
-    if (servedFrameIsPlain) expectPlausibleFrame(m);
+    expectPlausibleFrame(m);
   }, 150_000);
 
   it("windowSize is honoured inside the work area and clamped past it", async () => {
@@ -224,6 +224,69 @@ describe.runIf(LIVE_EXE)("live engine geometry: serve() in a Node without a glob
     expect(m.outer[0]).toBeGreaterThan(800);
     expect(m.outer).toEqual(m.avail);
     expectOnScreen(m);
-    if (servedFrameIsPlain) expectPlausibleFrame(m);
+    expectPlausibleFrame(m);
   }, 150_000);
+});
+
+/**
+ * serve() with --no-sandbox, which it adds itself as root on Linux (a container). The flag is on
+ * Chromium's "unsupported command-line flag" list, and the warning bar it raises sits on the first tab:
+ * 56px off that tab's innerHeight, a frame (outer - inner) of 185px where a second tab in the same window
+ * has 129 (Windows; 177 vs 121 on Linux). serve() keeps the bar off; these read the first tab.
+ */
+async function servedTabs(opts: Record<string, unknown>) {
+  const userDataDir = tempDir("cc-live-serve-");
+  const srv = await serve({ executablePath: LIVE_EXE, quiet: true, userDataDir, args: ["--no-sandbox"], ...opts });
+  const pid = srv.pid;
+  try {
+    const browser = await chromium.connectOverCDP(srv.cdpUrl);
+    try {
+      const ctx = browser.contexts()[0];
+      const out = [];
+      // One at a time: a tab read once another has opened over it is a background tab, and on Linux
+      // that one reports outer == inner.
+      for (const open of [async () => ctx.pages()[0], () => ctx.newPage()]) {
+        const page = await open();
+        await page.goto("data:text/html,<body style='margin:0'>geo</body>");
+        await page.waitForTimeout(700);   // first paint: innerWidth reads 0 before it
+        out.push(await read(page));
+      }
+      return out;
+    } finally {
+      await browser.close();
+    }
+  } finally {
+    await srv.close();
+    afterServed(pid, userDataDir);
+  }
+}
+
+function expectNoWarningBar([first, tab]: Awaited<ReturnType<typeof servedTabs>>) {
+  expectPlausibleFrame(first);
+  expectPlausibleFrame(tab);
+  // the bar is the first tab's alone: a second tab in the same window is the reference
+  expect(first.inner).toEqual(tab.inner);
+  expect(first.outer).toEqual(tab.outer);
+}
+
+describe.runIf(LIVE_EXE)("live engine geometry: serve() with --no-sandbox", () => {
+  it("regime 2: the first tab keeps the frame a second tab has", async () => {
+    expectNoWarningBar(await servedTabs({}));
+  }, 120_000);
+
+  it("regime 2 (lightStealth): the first tab keeps the frame a second tab has", async () => {
+    expectNoWarningBar(await servedTabs({ fingerprint: "live-serve-node", lightStealth: true }));
+  }, 120_000);
+
+  it("regime 1: the first tab keeps the frame a second tab has", async () => {
+    expectNoWarningBar(await servedTabs({ fingerprint: "live-geo-node" }));
+  }, 120_000);
+});
+
+// Headed opens real windows, so it is opt-in, as in the Python suite: CLEARCOTE_LIVE_HEADED=1 (and a
+// display: on Linux run under xvfb-run).
+describe.runIf(LIVE_EXE && process.env.CLEARCOTE_LIVE_HEADED)("live engine geometry: headed serve() with --no-sandbox", () => {
+  it("the first tab keeps the frame a second tab has", async () => {
+    expectNoWarningBar(await servedTabs({ headless: false }));
+  }, 120_000);
 });

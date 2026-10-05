@@ -297,4 +297,23 @@ public class ParityLaunchTests : IDisposable
         Assert.False(LaunchOpts.ServeNeedsNoSandbox("windows", null, Array.Empty<string>()));
         if (!Native.IsWindows) Assert.NotNull(LaunchOpts.EffectiveUid());
     }
+
+    // ── serve: the "unsupported command-line flag" infobar ───────────────────
+
+    [Fact]
+    public void Serve_headless_always_disables_infobars_and_never_twice()
+    {
+        Assert.Equal(new[] { "--disable-infobars" }, LaunchOpts.ServeInfobarArgs(true, Array.Empty<string>()));
+        Assert.Equal(new[] { "--disable-infobars" }, LaunchOpts.ServeInfobarArgs(true, new[] { "--no-sandbox" }));
+        Assert.Empty(LaunchOpts.ServeInfobarArgs(true, new[] { "--disable-infobars" }));
+    }
+
+    [Fact]
+    public void Serve_headed_adds_test_type_only_with_no_sandbox_and_never_twice()
+    {
+        Assert.Empty(LaunchOpts.ServeInfobarArgs(false, Array.Empty<string>()));
+        Assert.Empty(LaunchOpts.ServeInfobarArgs(false, new[] { "--ignore-certificate-errors" }));
+        Assert.Equal(new[] { "--test-type" }, LaunchOpts.ServeInfobarArgs(false, new[] { "--no-sandbox" }));
+        Assert.Empty(LaunchOpts.ServeInfobarArgs(false, new[] { "--no-sandbox", "--test-type=browser" }));
+    }
 }

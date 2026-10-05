@@ -1320,6 +1320,31 @@ export class Server {
   }
 }
 
+/** serve() as root on Linux needs --no-sandbox (unless the caller already passed it). */
+export function serveNeedsNoSandbox(platform: string, uid: number | undefined, args: string[]): boolean {
+  return platform === "linux" && uid === 0 && !args.includes("--no-sandbox");
+}
+
+/**
+ * The switch that keeps the engine's "unsupported command-line flag" warning bar off a served browser.
+ * Any flag on Chromium's list raises it, --no-sandbox among them (which serve adds as root on Linux),
+ * and it lands on the first tab: 56px off that tab's innerHeight, a frame (outer - inner) no other tab
+ * and no real Chrome has. launch() never shows it: Playwright starts that browser without a startup
+ * window, and passes --disable-infobars to a persistent context.
+ * - Headless: --disable-infobars, the same switch. Chromium honours it only in headless, where it
+ *   suppresses infobars and nothing else, so every headless serve gets it.
+ * - Headed: Chromium ignores --disable-infobars. The one switch that drops the warning is --test-type,
+ *   which also turns on test-harness behaviour (chrome.test in extension pages, no component
+ *   extensions with background pages, no OS integration for installed web apps), none of it visible
+ *   to a page. So only with --no-sandbox, the flag root on Linux cannot run without, and bare:
+ *   --test-type=webdriver would also waive Payment Request's user-interaction check.
+ */
+export function serveInfobarArgs(headless: boolean, args: readonly string[]): string[] {
+  const has = (sw: string) => args.some((a) => a === sw || a.startsWith(`${sw}=`));
+  if (headless) return has("--disable-infobars") ? [] : ["--disable-infobars"];
+  return has("--no-sandbox") && !has("--test-type") ? ["--test-type"] : [];
+}
+
 /**
  * Launch Clearcote with a RAW CDP endpoint and return a {@link Server} — the drop-in-for-the-whole-
  * ecosystem mode. Unlike {@link launch} (which spawns and *owns* a Playwright browser), `serve`
@@ -1337,11 +1362,6 @@ export class Server {
  * to the page; the port binds to loopback with an origin allowlist; attaching over CDP adds no
  * launch flags, so the served persona is preserved end to end.
  */
-/** serve() as root on Linux needs --no-sandbox (unless the caller already passed it). */
-export function serveNeedsNoSandbox(platform: string, uid: number | undefined, args: string[]): boolean {
-  return platform === "linux" && uid === 0 && !args.includes("--no-sandbox");
-}
-
 export async function serve(options: ServeOptions = {}): Promise<Server> {
   const {
     port,
@@ -1412,6 +1432,8 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // Chromium refuses to start as root without --no-sandbox, and serve spawns the binary itself, so
   // Playwright's own --no-sandbox is missing: `clearcote serve` in a root container just timed out.
   if (serveNeedsNoSandbox(process.platform, process.getuid?.(), engineArgs)) cdpArgs.push("--no-sandbox");
+  // ...and the warning bar that flag (or any of the caller's on Chromium's list) puts on the first tab.
+  cdpArgs.push(...serveInfobarArgs(headless, [...engineArgs, ...cdpArgs]));
   // Headless geometry for a raw endpoint: the display and window are set browser-wide, since no
   // client's context options or CDP overrides would reach every page (see ./geometry.ts).
   const geometry = servedGeometry(engineArgs, fingerprint, headless);

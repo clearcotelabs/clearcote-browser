@@ -442,3 +442,26 @@ def serve_needs_no_sandbox(platform=None, uid=None, args=()):
     Playwright's own --no-sandbox is missing: ``clearcote serve`` in a root container just timed out."""
     platform = sys.platform if platform is None else platform
     return str(platform).startswith("linux") and uid == 0 and "--no-sandbox" not in (args or ())
+
+
+def serve_infobar_args(headless, args=()):
+    """The switch that keeps the engine's "unsupported command-line flag" warning bar off a served
+    browser.
+
+    Any flag on Chromium's list raises it, --no-sandbox among them (which serve adds as root on
+    Linux), and it lands on the first tab: 56px off that tab's innerHeight, a frame (outer - inner)
+    no other tab and no real Chrome has. launch() never shows it: Playwright starts that browser
+    without a startup window, and passes --disable-infobars to a persistent context.
+
+    - Headless: --disable-infobars, the same switch. Chromium honours it only in headless, where it
+      suppresses infobars and nothing else, so every headless serve gets it.
+    - Headed: Chromium ignores --disable-infobars. The one switch that drops the warning is
+      --test-type, which also turns on test-harness behaviour (chrome.test in extension pages, no
+      component extensions with background pages, no OS integration for installed web apps), none
+      of it visible to a page. So only with --no-sandbox, the flag root on Linux cannot run without,
+      and bare: --test-type=webdriver would also waive Payment Request's user-interaction check."""
+    def has(switch):
+        return any(a == switch or str(a).startswith(switch + "=") for a in (args or ()))
+    if headless:
+        return [] if has("--disable-infobars") else ["--disable-infobars"]
+    return ["--test-type"] if has("--no-sandbox") and not has("--test-type") else []

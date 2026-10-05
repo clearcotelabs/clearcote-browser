@@ -296,7 +296,9 @@ public class ServeGeometryTests
     {
         options.ExecutablePath = LiveExe;
         options.Quiet = true;
-        options.Args = new[] { "--no-sandbox" };   // as in the launch live tests: containers cannot sandbox
+        // As in the launch live tests: containers cannot sandbox. It is also the flag ServeAsync adds itself
+        // as root on Linux, whose warning bar it keeps off the first tab.
+        options.Args = new[] { "--no-sandbox" };
         var srv = await Clearcote.ServeAsync(options).ConfigureAwait(false);
         try
         {
@@ -334,6 +336,23 @@ public class ServeGeometryTests
         Assert.True(m.MediaAgrees, $"device-width media query disagrees with screen: {at}");
     }
 
+    /// --no-sandbox is on Chromium's "unsupported command-line flag" list, and the warning bar it raises
+    /// sits on the first tab: 56px off that tab's innerHeight, a frame (outer - inner) of 185px where a
+    /// second tab in the same window has 129 (Windows; 177 vs 121 on Linux). The frame stays in the
+    /// range real captures show, and the first tab reads what a second tab reads.
+    private static void AssertNoWarningBar(Dictionary<string, Measured> out_)
+    {
+        foreach (var label in new[] { "first", "tab" })
+        {
+            var m = out_[label];
+            int dx = m.Outer[0] - m.Inner[0], dy = m.Outer[1] - m.Inner[1];
+            Assert.True(dx is >= 0 and <= 16 && dy is >= 60 and <= 160,
+                $"{label}: implausible frame ({dx}, {dy}): inner={Fmt(m.Inner)} outer={Fmt(m.Outer)}");
+        }
+        Assert.Equal(Fmt(out_["tab"].Inner), Fmt(out_["first"].Inner));
+        Assert.Equal(Fmt(out_["tab"].Outer), Fmt(out_["first"].Outer));
+    }
+
     [Fact]
     public async Task Live_ServedSeedlessBrowserIsMaximizedOnItsDisplay()
     {
@@ -348,6 +367,7 @@ public class ServeGeometryTests
         foreach (var label in new[] { "first", "tab" })
             Assert.Equal(Fmt(out_[label].Avail), Fmt(out_[label].Outer));
         Assert.Equal(500, out_["popup500"].Inner[0]);   // window.open() features honoured, not forced
+        AssertNoWarningBar(out_);
     }
 
     [Fact]
@@ -361,6 +381,17 @@ public class ServeGeometryTests
             Assert.True(m.Avail[1] < m.Screen[1], $"{label}: persona reported no taskbar");
         }
         Assert.Equal(Fmt(out_["first"].Avail), Fmt(out_["first"].Outer));
+        AssertNoWarningBar(out_);
+    }
+
+    [Fact]
+    public async Task Live_ServedLightStealthFirstTabKeepsTheFrameASecondTabHas()
+    {
+        if (string.IsNullOrEmpty(LiveExe)) return;
+        var out_ = await ServedAsync(new ServeOptions { Fingerprint = "live-serve-dotnet", LightStealth = true });
+        AssertOnScreen("first", out_["first"]);
+        Assert.Equal(Fmt(out_["first"].Avail), Fmt(out_["first"].Outer));
+        AssertNoWarningBar(out_);
     }
 
     [Fact]
@@ -370,5 +401,15 @@ public class ServeGeometryTests
         var out_ = await ServedAsync(new ServeOptions { WindowSize = new ViewportSize { Width = 1440, Height = 900 } });
         AssertOnScreen("first", out_["first"]);
         Assert.Equal("1440x900", Fmt(out_["first"].Outer));
+        AssertNoWarningBar(out_);
+    }
+
+    /// Headed opens real windows, so it is opt-in, as in the Python suite: CLEARCOTE_LIVE_HEADED=1 (and a
+    /// display: on Linux run under xvfb-run).
+    [Fact]
+    public async Task Live_HeadedServedFirstTabKeepsTheFrameASecondTabHas()
+    {
+        if (string.IsNullOrEmpty(LiveExe) || string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLEARCOTE_LIVE_HEADED"))) return;
+        AssertNoWarningBar(await ServedAsync(new ServeOptions { Headless = false }));
     }
 }

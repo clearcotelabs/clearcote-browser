@@ -287,7 +287,8 @@ def _served(**kwargs):
 def _served_on_this_thread(**kwargs):
     from playwright.sync_api import sync_playwright
 
-    # --no-sandbox as in the launch live tests: containers usually cannot run the Chrome sandbox.
+    # --no-sandbox as in the launch live tests: containers usually cannot run the Chrome sandbox. It is
+    # also the flag serve() adds itself as root on Linux, whose warning bar it keeps off the first tab.
     srv = clearcote.serve(executable_path=LIVE_EXE, quiet=True, args=["--no-sandbox"], **kwargs)
     try:
         with sync_playwright() as p:
@@ -316,6 +317,19 @@ def _assert_on_screen(label, m):
     assert m["media_agrees"], f"{label}: device-width media query disagrees with screen: {m}"
 
 
+def _assert_no_warning_bar(out):
+    """--no-sandbox is on Chromium's "unsupported command-line flag" list, and the warning bar it
+    raises sits on the first tab: 56px off that tab's innerHeight, a frame (outer - inner) of 185px
+    where a second tab in the same window has 129 (Windows; 177 vs 121 on Linux). The frame stays in
+    the range real captures show, and the first tab reads what a second tab reads."""
+    for label in ("first", "tab"):
+        m = out[label]
+        dx, dy = m["outer"][0] - m["inner"][0], m["outer"][1] - m["inner"][1]
+        assert 0 <= dx <= 16 and 60 <= dy <= 160, f"{label}: implausible window frame ({dx}, {dy}): {m}"
+    assert out["first"]["inner"] == out["tab"]["inner"], f"first tab differs from a second one: {out}"
+    assert out["first"]["outer"] == out["tab"]["outer"], f"first tab differs from a second one: {out}"
+
+
 @live_only
 def test_live_served_seedless_browser_is_maximized_on_its_display():
     out = _served()
@@ -327,6 +341,7 @@ def test_live_served_seedless_browser_is_maximized_on_its_display():
         assert out[label]["outer"] == out[label]["avail"], f"{label} not maximized: {out[label]}"
     # window.open() features are honoured, not forced to the window size
     assert out["popup500"]["inner"][0] == 500
+    _assert_no_warning_bar(out)
 
 
 @live_only
@@ -336,6 +351,15 @@ def test_live_served_persona_display_is_the_personas_own():
         _assert_on_screen(label, m)
         assert m["avail"][1] < m["screen"][1], f"{label}: persona reported no taskbar: {m}"
     assert out["first"]["outer"] == out["first"]["avail"]
+    _assert_no_warning_bar(out)
+
+
+@live_only
+def test_live_served_light_stealth_first_tab_keeps_the_frame_a_second_tab_has():
+    out = _served(fingerprint="live-serve-py", light_stealth=True)
+    _assert_on_screen("first", out["first"])
+    assert out["first"]["outer"] == out["first"]["avail"]
+    _assert_no_warning_bar(out)
 
 
 @live_only
@@ -343,3 +367,12 @@ def test_live_served_window_size_is_honoured_inside_the_work_area():
     out = _served(window_size={"width": 1440, "height": 900})
     _assert_on_screen("first", out["first"])
     assert out["first"]["outer"] == [1440, 900]
+    _assert_no_warning_bar(out)
+
+
+# Headed opens real windows, so it is opt-in, as for the headed launch() test in test_geometry:
+# CLEARCOTE_LIVE_HEADED=1 (and a display: on Linux run under xvfb-run).
+@pytest.mark.skipif(not LIVE_EXE or not os.environ.get("CLEARCOTE_LIVE_HEADED"),
+                    reason="set CLEARCOTE_LIVE_ENGINE and CLEARCOTE_LIVE_HEADED=1 to run headed serve tests")
+def test_live_headed_served_first_tab_keeps_the_frame_a_second_tab_has():
+    _assert_no_warning_bar(_served(headless=False))
