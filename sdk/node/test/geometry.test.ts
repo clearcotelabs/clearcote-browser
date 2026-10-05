@@ -360,8 +360,8 @@ describe("the work-area window fit", () => {
 });
 
 // serve() hands out a raw CDP endpoint: no Playwright context options reach its pages, so geometry is
-// set browser-wide (the headless display + the real window). The live proof is cc-gateway's
-// test/e2e-geometry.mjs and tools/probe-geometry.mjs; these lock down the choices and the CDP.
+// set browser-wide (the headless display + the real window). The live proof is in
+// geometry.live.test.ts; these lock down the choices and the CDP.
 describe("serve(): the headless display", () => {
   it("is a lightStealth seed's own row, so its screen and DPR stay a pair", () => {
     for (const seed of ["a", "b", "c", "probe-1", "probe-7"]) {

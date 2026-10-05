@@ -391,8 +391,7 @@ export function geometryIsCoherent(
 // fit runs on each context's first page. A raw endpoint has neither, and a CDP emulation override
 // would not survive either, being scoped to the session that set it. What every
 // target and every client of a served browser inherits is the headless DISPLAY and the real WINDOW,
-// both browser-level. Untouched, measured on 153.0.8010.36/win-x64 (cc-gateway
-// tools/probe-geometry.mjs):
+// both browser-level. Untouched, measured on 153.0.8010.36/win-x64:
 //
 //     no persona:           screen 800x600    avail 800x600    outer 780x580   <- the headless surface
 //     no persona + --window-size=1440,900:    outer 1440x900 on that 800x600 screen
