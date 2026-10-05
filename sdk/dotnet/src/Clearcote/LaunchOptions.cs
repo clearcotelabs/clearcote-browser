@@ -96,6 +96,10 @@ public class LaunchOptions : FingerprintOptions
     public string? Channel { get; set; }
     /// Slow down operations by N ms (Playwright slowMo).
     public float? SlowMo { get; set; }
+    /// Playwright timeout in ms (0 = no limit). For a local launch, how long to wait for the browser
+    /// to start (Playwright's default 30 000); for a cloud launch, how long to wait for the connect
+    /// (default 120 000 there: the hosted browser starts as you connect).
+    public float? Timeout { get; set; }
     /// Override the default strip of Playwright's <c>--enable-automation</c>,
     /// <c>--enable-unsafe-swiftshader</c> and <c>--hide-scrollbars</c> (Playwright ignoreDefaultArgs). See <see cref="LaunchOpts.DefaultIgnoredArgs"/>.
     public IReadOnlyList<string>? IgnoreDefaultArgs { get; set; }

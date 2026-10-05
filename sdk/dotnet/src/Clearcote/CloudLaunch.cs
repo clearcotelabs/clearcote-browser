@@ -34,7 +34,12 @@ internal static class CloudLaunch
     };
 
     // ... and those handled on THIS side: the switch, the account, and Playwright's connect options.
-    internal static readonly string[] SdkSideOptions = { "Cloud", "CloudClient", "ApiKey", "ApiUrl", "Quiet", "SlowMo" };
+    internal static readonly string[] SdkSideOptions = { "Cloud", "CloudClient", "ApiKey", "ApiUrl", "Quiet", "SlowMo", "Timeout" };
+
+    // How long the connect waits when the caller gives no Timeout (Playwright's own default is 30 s).
+    // The browser starts as the client connects, and a launch with a country can take over 30 s; a
+    // launch that fails is answered at once, so the longer wait only covers one in progress.
+    internal const float DefaultConnectTimeoutMs = 120_000;
 
     /// Everything else LaunchOptions has only makes sense for a browser on this machine. Derived from the
     /// type itself, so an option added to LaunchOptions later is refused here until it is mapped.
@@ -123,7 +128,10 @@ internal static class CloudLaunch
                 ?? throw new CloudException(200, null, $"the API created session {id} but sent no connectUrl");
             var connect = ConnectOverride ?? (async (url, opts) =>
                 await (await Clearcote.PlaywrightInstanceAsync().ConfigureAwait(false)).Chromium.ConnectOverCDPAsync(url, opts).ConfigureAwait(false));
-            real = await connect(connectUrl, new BrowserTypeConnectOverCDPOptions { SlowMo = o.SlowMo }).ConfigureAwait(false);
+            real = await connect(connectUrl, new BrowserTypeConnectOverCDPOptions
+            {
+                SlowMo = o.SlowMo, Timeout = o.Timeout ?? DefaultConnectTimeoutMs,
+            }).ConfigureAwait(false);
             // A disconnect by any route (CloseAsync on the proxy or on context.Browser, a lost connection)
             // ends the session; the proxy's CloseAsync also waits for it.
             real.Disconnected += (_, _) => _ = state.EndAsync();

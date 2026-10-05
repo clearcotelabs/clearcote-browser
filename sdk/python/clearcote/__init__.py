@@ -983,7 +983,9 @@ def launch(cloud=None, **kwargs):
     local browser. ``cloud=None`` (the default) follows ``CLEARCOTE_CLOUD=1|true|yes``. The API key
     comes from ``api_key=`` or ``CLEARCOTE_API_KEY``; the cloud options (``country``, ``identity``,
     ``profile``, ``record``, ...) and the options a cloud browser cannot take are listed in
-    :mod:`clearcote.cloud`. ``close()`` disconnects and ends the session.
+    :mod:`clearcote.cloud`. ``close()`` disconnects and ends the session. ``timeout`` and
+    ``slow_mo`` go to the CDP connect; ``timeout`` defaults to 120 000 ms there, as the browser
+    starts when you connect.
 
     Fingerprint kwargs: fingerprint, platform, platform_version, brand, brand_version,
     gpu_vendor, gpu_renderer, hardware_concurrency, location, timezone, accept_language,

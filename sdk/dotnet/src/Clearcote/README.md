@@ -104,7 +104,8 @@ await browser.CloseAsync();                // disconnects and ends the hosted se
   `AcceptLanguage`, `LightStealth`, `Geoip`, `Headless`, `Proxy` (`new() { Server = "managed" }` for the
   included residential connection) and `Version`. Cloud-only: `Identity`, `Country`, `State`, `City`,
   `ProxySession`, `TimeoutSec`, `IdleTimeoutSec`, `MaxGb`, `Url`, `Adblock`, `SolveSliders`, `SolveCheckboxes`, `KeepAlive`,
-  `Record`, `Note` and `Worker`.
+  `Record`, `Note` and `Worker`. `SlowMo` and `Timeout` go to the CDP connect, where `Timeout` defaults to
+  120 s (the browser starts as you connect).
 - An option only a browser on this machine can take (`ExecutablePath`, `Args`, `Extensions`, a user data
   directory, ...) stops the launch with an error naming it, before anything is created.
 - `Cloud.SessionOf(browser)` returns the hosted session (id, expiry, ...). `Humanize` works on a cloud

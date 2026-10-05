@@ -314,6 +314,25 @@ def test_cloud_launch_creates_connects_and_closes(api, fake_pw):
     assert b.closed and api.requests("DELETE", "/api/v1/browsers/bs_1")
 
 
+# The browser starts as the client connects (a launch with a country can take over 30 s), so the
+# connect waits up to 120 s unless the caller says otherwise; 0 = no limit, Playwright's meaning.
+CONNECT_TIMEOUT_CASES = [
+    ({"country": "us"}, {"timeout": 120_000}),
+    ({"slow_mo": 10}, {"timeout": 120_000, "slow_mo": 10}),
+    ({"timeout": None}, {"timeout": 120_000}),
+    ({"timeout": 5000}, {"timeout": 5000}),
+    ({"timeout": 0, "slow_mo": 10}, {"timeout": 0, "slow_mo": 10}),
+]
+
+
+@pytest.mark.parametrize("given,connect", CONNECT_TIMEOUT_CASES)
+def test_cloud_launch_waits_120_s_for_the_connect_by_default(api, fake_pw, given, connect):
+    clearcote.launch(cloud=True, **given)
+    assert fake_pw["kw"] == connect
+    clearcote.launch_persistent_context(cloud=True, profile="acct-1", **given)
+    assert fake_pw["kw"] == connect
+
+
 def test_cloud_launch_sends_the_key_and_user_agent(api, fake_pw):
     clearcote.launch(cloud=True, api_key=API_KEY, api_url=api.url)
     h = api.requests("POST", "/api/v1/browsers")[0]["headers"]
@@ -410,6 +429,48 @@ async def test_async_cloud_launch(api, monkeypatch):
     await b.close()
     assert seen["closed"] and seen["stopped"]
     assert api.requests("DELETE", "/api/v1/browsers/bs_1")
+
+
+@pytest.mark.parametrize("given,connect", CONNECT_TIMEOUT_CASES)
+async def test_async_cloud_launch_waits_120_s_for_the_connect_by_default(api, monkeypatch, given, connect):
+    seen = []
+
+    class Ctx:
+        pass
+
+    class B:
+        contexts = ()
+
+        async def close(self):
+            pass
+
+        def on(self, *_a):
+            pass
+
+        async def new_page(self, **kw):
+            return kw
+
+        async def new_context(self, **kw):
+            return Ctx()
+
+    class PW:
+        class chromium:
+            @staticmethod
+            async def connect_over_cdp(url, **kw):
+                seen.append(kw)
+                return B()
+
+        async def stop(self):
+            pass
+
+    async def start():
+        return PW()
+    monkeypatch.setattr(async_api, "_start_driver", start)
+    b = await async_api.launch(cloud=True, **given)
+    await b.close()
+    ctx = await async_api.launch_persistent_context(cloud=True, profile="acct-1", **given)
+    await ctx.close()
+    assert seen == [connect, connect]
 
 
 async def test_async_cloud_launch_failures_leave_nothing_running(api, monkeypatch):

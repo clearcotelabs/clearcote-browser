@@ -352,6 +352,35 @@ public sealed class CloudTests : IAsyncLifetime
         Assert.Single(_api.Requests("DELETE", "/api/v1/browsers/bs_1"));   // once, though Disconnected fired too
     }
 
+    // The browser starts as the client connects (a launch with a country can take over 30 s), so the
+    // connect waits up to 120 s unless the caller says otherwise.
+    [Fact]
+    public async Task The_connect_waits_120_s_by_default()
+    {
+        var (_, calls) = StandIn();
+        await Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, Country = "us" });
+        await Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, SlowMo = 10 });
+        await Clearcote.LaunchPersistentContextAsync(new LaunchOptions { Cloud = true, Profile = "acct-1" });
+        await Clearcote.LaunchEphemeralProfileAsync(new LaunchOptions { Cloud = true });
+        Assert.Equal(new float?[] { 120_000, 120_000, 120_000, 120_000 }, calls.Select(c => c.Options.Timeout));
+        Assert.Equal(new float?[] { null, 10, null, null }, calls.Select(c => c.Options.SlowMo));
+    }
+
+    [Fact]
+    public async Task The_callers_Timeout_wins_and_is_never_sent()
+    {
+        var (_, calls) = StandIn();
+        await Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, Timeout = 5000 });
+        await Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, Timeout = 0, SlowMo = 10 });   // 0 = no limit
+        await Clearcote.LaunchPersistentContextAsync(new LaunchOptions { Cloud = true, Profile = "acct-1", Timeout = 45_000 });
+        Assert.Equal(new float?[] { 5000, 0, 45_000 }, calls.Select(c => c.Options.Timeout));
+        Assert.Equal(new float?[] { null, 10, null }, calls.Select(c => c.Options.SlowMo));
+        // a connect option of this side, not a session option and not refused as local-only
+        Assert.DoesNotContain(CloudLaunch.LocalOnlyOptions, p => p.Name == "Timeout");
+        foreach (var r in _api.Requests("POST", "/api/v1/browsers"))
+            Assert.DoesNotContain("timeout", r.Body!.AsObject().Select(p => p.Key.ToLowerInvariant()));
+    }
+
     [Fact]
     public async Task Sends_the_key_and_the_SDK_user_agent()
     {

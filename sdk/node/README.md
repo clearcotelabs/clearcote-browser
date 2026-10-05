@@ -333,6 +333,7 @@ What changes in the cloud:
   `{ server, username, password }`), `country`/`state`/`city`, `proxySession`, `timeoutSec`,
   `idleTimeoutSec`, `maxGb`, `version`, `profile`, `url`, `adblock`, `solveSliders`, `solveCheckboxes`,
   `keepAlive`, `record`, `note`, `worker`. `humanize` and `showCursor` run in the SDK, exactly as for a local browser.
+  `timeout` and `slowMo` go to the CDP connect, where `timeout` defaults to 120 s (the browser starts as you connect).
 - **Slider challenges are solved for you.** A cloud browser drags slide-to-verify challenges (a handle
   to the end of a bar, or a puzzle piece into its gap) by itself, in any tab or frame. Pass
   `solveSliders: false` when your script handles them.

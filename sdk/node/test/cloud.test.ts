@@ -219,6 +219,21 @@ describe("launch({ cloud: true })", () => {
     expect(api.requests("DELETE", "/api/v1/browsers/bs_1")).toHaveLength(1);
   });
 
+  it("waits up to 120 s for the connect unless the caller says otherwise", async () => {
+    // the browser starts as the client connects (a launch with a country can take over 30 s)
+    const connect = vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fakeBrowser() as never);
+    await launch({ cloud: true, country: "us" });
+    expect(connect).toHaveBeenLastCalledWith(api.connectUrl, { timeout: 120_000 });
+    await launch({ cloud: true, slowMo: 10 });
+    expect(connect).toHaveBeenLastCalledWith(api.connectUrl, { timeout: 120_000, slowMo: 10 });
+    await launch({ cloud: true, timeout: 5000 });
+    expect(connect).toHaveBeenLastCalledWith(api.connectUrl, { timeout: 5000 });
+    await launch({ cloud: true, timeout: 0, slowMo: 10 }); // 0 = no limit, Playwright's meaning
+    expect(connect).toHaveBeenLastCalledWith(api.connectUrl, { timeout: 0, slowMo: 10 });
+    await launchPersistentContext({ cloud: true, profile: "acct-1" });
+    expect(connect).toHaveBeenLastCalledWith(api.connectUrl, { timeout: 120_000 });
+  });
+
   it("sends the key and the SDK user agent", async () => {
     vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fakeBrowser() as never);
     await launch({ cloud: true, apiKey: API_KEY, apiUrl: api.url });

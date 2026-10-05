@@ -193,6 +193,18 @@ RUN_FIELDS = {
 # (in its units, milliseconds), and api_key/api_url pick the account and server.
 _CONNECT_OPTIONS = ("timeout", "slow_mo")
 SDK_SIDE_OPTIONS = ("humanize", "show_cursor", "quiet", "api_key", "api_url") + _CONNECT_OPTIONS
+# How long a cloud launch waits for the connect when the caller gives no timeout (Playwright's own
+# default is 30 s). The browser starts as the client connects, and a launch with a country can take
+# over 30 s; a launch that fails is answered at once, so the longer wait only covers one in progress.
+_CONNECT_TIMEOUT_MS = 120_000
+
+
+def _connect_options(sdk):
+    """connect_over_cdp's keyword arguments: the caller's timeout and slow_mo (a timeout of 0, no
+    limit, included), and the cloud default timeout when the caller gave none."""
+    connect = {"timeout": _CONNECT_TIMEOUT_MS}
+    connect.update({k: sdk[k] for k in _CONNECT_OPTIONS if sdk.get(k) is not None})
+    return connect
 
 
 def _local_only_options():
@@ -1152,7 +1164,7 @@ def launch_cloud(cloud, kwargs, persistent=False, user_data_dir=None):
     sdk, body = _prepare_launch(kwargs, persistent, user_data_dir)
     client = _client_for(cloud, sdk)
     created = client.browsers._create(body)
-    connect = {k: sdk[k] for k in _CONNECT_OPTIONS if sdk.get(k) is not None}
+    connect = _connect_options(sdk)
     browser = disconnect = None
     try:
         browser = _playwright().chromium.connect_over_cdp(_connect_url(created), **connect)
@@ -1208,7 +1220,7 @@ async def launch_cloud_async(cloud, kwargs, persistent=False, user_data_dir=None
 
     sdk, body = _prepare_launch(kwargs, persistent, user_data_dir)
     client = _client_for(cloud, sdk)
-    connect = {k: sdk[k] for k in _CONNECT_OPTIONS if sdk.get(k) is not None}
+    connect = _connect_options(sdk)
     # The driver first: when it cannot start (Playwright missing), no session has been created yet.
     pw = await _start_driver()
     created = disconnect = None

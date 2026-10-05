@@ -179,6 +179,10 @@ export const RUN_FIELDS: Readonly<Record<string, string>> = {
 // exactly as for a local browser, timeout/slowMo are Playwright's connectOverCDP options (in its
 // units, milliseconds), and apiKey/apiUrl pick the account and server.
 const CONNECT_OPTIONS = ["timeout", "slowMo"] as const;
+// How long a cloud launch waits for the connect when the caller gives no timeout (Playwright's own
+// default is 30 s). The browser starts as the client connects, and a launch with a country can take
+// over 30 s; a launch that fails is answered at once, so the longer wait only covers one in progress.
+const CLOUD_CONNECT_TIMEOUT_MS = 120_000;
 export const SDK_SIDE_OPTIONS: readonly string[] = ["humanize", "showCursor", "quiet", "apiKey", "apiUrl", ...CONNECT_OPTIONS];
 
 /** Everything launch() accepts that only makes sense for a browser on this machine: derived from
@@ -330,7 +334,8 @@ export interface CloudLaunchOptions extends CloudSessionOptions {
   humanize?: boolean;
   showCursor?: boolean;
   quiet?: boolean;
-  /** Playwright connectOverCDP options (milliseconds). */
+  /** Playwright connectOverCDP options (milliseconds). `timeout` defaults to 120 000 here (the browser
+   * starts as you connect); 0 means no limit. */
   timeout?: number;
   slowMo?: number;
 }
@@ -1063,7 +1068,7 @@ export async function launchCloud(options: Record<string, unknown>, persistent =
   const { sdk, body } = prepareLaunch(options, persistent, userDataDir);
   const client = cloud instanceof Cloud ? cloud : new Cloud({ apiKey: sdk.apiKey as string | undefined, baseUrl: sdk.apiUrl as string | undefined });
   const created = await client.browsers._create(body);
-  const connect: Record<string, unknown> = {};
+  const connect: Record<string, unknown> = { timeout: CLOUD_CONNECT_TIMEOUT_MS };
   for (const k of CONNECT_OPTIONS) if (sdk[k] != null) connect[k] = sdk[k];
   let disconnect: (() => Promise<void>) | null = null;
   try {
