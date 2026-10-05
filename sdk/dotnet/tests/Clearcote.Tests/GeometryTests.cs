@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using Clearcote;
@@ -325,5 +326,93 @@ public class GeometryTests
         Assert.Null(Geometry.FitPlan(new[] { 1920, 1040 }, new[] { 1920, 1040 }));
         // and never shrinks a window that somehow overshot
         Assert.Null(Geometry.FitPlan(new[] { 1920, 1040 }, new[] { 1930, 1050 }));
+    }
+
+    // ─────────────────────────────────────────────────────── the launch fit, on a fake page
+    /// The engine side of FitWindowToWorkAreaAsync: the window reports the bounds it got less
+    /// <see cref="HeightBias"/>, and <see cref="StaleReads"/> reads after each resize still report the
+    /// size from before it, as a page does until the new window size reaches it.
+    public class FitPage : DispatchProxy
+    {
+        public int[] Avail = { 1920, 1040 };
+        public int HeightBias = 33;
+        public int StaleReads;
+        public int[] Outer = { 0, 0 };
+        public int[] Previous = { 0, 0 };
+        public object? Context;
+        public readonly List<string> Bounds = new();
+        private int _stale;
+
+        public void SetBounds(Dictionary<string, object> bounds)
+        {
+            var (w, h) = ((int)bounds["width"], (int)bounds["height"]);
+            Bounds.Add($"{w}x{h}");
+            Previous = Outer;
+            Outer = new[] { w, h - HeightBias };
+            _stale = StaleReads;
+        }
+
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            if (method?.Name == "get_Context") return Context;
+            if (method is { Name: "EvaluateAsync", IsGenericMethod: true })
+            {
+                var js = (string)args![0]!;
+                if (js.Contains("availWidth")) return Task.FromResult(Avail);
+                if (_stale > 0) { _stale--; return Task.FromResult(Previous); }
+                return Task.FromResult(Outer);
+            }
+            throw new InvalidOperationException(method?.Name);
+        }
+    }
+
+    public class FitCdp : DispatchProxy
+    {
+        public FitPage? Page;
+        protected override object? Invoke(MethodInfo? method, object?[]? args)
+        {
+            var name = (string)args![0]!;
+            if (name == "Browser.setWindowBounds")
+                Page!.SetBounds((Dictionary<string, object>)((Dictionary<string, object>)args[1]!)["bounds"]);
+            var json = name == "Browser.getWindowForTarget" ? "{\"windowId\":7}" : "{}";
+            return Task.FromResult<JsonElement?>(JsonDocument.Parse(json).RootElement.Clone());
+        }
+    }
+
+    public class FitContext : DispatchProxy
+    {
+        public ICDPSession? Cdp;
+        protected override object? Invoke(MethodInfo? method, object?[]? args) =>
+            method?.Name == "NewCDPSessionAsync" ? Task.FromResult(Cdp!) : throw new InvalidOperationException(method?.Name);
+    }
+
+    private static (IPage Page, FitPage Fake) FitFake(int[] initial, int staleReads)
+    {
+        var page = DispatchProxy.Create<IPage, FitPage>();
+        var ctx = DispatchProxy.Create<IBrowserContext, FitContext>();
+        var cdp = DispatchProxy.Create<ICDPSession, FitCdp>();
+        var fake = (FitPage)(object)page;
+        (fake.Outer, fake.Previous, fake.StaleReads, fake.Context) = (initial, initial, staleReads, ctx);
+        ((FitContext)(object)ctx).Cdp = cdp;
+        ((FitCdp)(object)cdp).Page = fake;
+        return (page, fake);
+    }
+
+    [Fact]
+    public async Task TheLaunchFitAddsBackTheShortfall()
+    {
+        var (page, fake) = FitFake(new[] { 945, 1020 }, staleReads: 0);
+        Assert.Equal((1920, 1040), (await Geometry.FitWindowToWorkAreaAsync(page, new[] { "--fingerprint=x" }))!.Value);
+        Assert.Equal(new[] { "1920x1040", "1920x1073" }, fake.Bounds);
+    }
+
+    [Fact]
+    public async Task TheLaunchFitMeasuresTheShortfallOnlyOnceThePageHasTheNewSize()
+    {
+        // A read straight after the resize can still have the engine's default window: correcting from
+        // it asked for 1920+975 px, and a second stale read hid the overshoot.
+        var (page, fake) = FitFake(new[] { 945, 1020 }, staleReads: 2);
+        Assert.Equal((1920, 1040), (await Geometry.FitWindowToWorkAreaAsync(page, new[] { "--fingerprint=x" }))!.Value);
+        Assert.Equal(new[] { "1920x1040", "1920x1073" }, fake.Bounds);
     }
 }

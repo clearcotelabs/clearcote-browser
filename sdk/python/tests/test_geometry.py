@@ -32,6 +32,7 @@ from clearcote._geometry import (
     caller_set_the_display,
     caller_sized_the_window,
     fit_window_to_work_area,
+    fit_window_to_work_area_async,
     geometry_is_coherent,
     headless_display,
     headless_geometry,
@@ -311,14 +312,19 @@ class _FakePageForFit:
     """Models the engine's bounds-vs-outer behaviour: it reports outerHeight height_bias px
     below the bounds height it was handed (33 on 149.0.7827.114)."""
 
-    def __init__(self, avail=(1920, 1040), height_bias=33, bias_first_call_only=False):
+    def __init__(self, avail=(1920, 1040), height_bias=33, bias_first_call_only=False,
+                 initial=(0, 0), stale_reads=0):
         self.avail = list(avail)
         self.height_bias = height_bias
         # An engine that under-reports once and then honours bounds exactly would make the
         # correction overshoot — that is what the revert guard is for.
         self.bias_first_call_only = bias_first_call_only
         self.bounds_calls = 0
-        self.outer = (0, 0)
+        self.outer = tuple(initial)
+        # A page still reports the previous size for a while after a resize: that many reads.
+        self.previous = self.outer
+        self.stale_reads = stale_reads
+        self.stale = 0
         self.cdp = _FakeCdp(on_bounds=self._apply_bounds)
         outer_self = self
 
@@ -335,11 +341,16 @@ class _FakePageForFit:
         self.bounds_calls += 1
         biased = not self.bias_first_call_only or self.bounds_calls == 1
         h = bounds["height"] - (self.height_bias if biased else 0)
+        self.previous = self.outer
         self.outer = (bounds["width"], h)
+        self.stale = self.stale_reads
 
     def evaluate(self, js):
         if "availWidth" in js:
             return self.avail
+        if self.stale > 0:
+            self.stale -= 1
+            return list(self.previous)
         return list(self.outer)          # outerWidth/Height after the last setWindowBounds
 
 
@@ -368,6 +379,40 @@ def test_window_fit_reverts_rather_than_overshooting_the_work_area():
     assert fit_window_to_work_area(page) == (1920, 1040)
     bounds = [p["bounds"] for m, p in page.cdp.calls if m == "Browser.setWindowBounds"]
     assert len(bounds) == 3 and bounds[2] == bounds[0], "should have reverted to the safe bounds"
+
+
+def test_window_fit_measures_the_shortfall_only_once_the_page_has_the_new_size():
+    """A read straight after the resize can still have the engine's default window: correcting from
+    it asked for 1920+975 px, and a second stale read hid the overshoot."""
+    page = _FakePageForFit((1920, 1040), height_bias=33, initial=(945, 1020), stale_reads=2)
+    assert fit_window_to_work_area(page, ["--fingerprint=x"]) == (1920, 1040)
+    bounds = [p["bounds"] for m, p in page.cdp.calls if m == "Browser.setWindowBounds"]
+    assert bounds == [
+        {"left": 0, "top": 0, "width": 1920, "height": 1040},
+        {"left": 0, "top": 0, "width": 1920, "height": 1073},
+    ]
+
+
+async def test_async_window_fit_measures_the_shortfall_only_once_the_page_has_the_new_size():
+    sync = _FakePageForFit((1920, 1040), height_bias=33, initial=(945, 1020), stale_reads=2)
+
+    class _AsyncCdp:
+        async def send(self, method, params=None):
+            return sync.cdp.send(method, params)
+
+    class _AsyncCtx:
+        async def new_cdp_session(self, page):
+            return _AsyncCdp()
+
+    class _AsyncPage:
+        context = _AsyncCtx()
+
+        async def evaluate(self, js):
+            return sync.evaluate(js)
+
+    assert await fit_window_to_work_area_async(_AsyncPage(), ["--fingerprint=x"]) == (1920, 1040)
+    heights = [p["bounds"]["height"] for m, p in sync.cdp.calls if m == "Browser.setWindowBounds"]
+    assert heights == [1040, 1073]
 
 
 def test_window_fit_defers_to_a_caller_supplied_window_size():

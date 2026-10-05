@@ -343,18 +343,86 @@ public static class Geometry
     /// nothing needs correcting.
     /// </summary>
     /// <remarks>
-    /// Requested bounds and reported outerHeight are not the same quantity: on 149 the window reports
-    /// 33px less than the bounds height it was given, so fitting bounds to the work area lands 33px
-    /// short of maximized (real maximized captures have outer == avail). Rather than hardcode 33,
-    /// measure the shortfall and add it back — that self-tunes if the engine changes. Never asks for
-    /// more than the shortfall, so the window cannot be pushed past the work area.
+    /// Requested bounds and reported outerHeight are not always the same quantity: on 149 the window
+    /// reported 33px less than the bounds height it was given, and on 150 a persona's window does (33px
+    /// in a launch, 89 in ServeAsync; without a persona it reports the bounds exactly). Fitting bounds
+    /// to the work area then lands short of maximized (real maximized captures have outer == avail).
+    /// Rather than hardcode it, measure the shortfall and add it back — that self-tunes if the engine
+    /// changes. Never asks for more than the shortfall.
     /// </remarks>
-    public static (int Width, int Height)? FitPlan(int[] avail, int[] outer)
+    public static (int Width, int Height)? FitPlan(int[] avail, int[] outer) => FitPlan(avail, outer, null);
+
+    /// <summary><see cref="FitPlan(int[], int[])"/>, never past the work area for a window smaller than it.</summary>
+    /// <param name="avail">The size asked for.</param>
+    /// <param name="outer">What the window reported.</param>
+    /// <param name="room">The space from the window's position to the work area's far edges. On an axis
+    /// where the window is smaller than that, the correction never takes the bounds past the edge: only a
+    /// window that fills the work area needs bounds beyond it (the persona engine then clamps the window
+    /// to the work area), and an engine without a persona does not clamp at all.</param>
+    public static (int Width, int Height)? FitPlan(int[] avail, int[] outer, int[]? room)
     {
         var dw = avail[0] - outer[0];
         var dh = avail[1] - outer[1];
         if (dw <= 0 && dh <= 0) return null;
-        return (avail[0] + Math.Max(dw, 0), avail[1] + Math.Max(dh, 0));
+        int Capped(int want, int i) => room is not null && avail[i] < room[i] ? Math.Min(want, room[i]) : want;
+        return (Capped(avail[0] + Math.Max(dw, 0), 0), Capped(avail[1] + Math.Max(dh, 0), 1));
+    }
+
+    /// <summary>How long a window resize may take to reach the page before a read is taken as it stands.</summary>
+    internal const int SettleMs = 1000;
+    private const int SettlePollMs = 20;
+
+    private static bool SameSize(int[] a, int[] b) => a[0] == b[0] && a[1] == b[1];
+
+    /// <summary>
+    /// Read <c>[outerWidth, outerHeight]</c> until it reflects the last <c>Browser.setWindowBounds</c>.
+    /// </summary>
+    /// <remarks>
+    /// The call returns before the page has the new window size, so a read straight after it can still
+    /// report the previous one (measured on 150/linux-x64: for tens of milliseconds). Correcting
+    /// from such a read once asked for 1440+495 px on a 1920 px screen. Settled means the asked-for
+    /// size, or a size other than <paramref name="before"/> that is still there one poll later;
+    /// <c>Settled</c> is false when neither happened within <paramref name="timeoutMs"/>.
+    /// </remarks>
+    internal static async Task<(int[] Outer, bool Settled)> SettledOuterAsync(
+        Func<Task<int[]>> read, int[] before, int[] want, int timeoutMs = SettleMs)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        var outer = await read().ConfigureAwait(false);
+        while (true)
+        {
+            if (SameSize(outer, want)) return (outer, true);
+            if (Environment.TickCount64 >= deadline) return (outer, false);
+            await Task.Delay(SettlePollMs).ConfigureAwait(false);
+            var next = await read().ConfigureAwait(false);
+            if (!SameSize(outer, before) && SameSize(next, outer)) return (outer, true);
+            outer = next;
+        }
+    }
+
+    /// <summary>
+    /// Give the window <paramref name="target"/>, then correct what the engine reports (see
+    /// <see cref="FitPlan(int[], int[], int[])"/>), on settled reads only: a correction is planned from a
+    /// size the page has actually seen, and kept only when the page then sees a window no larger than
+    /// the target; otherwise the bounds go back to the target. With no settled read there is nothing to
+    /// correct from, and the target lies inside the work area. Returns the last outer size read.
+    /// </summary>
+    private static async Task<int[]> FitWindowAsync(
+        Func<int, int, Task> setBounds, Func<Task<int[]>> read, int[] target, int[] room, int settleMs)
+    {
+        var (w, h) = (target[0], target[1]);
+        var before = await read().ConfigureAwait(false);
+        await setBounds(w, h).ConfigureAwait(false);
+        var first = await SettledOuterAsync(read, before, target, settleMs).ConfigureAwait(false);
+        var plan = first.Settled ? FitPlan(target, first.Outer, room) : null;
+        if (plan is null) return first.Outer;
+        await setBounds(plan.Value.Width, plan.Value.Height).ConfigureAwait(false);
+        var fixedUp = await SettledOuterAsync(read, first.Outer, new[] { plan.Value.Width, plan.Value.Height }, settleMs)
+            .ConfigureAwait(false);
+        // Overshooting would trade one impossible geometry for another (outer > target).
+        if (fixedUp.Settled && fixedUp.Outer[0] <= w && fixedUp.Outer[1] <= h) return fixedUp.Outer;
+        await setBounds(w, h).ConfigureAwait(false);
+        return (await SettledOuterAsync(read, fixedUp.Outer, target, settleMs).ConfigureAwait(false)).Outer;
     }
 
     /// <summary>Old name of <see cref="FitWindowToWorkAreaAsync"/>, which now serves both regimes.</summary>
@@ -387,30 +455,13 @@ public static class Geometry
             var target = await cdp.SendAsync("Browser.getWindowForTarget").ConfigureAwait(false);
             var windowId = target!.Value.GetProperty("windowId").GetInt32();
 
-            await cdp.SendAsync("Browser.setWindowBounds", new Dictionary<string, object>
-            {
-                ["windowId"] = windowId, ["bounds"] = Bounds(avail[0], avail[1]),
-            }).ConfigureAwait(false);
-            var outer = await page.EvaluateAsync<int[]>(OuterJs).ConfigureAwait(false);
-
-            var plan = FitPlan(avail, outer);
-            if (plan is not null)
-            {
-                await cdp.SendAsync("Browser.setWindowBounds", new Dictionary<string, object>
+            var outer = await FitWindowAsync(
+                (w, h) => cdp.SendAsync("Browser.setWindowBounds", new Dictionary<string, object>
                 {
-                    ["windowId"] = windowId, ["bounds"] = Bounds(plan.Value.Width, plan.Value.Height),
-                }).ConfigureAwait(false);
-                outer = await page.EvaluateAsync<int[]>(OuterJs).ConfigureAwait(false);
-                // Overshooting would trade one impossible geometry for another (outer > avail).
-                if (outer[0] > avail[0] || outer[1] > avail[1])
-                {
-                    await cdp.SendAsync("Browser.setWindowBounds", new Dictionary<string, object>
-                    {
-                        ["windowId"] = windowId, ["bounds"] = Bounds(avail[0], avail[1]),
-                    }).ConfigureAwait(false);
-                    outer = await page.EvaluateAsync<int[]>(OuterJs).ConfigureAwait(false);
-                }
-            }
+                    ["windowId"] = windowId, ["bounds"] = Bounds(w, h),
+                }),
+                () => page.EvaluateAsync<int[]>(OuterJs),
+                avail, avail, SettleMs).ConfigureAwait(false);
             return (outer[0], outer[1]);
         }
         catch (Exception)
@@ -589,13 +640,14 @@ public static class Geometry
     /// <summary>
     /// Put the served browser's first window on its display's work area (or <paramref name="windowSize"/>,
     /// clamped into it); under a persona, first make the headless display the persona's own. Only
-    /// Target/Emulation/Browser commands plus one Runtime.evaluate (never Runtime.enable) on the first
+    /// Target/Emulation/Browser commands plus Runtime.evaluate reads (never Runtime.enable) on the first
     /// page, and every change is browser-level, so nothing lingers when the connection closes.
+    /// <c>settleMs</c> bounds the wait for each resize to reach the page (<see cref="SettledOuterAsync"/>).
     /// </summary>
     /// <returns>The display and the window's outer size, or null when it could not act (no page, an
     /// implausible display, or an engine without Emulation.updateScreen under a persona). Never throws.</returns>
     internal static async Task<(Display Display, int[] Outer)?> FitWindowOverCdpAsync(
-        ICdpSend cdp, bool persona, ViewportSize? windowSize = null)
+        ICdpSend cdp, bool persona, ViewportSize? windowSize = null, int settleMs = SettleMs)
     {
         string? sessionId = null;
         try
@@ -653,20 +705,10 @@ public static class Geometry
                 ["bounds"] = new Dictionary<string, object> { ["left"] = left, ["top"] = top, ["width"] = bw, ["height"] = bh },
             });
 
-            await SetBoundsAsync(w, h).ConfigureAwait(false);
-            var outer = await ReadAsync(OuterJs).ConfigureAwait(false);
-            // Same self-tuning as FitWindowToWorkAreaAsync: an engine that reports less than the bounds
-            // it was given gets the shortfall added back, and an overshoot is reverted.
-            if (FitPlan(new[] { w, h }, outer) is { } plan)
-            {
-                await SetBoundsAsync(plan.Width, plan.Height).ConfigureAwait(false);
-                outer = await ReadAsync(OuterJs).ConfigureAwait(false);
-                if (outer[0] > w || outer[1] > h)
-                {
-                    await SetBoundsAsync(w, h).ConfigureAwait(false);
-                    outer = await ReadAsync(OuterJs).ConfigureAwait(false);
-                }
-            }
+            // Same as FitWindowToWorkAreaAsync: an engine that reports less than the bounds it was given
+            // gets the shortfall added back, an overshoot is reverted, and only settled reads count.
+            var outer = await FitWindowAsync(SetBoundsAsync, () => ReadAsync(OuterJs), new[] { w, h },
+                new[] { al + aw - left, at + ah - top }, settleMs).ConfigureAwait(false);
             return (new Display(sw, sh, aw, ah), outer);
         }
         catch (Exception)

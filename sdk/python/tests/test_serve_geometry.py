@@ -14,6 +14,7 @@ import clearcote
 from clearcote._fingerprint import _light_stealth_screen, _light_stealth_values
 from clearcote._geometry import (
     WINDOWS_TASKBAR_HEIGHT,
+    _fit_plan,
     fit_served_window,
     fit_window_over_cdp,
     geometry_is_coherent,
@@ -98,13 +99,19 @@ def test_window_size_rejects_anything_else(bad):
 
 # --------------------------------------------------------------- the window fit over CDP
 class _FakeBrowser:
-    """Models a served browser: the page reads its display, the window reports the bounds it got."""
+    """Models a served browser: the page reads its display, the window reports the bounds it got.
 
-    def __init__(self, display, update_screen=True, height_bias=0):
+    ``stale_reads``: that many reads after each resize still report the size from before it, as a
+    page does until the new window size reaches it (the read after that, the new size)."""
+
+    def __init__(self, display, update_screen=True, height_bias=0, initial=(780, 580), stale_reads=0):
         self.display = list(display)
         self.update_screen = update_screen
         self.height_bias = height_bias
-        self.outer = [780, 580]
+        self.outer = list(initial)
+        self.previous = self.outer
+        self.stale_reads = stale_reads
+        self.stale = 0
         self.calls = []
 
     def send(self, method, params=None, session_id=None):
@@ -114,8 +121,12 @@ class _FakeBrowser:
         if method == "Target.attachToTarget":
             return {"sessionId": "S1"}
         if method == "Runtime.evaluate":
-            value = self.display if "availWidth" in params["expression"] else list(self.outer)
-            return {"result": {"value": value}}
+            if "availWidth" in params["expression"]:
+                return {"result": {"value": self.display}}
+            if self.stale > 0:
+                self.stale -= 1
+                return {"result": {"value": list(self.previous)}}
+            return {"result": {"value": list(self.outer)}}
         if method == "Emulation.getScreenInfos":
             return {"screenInfos": [{"id": "2300000000", "isPrimary": True}]}
         if method == "Emulation.updateScreen" and not self.update_screen:
@@ -124,7 +135,9 @@ class _FakeBrowser:
             return {"windowId": 3}
         if method == "Browser.setWindowBounds":
             b = params["bounds"]
+            self.previous = self.outer
             self.outer = [b["width"], b["height"] - self.height_bias]
+            self.stale = self.stale_reads
         return {}
 
     def methods(self):
@@ -179,6 +192,44 @@ def test_adds_back_a_reported_shortfall_without_overshooting():
     f = _FakeBrowser([1920, 1080, 0, 0, 1920, 1040], height_bias=33)
     fit_window_over_cdp(f, persona=False)
     assert [p["bounds"]["height"] for p in f.of("Browser.setWindowBounds")] == [1040, 1073]
+
+
+def _sizes(f):
+    return ["%(left)d,%(top)d %(width)dx%(height)d" % p["bounds"] for p in f.of("Browser.setWindowBounds")]
+
+
+def test_waits_for_a_resize_to_reach_the_page_before_measuring_it():
+    """Measured on 150/linux-x64 (no taskbar): the first read still had the default 945x1060 window,
+    the fit "corrected" 1440 to 1440+495, and the next read had only caught up with the first resize,
+    so the 1935x900 window on a 1920x1080 screen stayed."""
+    f = _FakeBrowser([1920, 1080, 0, 0, 1920, 1080], initial=(945, 1060), stale_reads=1)
+    assert fit_window_over_cdp(f, persona=False, window_size=(1440, 900))["outer"] == (1440, 900)
+    assert _sizes(f) == ["10,10 1440x900"]
+
+
+def test_does_not_correct_a_maximized_window_from_a_stale_read():
+    f = _FakeBrowser([1920, 1080, 0, 0, 1920, 1040], initial=(945, 1020), stale_reads=2)
+    assert fit_window_over_cdp(f, persona=False)["outer"] == (1920, 1040)
+    assert _sizes(f) == ["0,0 1920x1040"]
+
+
+def test_still_adds_back_a_real_shortfall_when_the_page_is_slow_to_see_it():
+    f = _FakeBrowser([1920, 1080, 0, 0, 1920, 1040], height_bias=89, stale_reads=2)
+    assert fit_window_over_cdp(f, persona=True)["outer"] == (1920, 1040)
+    assert _sizes(f) == ["0,0 1920x1040", "0,0 1920x1129"]
+
+
+def test_corrects_nothing_when_the_page_never_shows_the_resize():
+    f = _FakeBrowser([1920, 1080, 0, 0, 1920, 1080], initial=(945, 1060), stale_reads=10 ** 9)
+    fit_window_over_cdp(f, persona=False, window_size=(1440, 900), settle_timeout=0.1)
+    assert _sizes(f) == ["10,10 1440x900"]
+
+
+def test_never_plans_bounds_past_the_work_area_for_a_window_smaller_than_it():
+    # 1440 wide at x=10 has 1910px of room; the misread shortfall would have asked for 1935.
+    assert _fit_plan((1440, 900), (945, 1060), (1910, 1070)) == (1910, 900)
+    # a window that fills the work area may need bounds beyond it (the persona engine clamps)
+    assert _fit_plan((1920, 1040), (1920, 951), (1920, 1040)) == (1920, 1129)
 
 
 def test_declines_the_800x600_surface():

@@ -96,16 +96,31 @@ public class ServeGeometryTests
 
     // ─────────────────────────────────────────────────────── the window fit over CDP
     /// Models a served browser: the page reads its display, the window reports the bounds it got.
+    /// <c>staleReads</c>: that many reads after each resize still report the size from before it, as a
+    /// page does until the new window size reaches it (the read after that, the new size).
     private sealed class FakeBrowser : Geometry.ICdpSend
     {
         private readonly int[] _display;
         private readonly bool _updateScreen;
         private readonly int _heightBias;
-        private int[] _outer = { 780, 580 };
+        private readonly int _staleReads;
+        private int[] _outer;
+        private int[] _previous;
+        private int _stale;
         public readonly List<(string Method, JsonElement Params, string? Session)> Calls = new();
 
-        public FakeBrowser(int[] display, bool updateScreen = true, int heightBias = 0) =>
-            (_display, _updateScreen, _heightBias) = (display, updateScreen, heightBias);
+        public FakeBrowser(int[] display, bool updateScreen = true, int heightBias = 0, int[]? initial = null, int staleReads = 0)
+        {
+            (_display, _updateScreen, _heightBias, _staleReads) = (display, updateScreen, heightBias, staleReads);
+            _outer = _previous = initial ?? new[] { 780, 580 };
+        }
+
+        private int[] Outer()
+        {
+            if (_stale <= 0) return _outer;
+            _stale--;
+            return _previous;
+        }
 
         private static JsonElement J(object o) => JsonSerializer.SerializeToElement(o);
 
@@ -117,7 +132,7 @@ public class ServeGeometryTests
             {
                 "Target.getTargets" => J(new { targetInfos = new[] { new { targetId = "T1", type = "page" } } }),
                 "Target.attachToTarget" => J(new { sessionId = "S1" }),
-                "Runtime.evaluate" => J(new { result = new { value = p.GetProperty("expression").GetString()!.Contains("availWidth") ? _display : _outer } }),
+                "Runtime.evaluate" => J(new { result = new { value = p.GetProperty("expression").GetString()!.Contains("availWidth") ? _display : Outer() } }),
                 "Emulation.getScreenInfos" => J(new { screenInfos = new[] { new { id = "2300000000", isPrimary = true } } }),
                 "Emulation.updateScreen" when !_updateScreen => throw new Exception("'Emulation.updateScreen' wasn't found"),
                 "Browser.getWindowForTarget" => J(new { windowId = 3 }),
@@ -128,7 +143,9 @@ public class ServeGeometryTests
 
         private JsonElement SetBounds(JsonElement b)
         {
+            _previous = _outer;
             _outer = new[] { b.GetProperty("width").GetInt32(), b.GetProperty("height").GetInt32() - _heightBias };
+            _stale = _staleReads;
             return J(new { });
         }
 
@@ -195,6 +212,51 @@ public class ServeGeometryTests
         await Geometry.FitWindowOverCdpAsync(f, persona: false);
         Assert.Equal(new[] { 1040, 1073 },
             f.Of("Browser.setWindowBounds").Select(p => p.GetProperty("bounds").GetProperty("height").GetInt32()));
+    }
+
+    [Fact]
+    public async Task WaitsForAResizeToReachThePageBeforeMeasuringIt()
+    {
+        // Measured on 150/linux-x64 (no taskbar): the first read still had the default 945x1060 window,
+        // the fit "corrected" 1440 to 1440+495, and the next read had only caught up with the first
+        // resize, so the 1935x900 window on a 1920x1080 screen stayed.
+        var f = new FakeBrowser(new[] { 1920, 1080, 0, 0, 1920, 1080 }, initial: new[] { 945, 1060 }, staleReads: 1);
+        var r = await Geometry.FitWindowOverCdpAsync(f, persona: false, new ViewportSize { Width = 1440, Height = 900 });
+        Assert.Equal(new[] { 1440, 900 }, r!.Value.Outer);
+        Assert.Equal(new[] { "10,10 1440x900" }, f.Of("Browser.setWindowBounds").Select(FakeBrowser.Bounds));
+    }
+
+    [Fact]
+    public async Task DoesNotCorrectAMaximizedWindowFromAStaleRead()
+    {
+        var f = new FakeBrowser(new[] { 1920, 1080, 0, 0, 1920, 1040 }, initial: new[] { 945, 1020 }, staleReads: 2);
+        Assert.Equal(new[] { 1920, 1040 }, (await Geometry.FitWindowOverCdpAsync(f, persona: false))!.Value.Outer);
+        Assert.Equal(new[] { "0,0 1920x1040" }, f.Of("Browser.setWindowBounds").Select(FakeBrowser.Bounds));
+    }
+
+    [Fact]
+    public async Task StillAddsBackARealShortfallWhenThePageIsSlowToSeeIt()
+    {
+        var f = new FakeBrowser(new[] { 1920, 1080, 0, 0, 1920, 1040 }, heightBias: 89, staleReads: 2);
+        Assert.Equal(new[] { 1920, 1040 }, (await Geometry.FitWindowOverCdpAsync(f, persona: true))!.Value.Outer);
+        Assert.Equal(new[] { "0,0 1920x1040", "0,0 1920x1129" }, f.Of("Browser.setWindowBounds").Select(FakeBrowser.Bounds));
+    }
+
+    [Fact]
+    public async Task CorrectsNothingWhenThePageNeverShowsTheResize()
+    {
+        var f = new FakeBrowser(new[] { 1920, 1080, 0, 0, 1920, 1080 }, initial: new[] { 945, 1060 }, staleReads: int.MaxValue);
+        await Geometry.FitWindowOverCdpAsync(f, persona: false, new ViewportSize { Width = 1440, Height = 900 }, settleMs: 100);
+        Assert.Equal(new[] { "10,10 1440x900" }, f.Of("Browser.setWindowBounds").Select(FakeBrowser.Bounds));
+    }
+
+    [Fact]
+    public void NeverPlansBoundsPastTheWorkAreaForAWindowSmallerThanIt()
+    {
+        // 1440 wide at x=10 has 1910px of room; the misread shortfall would have asked for 1935.
+        Assert.Equal((1910, 900), Geometry.FitPlan(new[] { 1440, 900 }, new[] { 945, 1060 }, new[] { 1910, 1070 }));
+        // a window that fills the work area may need bounds beyond it (the persona engine clamps)
+        Assert.Equal((1920, 1129), Geometry.FitPlan(new[] { 1920, 1040 }, new[] { 1920, 951 }, new[] { 1920, 1040 }));
     }
 
     [Fact]

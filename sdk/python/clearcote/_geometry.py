@@ -64,12 +64,14 @@ samples an audit site's visitors rather than the web:
   over-represent ultrawides; uncapped it would be picked for ~1 launch in 5).
 """
 
+import asyncio
 import base64
 import gzip
 import hashlib
 import json
 import logging
 import sys
+import time
 
 logger = logging.getLogger("clearcote")
 
@@ -303,22 +305,123 @@ def _bounds(width, height):
     return {"left": 0, "top": 0, "width": int(width), "height": int(height)}
 
 
-def _fit_plan(avail, outer):
+def _fit_plan(avail, outer, room=None):
     """The bounds correction, given what the window reported after the first attempt.
 
-    Requested bounds and reported ``outerHeight`` are NOT the same quantity: on 149 the window
-    reports 33px less than the bounds height it was given, so fitting bounds to the work area lands
-    the window 33px short of maximized (real maximized captures have ``outer == avail``). Rather than
-    hardcode 33, measure the shortfall and add it back — that self-tunes if the engine changes.
+    Requested bounds and reported ``outerHeight`` are NOT always the same quantity: on 149 the
+    window reported 33px less than the bounds height it was given, and on 150 a persona's window
+    does (33px in a launch, 89 in serve(); without a persona it reports the bounds exactly). Fitting
+    bounds to the work area then lands short of maximized (real maximized captures have
+    ``outer == avail``). Rather than hardcode it, measure the shortfall and add it back — that
+    self-tunes if the engine changes.
+
+    ``room`` is the space from the window's position to the work area's far edges. On an axis where
+    the window is smaller than that, the correction never takes the bounds past the edge: only a
+    window that fills the work area needs bounds beyond it (the persona engine then clamps the window
+    to the work area), and an engine without a persona does not clamp at all.
 
     Returns None when nothing needs correcting, else the ``(width, height)`` to request. Never asks
-    for MORE than the shortfall, so the window cannot be pushed past the work area.
+    for MORE than the shortfall.
     """
     dw = avail[0] - outer[0]
     dh = avail[1] - outer[1]
     if dw <= 0 and dh <= 0:
         return None
-    return (avail[0] + max(dw, 0), avail[1] + max(dh, 0))
+    plan = [avail[0] + max(dw, 0), avail[1] + max(dh, 0)]
+    for i in (0, 1):
+        if room and avail[i] < room[i]:
+            plan[i] = min(plan[i], room[i])
+    return tuple(plan)
+
+
+# How long a window resize may take to reach the page before a read is taken as it stands.
+_SETTLE_S = 1.0
+_SETTLE_POLL_S = 0.02
+
+
+def _same_size(a, b):
+    return a[0] == b[0] and a[1] == b[1]
+
+
+def _settled_outer(read, before, want, timeout=None, sleep=time.sleep):
+    """Read ``[outerWidth, outerHeight]`` until it reflects the last ``Browser.setWindowBounds``.
+
+    The call returns before the page has the new window size, so a read straight after it can still
+    report the previous one (measured on 150/linux-x64: for tens of milliseconds). Correcting
+    from such a read once asked for 1440+495 px on a 1920 px screen. Settled means the asked-for
+    size, or a size other than ``before`` that is still there one poll later.
+
+    Returns ``(outer, settled)``; ``settled`` is False when neither happened within ``timeout``.
+    """
+    deadline = time.monotonic() + (_SETTLE_S if timeout is None else timeout)
+    outer = read()
+    while True:
+        if _same_size(outer, want):
+            return outer, True
+        if time.monotonic() >= deadline:
+            return outer, False
+        sleep(_SETTLE_POLL_S)
+        nxt = read()
+        if not _same_size(outer, before) and _same_size(nxt, outer):
+            return outer, True
+        outer = nxt
+
+
+async def _settled_outer_async(read, before, want, timeout=None):
+    """Async mirror of ``_settled_outer`` (``read`` is a coroutine function)."""
+    deadline = time.monotonic() + (_SETTLE_S if timeout is None else timeout)
+    outer = await read()
+    while True:
+        if _same_size(outer, want):
+            return outer, True
+        if time.monotonic() >= deadline:
+            return outer, False
+        await asyncio.sleep(_SETTLE_POLL_S)
+        nxt = await read()
+        if not _same_size(outer, before) and _same_size(nxt, outer):
+            return outer, True
+        outer = nxt
+
+
+def _fit_window(set_bounds, read, target, room, timeout=None):
+    """Give the window ``target``, then correct what the engine reports (see ``_fit_plan``), on
+    settled reads only: a correction is planned from a size the page has actually seen, and kept only
+    when the page then sees a window no larger than ``target``; otherwise the bounds go back to
+    ``target``. With no settled read there is nothing to correct from, and ``target`` lies inside the
+    work area. Returns the last outer size read."""
+    w, h = target
+    before = read()
+    set_bounds(w, h)
+    outer, settled = _settled_outer(read, before, target, timeout)
+    plan = _fit_plan(target, outer, room) if settled else None
+    if not plan:
+        return outer
+    set_bounds(*plan)
+    fixed, settled = _settled_outer(read, outer, plan, timeout)
+    # Overshooting would trade one impossible geometry for another (outer > target).
+    if settled and fixed[0] <= w and fixed[1] <= h:
+        return fixed
+    logger.debug("window fit correction not kept (%r for %r); reverting", fixed, target)
+    set_bounds(w, h)
+    return _settled_outer(read, fixed, target, timeout)[0]
+
+
+async def _fit_window_async(set_bounds, read, target, room, timeout=None):
+    """Async mirror of ``_fit_window`` (``set_bounds`` and ``read`` are coroutine functions)."""
+    w, h = target
+    before = await read()
+    await set_bounds(w, h)
+    outer, settled = await _settled_outer_async(read, before, target, timeout)
+    plan = _fit_plan(target, outer, room) if settled else None
+    if not plan:
+        return outer
+    await set_bounds(*plan)
+    fixed, settled = await _settled_outer_async(read, outer, plan, timeout)
+    if settled and fixed[0] <= w and fixed[1] <= h:
+        return fixed
+    logger.debug("window fit correction not kept (%r for %r); reverting", fixed, target)
+    await set_bounds(w, h)
+    return (await _settled_outer_async(read, fixed, target, timeout))[0]
 
 
 def fit_window_to_work_area(page, args=None):
@@ -341,21 +444,11 @@ def fit_window_to_work_area(page, args=None):
             return None
         cdp = page.context.new_cdp_session(page)
         window_id = cdp.send("Browser.getWindowForTarget")["windowId"]
-        cdp.send("Browser.setWindowBounds",
-                 {"windowId": window_id, "bounds": _bounds(avail[0], avail[1])})
-        outer = page.evaluate(_OUTER_JS)
-        plan = _fit_plan(avail, outer)
-        if plan:
-            cdp.send("Browser.setWindowBounds",
-                     {"windowId": window_id, "bounds": _bounds(*plan)})
-            outer = page.evaluate(_OUTER_JS)
-            # Overshooting would trade one impossible geometry for another (outer > avail), so
-            # fall back to the uncorrected bounds rather than ship that.
-            if outer[0] > avail[0] or outer[1] > avail[1]:
-                logger.debug("window fit overshot (%r > %r); reverting", outer, avail)
-                cdp.send("Browser.setWindowBounds",
-                         {"windowId": window_id, "bounds": _bounds(avail[0], avail[1])})
-                outer = page.evaluate(_OUTER_JS)
+        target = (avail[0], avail[1])
+        outer = _fit_window(
+            lambda w, h: cdp.send("Browser.setWindowBounds",
+                                  {"windowId": window_id, "bounds": _bounds(w, h)}),
+            lambda: page.evaluate(_OUTER_JS), target, target)
         return (outer[0], outer[1])
     except Exception as exc:  # noqa: BLE001
         logger.debug("window fit skipped: %s", exc)
@@ -374,19 +467,16 @@ async def fit_window_to_work_area_async(page, args=None):
         cdp = await page.context.new_cdp_session(page)
         window = await cdp.send("Browser.getWindowForTarget")
         window_id = window["windowId"]
-        await cdp.send("Browser.setWindowBounds",
-                       {"windowId": window_id, "bounds": _bounds(avail[0], avail[1])})
-        outer = await page.evaluate(_OUTER_JS)
-        plan = _fit_plan(avail, outer)
-        if plan:
+        target = (avail[0], avail[1])
+
+        async def set_bounds(w, h):
             await cdp.send("Browser.setWindowBounds",
-                           {"windowId": window_id, "bounds": _bounds(*plan)})
-            outer = await page.evaluate(_OUTER_JS)
-            if outer[0] > avail[0] or outer[1] > avail[1]:
-                logger.debug("window fit overshot (%r > %r); reverting", outer, avail)
-                await cdp.send("Browser.setWindowBounds",
-                               {"windowId": window_id, "bounds": _bounds(avail[0], avail[1])})
-                outer = await page.evaluate(_OUTER_JS)
+                           {"windowId": window_id, "bounds": _bounds(w, h)})
+
+        async def read():
+            return await page.evaluate(_OUTER_JS)
+
+        outer = await _fit_window_async(set_bounds, read, target, target)
         return (outer[0], outer[1])
     except Exception as exc:  # noqa: BLE001
         logger.debug("window fit skipped: %s", exc)
@@ -466,18 +556,19 @@ _DISPLAY_JS = ("[screen.width, screen.height, screen.availLeft, screen.availTop,
                "screen.availWidth, screen.availHeight]")
 
 
-def fit_window_over_cdp(cdp, persona, window_size=None):
+def fit_window_over_cdp(cdp, persona, window_size=None, settle_timeout=None):
     """Put the served browser's first window on its display's work area (or ``window_size``, clamped
     into it); under a persona, first make the headless display the persona's own.
 
     Over a browser-level CDP connection (anything with ``send(method, params, session_id)``), on the
-    first page target. Only Target/Emulation/Browser commands plus one Runtime.evaluate (never
+    first page target. Only Target/Emulation/Browser commands plus Runtime.evaluate reads (never
     Runtime.enable) on that page, and every change is browser-level, so nothing lingers on the page
     when the connection closes.
 
     Returns ``{"display": {...}, "outer": (w, h)}``, or None when it could not act (no page, an
     implausible display, or an engine without ``Emulation.updateScreen`` under a persona, whose
-    window cannot outgrow 800x600 without it). Never raises.
+    window cannot outgrow 800x600 without it). Never raises. ``settle_timeout`` (seconds) bounds the
+    wait for each resize to reach the page (``_settled_outer``).
     """
     session_id = None
     try:
@@ -518,17 +609,10 @@ def fit_window_over_cdp(cdp, persona, window_size=None):
             cdp.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": {
                 "left": left, "top": top, "width": int(round(bw)), "height": int(round(bh))}})
 
-        set_bounds(w, h)
-        outer = read(_OUTER_JS)
-        # Same self-tuning as fit_window_to_work_area: an engine that reports less than the bounds
-        # it was given gets the shortfall added back, and an overshoot is reverted.
-        plan = _fit_plan((w, h), outer)
-        if plan:
-            set_bounds(*plan)
-            outer = read(_OUTER_JS)
-            if outer[0] > w or outer[1] > h:
-                set_bounds(w, h)
-                outer = read(_OUTER_JS)
+        # Same as fit_window_to_work_area: an engine that reports less than the bounds it was given
+        # gets the shortfall added back, an overshoot is reverted, and only settled reads count.
+        outer = _fit_window(set_bounds, lambda: read(_OUTER_JS), (w, h),
+                            (al + aw - left, at + ah - top), settle_timeout)
         return {"display": {"width": sw, "height": sh, "avail_width": aw, "avail_height": ah},
                 "outer": (outer[0], outer[1])}
     except Exception as exc:  # noqa: BLE001

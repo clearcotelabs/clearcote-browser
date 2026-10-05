@@ -240,17 +240,84 @@ function bounds(width: number, height: number) {
 /**
  * The bounds correction, given what the window reported after the first attempt.
  *
- * Requested bounds and reported outerHeight are not the same quantity: on 149 the window reports
- * 33px less than the bounds height it was given, so fitting bounds to the work area lands 33px short
- * of maximized (real maximized captures have outer == avail). Rather than hardcode 33, measure the
- * shortfall and add it back — that self-tunes if the engine changes. Never asks for more than the
- * shortfall, so the window cannot be pushed past the work area.
+ * Requested bounds and reported outerHeight are not always the same quantity: on 149 the window
+ * reported 33px less than the bounds height it was given, and on 150 a persona's window does (33px in
+ * a launch, 89 in serve(); without a persona it reports the bounds exactly). Fitting bounds to the
+ * work area then lands short of maximized (real maximized captures have outer == avail). Rather than
+ * hardcode it, measure the shortfall and add it back — that self-tunes if the engine changes. Never
+ * asks for more than the shortfall.
+ *
+ * `room` is the space from the window's position to the work area's far edges. On an axis where the
+ * window is smaller than that, the correction never takes the bounds past the edge: only a window that
+ * fills the work area needs bounds beyond it (the persona engine then clamps the window to the work
+ * area), and an engine without a persona does not clamp at all.
  */
-export function fitPlan(avail: number[], outer: number[]): [number, number] | null {
+export function fitPlan(avail: number[], outer: number[], room?: readonly number[] | null): [number, number] | null {
   const dw = avail[0] - outer[0];
   const dh = avail[1] - outer[1];
   if (dw <= 0 && dh <= 0) return null;
-  return [avail[0] + Math.max(dw, 0), avail[1] + Math.max(dh, 0)];
+  const capped = (want: number, i: number) => (room && avail[i] < room[i] ? Math.min(want, room[i]) : want);
+  return [capped(avail[0] + Math.max(dw, 0), 0), capped(avail[1] + Math.max(dh, 0), 1)];
+}
+
+/** How long a window resize may take to reach the page before a read is taken as it stands. */
+const SETTLE_MS = 1000;
+const SETTLE_POLL_MS = 20;
+
+const sameSize = (a: readonly number[], b: readonly number[]) => a[0] === b[0] && a[1] === b[1];
+
+/**
+ * Read `[outerWidth, outerHeight]` until it reflects the last `Browser.setWindowBounds`. The call
+ * returns before the page has the new window size, so a read straight after it can still report the
+ * previous one (measured on 150/linux-x64: for tens of milliseconds). Correcting from such a
+ * read once asked for 1440+495 px on a 1920 px screen. Settled means the asked-for size, or a size
+ * other than `before` that is still there one poll later; `settled` is false when neither happened
+ * within `timeoutMs`.
+ */
+async function settledOuter(
+  read: () => Promise<number[]>,
+  before: readonly number[],
+  want: readonly number[],
+  timeoutMs = SETTLE_MS,
+): Promise<{ outer: number[]; settled: boolean }> {
+  const deadline = Date.now() + timeoutMs;
+  let outer = await read();
+  for (;;) {
+    if (sameSize(outer, want)) return { outer, settled: true };
+    if (Date.now() >= deadline) return { outer, settled: false };
+    await new Promise((r) => setTimeout(r, SETTLE_POLL_MS));
+    const next = await read();
+    if (!sameSize(outer, before) && sameSize(next, outer)) return { outer, settled: true };
+    outer = next;
+  }
+}
+
+/**
+ * Give the window `target`, then correct what the engine reports (see {@link fitPlan}), on settled
+ * reads only: a correction is planned from a size the page has actually seen, and kept only when the
+ * page then sees a window no larger than `target`; otherwise the bounds go back to `target`. With no
+ * settled read there is nothing to correct from, and `target` lies inside the work area. Returns the
+ * last outer size read.
+ */
+async function fitWindow(
+  setBounds: (width: number, height: number) => Promise<unknown>,
+  read: () => Promise<number[]>,
+  target: [number, number],
+  room: [number, number],
+  settleMs: number,
+): Promise<number[]> {
+  const [w, h] = target;
+  const before = await read();
+  await setBounds(w, h);
+  const first = await settledOuter(read, before, target, settleMs);
+  const plan = first.settled ? fitPlan(target, first.outer, room) : null;
+  if (!plan) return first.outer;
+  await setBounds(plan[0], plan[1]);
+  const fixed = await settledOuter(read, first.outer, plan, settleMs);
+  // Overshooting would trade one impossible geometry for another (outer > target).
+  if (fixed.settled && fixed.outer[0] <= w && fixed.outer[1] <= h) return fixed.outer;
+  await setBounds(w, h);
+  return (await settledOuter(read, fixed.outer, target, settleMs)).outer;
 }
 
 /**
@@ -273,18 +340,10 @@ export async function fitWindowToWorkArea(
     if (!plausible(avail)) return null;
     const cdp = await page.context().newCDPSession(page);
     const { windowId } = (await cdp.send("Browser.getWindowForTarget")) as { windowId: number };
-    await cdp.send("Browser.setWindowBounds", { windowId, bounds: bounds(avail[0], avail[1]) });
-    let outer = (await page.evaluate(OUTER_JS)) as number[];
-    const plan = fitPlan(avail, outer);
-    if (plan) {
-      await cdp.send("Browser.setWindowBounds", { windowId, bounds: bounds(plan[0], plan[1]) });
-      outer = (await page.evaluate(OUTER_JS)) as number[];
-      // Overshooting would trade one impossible geometry for another (outer > avail).
-      if (outer[0] > avail[0] || outer[1] > avail[1]) {
-        await cdp.send("Browser.setWindowBounds", { windowId, bounds: bounds(avail[0], avail[1]) });
-        outer = (await page.evaluate(OUTER_JS)) as number[];
-      }
-    }
+    const outer = await fitWindow(
+      (w, h) => cdp.send("Browser.setWindowBounds", { windowId, bounds: bounds(w, h) }),
+      async () => (await page.evaluate(OUTER_JS)) as number[],
+      [avail[0], avail[1]], [avail[0], avail[1]], SETTLE_MS);
     return [outer[0], outer[1]];
   } catch {
     return null;   // deliberately silent: never fail a launch over geometry
@@ -460,17 +519,18 @@ export interface ServedFit { display: Display; outer: [number, number] }
 /**
  * Put the served browser's first window on its display's work area (or `windowSize`, clamped into
  * it); under a persona, first make the headless display the persona's own. Over the caller's CDP
- * connection, on the first page target. Only Target/Emulation/Browser commands plus one
- * Runtime.evaluate (never Runtime.enable) on that page, and every change is browser-level, so
+ * connection, on the first page target. Only Target/Emulation/Browser commands plus
+ * Runtime.evaluate reads (never Runtime.enable) on that page, and every change is browser-level, so
  * nothing lingers on the page when the connection closes.
  *
  * Returns null when it could not act (no page, an implausible persona display, or an engine without
  * `Emulation.updateScreen` under a persona, whose window cannot outgrow 800x600 without it). Never
- * throws: geometry must not be able to fail a launch.
+ * throws: geometry must not be able to fail a launch. `settleMs` bounds the wait for each resize to
+ * reach the page ({@link settledOuter}).
  */
 export async function fitWindowOverCdp(
   cdp: CdpSend,
-  opts: { persona: boolean; windowSize?: Size | null },
+  opts: { persona: boolean; windowSize?: Size | null; settleMs?: number },
 ): Promise<ServedFit | null> {
   let sessionId: string | undefined;
   try {
@@ -500,19 +560,10 @@ export async function fitWindowOverCdp(
     const { windowId } = (await cdp.send("Browser.getWindowForTarget", { targetId: page.targetId })) as { windowId: number };
     const setBounds = (bw: number, bh: number) =>
       cdp.send("Browser.setWindowBounds", { windowId, bounds: { left, top, width: Math.round(bw), height: Math.round(bh) } });
-    await setBounds(w, h);
-    let outer = await read(OUTER_JS);
-    // Same self-tuning as fitWindowToWorkArea: an engine that reports less than the bounds it was
-    // given gets the shortfall added back, and an overshoot is reverted.
-    const plan = fitPlan([w, h], outer);
-    if (plan) {
-      await setBounds(plan[0], plan[1]);
-      outer = await read(OUTER_JS);
-      if (outer[0] > w || outer[1] > h) {
-        await setBounds(w, h);
-        outer = await read(OUTER_JS);
-      }
-    }
+    // Same as fitWindowToWorkArea: an engine that reports less than the bounds it was given gets the
+    // shortfall added back, an overshoot is reverted, and only settled reads count.
+    const outer = await fitWindow(setBounds, () => read(OUTER_JS), [w, h],
+      [al + aw - left, at + ah - top], opts.settleMs ?? SETTLE_MS);
     return { display: { width: sw, height: sh, availWidth: aw, availHeight: ah }, outer: [outer[0], outer[1]] };
   } catch {
     return null;

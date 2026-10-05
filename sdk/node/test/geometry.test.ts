@@ -258,9 +258,13 @@ describe("the imported profile's screen", () => {
 describe("the work-area window fit", () => {
   /** Models the engine: it reports outerHeight `heightBias` px below the bounds height it was given
    *  (33 on 149.0.7827.114). */
-  function fakePage(avail: number[], opts: { heightBias?: number; biasFirstCallOnly?: boolean } = {}) {
+  function fakePage(avail: number[], opts: {
+    heightBias?: number; biasFirstCallOnly?: boolean; initial?: number[]; staleReads?: number;
+  } = {}) {
     const heightBias = opts.heightBias ?? 33;
-    let outer = [0, 0];
+    let outer = opts.initial ?? [0, 0];
+    let previous = outer;
+    let stale = 0;
     let boundsCalls = 0;
     const calls: Array<[string, unknown]> = [];
     const cdp = {
@@ -273,14 +277,20 @@ describe("the work-area window fit", () => {
           if (b.width !== undefined && b.height !== undefined) {
             boundsCalls++;
             const biased = !opts.biasFirstCallOnly || boundsCalls === 1;
+            previous = outer;
             outer = [b.width, b.height - (biased ? heightBias : 0)];
+            stale = opts.staleReads ?? 0;
           }
         }
         return {};
       }),
     };
     const page = {
-      evaluate: async (js: string) => (js.includes("availWidth") ? avail : outer),
+      evaluate: async (js: string) => {
+        if (js.includes("availWidth")) return avail;
+        if (stale > 0) { stale--; return previous; }
+        return outer;
+      },
       context: () => ({ newCDPSession: async () => cdp }),
     };
     return {
@@ -310,6 +320,17 @@ describe("the work-area window fit", () => {
     const b = f.bounds();
     expect(b).toHaveLength(3);
     expect(b[2]).toEqual(b[0]);
+  });
+
+  it("measures the shortfall only once the page has the new size", async () => {
+    // A read straight after the resize can still have the engine's default window: correcting from
+    // it asked for 1920+975 px, and a second stale read hid the overshoot.
+    const f = fakePage([1920, 1040], { initial: [945, 1020], staleReads: 2 });
+    await expect(fitWindowToWorkArea(f.page, ["--fingerprint=x"])).resolves.toEqual([1920, 1040]);
+    expect(f.bounds()).toEqual([
+      { left: 0, top: 0, width: 1920, height: 1040 },
+      { left: 0, top: 0, width: 1920, height: 1073 },
+    ]);
   });
 
   it("defers to a caller-supplied window size", async () => {
@@ -417,9 +438,15 @@ describe("serve(): which switches", () => {
 });
 
 describe("serve(): the window fit over CDP", () => {
-  /** Models a served browser: the page reads its display, the window reports the bounds it got. */
-  function fakeBrowser(display: number[], opts: { updateScreen?: boolean; heightBias?: number } = {}) {
-    let outer = [780, 580];
+  /** Models a served browser: the page reads its display, the window reports the bounds it got.
+   *  `staleReads`: that many reads after each resize still report the size from before it, as a page
+   *  does until the new window size reaches it (the read after that, the new size). */
+  function fakeBrowser(display: number[], opts: {
+    updateScreen?: boolean; heightBias?: number; initial?: number[]; staleReads?: number;
+  } = {}) {
+    let outer = opts.initial ?? [780, 580];
+    let previous = outer;
+    let stale = 0;
     const calls: Array<[string, Record<string, unknown> | undefined, string | undefined]> = [];
     const cdp = {
       send: vi.fn(async (method: string, params?: Record<string, unknown>, sessionId?: string) => {
@@ -428,8 +455,9 @@ describe("serve(): the window fit over CDP", () => {
           case "Target.getTargets": return { targetInfos: [{ targetId: "T1", type: "page" }] };
           case "Target.attachToTarget": return { sessionId: "S1" };
           case "Runtime.evaluate": {
-            const e = String(params!.expression);
-            return { result: { value: e.includes("availWidth") ? display : outer } };
+            if (String(params!.expression).includes("availWidth")) return { result: { value: display } };
+            if (stale > 0) { stale--; return { result: { value: previous } }; }
+            return { result: { value: outer } };
           }
           case "Emulation.getScreenInfos": return { screenInfos: [{ id: "2300000000", isPrimary: true }] };
           case "Emulation.updateScreen":
@@ -438,7 +466,9 @@ describe("serve(): the window fit over CDP", () => {
           case "Browser.getWindowForTarget": return { windowId: 3 };
           case "Browser.setWindowBounds": {
             const b = params!.bounds as { width: number; height: number };
+            previous = outer;
             outer = [b.width, b.height - (opts.heightBias ?? 0)];
+            stale = opts.staleReads ?? 0;
             return {};
           }
           default: return {};
@@ -493,6 +523,46 @@ describe("serve(): the window fit over CDP", () => {
     const f = fakeBrowser([1920, 1080, 0, 0, 1920, 1040], { heightBias: 33 });
     await fitWindowOverCdp(f.cdp, { persona: false });
     expect(f.of("Browser.setWindowBounds").map((p) => (p!.bounds as { height: number }).height)).toEqual([1040, 1073]);
+  });
+
+  const sizes = (f: ReturnType<typeof fakeBrowser>) => f.of("Browser.setWindowBounds").map((p) => {
+    const b = p!.bounds as { left: number; top: number; width: number; height: number };
+    return `${b.left},${b.top} ${b.width}x${b.height}`;
+  });
+
+  it("waits for a resize to reach the page before measuring it", async () => {
+    // Measured on 150/linux-x64 (no taskbar): the first read still had the default 945x1060 window,
+    // the fit "corrected" 1440 to 1440+495, and the next read had only caught up with the first
+    // resize, so the 1935x900 window on a 1920x1080 screen stayed.
+    const f = fakeBrowser([1920, 1080, 0, 0, 1920, 1080], { initial: [945, 1060], staleReads: 1 });
+    await expect(fitWindowOverCdp(f.cdp, { persona: false, windowSize: { width: 1440, height: 900 } }))
+      .resolves.toMatchObject({ outer: [1440, 900] });
+    expect(sizes(f)).toEqual(["10,10 1440x900"]);
+  });
+
+  it("does not correct a maximized window from a stale read", async () => {
+    const f = fakeBrowser([1920, 1080, 0, 0, 1920, 1040], { initial: [945, 1020], staleReads: 2 });
+    await expect(fitWindowOverCdp(f.cdp, { persona: false })).resolves.toMatchObject({ outer: [1920, 1040] });
+    expect(sizes(f)).toEqual(["0,0 1920x1040"]);
+  });
+
+  it("still adds back a real shortfall when the page is slow to see it", async () => {
+    const f = fakeBrowser([1920, 1080, 0, 0, 1920, 1040], { heightBias: 89, staleReads: 2 });
+    await expect(fitWindowOverCdp(f.cdp, { persona: true })).resolves.toMatchObject({ outer: [1920, 1040] });
+    expect(sizes(f)).toEqual(["0,0 1920x1040", "0,0 1920x1129"]);
+  });
+
+  it("corrects nothing when the page never shows the resize", async () => {
+    const f = fakeBrowser([1920, 1080, 0, 0, 1920, 1080], { initial: [945, 1060], staleReads: Infinity });
+    await fitWindowOverCdp(f.cdp, { persona: false, windowSize: { width: 1440, height: 900 }, settleMs: 100 });
+    expect(sizes(f)).toEqual(["10,10 1440x900"]);
+  });
+
+  it("never plans bounds past the work area for a window smaller than it", () => {
+    // 1440 wide at x=10 has 1910px of room; the misread shortfall would have asked for 1935.
+    expect(fitPlan([1440, 900], [945, 1060], [1910, 1070])).toEqual([1910, 900]);
+    // a window that fills the work area may need bounds beyond it (the persona engine clamps)
+    expect(fitPlan([1920, 1040], [1920, 951], [1920, 1040])).toEqual([1920, 1129]);
   });
 
   it("declines the 800x600 surface (no persona engaged)", async () => {
