@@ -123,6 +123,16 @@ function apiBase(opts: LicenseOptions): string {
   return (opts.licenseApiBase || process.env.CLEARCOTE_LICENSE_API || DEFAULT_API_BASE).replace(/\/$/, "");
 }
 
+/** The licence server base URL (`licenseApiBase` > CLEARCOTE_LICENSE_API > clearcotelabs.com). */
+export function licenseApiBase(explicit?: string): string {
+  return apiBase({ licenseApiBase: explicit });
+}
+
+/** The User-Agent every licence call sends ("clearcote-sdk-node/<version>"). */
+export function licenseUserAgent(): string {
+  return LICENSE_USER_AGENT;
+}
+
 const osTag = (): string =>
   ({ win32: "windows", linux: "linux", darwin: "macos" } as Record<string, string>)[process.platform] ?? "unknown";
 
@@ -845,12 +855,72 @@ export function saveLicenseKey(key: string): string {
   return p;
 }
 
-/** Remove the saved key. Returns true when a file was removed. */
+/** Remove the saved key (and what device login recorded about it). Returns true when the key file
+ * was removed. */
 export function removeLicenseKey(): boolean {
+  removeLicenseMeta();
   const p = licenseKeyPath();
   if (!existsSync(p)) return false;
   rmSync(p, { force: true });
   return true;
+}
+
+// What `clearcote login --device` learned about the key it saved. No licence endpoint reports a key's
+// expiry (GET /api/v1/lease/seats answers used/limit/plan only), so the device-token answer is the one
+// source; `clearcote info` reports it as such. Bound to the key by its SHA-256, so a key saved later
+// (pasted, or set in CLEARCOTE_LICENSE_KEY) is never described by another key's record.
+const EXPIRY_NOTE = "as the site reported it at `clearcote login --device`; no licence endpoint reports a key's expiry";
+const EXPIRY_UNKNOWN_NOTE = "not known: only `clearcote login --device` records it, and no licence endpoint reports a key's expiry";
+
+/** What `clearcote info` reports about the expiry of the key a launch would use. */
+export type LicenseExpiry =
+  | { expiresAt: string | null; source: "device-login"; recordedAt?: string; note: string }
+  | { source: "unknown"; note: string };
+
+export function licenseMetaPath(): string {
+  return join(homedir(), ".clearcote", "license.meta.json");
+}
+
+const keyDigest = (key: string): string => createHash("sha256").update(key.trim()).digest("hex");
+
+/** Record the plan and expiry the device login returned for `key` (never the key itself). */
+export function saveLicenseMeta(key: string, plan?: string | null, expiresAt?: string | null): string {
+  const p = licenseMetaPath();
+  mkdirSync(join(homedir(), ".clearcote"), { recursive: true });
+  const record = {
+    key_sha256: keyDigest(key), plan: plan ?? null, expires_at: expiresAt ?? null, source: "device-login",
+    recorded_at: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+  };
+  writeFileSync(p, JSON.stringify(record) + "\n", { mode: 0o600 });
+  try { chmodSync(p, 0o600); } catch { /* not supported on this filesystem */ }
+  return p;
+}
+
+/** Remove the device-login record; with `unlessKey`, only when it describes a different key. */
+export function removeLicenseMeta(unlessKey?: string): boolean {
+  const p = licenseMetaPath();
+  if (!existsSync(p)) return false;
+  if (unlessKey !== undefined) {
+    try {
+      if (JSON.parse(readFileSync(p, "utf8"))?.key_sha256 === keyDigest(unlessKey)) return false;
+    } catch { /* unreadable: replace it */ }
+  }
+  try { rmSync(p, { force: true }); } catch { return false; }
+  return true;
+}
+
+/** `{ expiresAt, source: "device-login", ... }` when device login recorded it for this very key
+ * (`expiresAt` null = no expiry); `{ source: "unknown" }` for any other key; undefined without one. */
+export function licenseExpiry(explicit?: string): LicenseExpiry | undefined {
+  const key = resolveLicenseKey(explicit);
+  if (!key) return undefined;
+  try {
+    const rec = JSON.parse(readFileSync(licenseMetaPath(), "utf8"));
+    if (rec && typeof rec === "object" && rec.key_sha256 === keyDigest(key)) {
+      return { expiresAt: rec.expires_at ?? null, source: "device-login", recordedAt: rec.recorded_at, note: EXPIRY_NOTE };
+    }
+  } catch { /* no record */ }
+  return { source: "unknown", note: EXPIRY_UNKNOWN_NOTE };
 }
 
 /** Where the key a launch would use comes from, without revealing it. */

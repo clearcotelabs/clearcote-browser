@@ -4,7 +4,8 @@
     clearcote info    [--quick] [--json] [--proxy URL]      diagnostics (alias: doctor)
     clearcote update  [--channel preview]                   fetch a newer build if one exists
     clearcote clear-cache                                   delete every cached binary
-    clearcote login   [key]                                 save a licence key (validated first)
+    clearcote login   [key] | --device                      save a licence key (validated first), or sign in
+                                                            from a browser and save the key it issues
     clearcote logout                                        remove the saved key
     clearcote serve   [--port 9222] [--idle-timeout 300] ...  multi-identity CDP endpoint
     clearcote cloud   run|sessions|stop|events|recording|profile sync|webhooks ...  the hosted API
@@ -31,6 +32,7 @@ USAGE
   clearcote update [--channel stable|preview]
   clearcote clear-cache
   clearcote login [key]
+  clearcote login --device                               (sign in from a browser; no key to paste)
   clearcote logout
   clearcote serve [--port 9222] [--host 127.0.0.1] [--idle-timeout <s>] [--data-dir <dir>]
                   [--max-browsers 16] [--allow-origin <origin>]... [--allow-host <name>]... [--headed]
@@ -123,7 +125,7 @@ def build_info(quick=False, proxy=None, launch_fn=None):
     import platform as _platform
 
     from ._launchopts import GATED_ENGINE_SWITCHES, engine_supports_switch
-    from ._license import get_session_seats, license_key_source
+    from ._license import get_session_seats, license_expiry, license_key_source
     from .download import list_cached_builds, resolve_release_channel
     from .release import RELEASE
 
@@ -138,6 +140,9 @@ def build_info(quick=False, proxy=None, launch_fn=None):
     license_info = {"source": src["source"]}
     if src.get("masked"):
         license_info["key"] = src["masked"]
+    expiry = license_expiry()  # a local record only: no network, so --quick reports it too
+    if expiry:
+        license_info["expiry"] = expiry
     binary = {"source": "CLEARCOTE_BINARY" if env_binary else ("cache" if pick else "none")}
     if pick:
         binary["path"] = pick["path"]
@@ -209,6 +214,9 @@ def print_info(r):
     _out(f"clearcote SDK   {r['sdk']['version']}  (python {r['sdk']['python']}, {r['sdk']['platform']})")
     lic = r["license"]
     _out("Licence         " + ("none (free build)" if lic["source"] == "none" else f"{lic.get('key')} from {lic['source']}"))
+    exp = lic.get("expiry")
+    if exp and exp.get("source") == "device-login":
+        _out(f"Expires         {exp.get('expiresAt') or 'never'}  (as reported at device login)")
     seats = lic.get("seats")
     if seats:
         if seats["state"] == "ok":
@@ -255,6 +263,55 @@ def _prompt_key():
     sys.stderr.write("Paste your licence key (https://www.clearcotelabs.com/dashboard/licenses): ")
     sys.stderr.flush()
     return (sys.stdin.readline() or "").strip()
+
+
+def _err(line=""):
+    sys.stderr.write(f"{line}\n")
+    sys.stderr.flush()
+
+
+def device_login(sleep=None, clock=None):
+    """``clearcote login --device``: show a link and a short code, wait for the approval in the
+    browser, then save the key it issues exactly as ``clearcote login <key>`` does. The key is never
+    printed. Instructions go to stderr and the result to stdout, like the paste login's prompt.
+    Output and exit codes match the Node CLI (tests/test_device_login.py)."""
+    import time as _time
+
+    from ._devicelogin import DeviceLoginError, poll_for_key, request_code
+    from ._license import save_license_key, save_license_meta
+
+    try:
+        try:
+            code = request_code()
+            _err("To sign in, open this link in a browser and approve the code shown there:")
+            _err("")
+            _err(f"  {code['verification_uri_complete']}")
+            _err("")
+            _err(f"Code: {code['user_code']}  (or enter it at {code['verification_uri']})")
+            _err("Waiting for the approval (Ctrl-C to cancel)...")
+            warned = []
+
+            def on_retry(reason):
+                if not warned:  # once: a flaky network must not flood the terminal
+                    warned.append(reason)
+                    _err(f"note: {reason}; still waiting")
+
+            got = poll_for_key(code, sleep=sleep or _time.sleep, clock=clock or _time.monotonic,
+                               on_retry=on_retry)
+        except DeviceLoginError as e:
+            fail(f"{e}. Nothing was saved." + (" Run `clearcote login --device` again."
+                                              if e.code == "expired_token" else ""))
+    except KeyboardInterrupt:
+        _err("")
+        fail("cancelled. Nothing was saved.", 130)
+    where = save_license_key(got["license_key"])
+    save_license_meta(got["license_key"], got.get("plan"), got.get("expires_at"))
+    _out(f"saved to {where}")
+    plan = got.get("plan") or "unknown"
+    _out(f"plan {plan}, " + (f"expires {got['expires_at']}" if got.get("expires_at") else "no expiry"))
+    if os.environ.get("CLEARCOTE_LICENSE_KEY"):
+        _out("note: CLEARCOTE_LICENSE_KEY is set in this environment and takes precedence over the saved key")
+    return 0
 
 
 _BUILD_DIR = __import__("re").compile(r"^(pro-.+|v\d.*)$")
@@ -312,6 +369,7 @@ def _parser():
     sub.add_parser("clear-cache", add_help=False)
     login = sub.add_parser("login", add_help=False)
     login.add_argument("key", nargs="?")
+    login.add_argument("--device", action="store_true")
     sub.add_parser("logout", add_help=False)
     sub.add_parser("version", add_help=False)
     s = sub.add_parser("serve", add_help=False)
@@ -735,7 +793,11 @@ def _run(argv):
         return 0
 
     if cmd == "login":
-        from ._license import get_session_seats, save_license_key
+        if a.device:
+            if a.key:
+                fail("pass a key or --device, not both", 2)
+            return device_login()
+        from ._license import get_session_seats, remove_license_meta, save_license_key
         key = (a.key or "").strip() or _prompt_key()
         if not key:
             fail("empty key")
@@ -743,6 +805,7 @@ def _run(argv):
         if seats["state"] == "invalid":
             fail(f"the licence server rejected this key ({seats.get('reason')}). Nothing was saved.")
         where = save_license_key(key)
+        remove_license_meta(unless_key=key)  # a device login's record of another key no longer applies
         _out(f"saved to {where}")
         if seats["state"] == "ok":
             limit = seats.get("limit") if seats.get("limit") is not None else "unlimited"

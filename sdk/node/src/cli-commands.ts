@@ -4,7 +4,8 @@
 //   clearcote info    [--quick] [--json] [--proxy URL]      diagnostics (alias: doctor)
 //   clearcote update  [--channel preview]                   fetch a newer build if one exists
 //   clearcote clear-cache                                   delete every cached binary
-//   clearcote login   [key]                                 save a licence key (validated first)
+//   clearcote login   [key] | --device                      save a licence key (validated first), or sign in
+//                                                           from a browser and save the key it issues
 //   clearcote logout                                        remove the saved key
 //   clearcote serve   [--port 9222] [--idle-timeout 300] …  multi-identity CDP endpoint
 //   clearcote cloud   run|sessions|stop|events|recording|profile sync|webhooks …  the hosted API
@@ -33,6 +34,8 @@ import {
   type SessionSeats,
 } from "./index.js";
 import { defaultCacheRoot, listCachedBuilds } from "./download.js";
+import { DeviceLoginError, pollForKey, requestDeviceCode } from "./devicelogin.js";
+import { licenseExpiry, removeLicenseMeta, saveLicenseMeta, type LicenseExpiry } from "./license.js";
 import { geoCacheRoot } from "./geoip.js";
 import { GATED_ENGINE_SWITCHES } from "./launchopts.js";
 import { toProxySpec } from "./net.js";
@@ -54,6 +57,7 @@ USAGE
   clearcote update [--channel stable|preview]
   clearcote clear-cache
   clearcote login [key]
+  clearcote login --device                               (sign in from a browser; no key to paste)
   clearcote logout
   clearcote serve [--port 9222] [--host 127.0.0.1] [--idle-timeout <s>] [--data-dir <dir>]
                   [--max-browsers 16] [--allow-origin <origin>]... [--allow-host <name>]... [--headed]
@@ -112,7 +116,7 @@ function fail(msg: string, code = 1): never {
 /** What `info` reports. Also the `--json` shape. */
 export interface InfoReport {
   sdk: { version: string; node: string; platform: string };
-  license: { source: string; key?: string; seats?: SessionSeats };
+  license: { source: string; key?: string; expiry?: LicenseExpiry; seats?: SessionSeats };
   binary: {
     source: "CLEARCOTE_BINARY" | "cache" | "none";
     path?: string;
@@ -162,6 +166,9 @@ export async function buildInfo(flags: { quick?: boolean; proxy?: string }): Pro
     geoip: { databaseCached: existsSync(geoDbPath()), path: geoDbPath() },
   };
 
+  const expiry = licenseExpiry(); // a local record only: no network, so --quick reports it too
+  if (expiry) report.license.expiry = expiry;
+
   if (pick && existsSync(pick.path)) {
     report.engineFeatures = Object.fromEntries(
       ["proxy-auth", "socks5-credentials", "socks5-udp", ...Object.keys(GATED_ENGINE_SWITCHES).map((s) => s.slice(2))]
@@ -210,6 +217,8 @@ function printInfo(r: InfoReport): void {
   const ok = (b: boolean | undefined) => (b ? "yes" : "no");
   out(`clearcote SDK   ${r.sdk.version}  (node ${r.sdk.node}, ${r.sdk.platform})`);
   out(`Licence         ${r.license.source === "none" ? "none (free build)" : `${r.license.key} from ${r.license.source}`}`);
+  const exp = r.license.expiry;
+  if (exp && exp.source === "device-login") out(`Expires         ${exp.expiresAt || "never"}  (as reported at device login)`);
   const seats = r.license.seats;
   if (seats) {
     if (seats.state === "ok") out(`Seats           ${seats.used} of ${seats.limit ?? "unlimited"} in use${seats.plan ? `  (plan: ${seats.plan})` : ""}`);
@@ -236,6 +245,59 @@ function printInfo(r: InfoReport): void {
     const p = r.geoip.proxy;
     out(p.error ? `Proxy geo       FAILED: ${p.error}` : `Proxy geo       exit ${p.exitIp} (${p.country})  timezone ${p.timezone}  language ${p.acceptLanguage}`);
   }
+}
+
+function err(line = ""): void {
+  process.stderr.write(line + "\n");
+}
+
+/**
+ * `clearcote login --device`: show a link and a short code, wait for the approval in the browser, then
+ * save the key it issues exactly as `clearcote login <key>` does. The key is never printed.
+ * Instructions go to stderr and the result to stdout, like the paste login's prompt. Output and exit
+ * codes match the Python CLI (test/device-login.test.ts). Ctrl-C cancels and saves nothing (exit 130).
+ */
+export async function deviceLogin(opts: { sleep?: (s: number, signal?: AbortSignal) => Promise<void>; clock?: () => number } = {}): Promise<void> {
+  const ctrl = new AbortController();
+  const onSigint = () => ctrl.abort();
+  process.on("SIGINT", onSigint);
+  let grant;
+  try {
+    const code = await requestDeviceCode();
+    err("To sign in, open this link in a browser and approve the code shown there:");
+    err("");
+    err(`  ${code.verification_uri_complete}`);
+    err("");
+    err(`Code: ${code.user_code}  (or enter it at ${code.verification_uri})`);
+    err("Waiting for the approval (Ctrl-C to cancel)...");
+    let warned = false;
+    grant = await pollForKey(code, {
+      ...opts,
+      signal: ctrl.signal,
+      onRetry: (reason) => {
+        if (!warned) { // once: a flaky network must not flood the terminal
+          warned = true;
+          err(`note: ${reason}; still waiting`);
+        }
+      },
+    });
+  } catch (e) {
+    if (e instanceof DeviceLoginError) {
+      if (e.code === "cancelled") {
+        err("");
+        fail("cancelled. Nothing was saved.", 130);
+      }
+      fail(`${e.message}. Nothing was saved.${e.code === "expired_token" ? " Run `clearcote login --device` again." : ""}`);
+    }
+    throw e;
+  } finally {
+    process.off("SIGINT", onSigint);
+  }
+  const where = saveLicenseKey(grant.licenseKey);
+  saveLicenseMeta(grant.licenseKey, grant.plan, grant.expiresAt);
+  out(`saved to ${where}`);
+  out(`plan ${grant.plan || "unknown"}, ${grant.expiresAt ? `expires ${grant.expiresAt}` : "no expiry"}`);
+  if (process.env.CLEARCOTE_LICENSE_KEY) out("note: CLEARCOTE_LICENSE_KEY is set in this environment and takes precedence over the saved key");
 }
 
 async function promptKey(): Promise<string> {
@@ -329,11 +391,17 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   }
 
   if (cmd === "login") {
+    if (rest.includes("--device")) {
+      if (rest.some((a) => a !== "--device")) fail("pass a key or --device, not both", 2);
+      await deviceLogin();
+      return;
+    }
     const key = rest[0] ?? (await promptKey());
     if (!key) fail("empty key");
     const seats = await getSessionSeats({ licenseKey: key });
     if (seats.state === "invalid") fail(`the licence server rejected this key (${seats.reason}). Nothing was saved.`);
     const where = saveLicenseKey(key);
+    removeLicenseMeta(key.trim()); // a device login's record of another key no longer applies
     out(`saved to ${where}`);
     if (seats.state === "ok") out(`valid: ${seats.used} of ${seats.limit ?? "unlimited"} seats in use${seats.plan ? `, plan ${seats.plan}` : ""}`);
     else out(`note: could not confirm the key right now (${seats.reason}); it was saved anyway`);

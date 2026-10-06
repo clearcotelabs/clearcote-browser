@@ -856,12 +856,86 @@ def save_license_key(key: str) -> str:
 
 
 def remove_license_key() -> bool:
-    """Remove the saved key. Returns True when a file was removed."""
+    """Remove the saved key (and what device login recorded about it). Returns True when the key
+    file was removed."""
+    remove_license_meta()
     p = Path(license_key_path())
     if not p.exists():
         return False
     p.unlink()
     return True
+
+
+# What `clearcote login --device` learned about the key it saved. No licence endpoint reports a key's
+# expiry (GET /api/v1/lease/seats answers used/limit/plan only), so the device-token answer is the one
+# source; `clearcote info` reports it as such. Bound to the key by its SHA-256, so a key saved later
+# (pasted, or set in CLEARCOTE_LICENSE_KEY) is never described by another key's record.
+_EXPIRY_NOTE = ("as the site reported it at `clearcote login --device`; no licence endpoint reports a "
+                "key's expiry")
+_EXPIRY_UNKNOWN_NOTE = ("not known: only `clearcote login --device` records it, and no licence endpoint "
+                        "reports a key's expiry")
+
+
+def license_meta_path() -> str:
+    return str(Path.home() / ".clearcote" / "license.meta.json")
+
+
+def _key_digest(key: str) -> str:
+    return hashlib.sha256(key.strip().encode()).hexdigest()
+
+
+def save_license_meta(key: str, plan=None, expires_at=None) -> str:
+    """Record the plan and expiry the device login returned for ``key`` (never the key itself)."""
+    p = Path(license_meta_path())
+    p.parent.mkdir(parents=True, exist_ok=True)
+    record = {"key_sha256": _key_digest(key), "plan": plan, "expires_at": expires_at,
+              "source": "device-login",
+              "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(record) + "\n")
+    try:
+        os.chmod(str(p), 0o600)
+    except OSError:
+        pass
+    return str(p)
+
+
+def remove_license_meta(unless_key: str | None = None) -> bool:
+    """Remove the device-login record; with ``unless_key``, only when it describes a different key."""
+    p = Path(license_meta_path())
+    if not p.exists():
+        return False
+    if unless_key is not None:
+        try:
+            if json.loads(p.read_text(encoding="utf-8")).get("key_sha256") == _key_digest(unless_key):
+                return False
+        except (OSError, ValueError, AttributeError):
+            pass
+    try:
+        p.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def license_expiry(explicit: str | None = None) -> dict | None:
+    """What is known about when the key a launch would use expires, for ``clearcote info``.
+
+    ``{"expiresAt": iso|None, "source": "device-login", "recordedAt": iso, "note": ...}`` when
+    device login recorded it for this very key (``expiresAt`` None = no expiry);
+    ``{"source": "unknown", "note": ...}`` for any other key; None without a key."""
+    key = resolve_license_key(explicit)
+    if not key:
+        return None
+    try:
+        rec = json.loads(Path(license_meta_path()).read_text(encoding="utf-8"))
+        if isinstance(rec, dict) and rec.get("key_sha256") == _key_digest(key):
+            return {"expiresAt": rec.get("expires_at"), "source": "device-login",
+                    "recordedAt": rec.get("recorded_at"), "note": _EXPIRY_NOTE}
+    except (OSError, ValueError):
+        pass
+    return {"source": "unknown", "note": _EXPIRY_UNKNOWN_NOTE}
 
 
 def _mask(k: str) -> str:
