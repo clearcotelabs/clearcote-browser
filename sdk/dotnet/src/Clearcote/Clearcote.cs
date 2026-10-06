@@ -132,19 +132,22 @@ public static class Clearcote
 
         // Headless: the display is browser-wide, so it applies even here (see the geometry caveat).
         var display = Geometry.ResolveHeadless(options.Headless, options.Fingerprint, args, callerSetGeometry: false);
+        // Engine 1021: the persona switches leave the browser's argv for CLEARCOTE_PERSONA_ARGS when the
+        // engine reads them from there (see PersonaEnv). Probed once; every attempt's env gets the payload.
+        var persona = PersonaEnv.Plan(exe, args.Concat(display.Args), options.PersonaEnv);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
         var browser = await License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
             WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
             {
                 ExecutablePath = exePath,
-                Args = args.Concat(display.Args).ToArray(),
+                Args = persona.Args.ToArray(),
                 Headless = options.Headless,
                 Channel = options.Channel,
                 SlowMo = options.SlowMo,
                 Timeout = options.Timeout,
                 IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
-                Env = envFor(),
+                Env = persona.Env(envFor()),
                 Proxy = ToPwProxy(proxy),
             }), exe)), launchToken).ConfigureAwait(false);
 
@@ -238,6 +241,10 @@ public static class Clearcote
         var geometry = Geometry.ResolveHeadless(
             options.Headless, options.Fingerprint, args,
             callerSetGeometry: options.ViewportSize is not null || options.ScreenSize is not null);
+        // Regime 2 appends the headless display; the fit below keeps reading the caller's args. Then engine
+        // 1021: the persona switches leave the browser's argv for CLEARCOTE_PERSONA_ARGS when the engine
+        // reads them from there (see PersonaEnv). Probed once; every attempt's env gets the payload.
+        var persona = PersonaEnv.Plan(exe, args.Concat(geometry.Args), options.PersonaEnv);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
         var context = await License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
@@ -245,14 +252,13 @@ public static class Clearcote
             new BrowserTypeLaunchPersistentContextOptions
             {
                 ExecutablePath = exePath,
-                // Regime 2 appends the headless display; the fit below keeps reading the caller's args.
-                Args = args.Concat(geometry.Args).ToArray(),
+                Args = persona.Args.ToArray(),
                 Headless = options.Headless,
                 Channel = options.Channel,
                 SlowMo = options.SlowMo,
                 Timeout = options.Timeout,
                 IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
-                Env = envFor(),
+                Env = persona.Env(envFor()),
                 Proxy = ToPwProxy(proxy),
                 // Headed with no explicit viewport -> real window size (matches launch()).
                 // Headless -> the persona's display (regime 1) or the SDK's (regime 2), and the window
@@ -343,11 +349,16 @@ public static class Clearcote
         // Bind a per-launch run-token file (r23+ engine online-enforcement opt-in); passed ALONGSIDE
         // CLEARCOTE_RUN_TOKEN. Inert in free mode.
         var launchToken = lease?.BindLaunch();
+        // Engine 1021: the persona switches leave the browser's argv for CLEARCOTE_PERSONA_ARGS when the
+        // engine reads them from there (see PersonaEnv). Last, so everything above still reads them from
+        // engineArgs; cdpArgs never carry one and stay as they are.
+        var persona = PersonaEnv.Plan(exe, engineArgs, options.PersonaEnv);
 
         var proc = await License.ReleaseLeaseOnFailureAsync(lease, () => WinLaunch.WinAvRetryAsync(exePath =>
         {
             var psi = new ProcessStartInfo(exePath) { UseShellExecute = false };
-            foreach (var a in engineArgs.Concat(cdpArgs)) psi.ArgumentList.Add(a);
+            foreach (var a in persona.Args.Concat(cdpArgs)) psi.ArgumentList.Add(a);
+            if (persona.Payload is not null) psi.Environment[PersonaEnv.EnvVar] = persona.Payload;
             if (lease is not null) psi.Environment[License.RunTokenEnv] = lease.Token;
             if (launchToken is not null) psi.Environment[License.RunTokenFileEnv] = launchToken.File;
             // serve() starts the engine itself, so the child inherits this process's environment;

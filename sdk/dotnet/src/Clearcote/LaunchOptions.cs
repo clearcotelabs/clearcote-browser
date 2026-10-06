@@ -92,6 +92,17 @@ public class LaunchOptions : FingerprintOptions
     /// <para>Applies only to a socks5:// proxy; ignored otherwise. Needs a PRO engine 151 r17+, and
     /// a proxy that actually permits the ASSOCIATE command.</para>
     public bool Socks5Udp { get; set; }
+    /// Keep the persona switches (the seed, every persona override, proxy credentials, the
+    /// canvas-bridge token) off the browser's command line, which any local user can read, on an engine
+    /// that implements <c>--persona-from-env</c> (engine patch 1021): they travel in the
+    /// CLEARCOTE_PERSONA_ARGS environment variable instead.
+    ///
+    /// <para>Null = on unless CLEARCOTE_PERSONA_ENV is 0/false/off/no; an explicit value wins over it.
+    /// An engine without the switch, a persona too large for the variable, or Args that already carry
+    /// <c>--persona-from-env</c> or <c>--disable-persona-env-transport</c> keep the command line as
+    /// before. An SDK option only: it never reaches Playwright, and a Docker launch accepts and ignores
+    /// it (the image's own launch picks the transport).</para>
+    public bool? PersonaEnv { get; set; }
     /// Browser channel (e.g. "chrome") passed to Playwright, if any.
     public string? Channel { get; set; }
     /// Slow down operations by N ms (Playwright slowMo).

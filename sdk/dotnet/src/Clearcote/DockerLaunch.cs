@@ -130,7 +130,8 @@ internal static class DockerLaunch
     };
     private static readonly string[] Special =
         { "DevicePixelRatio", "FingerprintProfile", "Headless", "Proxy", "Args", "LicenseKey", "LicenseApiBase" };
-    private static readonly string[] SdkSide = { "Timeout", "SlowMo", "Quiet", "Docker", "DockerImage" };
+    // PersonaEnv: accepted and ignored, the image's own launch picks the persona transport.
+    private static readonly string[] SdkSide = { "Timeout", "SlowMo", "Quiet", "Docker", "DockerImage", "PersonaEnv" };
 
     /// Everything else LaunchOptions has is refused when set: a Docker launch takes the image's options,
     /// and (like any local launch) ignores the cloud section. Derived from the type, so an option added to
