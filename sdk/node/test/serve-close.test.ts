@@ -87,6 +87,23 @@ function alive(pid: number): boolean {
 }
 
 /**
+ * Wait, up to `ms`, for a browser that a serve child started to be gone; true once it is. The child's
+ * exit hook stops it, but no event loop runs there to reap it: it outlives the child as a zombie,
+ * which signal 0 still finds, until its new parent (init, or a subreaper) reaps it. Checked at once,
+ * that failed on Linux CI. A browser the hook never stopped is still there when the wait runs out,
+ * and is killed so a failed run leaves nothing running.
+ */
+async function goneAfterChild(pid: number, ms = 5_000): Promise<boolean> {
+  for (const deadline = Date.now() + ms; alive(pid); await sleep(25)) {
+    if (Date.now() >= deadline) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Stands in for the browser's CDP endpoint, which serve() polls until it answers. Like Chrome's, it
  * answers once the browser is up, its singleton included: the profile has a SingletonLock link.
  */
@@ -145,7 +162,7 @@ describe.skipIf(!POSIX)("serve(): close() against a browser that behaves like Ch
     try {
       // process.exit() runs no async work: the exit hook stops the browser and removes it all synchronously
       const { pid } = await runServeChild({ executablePath: standin, port: cdp.port, quiet: true });
-      expect(alive(pid)).toBe(false);
+      expect(await goneAfterChild(pid)).toBe(true);
       await sleep(700);
       expect(readdirSync(temp)).toEqual([]);
     } finally {
@@ -220,7 +237,7 @@ describe.runIf(ENGINE)("serve(): close() with a real engine", () => {
 
   it("leaves nothing either when the process exits without close()", async () => {
     const { pid } = await runServeChild({ executablePath: ENGINE!, quiet: true });
-    expect(alive(pid)).toBe(false);
+    expect(await goneAfterChild(pid)).toBe(true);
     await sleep(1_000);
     expect(readdirSync(temp).filter((n) => n !== "cc-fc-cache")).toEqual([]);
   }, 60_000);
