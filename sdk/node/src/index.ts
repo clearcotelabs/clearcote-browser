@@ -56,6 +56,7 @@ import {
   webrtcDefaultDenyArgs,
   DEFAULT_IGNORED_ARGS,
   gpuBlocklistArgs,
+  gpuBackendArgs,
   gateEngineSwitches,
   engineExtrasArgs,
   type PwProxy,
@@ -109,7 +110,7 @@ export { resolveGeo, resolveGeoDetailed, geoipTimeoutMs, GeoipError, type Geo, t
 export { proxiedRequest, toProxySpec, type ProxySpec } from "./net.js";
 export { resolveReleaseChannel, type ReleaseChannel } from "./download.js";
 export { isFingerprintPassthrough } from "./fingerprint.js";
-export { DEFAULT_IGNORED_ARGS, gpuBlocklistArgs, gateEngineSwitches, engineSupportsSwitch } from "./launchopts.js";
+export { DEFAULT_IGNORED_ARGS, gpuBlocklistArgs, gpuBackendArgs, xDisplayAvailable, gateEngineSwitches, engineSupportsSwitch } from "./launchopts.js";
 export { serveMultiplex, type MultiplexOptions, type MultiplexServer } from "./multiplex.js";
 export type { HumanizeOptions } from "./humanize.js";
 export { Profile, listProfiles, loadProfile, PROFILE_DIR, type ProfileOptions } from "./profile.js";
@@ -492,6 +493,11 @@ function assembleArgs(
   if (extra) {
     base.push(...engineExtrasArgs(extra, proxyForQuic, extra.quiet));
     base.push(...gpuBlocklistArgs(!!extra.headed, process.platform, userArgs));
+    // On a Linux host, render WebGL through the backend whose limits match the CLAIMED platform
+    // (read back from the built persona switch; absent = pass-through). See gpuBackendArgs.
+    base.push(...gpuBackendArgs(
+      fpArgs.find((a) => a.startsWith("--fingerprint-platform="))?.slice("--fingerprint-platform=".length),
+      !!extra.headed, process.platform, userArgs));
   }
   const merged = mergeFeatureFlags([...base, ...userArgs]);
   // Last: drop 152 r22+ switches this engine does not implement (with a warning), wherever they came from.

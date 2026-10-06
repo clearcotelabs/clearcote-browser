@@ -434,6 +434,11 @@ public static class Clearcote
         {
             baseList.AddRange(LaunchOpts.EngineExtrasArgs(extra.AllowThirdPartyCookies, extra.TransparentProxy, proxyForQuic, extra.Quiet));
             baseList.AddRange(LaunchOpts.GpuBlocklistArgs(extra.Headed, null, userArgs));
+            // On a Linux host, render WebGL through the backend whose limits match the CLAIMED
+            // platform (read back from the built persona switch; absent = pass-through).
+            baseList.AddRange(LaunchOpts.GpuBackendArgs(
+                fpArgs.Find(a => a.StartsWith(platFlag, System.StringComparison.Ordinal))?[platFlag.Length..],
+                extra.Headed, null, userArgs));
         }
         var merged = LaunchOpts.MergeFeatureFlags(baseList.Concat(userArgs));
         // Last: drop 152 r22+ switches this engine does not implement (with a warning), wherever they came from.

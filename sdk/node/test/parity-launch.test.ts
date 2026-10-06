@@ -7,6 +7,8 @@ import { join } from "node:path";
 import {
   DEFAULT_IGNORED_ARGS,
   gpuBlocklistArgs,
+  gpuBackendArgs,
+  xDisplayAvailable,
   gateEngineSwitches,
   engineExtrasArgs,
   GATED_ENGINE_SWITCHES,
@@ -47,6 +49,41 @@ describe("GPU launch defaults (#1 + #2)", () => {
 
   it("adds nothing for headless Linux (SwiftShader WebGL works there regardless — measured)", () => {
     expect(gpuBlocklistArgs(false, "linux")).toEqual([]);
+  });
+
+  // A display socket that exists on every host the suite runs on would make these host-dependent,
+  // so they use a remote-style DISPLAY (trusted without a socket probe) or none at all.
+  const remote = { DISPLAY: "remotehost:0" } as NodeJS.ProcessEnv;
+
+  it("gives a Windows claim on Linux SwiftShader, headed and headless (GL clamps VUV to 1024 under a D3D11 label)", () => {
+    expect(gpuBackendArgs("windows", true, "linux")).toEqual(["--use-angle=swiftshader-webgl"]);
+    expect(gpuBackendArgs("windows", false, "linux")).toEqual(["--use-angle=swiftshader-webgl"]);
+  });
+
+  it("gives a headless Linux claim Mesa only when an X display is reachable", () => {
+    expect(gpuBackendArgs("linux", false, "linux", [], remote)).toEqual(["--use-angle=gl", "--ignore-gpu-blocklist"]);
+    expect(gpuBackendArgs("linux", false, "linux", [], {} as NodeJS.ProcessEnv)).toEqual([]);
+    expect(gpuBackendArgs("linux", false, "linux", [], { DISPLAY: ":4242" } as NodeJS.ProcessEnv)).toEqual([]); // no such socket
+  });
+
+  it("leaves a headed Linux claim on the default GL path", () => {
+    expect(gpuBackendArgs("linux", true, "linux", [], remote)).toEqual([]);
+  });
+
+  it("never overrides the caller's backend, other hosts, pass-through or android", () => {
+    expect(gpuBackendArgs("windows", true, "linux", ["--use-angle=vulkan"])).toEqual([]);
+    expect(gpuBackendArgs("linux", false, "linux", ["--use-gl=egl"], remote)).toEqual([]);
+    expect(gpuBackendArgs("linux", false, "linux", ["--ignore-gpu-blocklist"], remote)).toEqual(["--use-angle=gl"]);
+    expect(gpuBackendArgs("windows", true, "win32")).toEqual([]);
+    expect(gpuBackendArgs("windows", true, "darwin")).toEqual([]);
+    expect(gpuBackendArgs(undefined, false, "linux", [], remote)).toEqual([]);
+    expect(gpuBackendArgs("android", false, "linux", [], remote)).toEqual([]);
+  });
+
+  it("xDisplayAvailable: empty and malformed displays are unreachable, a host:N display is trusted", () => {
+    expect(xDisplayAvailable({ DISPLAY: "" } as NodeJS.ProcessEnv)).toBe(false);
+    expect(xDisplayAvailable({ DISPLAY: ":abc" } as NodeJS.ProcessEnv)).toBe(false);
+    expect(xDisplayAvailable(remote)).toBe(true);
   });
 
   it("never duplicates a caller-supplied flag", () => {

@@ -2,6 +2,7 @@
 proxy resolution. Kept pure (input -> switches / cleaned options) so they're unit-testable and
 mirror the Node SDK exactly."""
 
+import os
 import re
 import sys
 import warnings
@@ -520,6 +521,57 @@ def gpu_blocklist_args(headed, platform=None, user_args=()):
     if "--ignore-gpu-blocklist" in (user_args or ()):
         return []
     return ["--ignore-gpu-blocklist"]
+
+
+def x_display_available(environ=None):
+    """Whether ``DISPLAY`` names an X server this process can reach.
+
+    ANGLE's OpenGL backend opens an X display even for a headless browser: measured on a GPU-less
+    Linux host, ``--use-angle=gl`` without one leaves WebGL disabled ("Could not open the default X
+    display"); with one (an Xvfb) it renders through Mesa. A local ``:N`` display is checked for its
+    socket; a ``host:N`` display cannot be probed cheaply, so it is trusted."""
+    env = os.environ if environ is None else environ
+    disp = (env.get("DISPLAY") or "").strip()
+    if not disp:
+        return False
+    if disp.startswith(":"):
+        num = disp[1:].split(".")[0]
+        return num.isdigit() and os.path.exists("/tmp/.X11-unix/X" + num)
+    return True
+
+
+def gpu_backend_args(claimed_platform, headed, platform=None, user_args=(), environ=None):
+    """The ANGLE backend whose WebGL limits match the platform the page is TOLD it is, on a Linux host.
+
+    A persona's renderer string names a GPU and an API; the limits the page reads next to it come
+    from whichever backend actually renders (the engine only ever lowers them). Measured 2026-10-06
+    on a GPU-less Linux host against real captures:
+
+    * A **Windows** claim names Direct3D11. ANGLE's OpenGL backend (Mesa, what a headed launch gets)
+      clamps MAX_VERTEX_UNIFORM_VECTORS to 1024 -- no real Direct3D11 Intel machine reports that
+      (0 of 129 captures; they report 4096) -- and translates shaders to GLSL. SwiftShader reports
+      4096, and the HLSL shader dialect (see shader_dialect) makes its translations match. So a
+      Windows claim gets ``--use-angle=swiftshader-webgl``, the engine's own headless default.
+    * A **Linux** claim names Mesa/OpenGL. Headless Chromium renders WebGL through SwiftShader
+      (8192 textures, 4096 vertex uniforms, SwiftShader shader text: nothing like Mesa); with an X
+      display reachable, ``--use-angle=gl`` renders through Mesa instead (16384 / 1024 / GLSL, the
+      values real Mesa machines report). Headed launches already get Mesa (gpu_blocklist_args).
+      Headless with NO display stays as it is: the GL backend cannot start without one.
+
+    ``claimed_platform`` None (pass-through: no persona) adds nothing, nor does any host other than
+    Linux, nor a caller who chose a backend with their own ``--use-angle=`` / ``--use-gl=``."""
+    platform = sys.platform if platform is None else platform
+    if claimed_platform is None or not str(platform).startswith("linux"):
+        return []
+    user = list(user_args or ())
+    if any(a.startswith(("--use-angle=", "--use-gl=")) for a in user):
+        return []
+    claim = str(claimed_platform).strip().lower()
+    if claim == "windows":
+        return ["--use-angle=swiftshader-webgl"]
+    if claim == "linux" and not headed and x_display_available(environ):
+        return ["--use-angle=gl"] + ([] if "--ignore-gpu-blocklist" in user else ["--ignore-gpu-blocklist"])
+    return []
 
 
 # -- new engine switches (152 r22+) -------------------------------------------------------------

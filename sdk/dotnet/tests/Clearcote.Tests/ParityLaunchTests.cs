@@ -49,6 +49,35 @@ public class ParityLaunchTests : IDisposable
         Assert.Empty(LaunchOpts.GpuBlocklistArgs(true, "linux", new[] { "--ignore-gpu-blocklist" }));
     }
 
+    // GPU backend per claimed platform. A remote-style DISPLAY is trusted without a socket probe and
+    // ":4242" has no socket on any test host, so these stay host-independent.
+    [Fact]
+    public void Gpu_backend_follows_the_claim_on_a_linux_host()
+    {
+        // Windows claim: SwiftShader, headed and headless (GL clamps VUV to 1024 under a D3D11 label).
+        Assert.Equal(new[] { "--use-angle=swiftshader-webgl" }, LaunchOpts.GpuBackendArgs("windows", true, "linux"));
+        Assert.Equal(new[] { "--use-angle=swiftshader-webgl" }, LaunchOpts.GpuBackendArgs("windows", false, "linux"));
+        // Linux claim, headless: Mesa only when an X display is reachable.
+        Assert.Equal(new[] { "--use-angle=gl", "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", null, "remotehost:0"));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", false, "linux", null, ":4242"));
+        // Headed Linux claim: already on the default GL path.
+        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", true, "linux", null, "remotehost:0"));
+    }
+
+    [Fact]
+    public void Gpu_backend_never_overrides_the_caller_other_hosts_or_passthrough()
+    {
+        Assert.Empty(LaunchOpts.GpuBackendArgs("windows", true, "linux", new[] { "--use-angle=vulkan" }));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--use-gl=egl" }, "remotehost:0"));
+        Assert.Equal(new[] { "--use-angle=gl" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--ignore-gpu-blocklist" }, "remotehost:0"));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("windows", true, "windows"));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("windows", true, "macos"));
+        Assert.Empty(LaunchOpts.GpuBackendArgs(null, false, "linux", null, "remotehost:0"));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("android", false, "linux", null, "remotehost:0"));
+        Assert.False(LaunchOpts.XDisplayAvailable(":abc"));
+        Assert.True(LaunchOpts.XDisplayAvailable("remotehost:0"));
+    }
+
     // ── capability probe + gating ────────────────────────────────────────────
 
     [Fact]

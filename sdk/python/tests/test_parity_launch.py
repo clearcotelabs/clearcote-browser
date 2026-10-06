@@ -15,8 +15,10 @@ from clearcote._launchopts import (
     _SWITCH_CACHE,
     engine_extras_args,
     gate_engine_switches,
+    gpu_backend_args,
     gpu_blocklist_args,
     serve_infobar_args,
+    x_display_available,
     serve_needs_no_sandbox,
 )
 from clearcote.download import pro_download_url, resolve_release_channel
@@ -60,6 +62,52 @@ def test_nothing_for_headless_linux():
 
 def test_never_duplicates_caller_flag():
     assert gpu_blocklist_args(True, "linux", ["--ignore-gpu-blocklist"]) == []
+
+
+# -- GPU backend per claimed platform (Linux host) -----------------------------------------------
+
+def _xsock(monkeypatch, present):
+    real = os.path.exists
+    monkeypatch.setattr(os.path, "exists", lambda p: present if str(p).startswith("/tmp/.X11-unix/X") else real(p))
+
+
+def test_windows_claim_on_linux_gets_swiftshader_headed_and_headless():
+    # ANGLE's GL backend clamps vertex uniform vectors to 1024 under a Direct3D11 label; SwiftShader gives 4096
+    assert gpu_backend_args("windows", True, "linux") == ["--use-angle=swiftshader-webgl"]
+    assert gpu_backend_args("windows", False, "linux") == ["--use-angle=swiftshader-webgl"]
+
+
+def test_linux_claim_headless_uses_mesa_only_with_a_reachable_display(monkeypatch):
+    _xsock(monkeypatch, True)
+    assert gpu_backend_args("linux", False, "linux", environ={"DISPLAY": ":99"}) == ["--use-angle=gl", "--ignore-gpu-blocklist"]
+    _xsock(monkeypatch, False)
+    assert gpu_backend_args("linux", False, "linux", environ={"DISPLAY": ":99"}) == []   # dead local display
+    assert gpu_backend_args("linux", False, "linux", environ={}) == []                   # no display at all
+
+
+def test_linux_claim_headed_is_left_to_the_default_gl_path(monkeypatch):
+    _xsock(monkeypatch, True)
+    assert gpu_backend_args("linux", True, "linux", environ={"DISPLAY": ":99"}) == []
+
+
+def test_backend_choice_never_overrides_the_caller_or_other_hosts(monkeypatch):
+    _xsock(monkeypatch, True)
+    env = {"DISPLAY": ":99"}
+    assert gpu_backend_args("windows", True, "linux", ["--use-angle=vulkan"]) == []
+    assert gpu_backend_args("linux", False, "linux", ["--use-gl=egl"], environ=env) == []
+    assert gpu_backend_args("linux", False, "linux", ["--ignore-gpu-blocklist"], environ=env) == ["--use-angle=gl"]
+    assert gpu_backend_args("windows", True, "win32") == []
+    assert gpu_backend_args("windows", True, "darwin") == []
+    assert gpu_backend_args(None, False, "linux", environ=env) == []        # pass-through: no persona
+    assert gpu_backend_args("android", False, "linux", environ=env) == []
+
+
+def test_x_display_available(monkeypatch):
+    _xsock(monkeypatch, True)
+    assert x_display_available({"DISPLAY": ":1.0"}) is True
+    assert x_display_available({"DISPLAY": "remotehost:0"}) is True
+    assert x_display_available({"DISPLAY": ""}) is False
+    assert x_display_available({"DISPLAY": ":abc"}) is False
 
 
 # -- gate_engine_switches -----------------------------------------------------------------------

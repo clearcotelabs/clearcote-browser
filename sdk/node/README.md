@@ -205,6 +205,8 @@ It reads the (unmasked) WebGL vendor/renderer the page sees, flags a software ra
 
 The renderer *string* alone is not enough: a persona renames the backend, so a SwiftShader fallback stops looking like one. The check therefore also measures limits the string cannot move — `MAX_TEXTURE_SIZE`, the vertex/fragment uniform-vector pair, and an actual 16384-wide texture allocation — and reports them as `maxTextureSize`, `maxVertexUniformVectors`, `maxFragmentUniformVectors` and `canAllocate16kTexture`. A renderer naming a desktop GPU while `MAX_TEXTURE_SIZE` is below 16384 is a spoof over a software rasterizer and comes back `coherent: false`. **Headless on Linux with no GPU hits exactly this** — Chromium falls back to SwiftShader (8192) whatever the persona claims, and no launch flag changes it on a display-less host. Run headed under Xvfb, or use the canvas bridge.
 
+On a Linux host the SDK picks the software backend that matches the GPU the persona names: a Linux persona (Mesa/OpenGL) renders through Mesa's own GL whenever an X display is reachable — headed, or headless with `DISPLAY` pointing at an Xvfb — and a Windows persona (Direct3D11) renders through SwiftShader, whose limits match Direct3D11. Your own `--use-angle=` / `--use-gl=` in `args` wins.
+
 ### Hardened launch defaults
 
 Every `launch()` already, with no extra options: **drops Playwright's `--enable-automation`** (so the engine's `AutomationControlled` feature stays off — pass your own `ignoreDefaultArgs` to override); **disables QUIC/HTTP-3 when a proxy is set** (a SOCKS5/HTTP proxy carries only TCP, so no UDP egresses around it); and prints a one-line **coherence warning** to stderr for incoherent option combos (silence with `quiet: true` or `CLEARCOTE_NO_WARN=1`).

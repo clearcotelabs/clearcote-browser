@@ -363,6 +363,47 @@ public static class LaunchOpts
         return new() { "--ignore-gpu-blocklist" };
     }
 
+    /// Whether <c>DISPLAY</c> names an X server this process can reach. ANGLE's OpenGL backend opens
+    /// an X display even for a headless browser: measured on a GPU-less Linux host,
+    /// <c>--use-angle=gl</c> without one leaves WebGL disabled ("Could not open the default X
+    /// display"); with one (an Xvfb) it renders through Mesa. A local <c>:N</c> display is checked
+    /// for its socket; a <c>host:N</c> display is trusted.
+    public static bool XDisplayAvailable(string? display = null)
+    {
+        var disp = (display ?? System.Environment.GetEnvironmentVariable("DISPLAY") ?? "").Trim();
+        if (disp.Length == 0) return false;
+        if (disp.StartsWith(':'))
+        {
+            var num = disp[1..].Split('.')[0];
+            return num.Length > 0 && num.All(char.IsAsciiDigit) && System.IO.File.Exists("/tmp/.X11-unix/X" + num);
+        }
+        return true;
+    }
+
+    /// The ANGLE backend whose WebGL limits match the platform the page is TOLD it is, on a Linux
+    /// host (mirrors Python's gpu_backend_args; measured 2026-10-06). A Windows
+    /// claim names Direct3D11: ANGLE's OpenGL backend (Mesa, what a headed launch gets) clamps
+    /// MAX_VERTEX_UNIFORM_VECTORS to 1024, which no real Direct3D11 Intel machine reports (they
+    /// report 4096), so it gets <c>--use-angle=swiftshader-webgl</c> (4096; the HLSL shader dialect
+    /// makes its translations match). A Linux claim names Mesa/OpenGL: headless Chromium renders
+    /// WebGL through SwiftShader (8192 textures, 4096 vertex uniforms), so with an X display
+    /// reachable it gets <c>--use-angle=gl</c> (Mesa: 16384 / 1024 / GLSL). Headed launches already
+    /// get Mesa; headless with no display stays as it is. A null claim (pass-through), a host other
+    /// than Linux, or a caller's own <c>--use-angle=</c> / <c>--use-gl=</c> adds nothing.
+    public static List<string> GpuBackendArgs(string? claimedPlatform, bool headed, string? osTag = null,
+                                              IEnumerable<string>? userArgs = null, string? display = null)
+    {
+        if (claimedPlatform is null || (osTag ?? Native.OsTag) != "linux") return new();
+        var user = userArgs?.ToList() ?? new List<string>();
+        if (user.Any(a => a.StartsWith("--use-angle=", StringComparison.Ordinal) || a.StartsWith("--use-gl=", StringComparison.Ordinal)))
+            return new();
+        var claim = claimedPlatform.Trim().ToLowerInvariant();
+        if (claim == "windows") return new() { "--use-angle=swiftshader-webgl" };
+        if (claim == "linux" && !headed && XDisplayAvailable(display))
+            return user.Contains("--ignore-gpu-blocklist") ? new() { "--use-angle=gl" } : new() { "--use-angle=gl", "--ignore-gpu-blocklist" };
+        return new();
+    }
+
     // ── engine capability probe ─────────────────────────────────────────────
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, bool> SwitchCache = new();

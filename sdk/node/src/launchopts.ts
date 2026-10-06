@@ -468,6 +468,55 @@ export function gpuBlocklistArgs(headed: boolean, platform: NodeJS.Platform = pr
   return ["--ignore-gpu-blocklist"];
 }
 
+/**
+ * Whether `DISPLAY` names an X server this process can reach. ANGLE's OpenGL backend opens an X
+ * display even for a headless browser: measured on a GPU-less Linux host, `--use-angle=gl` without
+ * one leaves WebGL disabled ("Could not open the default X display"); with one (an Xvfb) it renders
+ * through Mesa. A local `:N` display is checked for its socket; a `host:N` display is trusted.
+ */
+export function xDisplayAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
+  const disp = (env.DISPLAY ?? "").trim();
+  if (!disp) return false;
+  if (disp.startsWith(":")) {
+    const num = disp.slice(1).split(".")[0];
+    return /^\d+$/.test(num) && existsSync(`/tmp/.X11-unix/X${num}`);
+  }
+  return true;
+}
+
+/**
+ * The ANGLE backend whose WebGL limits match the platform the page is TOLD it is, on a Linux host
+ * (mirrors Python's gpu_backend_args; measured 2026-10-06).
+ *
+ * - A **Windows** claim names Direct3D11. ANGLE's OpenGL backend (Mesa, what a headed launch gets)
+ *   clamps MAX_VERTEX_UNIFORM_VECTORS to 1024, which no real Direct3D11 Intel machine reports (0 of 129
+ *   captures; they report 4096). SwiftShader reports 4096, and the HLSL shader dialect makes its
+ *   translations match: `--use-angle=swiftshader-webgl`, the engine's own headless default.
+ * - A **Linux** claim names Mesa/OpenGL. Headless Chromium renders WebGL through SwiftShader (8192
+ *   textures, 4096 vertex uniforms, SwiftShader shader text); with an X display reachable,
+ *   `--use-angle=gl` renders through Mesa (16384 / 1024 / GLSL, what real Mesa machines report).
+ *   Headed launches already get Mesa (gpuBlocklistArgs). Headless with no display stays as it is.
+ *
+ * `claimedPlatform` undefined (pass-through: no persona) adds nothing, nor does a host other than
+ * Linux, nor a caller who chose a backend with their own `--use-angle=` / `--use-gl=`.
+ */
+export function gpuBackendArgs(
+  claimedPlatform: string | undefined,
+  headed: boolean,
+  platform: NodeJS.Platform = process.platform,
+  userArgs: readonly string[] = [],
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  if (claimedPlatform === undefined || platform !== "linux") return [];
+  if (userArgs.some((a) => a.startsWith("--use-angle=") || a.startsWith("--use-gl="))) return [];
+  const claim = claimedPlatform.trim().toLowerCase();
+  if (claim === "windows") return ["--use-angle=swiftshader-webgl"];
+  if (claim === "linux" && !headed && xDisplayAvailable(env)) {
+    return userArgs.includes("--ignore-gpu-blocklist") ? ["--use-angle=gl"] : ["--use-angle=gl", "--ignore-gpu-blocklist"];
+  }
+  return [];
+}
+
 // ── new engine switches (152 r22+) ──────────────────────────────────────────────────────────────
 
 /** Switches introduced in engine 152 r22, with what the caller asked for. Gated per binary. */

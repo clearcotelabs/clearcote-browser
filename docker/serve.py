@@ -342,7 +342,7 @@ subprocess.Popen(
 
 # Display mode: default is HEADFUL on a virtual X display (Xvfb) — a real headed browser avoids
 # the headless-mode tells some detectors probe. Set CC_HEADLESS=1 to force pure-headless (no Xvfb).
-# Either way the container has no GPU, so WebGL/WebGPU still go through ANGLE/SwiftShader (below).
+# The container has no GPU; which software backend renders WebGL depends on the persona (below).
 headless = os.environ.get("CC_HEADLESS", "").strip().lower() in ("1", "true", "yes")
 mode_args = []
 if headless:
@@ -353,6 +353,16 @@ else:
     if not os.environ.get("DISPLAY"):  # start our own Xvfb only if the host didn't provide a display
         # xvfb_screen is the SAME CC_SCREEN the persona's claimed screen was pinned to above; that
         # shared parse is the whole point, so the display and the claim cannot drift apart again.
+        # A container keeps /tmp across `docker restart` (and every --restart policy), so the previous
+        # run's Xvfb lock and socket are still there: the new Xvfb exits "Server is already active for
+        # display", Chrome then exits "Missing X server", and the container dies. Nothing can still own
+        # them -- this process tree has only just started -- so remove them first.
+        num = display.lstrip(":").split(".")[0]
+        for stale in ("/tmp/.X%s-lock" % num, "/tmp/.X11-unix/X%s" % num):
+            try:
+                os.remove(stale)
+            except FileNotFoundError:
+                pass
         subprocess.Popen(["Xvfb", display, "-screen", "0", xvfb_screen, "-nolisten", "tcp", "-ac"])
         sock = "/tmp/.X11-unix/X" + display.lstrip(":").split(".")[0]
         for _ in range(100):  # wait up to ~10s for the virtual display to come up
@@ -362,10 +372,26 @@ else:
     os.environ["DISPLAY"] = display  # inherited by chrome via `env` below
     print(f"[clearcote] display: headful on Xvfb {display}", flush=True)
 
+# The container has no GPU, so WebGL renders in software -- through the backend whose limits match the
+# GPU the persona NAMES (measured 2026-10-06 against real captures):
+# * a Linux persona names "Mesa Intel ... OpenGL 4.6". SwiftShader gives it 8192 textures, 4096 vertex
+#   uniform vectors and SwiftShader shader text, which no Mesa machine reports; Mesa's own software GL
+#   (llvmpipe, shipped in this image) gives 16384 / 1024 / GLSL like real Mesa machines. It needs an X
+#   display, so it is used headful (the default) and not under CC_HEADLESS.
+# * a Windows persona names Direct3D11. SwiftShader gives the Direct3D11-like 4096 vertex uniform vectors
+#   (Mesa's GL clamps them to 1024) and, with the HLSL dialect below, matching shader translations.
+# --enable-unsafe-swiftshader stays on both: if Mesa cannot start, WebGL falls back rather than vanishing.
+# CC_EXTRA_ARGS comes last on the line, so a --use-angle= there still wins.
+if persona_platform(opts) == "linux" and not headless:
+    gpu_args = ["--use-gl=angle", "--use-angle=gl", "--ignore-gpu-blocklist", "--enable-unsafe-swiftshader"]
+else:
+    gpu_args = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
+print("[clearcote] WebGL backend: %s" % ("Mesa GL (llvmpipe)" if "--use-angle=gl" in gpu_args else "SwiftShader"),
+      flush=True)
+
 base_args = [
     "--no-sandbox", "--disable-dev-shm-usage",
-    # container has no GPU -> ANGLE/SwiftShader so WebGL/WebGPU stay coherent
-    "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
+] + gpu_args + [
     f"--remote-debugging-port={internal}", "--remote-allow-origins=*",
     "--user-data-dir=%s" % PROFILE_DIR,
 ] + mode_args + window_args + args + web_bluetooth_args(persona_platform(opts)) + proxy_args + extra

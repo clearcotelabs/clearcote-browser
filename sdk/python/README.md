@@ -282,6 +282,11 @@ allocation — and reports them as `max_texture_size`, `max_vertex_uniform_vecto
 SwiftShader (8192) whatever the persona claims, and no launch flag changes it on a display-less
 host. Run headed under Xvfb, or use the canvas bridge.
 
+On a Linux host the SDK picks the software backend that matches the GPU the persona names: a Linux
+persona (Mesa/OpenGL) renders through Mesa's own GL whenever an X display is reachable — headed, or
+headless with `DISPLAY` pointing at an Xvfb — and a Windows persona (Direct3D11) renders through
+SwiftShader, whose limits match Direct3D11. Your own `--use-angle=` / `--use-gl=` in `args` wins.
+
 ### Hardened launch defaults
 
 Every `launch()` already does, with no extra options:
