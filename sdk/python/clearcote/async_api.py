@@ -41,6 +41,7 @@ from ._geometry import apply_headless_geometry, fit_window_to_work_area_async
 from ._license import inject_run_token
 from ._fonts import apply_font_env
 from ._shaderdialect import apply_shader_dialect
+from . import _personaenv
 from ._humanize_async import install_humanize, install_humanize_on_context
 from ._profile import Profile, list_profiles, load_profile
 from ._render_async import check_render_coherence
@@ -265,6 +266,7 @@ async def launch(cloud=None, **kwargs):
         return await launch_docker_async({**kwargs, "docker_image": docker_image})
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
+    persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
     lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
     exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(
         _prepare_releasing, kwargs, lease)
@@ -278,6 +280,7 @@ async def launch(cloud=None, **kwargs):
     # new_page/new_context (see _geometry).
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args)
     launch_args = _with_geometry_args(args, geom)
+    launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     pw = await _start_driver()
     try:
         browser = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
@@ -319,11 +322,13 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     # Automation strip before the Widevine helper (it appends --disable-component-update rather than
     # clobbering ['--enable-automation']) — mirrors the sync path.
     kwargs.setdefault("ignore_default_args", list(DEFAULT_IGNORED_ARGS))
-    if kwargs.get("widevine"):
+    widevine, wv_quiet = bool(kwargs.get("widevine")), kwargs.get("quiet", False)
+    if widevine:
         from ._widevine import apply_widevine_launch
-        await asyncio.to_thread(apply_widevine_launch, user_data_dir, kwargs, kwargs.get("quiet", False))
+        await asyncio.to_thread(apply_widevine_launch, user_data_dir, kwargs, wv_quiet)
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
+    persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
     lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
     exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(
         _prepare_releasing, kwargs, lease)
@@ -338,6 +343,10 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     else:  # headless: persona owns screen -> fit the window; no persona -> set the display too
         geom = apply_headless_geometry(pw_kwargs, seed, args)
     launch_args = _with_geometry_args(args, geom)
+    if widevine:
+        from ._widevine import widevine_cdm_args
+        launch_args = launch_args + await asyncio.to_thread(widevine_cdm_args, exe, wv_quiet)
+    launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     pw = await _start_driver()
     try:
         context = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(

@@ -127,7 +127,7 @@ _BOOL_ENV = {
 # Handled specially below, or on this side of the connection.
 _SPECIAL = ("location", "fingerprint_profile", "headless", "proxy", "args", "license_key", "license_api_base")
 SDK_SIDE = ("timeout", "slow_mo", "humanize", "show_cursor", "quiet", "docker", "docker_image",
-            "ephemeral_profile")
+            "ephemeral_profile", "persona_env")  # persona_env: the image's own launch picks the transport
 ACCEPTED = tuple(_STR_ENV) + tuple(_INT_ENV) + tuple(_FLOAT_ENV) + tuple(_BOOL_ENV) + _SPECIAL + SDK_SIDE
 
 

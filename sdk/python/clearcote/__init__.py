@@ -39,6 +39,7 @@ from ._fingerprint import (
 from ._fontpersona import ensure_persona_fonts, font_reachability, profile_with_windows11_faces
 from ._fonts import apply_font_env
 from ._shaderdialect import apply_shader_dialect
+from . import _personaenv
 from ._geometry import apply_headless_geometry, fit_window_to_work_area
 from ._humanize import install_humanize, install_humanize_on_context
 from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
@@ -77,7 +78,7 @@ from ._profileauto import (
 )
 from ._render import check_render_coherence
 from ._warnings import emit_coherence_warnings
-from ._widevine import apply_widevine_launch, fetch_widevine, seed_widevine
+from ._widevine import apply_widevine_launch, fetch_widevine, seed_widevine, widevine_cdm_args
 from ._license import (
     STALE_TOKEN_REFUSAL,
     ConcurrencyLimitError,
@@ -1065,6 +1066,7 @@ def launch(cloud=None, **kwargs):
         return _install_persistent_as_browser(_launch_on_throwaway_profile("clearcote-run-", kwargs))
 
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
+    persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
     # _cc_lease (internal): the host probe behind profile="auto" runs on its caller's slot rather
     # than checking out its own. It does not own the lease, so it must not release it on close.
     reused = kwargs.pop("_cc_lease", None)
@@ -1084,6 +1086,7 @@ def launch(cloud=None, **kwargs):
     # context option, so it rides on new_page/new_context.
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args)
     launch_args = _with_geometry_args(args, geom)
+    launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     browser = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
         lease, pw_kwargs, launch_token, lambda: _win_av_retry(
             lambda e: _playwright().chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe
@@ -1124,9 +1127,11 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     # --disable-component-update to it rather than replacing it (which would lose the AutomationControlled
     # strip on Widevine launches).
     kwargs.setdefault("ignore_default_args", list(DEFAULT_IGNORED_ARGS))
-    if kwargs.get("widevine"):
-        apply_widevine_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
+    widevine, wv_quiet = bool(kwargs.get("widevine")), kwargs.get("quiet", False)
+    if widevine:
+        apply_widevine_launch(user_data_dir, kwargs, quiet=wv_quiet)
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
+    persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
     # _cc_lease (internal): a launch that borrows its caller's slot (the profile="auto" host probe
     # reaches here when ephemeral_profile is left on). It must not release a slot it does not own.
     reused = kwargs.pop("_cc_lease", None)
@@ -1146,6 +1151,9 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     else:  # headless: persona owns screen -> fit the window; no persona -> set the display too
         geom = apply_headless_geometry(pw_kwargs, seed, args)
     launch_args = _with_geometry_args(args, geom)
+    if widevine:
+        launch_args = launch_args + widevine_cdm_args(exe, quiet=wv_quiet)
+    launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     context = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
         lease, pw_kwargs, launch_token, lambda: _win_av_retry(
             lambda e: _playwright().chromium.launch_persistent_context(

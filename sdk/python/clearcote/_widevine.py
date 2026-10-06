@@ -221,3 +221,18 @@ def seed_widevine(user_data_dir, cdm_dir=None, quiet=False):
     if not quiet:
         print("[widevine] seeded into", wv_root)
     return target
+
+
+def widevine_cdm_args(exe, quiet=False):
+    """``["--widevine-cdm-path=<the fetched CDM>"]`` when the engine implements that switch (patch 1022),
+    else ``[]``. Such an engine registers the CDM at startup in every profile, Playwright's throwaway ones
+    included, so DRM no longer depends on the component updater; the hint file that
+    :func:`apply_widevine_launch` seeds keeps older engines working. Best-effort, like the rest of DRM:
+    any failure answers ``[]`` and the launch goes on."""
+    try:
+        from ._launchopts import engine_supports_switch
+        if not engine_supports_switch(exe, "widevine-cdm-path"):
+            return []
+        return ["--widevine-cdm-path=" + fetch_widevine(quiet=quiet)]
+    except Exception:
+        return []

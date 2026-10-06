@@ -32,6 +32,8 @@ import os
 import shutil
 import socket
 import subprocess
+
+from . import _personaenv
 import sys
 import tempfile
 import time
@@ -182,6 +184,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     # ...and never carries Playwright's --disable-features, so _prepare has nothing to replace.
     kwargs["_cc_direct"] = True
     shader_dialect = kwargs.pop("shader_dialect", None)  # an env var for the GPU process, not a switch
+    persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a switch
     resolve_shader_dialect(shader_dialect, [])  # a typo raises here, before a lease or a temp dir exists
     # License (opt-in, inert in free mode). This MUST run before _prepare: it converts license_key
     # into the _cc_pro tuple _prepare needs to select the gated binary. Without it serve() silently
@@ -245,6 +248,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     # Launched DIRECTLY (no automation framework) -> no --enable-automation -> webdriver stays false.
     # Wrap in _win_av_retry so a just-extracted binary survives the Windows SxS/AV first-launch race
     # ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
+    args, env = _personaenv.apply(exe, args, env, persona_env)  # persona off the browser's argv (1021)
     proc = _win_av_retry(
         lambda e: subprocess.Popen([e] + args + cdp, env=env,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
