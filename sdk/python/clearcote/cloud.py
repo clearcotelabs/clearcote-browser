@@ -226,7 +226,7 @@ def _local_only_options():
         "allow_third_party_cookies", "transparent_proxy", "license_key", "license_api_base",
         "license_through_proxy", "env", "devtools", "downloads_path", "traces_dir",
         "chromium_sandbox", "channel", "handle_sigint", "handle_sigterm", "handle_sighup",
-        "firefox_user_prefs", "artifacts_dir",
+        "firefox_user_prefs", "artifacts_dir", "docker", "docker_image",
     )
     return persona + tuple(AGENT_KEYS) + launch_side
 

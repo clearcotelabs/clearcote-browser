@@ -103,6 +103,7 @@ from ._serve import Server, serve
 from .cloud import (
     AsyncCloud, Cloud, CloudError, CloudTimeoutError, cloud_requested, launch_cloud, verify_webhook,
 )
+from ._docker import DockerUnavailableError, docker_requested, launch_docker
 
 __all__ = [
     "launch",
@@ -111,6 +112,7 @@ __all__ = [
     "CloudError",
     "CloudTimeoutError",
     "verify_webhook",
+    "DockerUnavailableError",
     "launch_persistent_context",
     "launch_agent",
     "serve",
@@ -349,7 +351,7 @@ def _apply_auto_profile(fp, exe, select, quiet=False, pro=None, lease=None):
     host = measure_host(
         lambda **kw: launch(
             license_key=license_key, license_api_base=api_base, ephemeral_profile=False,
-            _cc_lease=lease, cloud=False, **kw
+            _cc_lease=lease, cloud=False, docker=False, **kw
         ),
         exe,
         major,
@@ -1004,6 +1006,14 @@ def launch(cloud=None, **kwargs):
     ``slow_mo`` go to the CDP connect; ``timeout`` defaults to 120 000 ms there, as the browser
     starts when you connect.
 
+    MACOS. There is no native macOS build, so on macOS launch() starts the Clearcote Docker image
+    (``teamflatearth/clearcote:sdk-<version>``; ``docker_image=`` or CLEARCOTE_DOCKER_IMAGE picks
+    another) and returns the same Playwright ``Browser``, connected to it over CDP; ``close()`` stops
+    the container. The persona options, ``headless``, ``proxy``, ``args``, ``version`` and the licence
+    key go to the container; an option it cannot take raises ValueError naming it. Docker must be
+    installed and running (DockerUnavailableError says so otherwise). ``docker=False`` (or
+    CLEARCOTE_DOCKER=0) turns this off; ``docker=True`` uses the container on any OS.
+
     Fingerprint kwargs: fingerprint, platform, platform_version, brand, brand_version,
     gpu_vendor, gpu_renderer, hardware_concurrency, location, timezone, accept_language,
     webrtc_ip, disable_gpu_fingerprint. Pass geoip=True to resolve the proxy's exit-IP geo and
@@ -1026,6 +1036,9 @@ def launch(cloud=None, **kwargs):
     if cloud_requested(cloud):
         return launch_cloud(cloud, kwargs)
     _drop_cloud_credentials(kwargs)
+    docker, docker_image = kwargs.pop("docker", None), kwargs.pop("docker_image", None)
+    if docker_requested(docker, kwargs):  # macOS (no native build): the Clearcote Docker image
+        return launch_docker({**kwargs, "docker_image": docker_image})
     # ephemeral_profile=False restores the pre-0.23 incognito launch. Kept because the persistent
     # path costs a directory create+delete per launch, which a caller spawning hundreds of
     # short-lived browsers may reasonably not want to pay for a CDM they never touch.

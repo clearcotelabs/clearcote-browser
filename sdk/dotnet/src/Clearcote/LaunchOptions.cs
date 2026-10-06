@@ -112,6 +112,17 @@ public class LaunchOptions : FingerprintOptions
     /// <see cref="ViewportSize"/> for how it interacts with the SDK default.
     public ScreenSize? ScreenSize { get; set; }
 
+    // ── macOS: the Clearcote Docker image ────────────────────────────────────
+    // There is no native macOS build, so on macOS LaunchAsync runs the Clearcote Docker image and
+    // connects to it (see Clearcote.LaunchAsync).
+
+    /// Run Clearcote in its Docker image. Null: on macOS only (there is no native macOS build), unless
+    /// ExecutablePath / CLEARCOTE_BINARY names a binary; CLEARCOTE_DOCKER=0/1 decides when this is null.
+    /// False turns it off; true uses the image on any OS.
+    public bool? Docker { get; set; }
+    /// The image to run. Default CLEARCOTE_DOCKER_IMAGE, else teamflatearth/clearcote:sdk-&lt;SDK version&gt;.
+    public string? DockerImage { get; set; }
+
     // ── local or cloud ───────────────────────────────────────────────────────
     // A cloud launch takes the persona options that also exist for a hosted browser (Fingerprint,
     // Platform, Brand, Timezone, AcceptLanguage, LightStealth, Geoip, Headless, Proxy, Version) plus the

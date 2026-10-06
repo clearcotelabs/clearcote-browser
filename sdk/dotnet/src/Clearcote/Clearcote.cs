@@ -30,6 +30,10 @@ public static class Clearcote
 
     internal static Task<IPlaywright> PlaywrightInstanceAsync() => PlaywrightAsync();
 
+    /// The Docker container a browser from <see cref="LaunchAsync"/> runs in (macOS); null for any other browser.
+    public static DockerContainer? DockerContainerOf(object browser)
+        => DockerLaunch.Containers.TryGetValue(browser, out var c) ? c : null;
+
     /// Resolve the chrome binary path: explicit ExecutablePath &gt; CLEARCOTE_BINARY env &gt; PRO (when
     /// licensed) &gt; free auto-download. Downloads + SHA-256-verifies as needed.
     public static async Task<string> ExecutablePathAsync(LaunchOptions? options = null)
@@ -86,10 +90,22 @@ public static class Clearcote
     /// the hosted session. Options only a browser on this machine can take are refused by name before
     /// anything is created. See <see cref="Cloud"/> for the rest of the hosted API.
     /// </para>
+    /// <para>
+    /// MACOS. There is no native macOS build, so on macOS this starts the Clearcote Docker image
+    /// (teamflatearth/clearcote:sdk-&lt;version&gt;; <see cref="LaunchOptions.DockerImage"/> or
+    /// CLEARCOTE_DOCKER_IMAGE picks another) and returns the same Playwright <see cref="IBrowser"/>, connected
+    /// to it over CDP; CloseAsync stops the container. The persona options, Headless, Proxy, Args, Version and
+    /// the licence key go to the container; an option it cannot take is refused by name.
+    /// <see cref="DockerUnavailableException"/> says so when Docker is missing or not running.
+    /// <see cref="LaunchOptions.Docker"/> = false (or CLEARCOTE_DOCKER=0) turns this off; true uses the
+    /// container on any OS. <see cref="DockerContainerOf"/> names the container.
+    /// </para>
     /// </remarks>
     public static async Task<IBrowser> LaunchAsync(LaunchOptions? options = null)
     {
         if (CloudLaunch.Requested(options)) return await CloudLaunch.LaunchBrowserAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
+        // macOS (no native build): the Clearcote Docker image, connected over CDP.
+        if (DockerLaunch.Requested(options)) return await DockerLaunch.LaunchBrowserAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);

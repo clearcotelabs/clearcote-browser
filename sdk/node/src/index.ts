@@ -71,6 +71,8 @@ import {
 } from "./geometry.js";
 import { acquireLease, resolveLicenseKey, withRunToken, STALE_TOKEN_REFUSAL, type LicenseOptions, type LeaseSession } from "./license.js";
 import { Cloud, cloudRequested, launchCloud, verifyWebhook, type CloudLaunchOptions, type CloudProfile } from "./cloud.js";
+import { dockerRequested, launchDocker, type DockerOption } from "./docker.js";
+export { DockerUnavailableError, type DockerContainer, type DockerOption } from "./docker.js";
 
 export {
   Cloud,
@@ -270,7 +272,7 @@ interface CloudSwitchOption {
 }
 
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption, DockerOption {}
 
 /** The account options a local launch drops (see CloudSwitchOption). */
 function withoutCloudOptions<T extends object>(options: T): T {
@@ -979,11 +981,25 @@ export async function retryOnStaleRunToken<T>(lease: LeaseSession | null, start:
  * CLEARCOTE_API_KEY; the cloud options are {@link CloudLaunchOptions}, and an option a cloud browser
  * cannot take (executablePath, args, userDataDir, ...) throws naming it. `close()` disconnects and
  * ends the session.
+ *
+ * MACOS. There is no native macOS build, so on macOS launch() starts the Clearcote Docker image
+ * (teamflatearth/clearcote:sdk-<version>; `dockerImage` or CLEARCOTE_DOCKER_IMAGE picks another) and
+ * resolves to the same Playwright `Browser`, connected to it over CDP; `close()` stops the container.
+ * The persona options, `headless`, `proxy`, `args`, `version` and the licence key go to the container;
+ * an option it cannot take throws naming it. Docker must be installed and running
+ * ({@link DockerUnavailableError} says so otherwise). `docker: false` (or CLEARCOTE_DOCKER=0) turns
+ * this off; `docker: true` uses the container on any OS.
  */
 export async function launch(options: LaunchOptions | CloudLaunchOptions = {}): Promise<Browser> {
   if (cloudRequested((options as CloudSwitchOption).cloud)) {
     return (await launchCloud(options as Record<string, unknown>)) as Browser;
   }
+  const { docker, dockerImage, ...notDocker } = options as LaunchOptions;
+  if (dockerRequested(docker, notDocker as Record<string, unknown>)) {
+    // macOS (no native build): the Clearcote Docker image, connected over CDP
+    return launchDocker({ ...(withoutCloudOptions(notDocker) as Record<string, unknown>), dockerImage });
+  }
+  options = notDocker;
   // ephemeralProfile: false restores the pre-0.23 incognito launch. Kept because the persistent
   // path costs a directory create+delete per launch, which a caller spawning hundreds of
   // short-lived browsers may reasonably not want to pay for a CDM they never touch.
