@@ -49,9 +49,10 @@ class FakeGitHub:
     checks against the other SDKs). `digest` controls the asset's digest field: a callable(pin) -> value,
     or None to leave the field out, as GitHub did for assets uploaded before it computed digests."""
 
-    def __init__(self, digest=lambda pin: "sha256:" + pin["sha256"]):
+    def __init__(self, digest=lambda pin: "sha256:" + pin["sha256"], extra_assets=()):
         self.platforms, self.repo = python_pins()
         self.digest = digest
+        self.extra_assets = list(extra_assets)  # more asset names on every release, after the pinned ones
         self.urls = []
 
     def __call__(self, url, token=None):
@@ -67,6 +68,8 @@ class FakeGitHub:
                 if self.digest is not None:
                     a["digest"] = self.digest(pin)
                 assets.append(a)
+            for name in self.extra_assets:
+                assets.append({"name": name, "browser_download_url": f"https://github.com/{self.repo}/releases/download/{tag}/{name}"})
             assets.append({"name": "SHA256SUMS.txt",
                            "browser_download_url": f"https://github.com/{self.repo}/releases/download/{tag}/SHA256SUMS.txt"})
             return json.dumps({"tag_name": tag, "assets": assets})
@@ -93,6 +96,11 @@ class GateCase(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         self.assertIn(old, text, f"fixture edit target not found in {path.name}")
         path.write_text(text.replace(old, new, count), encoding="utf-8")
+
+    def edit_all(self, py, ts, cs):
+        """The same change in all three SDKs (each an (old, new) pair), so the pins still agree."""
+        for path, (old, new) in ((self.py, py), (self.ts, ts), (self.cs, cs)):
+            self.edit(path, old, new)
 
     def run_gate(self, fake=None):
         """Run main() against the temp pin files and a fake GitHub. Returns (exit code, stdout)."""
@@ -168,6 +176,131 @@ class DotnetPinTest(GateCase):
         code, out = self.run_gate()
         self.assertEqual(code, 1, out)
         self.assertIn("Release.cs", out)
+
+
+class CommentedOutCodeTest(GateCase):
+    """Commented-out pin code is not a pin: C# and TypeScript comments are removed before parsing."""
+
+    def test_strip_comments_keeps_strings_and_line_structure(self):
+        src = ('var u = "https://x/y"; // gone 1\n'
+               '/* gone 2\n   gone 3 */ var c = \'"\'; var v = @"C:\\dir\\"; var s = "a /* b */ c // d";\n'
+               'var r = """raw // kept""";  /** gone 4 */\n'
+               'const t = `tpl // kept`; const e = "esc \\" // kept";\n')
+        out = self.gate.strip_comments(src)
+        self.assertEqual(out.count("\n"), src.count("\n"))
+        for kept in ('"https://x/y"', "'\"'", '@"C:\\dir\\"', '"a /* b */ c // d"', '"""raw // kept"""',
+                     "`tpl // kept`", '"esc \\" // kept"'):
+            self.assertIn(kept, out)
+        self.assertNotIn("gone", out)
+
+    def test_dotnet_platform_in_a_block_comment_is_not_pinned(self):
+        self.edit(self.cs, ', ["linux"] = Linux', ' /* , ["linux"] = Linux */')
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("platform sets differ", out)
+
+    def test_dotnet_platform_in_a_line_comment_is_not_pinned(self):
+        self.edit(self.cs, ', ["linux"] = Linux };', ', // ["linux"] = Linux\n        };')
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("platform sets differ", out)
+
+    def test_dotnet_field_in_a_line_comment_is_ignored(self):
+        tag = python_pins()[0]["win32"]["tag"]
+        self.edit(self.cs, f'Tag = "{tag}",', f'// Tag = "{tag}",\n        Tag = "v0.0.0-drifted",')
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("v0.0.0-drifted", out)
+
+    def test_dotnet_field_in_a_block_comment_is_ignored(self):
+        tag = python_pins()[0]["win32"]["tag"]
+        self.edit(self.cs, f'Tag = "{tag}",', f'/* Tag = "{tag}", */ Tag = "v0.0.0-drifted",')
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("v0.0.0-drifted", out)
+
+    def test_node_field_in_a_line_comment_is_ignored(self):
+        tag = python_pins()[0]["win32"]["tag"]
+        self.edit(self.ts, f'tag: "{tag}",', f'// tag: "{tag}",\n  tag: "v0.0.0-drifted",')
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("v0.0.0-drifted", out)
+
+
+class ArchiveAndAssetGlobTest(GateCase):
+    """`archive` picks how the SDKs unpack the asset; `assetGlob` is the marker their auto-update uses to pick a
+    release's asset (`^clearcote-.*-<glob>\\.(zip|tar.xz)$`). Both must agree across the SDKs and with the
+    release's real asset names."""
+
+    WIN_GLOB = ('"asset_glob": "windows-x64",', 'assetGlob: "windows-x64",', 'AssetGlob = "windows-x64",')
+    LINUX_ARCHIVE = ('"archive": "tar.xz",', 'archive: "tar.xz",', 'Archive = "tar.xz",')
+
+    def change(self, triple, old, new):
+        self.edit_all(*[(t, t.replace(old, new)) for t in triple])
+
+    def test_every_sdk_pins_archive_and_glob(self):
+        py, _ = python_pins()
+        for sdk, load in (("node", self.gate.load_node), ("python", self.gate.load_python),
+                          ("dotnet", self.gate.load_dotnet)):
+            pins = load()
+            for oskey, p in py.items():
+                self.assertEqual(pins[oskey]["archive"], p["archive"], f"{sdk} {oskey}")
+                self.assertEqual(pins[oskey]["assetGlob"], p["asset_glob"], f"{sdk} {oskey}")
+
+    def test_dotnet_archive_drift_fails(self):
+        self.edit(self.cs, 'Archive = "tar.xz",', 'Archive = "zip",')
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("archive", out)
+        self.assertIn("dotnet", out)
+
+    def test_dotnet_asset_glob_drift_fails(self):
+        self.edit(self.cs, 'AssetGlob = "linux-x64",', 'AssetGlob = "linux-arm64",')
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("assetGlob", out)
+        self.assertIn("dotnet", out)
+
+    def test_archive_that_is_not_the_assets_format_fails(self):
+        self.change(self.LINUX_ARCHIVE, "tar.xz", "zip")
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("[linux]", out)
+        self.assertIn("archive", out)
+
+    def test_unknown_archive_format_fails(self):
+        self.change(self.LINUX_ARCHIVE, "tar.xz", "xz")
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("archive", out)
+
+    def test_glob_that_does_not_pick_the_pinned_asset_fails(self):
+        self.change(self.WIN_GLOB, "windows-x64", "windows-arm64")
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("[win32]", out)
+        self.assertIn("assetGlob", out)
+
+    def test_glob_that_also_picks_another_platforms_asset_fails(self):
+        self.change(self.WIN_GLOB, "windows-x64", "x64")
+        code, out = self.run_gate()
+        self.assertEqual(code, 1, out)
+        self.assertIn("assetGlob", out)
+        self.assertIn(python_pins()[0]["linux"]["asset"], out)
+
+    def test_second_asset_matching_the_glob_in_the_release_fails(self):
+        win = python_pins()[0]["win32"]["asset"]
+        fake = FakeGitHub(extra_assets=[win[:-len(".zip")] + ".tar.xz"])
+        code, out = self.run_gate(fake)
+        self.assertEqual(code, 1, out)
+        self.assertIn("assetGlob", out)
+
+    def test_real_release_side_files_do_not_match_the_glob(self):
+        # the published release also carries per-asset .sha256 / .sha256.asc files and the signing key
+        pins = python_pins()[0].values()
+        extra = [p["asset"] + s for p in pins for s in (".sha256", ".sha256.asc")]
+        code, out = self.run_gate(FakeGitHub(extra_assets=extra + ["clearcote-signing-key.asc", "SHA256SUMS.txt.asc"]))
+        self.assertEqual(code, 0, out)
 
 
 class AssetDigestTest(GateCase):

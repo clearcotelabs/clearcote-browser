@@ -10,7 +10,13 @@ sdk/python/clearcote/release.py and sdk/dotnet/src/Clearcote/Release.cs):
      SHA256SUMS.txt, and
   5. where GitHub exposes a `digest` for the release asset ("sha256:<hex>", computed by
      GitHub at upload), it equals the pinned archive sha256. Assets without one (uploaded
-     before GitHub computed digests) rely on check 4 alone.
+     before GitHub computed digests) rely on check 4 alone, and
+  6. `archive` names the asset's format (how the SDKs unpack it) and `assetGlob` (the marker the
+     SDKs' auto-update uses to pick a release's asset) picks exactly the pinned asset out of the
+     release's real asset list.
+
+C# and TypeScript comments are removed before the pins are parsed, so commented-out code never
+counts as a pin.
 
 This prevents shipping an SDK whose auto-download points at a missing, renamed, or
 checksum-mismatched binary. Run in CI (no token needed for public repos, but set
@@ -37,7 +43,55 @@ CS_RELEASE = ROOT / "sdk" / "dotnet" / "src" / "Clearcote" / "Release.cs"
 # use Node/Python platform ids. Normalised here so all three compare field by field.
 DOTNET_OS = {"windows": "win32", "linux": "linux"}
 
-FIELDS = ("tag", "version", "asset", "url", "sha256", "exeSha256", "size", "os", "binary", "repo", "fpr")
+FIELDS = ("tag", "version", "asset", "url", "sha256", "exeSha256", "size", "os", "archive", "binary",
+          "assetGlob", "repo", "fpr")
+ARCHIVES = ("zip", "tar.xz")
+
+
+def asset_matcher(glob: str) -> "re.Pattern[str]":
+    """The asset pattern every SDK's auto-update uses (download.py _resolve_latest, download.ts resolveLatest,
+    Download.cs ResolveLatestAsync): the first release asset that matches is the one it downloads."""
+    return re.compile(rf"^clearcote-.*-{re.escape(glob)}\.(?:zip|tar\.xz)$")
+
+
+def strip_comments(src: str) -> str:
+    """Blank out // and /* */ comments in C# or TypeScript source. String and char literals are left alone
+    (regular, C# verbatim and raw triple-quoted, TypeScript template), so a URL's "//" survives. Comment
+    characters become spaces and newlines are kept, so line structure is unchanged."""
+    out, i, n = [], 0, len(src)
+    while i < n:
+        c, nxt = src[i], src[i + 1:i + 2]
+        if c == "/" and nxt in ("/", "*"):
+            if nxt == "/":
+                end = src.find("\n", i)
+                end = n if end == -1 else end
+            else:
+                end = src.find("*/", i + 2)
+                end = n if end == -1 else end + 2
+            out.append(re.sub(r"[^\n]", " ", src[i:end]))
+            i = end
+            continue
+        if c == '"' and (src[i - 1:i] == "@" or src[i - 2:i] == "@$"):  # C# verbatim string: "" is a quote
+            end = i + 1
+            while end < n and not (src[end] == '"' and src[end + 1:end + 2] != '"'):
+                end += 2 if src[end] == '"' else 1
+            end += 1
+        elif c == '"' and src.startswith('"""', i):  # C# raw string: closes on the same run of quotes
+            run = len(src[i:]) - len(src[i:].lstrip('"'))
+            end = src.find('"' * run, i + run)
+            end = n if end == -1 else end + run
+        elif c in "\"'`":  # string, char or template literal; backslash escapes the next character
+            end = i + 1
+            while end < n and src[end] != c and (c == "`" or src[end] != "\n"):
+                end += 2 if src[end] == "\\" else 1
+            end += 1
+        else:
+            out.append(c)
+            i += 1
+            continue
+        out.append(src[i:end])
+        i = end
+    return "".join(out)
 
 
 def fail(msg: str) -> "None":
@@ -56,14 +110,15 @@ def load_python() -> dict:
         out[oskey] = {
             "tag": r["tag"], "version": r["version"], "asset": r["asset"], "url": r["url"],
             "sha256": r["sha256"], "exeSha256": r["exe_sha256"], "size": int(r["size"]),
-            "os": r["os"], "binary": r["binary"], "repo": repo, "fpr": fpr,
+            "os": r["os"], "archive": r["archive"], "binary": r["binary"], "assetGlob": r["asset_glob"],
+            "repo": repo, "fpr": fpr,
         }
     return out
 
 
 def load_node() -> dict:
     """Parse the per-OS pin objects (WINDOWS + LINUX) out of release.ts. Returns {os_key: pin}."""
-    t = TS_RELEASE.read_text(encoding="utf-8")
+    t = strip_comments(TS_RELEASE.read_text(encoding="utf-8"))
 
     def mod(name: str) -> "str | None":
         m = re.search(rf'\b{name}\s*=\s*"([^"]+)"', t)
@@ -87,7 +142,8 @@ def load_node() -> dict:
             "tag": s("tag"), "version": s("version"), "asset": s("asset"), "url": s("url"),
             "sha256": s("sha256"), "exeSha256": s("exeSha256"),
             "size": int(size_m.group(1)) if size_m else None,
-            "os": s("os"), "binary": s("binary"), "repo": repo, "fpr": fpr,
+            "os": s("os"), "archive": s("archive"), "binary": s("binary"), "assetGlob": s("assetGlob"),
+            "repo": repo, "fpr": fpr,
         }
     return out
 
@@ -97,7 +153,7 @@ def load_dotnet() -> dict:
     which `ReleaseInfo` initialisers are pinned. Returns {os_key: pin} keyed like the other SDKs.
     Every field must be a single string/number literal; anything else fails loudly rather than
     comparing a None."""
-    t = CS_RELEASE.read_text(encoding="utf-8")
+    t = strip_comments(CS_RELEASE.read_text(encoding="utf-8"))
     name = CS_RELEASE.name
 
     def const(key: str) -> str:
@@ -138,7 +194,8 @@ def load_dotnet() -> dict:
         out[DOTNET_OS[cs_os]] = {
             "tag": s("Tag"), "version": s("Version"), "asset": s("Asset"), "url": s("Url"),
             "sha256": s("Sha256"), "exeSha256": s("ExeSha256"), "size": int(size_m.group(1)),
-            "os": DOTNET_OS[os_field], "binary": s("Binary"), "repo": repo, "fpr": fpr,
+            "os": DOTNET_OS[os_field], "archive": s("Archive"), "binary": s("Binary"),
+            "assetGlob": s("AssetGlob"), "repo": repo, "fpr": fpr,
         }
     return out
 
@@ -228,6 +285,12 @@ def main() -> "None":
         expected_url = f"https://github.com/{r['repo']}/releases/download/{r['tag']}/{r['asset']}"
         if r["url"] != expected_url:
             fail(f"[{oskey}] url != {expected_url}")
+        if r["archive"] not in ARCHIVES:
+            fail(f"[{oskey}] archive {r['archive']!r} is not one of {ARCHIVES}")
+        if not r["asset"].endswith("." + r["archive"]):
+            fail(f"[{oskey}] archive is {r['archive']!r} but the asset {r['asset']} is not a .{r['archive']}")
+        if not asset_matcher(r["assetGlob"]).match(r["asset"]):
+            fail(f"[{oskey}] assetGlob {r['assetGlob']!r} does not match the pinned asset {r['asset']}")
 
         # 3) release exists + asset present (polls briefly to absorb the push-before-release window)
         rel = wait_for_release(r["repo"], r["tag"], r["asset"], token, budget)
@@ -248,6 +311,13 @@ def main() -> "None":
 
         # 5) GitHub's own digest of the archive, where the API exposes one
         check_asset_digest(oskey, r, assets[r["asset"]])
+
+        # 6) the glob picks exactly the pinned asset out of this release, as the SDKs' auto-update would
+        picked = [name for name in assets if asset_matcher(r["assetGlob"]).match(name)]
+        if picked != [r["asset"]]:
+            fail(f"[{oskey}] assetGlob {r['assetGlob']!r} picks {picked} from release {r['tag']}; "
+                 f"it must pick only {r['asset']}")
+        print(f"[{oskey}] OK: assetGlob {r['assetGlob']!r} picks only {r['asset']} (a .{r['archive']}, as archive says)")
 
     print("OK: all platform pins verified across all three SDKs")
 
