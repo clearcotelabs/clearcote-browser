@@ -1,0 +1,47 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.clearcotelabs/clearcote-mcp",
+  "title": "Clearcote Browser",
+  "description": "Drive the Clearcote Chromium browser from any MCP client: read pages, click, fill, screenshot.",
+  "websiteUrl": "https://clearcotelabs.com",
+  "repository": {
+    "url": "https://github.com/clearcotelabs/clearcote-browser",
+    "source": "github",
+    "subfolder": "mcp"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "clearcote-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "uvx",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        { "name": "CLEARCOTE_FINGERPRINT", "description": "Seed for one stable identity (the same seed is the same device on every run)" },
+        { "name": "CLEARCOTE_PLATFORM", "description": "Platform persona", "choices": ["windows", "linux", "macos", "android"] },
+        { "name": "CLEARCOTE_PROXY", "description": "Proxy for all traffic, http://user:pass@host:port", "isSecret": true },
+        { "name": "CLEARCOTE_GEOIP", "description": "1: timezone, locale and WebRTC IP follow the proxy's exit IP", "choices": ["0", "1"] },
+        { "name": "CLEARCOTE_CLOUD", "description": "1: the browser is a hosted Clearcote session (needs CLEARCOTE_API_KEY)", "choices": ["0", "1"] },
+        { "name": "CLEARCOTE_API_KEY", "description": "API key for cloud mode and the run_task tool", "isSecret": true }
+      ]
+    },
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "clearcote-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "npx",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        { "name": "CLEARCOTE_FINGERPRINT", "description": "Seed for one stable identity (the same seed is the same device on every run)" },
+        { "name": "CLEARCOTE_PLATFORM", "description": "Platform persona", "choices": ["windows", "linux", "macos", "android"] },
+        { "name": "CLEARCOTE_PROXY", "description": "Proxy for all traffic, http://user:pass@host:port", "isSecret": true },
+        { "name": "CLEARCOTE_GEOIP", "description": "1: timezone, locale and WebRTC IP follow the proxy's exit IP", "choices": ["0", "1"] },
+        { "name": "CLEARCOTE_CLOUD", "description": "1: the browser is a hosted Clearcote session (needs CLEARCOTE_API_KEY)", "choices": ["0", "1"] },
+        { "name": "CLEARCOTE_API_KEY", "description": "API key for cloud mode and the run_task tool", "isSecret": true }
+      ]
+    }
+  ]
+}

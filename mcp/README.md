@@ -1,5 +1,7 @@
 # Clearcote MCP server
 
+<!-- mcp-name: io.github.clearcotelabs/clearcote-mcp -->
+
 Drive the open-source **Clearcote stealth Chromium** from any MCP client — Claude Desktop, Cursor,
 Cline, Continue, or your own agent. One shared, coherent stealth browser; ~20 tools to navigate,
 read, extract, click, fill, screenshot, and persist sessions — plus `get_cdp_endpoint`, which hands
@@ -17,6 +19,9 @@ no automation flags, so `navigator.webdriver` stays `false` and the persona is i
 ```bash
 npx clearcote-mcp
 ```
+The launcher runs the Python server with `uvx` if you have [uv](https://docs.astral.sh/uv/), else with `pipx`, else
+installs it with `pip` (a Python whose `pip install` is refused outside a virtual environment, as on Debian 12+,
+Ubuntu 23.04+ and Homebrew, needs uv or pipx; the launcher says so).
 
 **Python:**
 ```bash
@@ -65,15 +70,20 @@ The **persona lives in the environment**, so the tool surface stays clean:
 
 Hardening knobs: `CLEARCOTE_MCP_TOOL_TIMEOUT` (s), `CLEARCOTE_MCP_RUN_TIMEOUT` (s, `run_task`; default 900), `CLEARCOTE_MCP_WRITE_DIR` (sandbox for file
 writes), `CLEARCOTE_MCP_ALLOW_ANY_PATH=1`, `CLEARCOTE_ALLOW_PRIVATE_EGRESS=1` (allow localhost /
-private targets), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`.
+private targets), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`, `CLEARCOTE_MCP_INLINE_IMAGE_MAX`
+(bytes; default 200000: the largest screenshot also returned inline).
 
 ## Tools
 
-**Read** · `read_page` (text + Markdown) · `get_page_html` · `page_elements` (interactive elements +
+**Read** · `read_page` (Markdown by default; `format="text"` or `"both"`) · `get_page_html` · `page_elements` (interactive elements +
 selectors) · `evaluate_js` · `wait_for` · `current_page` · `get_cookies` · `list_tabs`
 **Act** · `navigate` · `click` (selector or visible text) · `fill_field` (selector/label/placeholder/name)
 · `press_key` · `new_tab` · `close_tab`
-**Capture** · `screenshot_page` · `save_page_pdf`
+**Capture** · `screenshot_page` (saved under the sandbox dir; up to 200 KB also returned as an image) · `save_page_pdf`
+
+`navigate` and `read_page` also return `http_status` (the main document's HTTP status; `null` for a local file or
+`about:blank`) and `page_state`: `blocked` (HTTP 401, 403, 429 or 503), `empty` (under 20 characters of visible
+text: still loading, or nothing to read) or `ok`.
 **Session** · `save_profile` / `load_profile` (cookies + storage)
 **Stealth / infra** · `get_egress_info` (public IP + active persona) · **`get_cdp_endpoint`** (attach any
 other CDP client to the same stealth browser)
@@ -108,7 +118,10 @@ holds it, so `get_cdp_endpoint` has no endpoint to hand out; start your own host
 - Every tool has a wall-clock timeout and returns a **structured error** instead of crashing the server.
 - URL args are **SSRF-checked** — localhost / private / cloud-metadata are refused unless you opt in.
 - File writes are **confined** to a sandbox dir (no path traversal).
-- Oversized text is **capped** so a response never floods the agent's context.
+- Oversized text is **capped** so a response never floods the agent's context, with an explicit
+  `<field>_truncated` flag.
+- Page text, Markdown and HTML are **fenced** as untrusted data (`<untrusted_page_content>`), and a page cannot
+  close the fence early.
 - The shared browser is **rebuilt** automatically if it dies.
 
 ## Just want the raw endpoint?

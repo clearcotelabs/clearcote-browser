@@ -57,6 +57,18 @@ jobs:
       - name: Run the MCP tests (stdio round trip included; no browser needed)
         run: python -m pytest mcp/tests -q
 
+  # The npm launcher's route to the Python server (installed server, uvx, pipx, pip) with stub commands on PATH,
+  # on the oldest Node it supports.
+  launcher:
+    name: npm launcher tests (node 18)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "18"
+      - run: node --test mcp/npm/test/cli.test.js
+
   # The package exactly as it is on PyPI now. Schedule only: the publish gate must never depend on
   # the release it is about to replace.
   published:

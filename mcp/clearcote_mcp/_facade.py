@@ -22,6 +22,22 @@ import json
 import os
 
 
+# page_state: what the page amounts to, from neutral signals only (the main document's HTTP status and how much
+# visible text it has). An agent reads it to decide whether to wait, retry or move on.
+READ_FORMATS = ("markdown", "text", "both")
+BLOCKED_STATUSES = frozenset({401, 403, 429, 503})
+EMPTY_TEXT_CHARS = 20
+
+
+def page_state(http_status: int | None, text: str) -> str:
+    """"blocked" for HTTP 401/403/429/503, else "empty" under EMPTY_TEXT_CHARS of visible text, else "ok"."""
+    if http_status in BLOCKED_STATUSES:
+        return "blocked"
+    if len("".join((text or "").split())) < EMPTY_TEXT_CHARS:
+        return "empty"
+    return "ok"
+
+
 def _md(html: str) -> str:
     """HTML -> Markdown, best-effort. Uses markdownify if present, else falls back to a light strip."""
     try:
@@ -102,6 +118,7 @@ class ClearcoteBrowser:
             try:
                 self._ctx = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
                 self._page = self._ctx.pages[0] if self._ctx.pages else await self._ctx.new_page()
+                self._watch_context()
             except BaseException:
                 # the caller never gets this instance, so nobody else would end the (billed) session
                 await self.close()
@@ -116,6 +133,61 @@ class ClearcoteBrowser:
         self._browser = await self._pw.chromium.connect_over_cdp(self._srv.cdp_url)
         self._ctx = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
         self._page = self._ctx.pages[0] if self._ctx.pages else await self._ctx.new_page()
+        self._watch_context()
+
+    def _watch_context(self):
+        """Track the main document's HTTP status in every tab, the ones the page opens included."""
+        self._ctx.on("page", self._watch)
+        for page in self._ctx.pages:
+            self._watch(page)
+
+    @staticmethod
+    def _watch(page):
+        if getattr(page, "_cc_watched", False):
+            return
+        page._cc_watched = True
+
+        def on_response(response):
+            try:
+                if (response.frame == page.main_frame and response.request.is_navigation_request()
+                        and not 300 <= response.status < 400):  # a redirect on the way: the final answer follows
+                    page._cc_http_status = ClearcoteBrowser._status_of(response)
+            except Exception:
+                pass
+        page.on("response", on_response)
+
+    @staticmethod
+    def _status_of(response) -> int | None:
+        # Only an HTTP exchange has a status: Chromium also reports a 200 for a file: document.
+        return (response.status or None) if response.url.startswith(("http:", "https:")) else None
+
+    @staticmethod
+    def http_status(page) -> int | None:
+        """HTTP status of the page's main document; None when it had none (about:blank, file:, data:)."""
+        return getattr(page, "_cc_http_status", None)
+
+    @staticmethod
+    async def _goto(page, url: str, timeout: float = 45000):
+        before = page.url
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        if response is not None:
+            page._cc_http_status = ClearcoteBrowser._status_of(response)
+        elif before.split("#")[0] != page.url.split("#")[0]:
+            page._cc_http_status = None  # a document without a response (about:blank, data:)
+        # else the same document (a #fragment change): its status stands
+
+    @staticmethod
+    async def _text(page) -> str:
+        """The page's visible text, or "" when there is no body to read."""
+        try:
+            return await page.inner_text("body", timeout=5000)
+        except Exception:
+            return ""
+
+    async def _document(self, page, text: str) -> dict:
+        status = self.http_status(page)
+        return {"status": "ok", "url": page.url, "title": await page.title(),
+                "http_status": status, "page_state": page_state(status, text)}
 
     def is_healthy(self) -> bool:
         try:
@@ -150,19 +222,27 @@ class ClearcoteBrowser:
 
     async def _pg(self, url: str | None):
         if url:
-            await self._page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await self._goto(self._page, url)
         return self._page
 
     # ── read ─────────────────────────────────────────────────────────────────
     async def navigate(self, url: str) -> dict:
         pg = await self._pg(url)
-        return {"status": "ok", "url": pg.url, "title": await pg.title()}
+        return await self._document(pg, await self._text(pg))
 
-    async def read_page(self, url: str | None = None) -> dict:
+    async def read_page(self, url: str | None = None, format: str = "markdown") -> dict:
+        """The page as Markdown, visible text or both (`format`), with its HTTP status and page_state. Uncapped:
+        the MCP tool caps the fields."""
+        if format not in READ_FORMATS:
+            raise ValueError(f"format must be one of {', '.join(READ_FORMATS)}, not {format!r}")
         pg = await self._pg(url)
-        html = await pg.content()
-        return {"status": "ok", "url": pg.url, "title": await pg.title(),
-                "text": (await pg.inner_text("body"))[:200000], "markdown": _md(html)[:200000]}
+        text = await self._text(pg)
+        out = await self._document(pg, text)
+        if format in ("markdown", "both"):
+            out["markdown"] = _md(await pg.content())
+        if format in ("text", "both"):
+            out["text"] = text
+        return out
 
     async def get_html(self, url: str | None = None) -> dict:
         pg = await self._pg(url)
@@ -257,8 +337,9 @@ class ClearcoteBrowser:
 
     async def new_tab(self, url: str | None = None) -> dict:
         self._page = await self._ctx.new_page()
+        self._watch(self._page)  # also done by the context's "page" event; this one covers fakes
         if url:
-            await self._page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            await self._goto(self._page, url)
         return {"status": "ok", "url": self._page.url, "index": len(self._ctx.pages) - 1}
 
     async def close_tab(self, index: int) -> dict:
@@ -296,7 +377,7 @@ class ClearcoteBrowser:
             info = {"error": str(exc)}
         try:
             if prev and prev != "about:blank":
-                await pg.goto(prev, wait_until="domcontentloaded", timeout=15000)
+                await self._goto(pg, prev, timeout=15000)
         except Exception:
             pass
         out = {"status": "ok", "public_ip": info.get("ip") if isinstance(info, dict) else None,

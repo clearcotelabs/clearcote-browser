@@ -17,6 +17,9 @@ no automation flags, so `navigator.webdriver` stays `false` and the persona is i
 ```bash
 npx clearcote-mcp
 ```
+The launcher runs the Python server with `uvx` if you have [uv](https://docs.astral.sh/uv/), else with `pipx`, else
+installs it with `pip` (a Python whose `pip install` is refused outside a virtual environment, as on Debian 12+,
+Ubuntu 23.04+ and Homebrew, needs uv or pipx; the launcher says so).
 
 **Python:**
 ```bash
@@ -67,7 +70,7 @@ private targets), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`.
 
 ## Tools
 
-**Read** · `read_page` (text + Markdown) · `get_page_html` · `page_elements` (interactive elements +
+**Read** · `read_page` (Markdown by default, or `format="text"` / `"both"`; with `http_status` and `page_state`) · `get_page_html` · `page_elements` (interactive elements +
 selectors) · `evaluate_js` · `wait_for` · `current_page` · `get_cookies` · `list_tabs`
 **Act** · `navigate` · `click` (selector or visible text) · `fill_field` (selector/label/placeholder/name)
 · `press_key` · `new_tab` · `close_tab`

@@ -1,26 +1,41 @@
 #!/usr/bin/env node
 // Thin launcher: run the Python `clearcote-mcp` stdio server, installing it on first use.
 // The Python package pulls in `clearcote` (which downloads + SHA-256-verifies the stealth binary).
+//
+// Route, first that applies:
+//   1. `clearcote-mcp` already installed (and new enough) in the system Python: run it, as before.
+//   2. `uvx`:  runs it from an isolated, cached environment; needs no system Python.
+//   3. `pipx run`: the same, for machines with pipx.
+//   4. `pip install --user` (plain `pip install` inside a virtual environment), then run it.
+// uvx and pipx come before pip because many Pythons (Debian 12+, Ubuntu 23.04+, Homebrew) refuse
+// `pip install` outside a virtual environment (PEP 668, "externally-managed-environment").
 "use strict";
 const { spawnSync, spawn } = require("node:child_process");
 const { version: LAUNCHER_VERSION } = require("./package.json");
 
+const SPEC = "clearcote-mcp>=" + LAUNCHER_VERSION;
+
 function pythons() {
   return process.platform === "win32" ? ["py", "python", "python3"] : ["python3", "python"];
 }
+// stdout of `cmd args` when it exits 0, else null (also when cmd is not there).
+function output(cmd, args) {
+  const r = spawnSync(cmd, args, { encoding: "utf8" });
+  return r.status === 0 ? (r.stdout || "").trim() : null;
+}
 function findPython() {
-  for (const p of pythons()) {
-    const r = spawnSync(p, ["-c", "import sys;print(sys.version_info[0])"], { encoding: "utf8" });
-    if (r.status === 0 && (r.stdout || "").trim() === "3") return p;
-  }
-  return null;
+  return pythons().find((p) => output(p, ["-c", "import sys;print(sys.version_info[0])"]) === "3") || null;
 }
 // Version of the importable Python server, or null when it is missing or fails to import (0.1.0
 // fails under mcp 2.x, and a plain `pip install` would call it satisfied and leave it broken).
 function serverVersion(py) {
-  const r = spawnSync(py, ["-c", "import clearcote_mcp;print(clearcote_mcp.__version__)"],
-                      { encoding: "utf8" });
-  return r.status === 0 ? (r.stdout || "").trim() : null;
+  return output(py, ["-c", "import clearcote_mcp;print(clearcote_mcp.__version__)"]);
+}
+function inVirtualenv(py) {
+  return output(py, ["-c", "import sys;print(int(sys.prefix != sys.base_prefix))"]) === "1";
+}
+function onPath(cmd) {
+  return output(cmd, ["--version"]) !== null;
 }
 function older(a, b) {
   const num = (v) => v.split(".").map((p) => parseInt(p, 10) || 0);
@@ -32,28 +47,50 @@ function older(a, b) {
   return false;
 }
 
-const py = findPython();
-if (!py) {
-  console.error("[clearcote-mcp] Python 3.10+ is required (not found). Install Python, then re-run.");
+function fail(lines) {
+  console.error(lines.join("\n"));
   process.exit(1);
 }
-const have = serverVersion(py);
-if (!have || older(have, LAUNCHER_VERSION)) {
-  const spec = "clearcote-mcp>=" + LAUNCHER_VERSION;
+const FIXES = [
+  "Fix it with one of these, then run this again:",
+  "  - install uv  (https://docs.astral.sh/uv/getting-started/installation/): the launcher then uses uvx",
+  "  - install pipx  (e.g. `sudo apt install pipx`, `brew install pipx`): the launcher then uses pipx",
+  "  - or install the server into a virtual environment and point your MCP client at it:",
+  `      python3 -m venv ~/.clearcote-mcp && ~/.clearcote-mcp/bin/pip install "${SPEC}"`,
+  "      command: ~/.clearcote-mcp/bin/clearcote-mcp   (on Windows: %USERPROFILE%\\.clearcote-mcp\\Scripts\\clearcote-mcp.exe)",
+];
+
+// [command, args] that starts the server, installing it with pip first if that is the route.
+function route() {
+  const py = findPython();
+  const have = py && serverVersion(py);
+  if (have && !older(have, LAUNCHER_VERSION)) return [py, ["-m", "clearcote_mcp"]];
+  if (onPath("uvx")) return ["uvx", ["--from", SPEC, "clearcote-mcp"]];
+  if (onPath("pipx")) return ["pipx", ["run", "--spec", SPEC, "clearcote-mcp"]];
+  if (!py) {
+    fail(["[clearcote-mcp] the server needs Python 3.10+ (with pip), uv or pipx, and none of them was found.",
+          ...FIXES.slice(0, 3), "  - or install Python 3.10+"]);
+  }
   console.error(have
     ? `[clearcote-mcp] upgrading the Python package \`clearcote-mcp\` ${have} -> ${LAUNCHER_VERSION}…`
-    : "[clearcote-mcp] installing the Python package `clearcote-mcp`…");
+    : "[clearcote-mcp] installing the Python package `clearcote-mcp` with pip…");
   // pip's stdout goes to stderr: stdout is the MCP channel the client is about to read.
-  const install = spawnSync(py, ["-m", "pip", "install", "--user", "--quiet", "--upgrade", spec],
+  const user = inVirtualenv(py) ? [] : ["--user"];
+  const install = spawnSync(py, ["-m", "pip", "install", ...user, "--quiet", "--upgrade", SPEC],
                             { stdio: ["ignore", 2, 2] });
   const now = serverVersion(py);
   if (install.status !== 0 || !now || older(now, LAUNCHER_VERSION)) {
-    console.error(`[clearcote-mcp] install failed. Run:  ${py} -m pip install --upgrade "${spec}"`);
-    process.exit(1);
+    fail([`[clearcote-mcp] could not install the Python package \`clearcote-mcp\`: there is no uvx or pipx on PATH, and pip
+could not install it. Many Pythons (Debian 12+, Ubuntu 23.04+, Homebrew) refuse \`pip install\` outside a virtual
+environment (PEP 668: "externally-managed-environment"); pip's own message is above.`, ...FIXES]);
   }
+  return [py, ["-m", "clearcote_mcp"]];
 }
+
+const [cmd, args] = route();
 // Hand over stdio to the MCP server (stdio transport).
-const child = spawn(py, ["-m", "clearcote_mcp"], { stdio: "inherit", env: process.env });
+const child = spawn(cmd, args, { stdio: "inherit", env: process.env });
+child.on("error", (err) => fail([`[clearcote-mcp] could not start ${cmd}: ${err.message}`]));
 child.on("exit", (code) => process.exit(code == null ? 0 : code));
 process.on("SIGINT", () => child.kill("SIGINT"));
 process.on("SIGTERM", () => child.kill("SIGTERM"));

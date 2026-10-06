@@ -101,8 +101,9 @@ The MCP server in [`mcp/`](../mcp/) publishes on a dedicated **`mcp-v*`** tag (w
 separately (starts at `0.1.0`). One `mcp-v*` tag publishes **both** the Python package
 (`clearcote-mcp` → PyPI) and the npm launcher (`clearcote-mcp` → npm), via OIDC.
 
-1. Bump the **same** version in **all three** spots: `mcp/pyproject.toml`,
-   `mcp/clearcote_mcp/__init__.py` (`__version__`), and `mcp/npm/package.json`.
+1. Bump the **same** version in **all four** spots: `mcp/pyproject.toml`,
+   `mcp/clearcote_mcp/__init__.py` (`__version__`), `mcp/npm/package.json`, and `mcp/server.json`
+   (its top-level `version` and each package's `version`; `mcp/tests/test_registry.py` fails otherwise).
 2. Commit + push, then:
    ```bash
    git tag mcp-v0.1.0
@@ -119,6 +120,26 @@ separately (starts at `0.1.0`). One `mcp-v*` tag publishes **both** the Python p
   `mcp.yml`, environment `pypi`.
 - npm: `clearcote-mcp` → Settings → Trusted Publisher → GitHub Actions, workflow `mcp.yml`,
   environment `npm`.
+
+### Listing it in the official MCP Registry
+
+[`mcp/server.json`](../mcp/server.json) is the registry entry (`io.github.clearcotelabs/clearcote-mcp`, both
+packages). The registry stores only this metadata and checks that each package names the entry: `mcpName` in
+`mcp/npm/package.json` and the `mcp-name:` comment at the top of `mcp/README.md` (the PyPI description). Both
+reach the registries only with a release, so publish the entry **after** the `mcp-v*` release that contains them
+is live on PyPI and npm, with `server.json` at that version. The `io.github.clearcotelabs/` namespace needs a
+GitHub login that is an **owner** of the `clearcotelabs` organisation.
+
+```bash
+# mcp-publisher: `brew install mcp-publisher`, or the binary from
+# https://github.com/modelcontextprotocol/registry/releases
+cd mcp
+mcp-publisher validate            # checks server.json without publishing
+mcp-publisher login github        # device-code login in the browser
+mcp-publisher publish
+curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.clearcotelabs/clearcote-mcp"
+```
+Every later release: bump `server.json` with the other three version fields, then `mcp-publisher publish` again.
 
 ## Auth fallback (only if OIDC is unavailable)
 If you ever must publish before OIDC is configured: `npm publish --access public` from a logged-in

@@ -7,8 +7,8 @@
 #         (repo clearcotelabs/clearcote-browser, workflow mcp.yml, environment pypi)
 #   npm : clearcote-mcp -> Settings -> Trusted Publisher -> GitHub Actions
 #         (repo clearcotelabs/clearcote-browser, workflow mcp.yml, environment npm)
-# Keep the three version fields + the tag in sync (mcp/pyproject.toml,
-# mcp/clearcote_mcp/__init__.py, mcp/npm/package.json). See docs/RELEASING-SDK.md.
+# Keep the four version fields + the tag in sync (mcp/pyproject.toml,
+# mcp/clearcote_mcp/__init__.py, mcp/npm/package.json, mcp/server.json). See docs/RELEASING-SDK.md.
 name: Publish MCP server
 
 on:
