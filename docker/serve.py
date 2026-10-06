@@ -14,10 +14,12 @@ CC_* env vars.
 Modern Chrome binds the DevTools endpoint to 127.0.0.1 only (a security restriction;
 --remote-debugging-address is ignored), so we run a tiny socat TCP proxy to publish it.
 """
+import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from clearcote import executable_path
 from clearcote._fingerprint import fingerprint_args
@@ -59,6 +61,31 @@ except ImportError:  # an image built with an SDK older than this entrypoint: sa
         return seed, "new"
 
 PROFILE_DIR = os.environ.get("CC_PROFILE_DIR", "/tmp/cc-profile")
+
+# CC_SECRETS_FILE: a JSON file of {"CLEARCOTE_LICENSE_KEY": ..., "CC_PROXY": ...}, read once and deleted.
+# Anything passed with `docker run -e` is shown by `docker inspect` to whoever can reach the Docker daemon;
+# the SDK's macOS launch() copies this file into the container instead (docker cp), so a licence key or a
+# proxy password stays out of the container's configuration. Only these two names are taken from it.
+_SECRET_NAMES = ("CLEARCOTE_LICENSE_KEY", "CC_PROXY")
+_secrets_file = os.environ.get("CC_SECRETS_FILE", "").strip()
+if _secrets_file:
+    try:
+        with open(_secrets_file, encoding="utf-8") as _fh:
+            _secrets = json.load(_fh)
+        if not isinstance(_secrets, dict):
+            raise ValueError("not a JSON object")
+        for _name in _SECRET_NAMES:
+            if isinstance(_secrets.get(_name), str) and _secrets[_name]:
+                os.environ[_name] = _secrets[_name]
+    except Exception as exc:  # noqa: BLE001 -- a licensed caller must not silently get the free engine
+        print("[clearcote] ERROR: CC_SECRETS_FILE=%s could not be read (%s: %s). Refusing to start."
+              % (_secrets_file, type(exc).__name__, exc), flush=True)
+        raise SystemExit(1)
+    finally:
+        try:
+            os.remove(_secrets_file)
+        except OSError:
+            pass
 
 # The image bakes in the FREE engine at build time. With CLEARCOTE_LICENSE_KEY set, resolve the
 # licensed build instead -- passing the key and any CC_VERSION pin explicitly, because a bare
@@ -502,6 +529,53 @@ if _shown.get("fingerprint_profile"):
 print(f"[clearcote] CDP endpoint on 0.0.0.0:{port} (socat -> chrome 127.0.0.1:{internal}) | persona={_shown}", flush=True)
 
 chrome = subprocess.Popen(cmd, env=env)
+
+
+# CC_IDLE_EXIT_SECONDS: stop once no CDP client has been connected for this long. The SDK's macOS launch()
+# sets it (with --rm), so a container whose owner died -- Ctrl-C, a kill, a crash -- stops on its own,
+# gives its licence seat back and is removed, instead of running forever. A connected client keeps one
+# WebSocket open for as long as it is connected, so "connected" is an ESTABLISHED TCP connection to the
+# published port, read from /proc/net/tcp{,6} (this container's network namespace only). Unset or 0: off.
+def _cdp_clients(listen_port):
+    suffix = ":%04X" % int(listen_port)
+    n = 0
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(table) as fh:
+                next(fh, None)
+                for line in fh:
+                    fields = line.split()
+                    if len(fields) > 3 and fields[1].endswith(suffix) and fields[3] == "01":  # 01 = ESTABLISHED
+                        n += 1
+        except OSError:
+            pass
+    return n
+
+
+def _idle_watch(limit):
+    last = time.monotonic()
+    while chrome.poll() is None:
+        time.sleep(1)
+        if _cdp_clients(port):
+            last = time.monotonic()
+        elif time.monotonic() - last >= limit:
+            print("[clearcote] no CDP client for %d s (CC_IDLE_EXIT_SECONDS): stopping" % limit, flush=True)
+            try:
+                chrome.terminate()
+            except Exception:  # noqa: BLE001 -- already gone
+                pass
+            return
+
+
+try:
+    _idle_limit = int(os.environ.get("CC_IDLE_EXIT_SECONDS", "0") or 0)
+except ValueError:
+    print("[clearcote] WARNING: CC_IDLE_EXIT_SECONDS=%r is not a whole number; ignoring it."
+          % os.environ.get("CC_IDLE_EXIT_SECONDS"), flush=True)
+    _idle_limit = 0
+if _idle_limit > 0:
+    threading.Thread(target=_idle_watch, args=(_idle_limit,), daemon=True).start()
+    print("[clearcote] idle exit: after %d s with no CDP client" % _idle_limit, flush=True)
 
 
 def _forward(signum, _frame):

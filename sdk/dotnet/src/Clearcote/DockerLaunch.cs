@@ -35,14 +35,32 @@ public sealed record DockerContainer(string Id, string Image, string Endpoint);
 ///
 /// The container is configured through the image's own CC_* variables (docker/serve.py), so only the
 /// options the image understands are accepted; any other option throws naming it. Values travel in the
-/// docker CLI's environment (`-e NAME` without a value), never on its command line, so a licence key or
-/// proxy password is not visible in the process list. The CDP port is published on 127.0.0.1 only.
+/// docker CLI's environment (`-e NAME` without a value), never on its command line. The licence key and
+/// the proxy URL are not passed as variables at all: they are copied in as a file serve.py reads once and
+/// deletes, so `docker inspect` does not show them (anyone who can reach the Docker daemon can still read a
+/// running container's files and memory). The CDP port is published on 127.0.0.1 only.
+///
+/// Nothing outlives its owner: the container is created with --rm, stops itself once no CDP client has been
+/// connected for 30 s (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch on the machine removes any whose
+/// owner process is gone. CloseAsync stops it at once.
 /// Mirrors _docker.py (Python) and docker.ts (Node).
 internal static class DockerLaunch
 {
     internal const string DefaultRepository = "teamflatearth/clearcote";
     internal const string TestOnlyAssumeMacos = "CLEARCOTE_TEST_ONLY_ASSUME_MACOS";
     private const string Label = "com.clearcotelabs.sdk-launch=1";
+    // Who started a container: SweepStaleAsync removes the ones whose owner process is gone.
+    private const string OwnerHostLabel = "com.clearcotelabs.owner-host";
+    private const string OwnerPidLabel = "com.clearcotelabs.owner-pid";
+    // A container stops itself once no CDP client has been connected for this long (serve.py's
+    // CC_IDLE_EXIT_SECONDS). CLEARCOTE_DOCKER_IDLE_EXIT overrides it; 0 turns it off.
+    private const int DefaultIdleExitSeconds = 30;
+    private const string DefaultCacheVolume = "clearcote-cache";
+    // The licence key and the proxy URL (it may carry a password) reach the container as this file, copied
+    // in with `docker cp` and deleted by serve.py once read, not as -e variables `docker inspect` would show.
+    private static readonly string[] SecretEnv = { "CLEARCOTE_LICENSE_KEY", "CC_PROXY" };
+    internal const string SecretsFile = "/tmp/clearcote-secrets.json";
+    private const int ImageUid = 10001;   // the image's user (cc)
     private static readonly string[] Truthy = { "1", "true", "yes", "on" };
     private static readonly string[] Falsy = { "0", "false", "no", "off" };
     private const int ReadyTimeoutMs = 180_000;
@@ -54,7 +72,7 @@ internal static class DockerLaunch
 
     /// Test seams: the docker executable lookup, the CLI runner, and Playwright's ConnectOverCDPAsync.
     internal static Func<string?> Which { get; set; } = () => FindOnPath("docker");
-    internal static Func<IReadOnlyList<string>, IDictionary<string, string>?, int, Task<CliResult>> Run { get; set; } = RunCliAsync;
+    internal static Func<IReadOnlyList<string>, IDictionary<string, string>?, int, byte[]?, Task<CliResult>> Run { get; set; } = RunCliAsync;
     internal static Func<string, BrowserTypeConnectOverCDPOptions, Task<IBrowser>>? ConnectOverride { get; set; }
 
     /// The container behind a browser (real or proxied); see <see cref="Clearcote.DockerContainerOf"/>.
@@ -183,9 +201,13 @@ internal static class DockerLaunch
         return null;
     }
 
-    private static async Task<CliResult> RunCliAsync(IReadOnlyList<string> argv, IDictionary<string, string>? env, int timeoutMs)
+    private static async Task<CliResult> RunCliAsync(IReadOnlyList<string> argv, IDictionary<string, string>? env, int timeoutMs, byte[]? input)
     {
-        var psi = new ProcessStartInfo(argv[0]) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+        var psi = new ProcessStartInfo(argv[0])
+        {
+            RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = input is not null,
+            UseShellExecute = false, CreateNoWindow = true,
+        };
         foreach (var a in argv.Skip(1)) psi.ArgumentList.Add(a);
         if (env is not null) foreach (var (k, v) in env) psi.Environment[k] = v;
         Process proc;
@@ -195,6 +217,11 @@ internal static class DockerLaunch
         {
             var stdout = proc.StandardOutput.ReadToEndAsync();
             var stderr = proc.StandardError.ReadToEndAsync();
+            if (input is not null)
+            {
+                await proc.StandardInput.BaseStream.WriteAsync(input).ConfigureAwait(false);
+                proc.StandardInput.Close();
+            }
             using var cts = new CancellationTokenSource(timeoutMs);
             try { await proc.WaitForExitAsync(cts.Token).ConfigureAwait(false); }
             catch (OperationCanceledException)
@@ -214,11 +241,61 @@ internal static class DockerLaunch
     {
         var exe = Which() ?? throw new DockerUnavailableException(
             $"Clearcote has no native macOS build, so on macOS LaunchAsync runs it in Docker, but the `docker` command was not found. Install Docker Desktop ({InstallUrl}), start it, and try again. {OffHint}");
-        var r = await Run(new[] { exe, "info", "--format", "{{.ServerVersion}}" }, null, 30_000).ConfigureAwait(false);
+        var r = await Run(new[] { exe, "info", "--format", "{{.ServerVersion}}" }, null, 30_000, null).ConfigureAwait(false);
         if (r.Code != 0)
             throw new DockerUnavailableException(
                 $"Clearcote has no native macOS build, so on macOS LaunchAsync runs it in Docker, but Docker is not running (`docker info`: {(FirstLine(r.Stderr) is { Length: > 0 } l ? l : $"exit {r.Code}")}). Start Docker Desktop and try again. {OffHint}");
         return exe;
+    }
+
+    /// How long a launched container waits with no CDP client before it stops itself:
+    /// CLEARCOTE_DOCKER_IDLE_EXIT (seconds, 0 = never), default 30.
+    internal static int IdleExitSeconds()
+    {
+        var raw = Env("CLEARCOTE_DOCKER_IDLE_EXIT");
+        if (raw.Length == 0) return DefaultIdleExitSeconds;
+        if (!int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out var n))
+            throw new ArgumentException($"CLEARCOTE_DOCKER_IDLE_EXIT=\"{raw}\" is not a whole number of seconds");
+        return n;
+    }
+
+    /// The named volume a licensed container keeps its engine in (shared, so it downloads once):
+    /// CLEARCOTE_DOCKER_CACHE_VOLUME, default clearcote-cache.
+    internal static string CacheVolume() => Env("CLEARCOTE_DOCKER_CACHE_VOLUME") is { Length: > 0 } v ? v : DefaultCacheVolume;
+
+    internal static bool PidAlive(int pid)
+    {
+        if (pid <= 0) return false;
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            try { return !p.HasExited; }
+            catch (System.ComponentModel.Win32Exception) { return true; }   // exists, but not ours to query
+        }
+        catch (ArgumentException) { return false; }
+        catch (InvalidOperationException) { return false; }
+    }
+
+    /// Stop and remove containers an earlier launch on this machine left behind: labelled as ours, with an
+    /// owner process that no longer exists (killed, crashed). They would stop on their own after the idle
+    /// period; this frees their licence seat now. Containers of live processes, and of other machines sharing
+    /// the Docker daemon, are left alone. Returns the ids removed.
+    internal static async Task<IReadOnlyList<string>> SweepStaleAsync(string exe)
+    {
+        var format = $"{{{{.ID}}}}\t{{{{.Label \"{OwnerHostLabel}\"}}}}\t{{{{.Label \"{OwnerPidLabel}\"}}}}";
+        var r = await Run(new[] { exe, "ps", "-a", "--filter", $"label={Label}", "--format", format }, null, 30_000, null).ConfigureAwait(false);
+        if (r.Code != 0) return Array.Empty<string>();
+        var here = System.Net.Dns.GetHostName();
+        var stale = r.Stdout.Split('\n')
+            .Select(l => l.Trim().Split('\t'))
+            .Where(p => p.Length == 3 && p[1] == here && int.TryParse(p[2], NumberStyles.None, CultureInfo.InvariantCulture, out var pid) && !PidAlive(pid))
+            .Select(p => p[0]).ToList();
+        if (stale.Count > 0)
+        {
+            await Run(new[] { exe, "stop", "--time", "10" }.Concat(stale).ToList(), null, 120_000, null).ConfigureAwait(false);
+            await Run(new[] { exe, "rm", "-f", "-v" }.Concat(stale).ToList(), null, 60_000, null).ConfigureAwait(false);
+        }
+        return stale;
     }
 
     private static readonly Dictionary<string, string> Live = new();   // container id -> docker executable
@@ -227,26 +304,78 @@ internal static class DockerLaunch
     private static void InstallSweep()
     {
         if (Interlocked.Exchange(ref _sweepInstalled, 1) == 1) return;
-        // A container a caller never closed is removed at process exit.
+        // A normal exit removes what a caller never closed. Ctrl-C, a kill or a crash may not run this: the
+        // container's idle exit and the next launch's SweepStaleAsync cover those.
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
         {
             KeyValuePair<string, string>[] left;
             lock (Live) left = Live.ToArray();
             foreach (var (id, exe) in left)
-                try { Run(new[] { exe, "rm", "-f", "-v", id }, null, 30_000).Wait(TimeSpan.FromSeconds(30)); } catch { }
+                try { Run(new[] { exe, "rm", "-f", "-v", id }, null, 30_000, null).Wait(TimeSpan.FromSeconds(30)); } catch { }
         };
     }
 
     internal static async Task RemoveAsync(string exe, string id)
     {
-        // stop first: SIGTERM lets the image release a licence seat; rm then deletes what is left. -v takes
-        // the container's anonymous volume with it: the image declares VOLUME /opt/xdg-cache, so every
-        // container gets one holding a copy of the engine (~0.5 GB) that `rm` alone leaves behind. A named
-        // volume (clearcote-cache, mounted when licensed) is never removed by -v.
-        await Run(new[] { exe, "stop", "--time", "10", id }, null, 60_000).ConfigureAwait(false);
-        await Run(new[] { exe, "rm", "-f", "-v", id }, null, 60_000).ConfigureAwait(false);
+        // stop first: SIGTERM lets the image release a licence seat. The container was created with --rm, so
+        // stopping it removes it and its anonymous volume (the image declares VOLUME /opt/xdg-cache: ~0.5 GB);
+        // rm -f -v is for a container that did not go away. A named volume is never removed.
+        await Run(new[] { exe, "stop", "--time", "10", id }, null, 60_000, null).ConfigureAwait(false);
+        await Run(new[] { exe, "rm", "-f", "-v", id }, null, 60_000, null).ConfigureAwait(false);
         lock (Live) Live.Remove(id);
     }
+
+    /// A starting container's log, kept in memory: it is created with --rm, so once it has stopped its log
+    /// cannot be asked for any more.
+    internal interface ILogTail
+    {
+        Task<string> TextAsync(int waitMs = 3000);
+        void Stop();
+    }
+
+    private sealed class LogTail : ILogTail
+    {
+        private readonly Process? _proc;
+        private readonly Queue<string> _lines = new();
+        private readonly Task _done = Task.CompletedTask;
+
+        public LogTail(string exe, string id)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(exe) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+                foreach (var a in new[] { "logs", "--follow", id }) psi.ArgumentList.Add(a);
+                _proc = Process.Start(psi);
+                if (_proc is not null) _done = Task.WhenAll(Pump(_proc.StandardOutput), Pump(_proc.StandardError));
+            }
+            catch { _proc = null; }
+        }
+
+        private async Task Pump(StreamReader reader)
+        {
+            while (await reader.ReadLineAsync().ConfigureAwait(false) is { } line)
+                lock (_lines)
+                {
+                    _lines.Enqueue(line);
+                    while (_lines.Count > 40) _lines.Dequeue();
+                }
+        }
+
+        public async Task<string> TextAsync(int waitMs = 3000)
+        {
+            await Task.WhenAny(_done, Task.Delay(waitMs)).ConfigureAwait(false);   // the container is gone: the follower ends
+            lock (_lines) return string.Join("\n", _lines);
+        }
+
+        public void Stop()
+        {
+            try { if (_proc is { HasExited: false }) _proc.Kill(); } catch { }
+            _proc?.Dispose();
+        }
+    }
+
+    /// Test seam: the log follower.
+    internal static Func<string, string, ILogTail> FollowLogs { get; set; } = (exe, id) => new LogTail(exe, id);
 
     private static async Task<bool> CdpReadyAsync(int port)
     {
@@ -261,7 +390,7 @@ internal static class DockerLaunch
 
     private static async Task<int> PublishedPortAsync(string exe, string id)
     {
-        var r = await Run(new[] { exe, "port", id, "9222/tcp" }, null, 30_000).ConfigureAwait(false);
+        var r = await Run(new[] { exe, "port", id, "9222/tcp" }, null, 30_000, null).ConfigureAwait(false);
         foreach (var line in r.Stdout.Split('\n'))
         {
             var m = System.Text.RegularExpressions.Regex.Match(line.Trim(), @":(\d+)$");
@@ -270,17 +399,17 @@ internal static class DockerLaunch
         throw new InvalidOperationException($"could not read the container's published CDP port ({(FirstLine(r.Stderr) is { Length: > 0 } l ? l : r.Stdout)})");
     }
 
-    private static async Task WaitReadyAsync(string exe, string id, int port, int budgetMs)
+    private static async Task WaitReadyAsync(string exe, string id, int port, int budgetMs, ILogTail logs)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(budgetMs);
         while (true)
         {
             if (await CdpReadyAsync(port).ConfigureAwait(false)) return;
-            var st = await Run(new[] { exe, "inspect", "-f", "{{.State.Running}}", id }, null, 30_000).ConfigureAwait(false);
-            if (st.Code != 0 || st.Stdout.Trim() != "true")
+            var st = await Run(new[] { exe, "inspect", "-f", "{{.State.Running}}", id }, null, 30_000, null).ConfigureAwait(false);
+            if (st.Code != 0 || st.Stdout.Trim() != "true")   // stopped (and, with --rm, already gone)
             {
-                var logs = await Run(new[] { exe, "logs", "--tail", "25", id }, null, 30_000).ConfigureAwait(false);
-                throw new InvalidOperationException($"the Clearcote container stopped before its browser came up:\n{(logs.Stdout + logs.Stderr).Trim()}");
+                var text = (await logs.TextAsync().ConfigureAwait(false)).Trim();
+                throw new InvalidOperationException($"the Clearcote container stopped before its browser came up:\n{(text.Length > 0 ? text : "(it left no log)")}");
             }
             if (DateTime.UtcNow >= deadline)
                 throw new TimeoutException($"the Clearcote container's CDP endpoint did not answer within {budgetMs / 1000} s");
@@ -288,34 +417,108 @@ internal static class DockerLaunch
         }
     }
 
+    private static readonly System.Text.RegularExpressions.Regex VolumeInitRace = new(
+        @"volumes/[^/\s]+/_data\S*: (?:file exists|no such file)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static readonly System.Text.RegularExpressions.Regex NotPublished = new(
+        "manifest unknown|manifest for .* not found|not found: manifest|pull access denied|repository does not exist",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static Exception CreateFailed(string image, int code, string stderr)
+    {
+        var detail = stderr.Trim() is { Length: > 0 } e ? e : $"exit {code}";
+        if (NotPublished.IsMatch(detail))
+        {
+            var why = image == $"{DefaultRepository}:sdk-{Clearcote.Version}"
+                ? $"Images are published a few minutes after each SDK release (after the PyPI package they are built from), so a brand-new SDK can be ahead of its image: try again shortly, or set CLEARCOTE_DOCKER_IMAGE={DefaultRepository}:latest to run the newest published image."
+                : "Check the name, or unset CLEARCOTE_DOCKER_IMAGE / DockerImage to use the default.";
+            return new InvalidOperationException($"the Clearcote image {image} is not available ({FirstLine(detail)}). {why}");
+        }
+        return new InvalidOperationException($"`docker create {image}` failed: {detail}\n(set CLEARCOTE_DOCKER_IMAGE or DockerImage to use another image)");
+    }
+
+    /// A tar holding the secrets file's JSON, owned by the image's user (uid 10001) and readable by it only,
+    /// for `docker cp -`: serve.py reads it once and deletes it.
+    internal static byte[] SecretsTar(IReadOnlyDictionary<string, string> secrets)
+    {
+        var data = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(secrets));
+        using var ms = new MemoryStream();
+        using (var writer = new System.Formats.Tar.TarWriter(ms, System.Formats.Tar.TarEntryFormat.Ustar, leaveOpen: true))
+        {
+            writer.WriteEntry(new System.Formats.Tar.UstarTarEntry(System.Formats.Tar.TarEntryType.RegularFile, Path.GetFileName(SecretsFile))
+            {
+                Uid = ImageUid, Gid = ImageUid, Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
+                ModificationTime = DateTimeOffset.UtcNow, DataStream = new MemoryStream(data),
+            });
+        }
+        return ms.ToArray();
+    }
+
     /// Start the image and wait for its CDP endpoint. Nothing is left running when this throws.
+    ///
+    /// The container is created with --rm and stops itself once no CDP client has been connected for
+    /// IdleExitSeconds() (serve.py's CC_IDLE_EXIT_SECONDS), so one whose owner died (Ctrl-C, a kill, a crash)
+    /// gives its licence seat back and disappears on its own; the next launch on this machine also sweeps any
+    /// still there (SweepStaleAsync). It carries the owner's host name and pid as labels for that sweep. The
+    /// licence key and the proxy URL are copied in as a file rather than passed with -e, so they are not part
+    /// of the container's configuration (`docker inspect`).
     internal static async Task<(DockerContainer Container, string Exe)> StartContainerAsync(LaunchOptions o)
     {
         var env = ContainerEnv(o);
+        var idle = IdleExitSeconds();
         var exe = await CheckDockerAsync().ConfigureAwait(false);
+        await SweepStaleAsync(exe).ConfigureAwait(false);
         var image = string.IsNullOrEmpty(o.DockerImage) ? DefaultImage() : o.DockerImage;
-        var argv = new List<string> { exe, "run", "-d", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222", "--label", Label };
+        var secrets = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var k in SecretEnv)
+            if (env.Remove(k, out var v)) secrets[k] = v;
+        if (idle > 0) env["CC_IDLE_EXIT_SECONDS"] = idle.ToString(CultureInfo.InvariantCulture);
+        if (secrets.Count > 0) env["CC_SECRETS_FILE"] = SecretsFile;
+        var argv = new List<string>
+        {
+            exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
+            "--label", Label, "--label", $"{OwnerHostLabel}={System.Net.Dns.GetHostName()}", "--label", $"{OwnerPidLabel}={Environment.ProcessId}",
+        };
         foreach (var name in env.Keys.OrderBy(k => k, StringComparer.Ordinal)) argv.AddRange(new[] { "-e", name });   // value via the CLI's environment
-        if (env.ContainsKey("CLEARCOTE_LICENSE_KEY")) argv.AddRange(new[] { "-v", "clearcote-cache:/opt/xdg-cache" });   // the licensed engine downloads once
+        if (secrets.ContainsKey("CLEARCOTE_LICENSE_KEY")) argv.AddRange(new[] { "-v", $"{CacheVolume()}:/opt/xdg-cache" });   // the licensed engine downloads once
         argv.Add(image);
         if (!o.Quiet) Console.Error.WriteLine($"[clearcote] no native macOS build: starting the Clearcote Docker image {image} (the first run downloads it)");
-        var r = await Run(argv, env, 1_800_000).ConfigureAwait(false);
+        var r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
+        // Two launches creating their first container on a NEW shared volume at once collide in Docker's own
+        // volume initialisation ("failed to mkdir .../volumes/<name>/_data/...: file exists"); the loser
+        // succeeds a moment later, once the volume has been filled.
+        for (var attempt = 1; attempt < 4 && r.Code != 0 && VolumeInitRace.IsMatch(r.Stderr); attempt++)
+        {
+            await Task.Delay(1000 * attempt).ConfigureAwait(false);
+            r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
+        }
         var id = r.Stdout.Trim().Split('\n').LastOrDefault()?.Trim() ?? "";
-        if (r.Code != 0 || id.Length == 0)
-            throw new InvalidOperationException(
-                $"`docker run {image}` failed: {(r.Stderr.Trim() is { Length: > 0 } e ? e : $"exit {r.Code}")}\n(set CLEARCOTE_DOCKER_IMAGE or DockerImage to use another image)");
+        if (r.Code != 0 || id.Length == 0) throw CreateFailed(image, r.Code, r.Stderr);
         lock (Live) Live[id] = exe;
         InstallSweep();
+        ILogTail? logs = null;
         try
         {
+            if (secrets.Count > 0)
+            {
+                var cp = await Run(new[] { exe, "cp", "-", $"{id}:{SecretsFile[..SecretsFile.LastIndexOf('/')]}" }, null, 60_000, SecretsTar(secrets)).ConfigureAwait(false);
+                if (cp.Code != 0) throw new InvalidOperationException($"could not copy the licence/proxy settings into the container: {FirstLine(cp.Stderr)}");
+            }
+            var st = await Run(new[] { exe, "start", id }, null, 120_000, null).ConfigureAwait(false);
+            if (st.Code != 0) throw new InvalidOperationException($"`docker start` failed: {(st.Stderr.Trim() is { Length: > 0 } e ? e : $"exit {st.Code}")}");
+            logs = FollowLogs(exe, id);
             var port = await PublishedPortAsync(exe, id).ConfigureAwait(false);
-            await WaitReadyAsync(exe, id, port, o.Timeout is float ms && ms > 0 ? (int)Math.Max(ms, 1000) : ReadyTimeoutMs).ConfigureAwait(false);
+            await WaitReadyAsync(exe, id, port, o.Timeout is float ms && ms > 0 ? (int)Math.Max(ms, 1000) : ReadyTimeoutMs, logs).ConfigureAwait(false);
             return (new DockerContainer(id, image, $"http://127.0.0.1:{port}"), exe);
         }
         catch
         {
             await RemoveAsync(exe, id).ConfigureAwait(false);
             throw;
+        }
+        finally
+        {
+            logs?.Stop();
         }
     }
 

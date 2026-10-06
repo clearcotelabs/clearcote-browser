@@ -40,4 +40,19 @@ public class SdkVersionTests
         Assert.Equal(3, parts.Length);
         Assert.All(parts, p => Assert.True(int.TryParse(p, out _), $"'{p}' is not numeric"));
     }
+
+    /// The macOS LaunchAsync runs teamflatearth/clearcote:sdk-&lt;Clearcote.Version&gt;, and that tag is built from
+    /// the PyPI package of the same version. A .NET version that drifts off the Python/Node line points every
+    /// macOS user at a tag that was never published. Skipped when the tree has no Python SDK next to this one.
+    [Fact]
+    public void Version_is_the_same_line_as_the_Python_SDK_whose_Docker_image_macOS_runs()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "python", "pyproject.toml"))) dir = dir.Parent;
+        if (dir is null) return;
+        var pyproject = File.ReadAllText(Path.Combine(dir.FullName, "python", "pyproject.toml"));
+        var m = System.Text.RegularExpressions.Regex.Match(pyproject, "(?m)^version\\s*=\\s*\"([^\"]+)\"");
+        Assert.True(m.Success, "no version in sdk/python/pyproject.toml");
+        Assert.Equal(m.Groups[1].Value, Clearcote.Version);
+    }
 }

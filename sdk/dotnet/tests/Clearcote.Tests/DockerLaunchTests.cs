@@ -1,3 +1,5 @@
+using System.Formats.Tar;
+using System.Text.Json;
 using Microsoft.Playwright;
 using Xunit;
 
@@ -12,32 +14,44 @@ namespace Clearcote.Tests;
 /// sdk/node/test/docker-launch.test.ts and sdk/python/tests/test_docker_launch.py.
 public sealed class DockerLaunchTests : IDisposable
 {
+    private const int DeadPid = (1 << 22) + 12345;   // above any pid_max: never a live process
+
     private sealed class FakeDocker
     {
-        public readonly List<(string[] Argv, Dictionary<string, string> Env)> Calls = new();
+        public readonly List<(string[] Argv, Dictionary<string, string> Env, byte[]? Input)> Calls = new();
         public int CdpPort = 1;
         public bool Running = true;
         public string InfoError = "";
-        public string RunError = "";
+        public string CreateError = "";
         public string Logs = "";
+        public string Ps = "";   // `docker ps` rows: id \t owner-host \t owner-pid
 
-        public Task<DockerLaunch.CliResult> Run(IReadOnlyList<string> argv, IDictionary<string, string>? env, int _)
+        public Task<DockerLaunch.CliResult> Run(IReadOnlyList<string> argv, IDictionary<string, string>? env, int _, byte[]? input)
         {
-            Calls.Add((argv.ToArray(), new Dictionary<string, string>(env ?? new Dictionary<string, string>())));
+            Calls.Add((argv.ToArray(), new Dictionary<string, string>(env ?? new Dictionary<string, string>()), input));
             DockerLaunch.CliResult r = argv[1] switch
             {
                 "info" => InfoError.Length > 0 ? new(1, "", InfoError) : new(0, "29.1.3\n", ""),
-                "run" => RunError.Length > 0 ? new(125, "", RunError) : new(0, "c0ffee1234\n", ""),
+                "ps" => new(0, Ps, ""),
+                "create" => CreateError.Length > 0 ? new(125, "", CreateError) : new(0, "c0ffee1234\n", ""),
                 "port" => new(0, $"127.0.0.1:{CdpPort}\n[::1]:{CdpPort}\n", ""),
-                "inspect" => new(0, (Running ? "true" : "false") + "\n", ""),
-                "logs" => new(0, Logs, ""),
-                _ => new(0, "", ""),
+                "inspect" => Running ? new(0, "true\n", "") : new(1, "", "Error: No such object: c0ffee1234"),
+                _ => new(0, "", ""),   // cp, start, stop, rm
             };
             return Task.FromResult(r);
         }
 
         public string[] Commands => Calls.Select(c => c.Argv[1]).ToArray();
-        public (string[] Argv, Dictionary<string, string> Env) RunCall => Calls.First(c => c.Argv[1] == "run");
+        public (string[] Argv, Dictionary<string, string> Env, byte[]? Input) Call(string cmd) => Calls.First(c => c.Argv[1] == cmd);
+        public string[][] StopsAndRms => Calls.Where(c => c.Argv[1] is "stop" or "rm").Select(c => c.Argv[2..]).ToArray();
+    }
+
+    private sealed class FakeLogs : DockerLaunch.ILogTail
+    {
+        private readonly FakeDocker _d;
+        public FakeLogs(FakeDocker d) => _d = d;
+        public Task<string> TextAsync(int waitMs = 3000) => Task.FromResult(_d.Logs);
+        public void Stop() { }
     }
 
     // Found before the constructor moves HOME (TempHome below), which is where Playwright's Chromium is
@@ -47,24 +61,33 @@ public sealed class DockerLaunchTests : IDisposable
     private readonly Sandbox _sb = new();
     private readonly FakeDocker _docker = new();
     private readonly Func<string?> _realWhich = DockerLaunch.Which;
-    private readonly Func<IReadOnlyList<string>, IDictionary<string, string>?, int, Task<DockerLaunch.CliResult>> _realRun = DockerLaunch.Run;
+    private readonly Func<IReadOnlyList<string>, IDictionary<string, string>?, int, byte[]?, Task<DockerLaunch.CliResult>> _realRun = DockerLaunch.Run;
+    private readonly Func<string, string, DockerLaunch.ILogTail> _realLogs = DockerLaunch.FollowLogs;
+    private readonly Func<string, BrowserTypeConnectOverCDPOptions, Task<IBrowser>>? _realConnect = DockerLaunch.ConnectOverride;
 
     public DockerLaunchTests()
     {
-        foreach (var k in new[] { "CLEARCOTE_DOCKER", "CLEARCOTE_BINARY", "CLEARCOTE_DOCKER_IMAGE", "CLEARCOTE_CLOUD", "CLEARCOTE_LICENSE_KEY", DockerLaunch.TestOnlyAssumeMacos })
+        foreach (var k in new[] { "CLEARCOTE_DOCKER", "CLEARCOTE_BINARY", "CLEARCOTE_DOCKER_IMAGE", "CLEARCOTE_CLOUD", "CLEARCOTE_LICENSE_KEY",
+                                  "CLEARCOTE_DOCKER_IDLE_EXIT", "CLEARCOTE_DOCKER_CACHE_VOLUME", DockerLaunch.TestOnlyAssumeMacos })
             _sb.Env(k, null);
         _sb.TempHome();   // never this machine's own saved licence key
         _sb.Os("macos");
         DockerLaunch.Which = () => "docker";
         DockerLaunch.Run = _docker.Run;
+        DockerLaunch.FollowLogs = (_, _) => new FakeLogs(_docker);
     }
 
     public void Dispose()
     {
         DockerLaunch.Which = _realWhich;
         DockerLaunch.Run = _realRun;
+        DockerLaunch.FollowLogs = _realLogs;
+        DockerLaunch.ConnectOverride = _realConnect;
         _sb.Dispose();
     }
+
+    private static string Image => $"teamflatearth/clearcote:sdk-{Clearcote.Version}";
+    private static string[] After(string[] argv, string flag) => argv.Where((_, i) => i > 0 && argv[i - 1] == flag).ToArray();
 
     [Fact]
     public void Decides_by_platform_option_binary_and_environment()
@@ -106,8 +129,7 @@ public sealed class DockerLaunchTests : IDisposable
         {
             Assert.True(browser.IsConnected);
             Assert.False(string.IsNullOrEmpty(browser.Version));
-            Assert.Equal(new DockerContainer("c0ffee1234", $"teamflatearth/clearcote:sdk-{Clearcote.Version}", $"http://127.0.0.1:{_docker.CdpPort}"),
-                Clearcote.DockerContainerOf(browser));
+            Assert.Equal(new DockerContainer("c0ffee1234", Image, $"http://127.0.0.1:{_docker.CdpPort}"), Clearcote.DockerContainerOf(browser));
             var page = await browser.NewPageAsync();
             Assert.Null(page.ViewportSize);   // no emulated viewport over the container's real window
             await page.SetContentAsync("<title>in docker</title>");
@@ -119,25 +141,75 @@ public sealed class DockerLaunchTests : IDisposable
         }
         Assert.False(browser.IsConnected);
         Assert.True(local.IsAlive);   // CloseAsync disconnects; ending the browser is the container's stop
-        Assert.Equal(new[] { "info", "run", "port", "stop", "rm" }, _docker.Commands);
-        var (argv, env) = _docker.RunCall;
-        Assert.Equal(new[] { "docker", "run", "-d", "--platform", "linux/amd64" }, argv[..5]);
+        Assert.Equal(new[] { "info", "ps", "create", "cp", "start", "port", "stop", "rm" }, _docker.Commands);
+        var (argv, env, _) = _docker.Call("create");
+        // --rm: a stopped container (and its anonymous engine volume) goes away by itself
+        Assert.Equal(new[] { "docker", "create", "--rm", "--platform", "linux/amd64", "--shm-size" }, argv[..6]);
         Assert.Equal("127.0.0.1::9222", argv[Array.IndexOf(argv, "-p") + 1]);   // loopback only
-        Assert.Equal($"teamflatearth/clearcote:sdk-{Clearcote.Version}", argv[^1]);
+        Assert.Equal(Image, argv[^1]);
         Assert.Equal("clearcote-cache:/opt/xdg-cache", argv[Array.IndexOf(argv, "-v") + 1]);
-        var eNames = argv.Where((_, i) => i > 0 && argv[i - 1] == "-e").ToArray();
+        // owned: the next launch on this machine removes it if this process is gone
+        Assert.Equal(new[] { "com.clearcotelabs.sdk-launch=1", $"com.clearcotelabs.owner-host={System.Net.Dns.GetHostName()}",
+                             $"com.clearcotelabs.owner-pid={Environment.ProcessId}" }, After(argv, "--label"));
+        var eNames = After(argv, "-e");
         Assert.All(eNames, a => Assert.DoesNotContain("=", a));   // values travel in the environment only
         Assert.DoesNotContain(argv, a => a.Contains("cc_lic_docker_test_key_1234") || a.Contains("p w") || a.Contains("p%20w"));
         Assert.Equal(new Dictionary<string, string>
         {
             ["CC_FINGERPRINT"] = "seed-1", ["CC_PLATFORM"] = "windows", ["CC_TIMEZONE"] = "Europe/Berlin",
             ["CC_HARDWARE_CONCURRENCY"] = "8", ["CC_CANVAS_NOISE"] = "0", ["CC_HEADLESS"] = "1",
-            ["CC_EXTRA_ARGS"] = "--lang=de-DE", ["CC_PROXY"] = "http://u:p%20w@proxy.example:8080",
-            ["CLEARCOTE_LICENSE_KEY"] = "cc_lic_docker_test_key_1234",
+            ["CC_EXTRA_ARGS"] = "--lang=de-DE", ["CC_IDLE_EXIT_SECONDS"] = "30", ["CC_SECRETS_FILE"] = "/tmp/clearcote-secrets.json",
         }, env);
         Assert.Equal(env.Keys.OrderBy(k => k, StringComparer.Ordinal), eNames.OrderBy(k => k, StringComparer.Ordinal));
-        Assert.Equal(new[] { new[] { "--time", "10", "c0ffee1234" }, new[] { "-f", "-v", "c0ffee1234" } },   // -v: the image's anonymous VOLUME too
-            _docker.Calls.Where(c => c.Argv[1] is "stop" or "rm").Select(c => c.Argv[2..]).ToArray());
+        // the licence key and the proxy URL go in as a file only the image's user can read
+        var cp = _docker.Call("cp");
+        Assert.Equal(new[] { "-", "c0ffee1234:/tmp" }, cp.Argv[2..]);
+        Assert.Empty(cp.Env);
+        using var reader = new TarReader(new MemoryStream(cp.Input!));
+        var entry = reader.GetNextEntry()!;
+        Assert.Equal(("clearcote-secrets.json", 10001, 10001, UnixFileMode.UserRead | UnixFileMode.UserWrite), (entry.Name, entry.Uid, entry.Gid, entry.Mode));
+        var secrets = JsonSerializer.Deserialize<Dictionary<string, string>>(new StreamReader(entry.DataStream!).ReadToEnd());
+        Assert.Equal(new Dictionary<string, string>
+        {
+            ["CLEARCOTE_LICENSE_KEY"] = "cc_lic_docker_test_key_1234", ["CC_PROXY"] = "http://u:p%20w@proxy.example:8080",
+        }, secrets);
+        Assert.Equal(new[] { new[] { "--time", "10", "c0ffee1234" }, new[] { "-f", "-v", "c0ffee1234" } }, _docker.StopsAndRms);   // -v: the anonymous VOLUME too
+    }
+
+    [Fact]
+    public async Task Sweeps_stale_containers_of_dead_owners_at_the_next_launch()
+    {
+        var here = System.Net.Dns.GetHostName();
+        _docker.Ps = $"aaa111\t{here}\t{DeadPid}\n"            // this machine, owner gone: swept
+                   + $"bbb222\t{here}\t{Environment.ProcessId}\n"   // this machine, owner alive: kept
+                   + $"ccc333\tsome-other-host\t{DeadPid}\n"       // another machine on the same daemon: kept
+                   + "ddd444\t\t\n";                               // no owner labels: kept
+        _docker.Running = false;   // this launch then fails; only the sweep matters here
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Clearcote.LaunchAsync(new LaunchOptions { Quiet = true }));
+        Assert.Equal(new[] { "-a", "--filter", "label=com.clearcotelabs.sdk-launch=1" }, _docker.Call("ps").Argv[2..5]);
+        Assert.Equal(new[] { new[] { "--time", "10", "aaa111" }, new[] { "-f", "-v", "aaa111" } }, _docker.StopsAndRms[..2]);
+        Assert.True(Array.IndexOf(_docker.Commands, "ps") < Array.IndexOf(_docker.Commands, "create"));
+    }
+
+    [Fact]
+    public void PidAlive()
+    {
+        Assert.True(DockerLaunch.PidAlive(Environment.ProcessId));
+        Assert.False(DockerLaunch.PidAlive(DeadPid));
+    }
+
+    [Fact]
+    public async Task The_idle_exit_and_the_cache_volume_can_be_tuned()
+    {
+        _sb.Env("CLEARCOTE_DOCKER_IDLE_EXIT", "7").Env("CLEARCOTE_DOCKER_CACHE_VOLUME", "my-cc-cache");
+        _docker.Running = false;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Clearcote.LaunchAsync(new LaunchOptions { LicenseKey = "cc_lic_x", Quiet = true }));
+        var (argv, env, _) = _docker.Call("create");
+        Assert.Equal("7", env["CC_IDLE_EXIT_SECONDS"]);
+        Assert.Equal("my-cc-cache:/opt/xdg-cache", argv[Array.IndexOf(argv, "-v") + 1]);
+        _sb.Env("CLEARCOTE_DOCKER_IDLE_EXIT", "soon");
+        var e = await Assert.ThrowsAsync<ArgumentException>(() => Clearcote.LaunchAsync(new LaunchOptions { Quiet = true }));
+        Assert.Contains("CLEARCOTE_DOCKER_IDLE_EXIT", e.Message);
     }
 
     [Fact]
@@ -208,13 +280,56 @@ public sealed class DockerLaunchTests : IDisposable
     }
 
     [Fact]
-    public async Task A_failed_docker_run_names_the_image()
+    public async Task An_image_not_published_yet_says_what_to_do()
     {
-        _sb.Env("CLEARCOTE_DOCKER_IMAGE", "example/missing:tag");
-        _docker.RunError = "Unable to find image 'example/missing:tag' locally\nmanifest unknown\n";
+        _docker.CreateError = $"Unable to find image '{Image}' locally\nError response from daemon: manifest for {Image} not found: manifest unknown: manifest unknown\n";
         var e = await Assert.ThrowsAsync<InvalidOperationException>(() => Clearcote.LaunchAsync(new LaunchOptions { Quiet = true }));
-        Assert.Contains("`docker run example/missing:tag` failed: Unable to find image", e.Message);
-        Assert.Equal(new[] { "info", "run" }, _docker.Commands);
+        Assert.Contains($"the Clearcote image {Image} is not available", e.Message);
+        Assert.Contains("published a few minutes after each SDK release", e.Message);
+        Assert.Contains("CLEARCOTE_DOCKER_IMAGE=teamflatearth/clearcote:latest", e.Message);
+        Assert.Equal(new[] { "info", "ps", "create" }, _docker.Commands);
+    }
+
+    [Fact]
+    public async Task A_failed_create_names_the_image()
+    {
+        _sb.Env("CLEARCOTE_DOCKER_IMAGE", "example/other:tag");
+        _docker.CreateError = "docker: Error response from daemon: Conflict. The container name is already in use.\n";
+        var e = await Assert.ThrowsAsync<InvalidOperationException>(() => Clearcote.LaunchAsync(new LaunchOptions { Quiet = true }));
+        Assert.Contains("`docker create example/other:tag` failed: docker: Error response", e.Message);
+    }
+
+    [Fact]
+    public async Task A_failed_connect_after_the_container_started_removes_it()
+    {
+        // The container is up (its CDP answers), then the connect fails.
+        using var listener = new System.Net.HttpListener();
+        var port = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        port.Start();
+        _docker.CdpPort = ((System.Net.IPEndPoint)port.LocalEndpoint).Port;
+        port.Stop();
+        listener.Prefixes.Add($"http://127.0.0.1:{_docker.CdpPort}/");
+        listener.Start();
+        var serve = Task.Run(async () =>
+        {
+            try
+            {
+                while (listener.IsListening)
+                {
+                    var ctx = await listener.GetContextAsync();
+                    var body = System.Text.Encoding.UTF8.GetBytes("{\"webSocketDebuggerUrl\":\"ws://127.0.0.1:1/devtools/browser/x\"}");
+                    ctx.Response.ContentType = "application/json";
+                    await ctx.Response.OutputStream.WriteAsync(body);
+                    ctx.Response.Close();
+                }
+            }
+            catch { /* stopped */ }
+        });
+        DockerLaunch.ConnectOverride = (_, _) => throw new PlaywrightException("connect failed");
+        await Assert.ThrowsAsync<PlaywrightException>(() => Clearcote.LaunchAsync(new LaunchOptions { Quiet = true }));
+        listener.Stop();
+        Assert.Equal(new[] { "stop", "rm" }, _docker.Commands[^2..]);
+        Assert.Equal(new[] { new[] { "--time", "10", "c0ffee1234" }, new[] { "-f", "-v", "c0ffee1234" } }, _docker.StopsAndRms);
     }
 
     [Fact]

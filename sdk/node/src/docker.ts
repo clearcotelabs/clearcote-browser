@@ -16,13 +16,20 @@
 //
 // The container is configured through the image's own CC_* variables (docker/serve.py), so only the
 // options the image understands are accepted; anything else throws naming it. Values travel in the
-// docker CLI's environment (`-e NAME` without a value), never on its command line, so a licence key or
-// proxy password is not visible in the process list. The CDP port is published on 127.0.0.1 only.
+// docker CLI's environment (`-e NAME` without a value), never on its command line. The licence key and
+// the proxy URL are not passed as variables at all: they are copied in as a file serve.py reads once and
+// deletes, so `docker inspect` does not show them (anyone who can reach the Docker daemon can still read a
+// running container's files and memory). The CDP port is published on 127.0.0.1 only.
+//
+// Nothing outlives its owner: the container is created with --rm, stops itself once no CDP client has been
+// connected for 30 s (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch on the machine removes any whose
+// owner process is gone. close() stops it at once.
 // Mirrors _docker.py in the Python SDK.
 
-import { execFile, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import http from "node:http";
+import { hostname } from "node:os";
 import { delimiter, join } from "node:path";
 import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
@@ -32,6 +39,18 @@ import { resolveLicenseKey } from "./license.js";
 export const DEFAULT_REPOSITORY = "teamflatearth/clearcote";
 export const TEST_ONLY_ASSUME_MACOS = "CLEARCOTE_TEST_ONLY_ASSUME_MACOS";
 const LABEL = "com.clearcotelabs.sdk-launch=1";
+// Who started a container: sweepStale() removes the ones whose owner process is gone.
+const OWNER_HOST_LABEL = "com.clearcotelabs.owner-host";
+const OWNER_PID_LABEL = "com.clearcotelabs.owner-pid";
+// A container stops itself once no CDP client has been connected for this long (serve.py's
+// CC_IDLE_EXIT_SECONDS). CLEARCOTE_DOCKER_IDLE_EXIT overrides it; 0 turns it off.
+const DEFAULT_IDLE_EXIT_S = 30;
+const DEFAULT_CACHE_VOLUME = "clearcote-cache";
+// The licence key and the proxy URL (it may carry a password) reach the container as this file, copied in
+// with `docker cp` and deleted by serve.py once read, not as -e variables `docker inspect` would show.
+const SECRET_ENV = ["CLEARCOTE_LICENSE_KEY", "CC_PROXY"];
+const SECRETS_FILE = "/tmp/clearcote-secrets.json";
+const IMAGE_UID = 10001; // the image's user (cc)
 const TRUTHY = ["1", "true", "yes", "on"];
 const FALSY = ["0", "false", "no", "off"];
 // The image starts a virtual display, Chromium and (with a licence) fetches the licensed engine on its
@@ -165,6 +184,9 @@ export function containerEnv(options: Record<string, unknown>): Record<string, s
 
 export interface CliResult { code: number; stdout: string; stderr: string }
 
+/** A starting container's log, kept in memory (it is created with --rm: once stopped, its log is gone). */
+export interface LogTail { text(waitMs?: number): Promise<string>; stop(): void }
+
 function findOnPath(name: string): string | null {
   const exts = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
@@ -177,18 +199,48 @@ function findOnPath(name: string): string | null {
   return null;
 }
 
-/** The docker CLI. Seams: tests replace `which` and `run`. */
+function followLogs(exe: string, id: string): LogTail {
+  const lines: string[] = [];
+  let buf = "";
+  let child: ReturnType<typeof spawn> | null = null;
+  let done: Promise<void> = Promise.resolve();
+  try {
+    child = spawn(exe, ["logs", "--follow", id], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const onData = (c: Buffer) => {
+      buf += c.toString("utf8");
+      const parts = buf.split(/\r?\n/);
+      buf = parts.pop() ?? "";
+      lines.push(...parts);
+      if (lines.length > 40) lines.splice(0, lines.length - 40);
+    };
+    child.stdout!.on("data", onData);
+    child.stderr!.on("data", onData);
+    done = new Promise((r) => { child!.once("close", () => r()); child!.once("error", () => r()); });
+  } catch { /* no log, then */ }
+  return {
+    async text(waitMs = 3000) {
+      // the container is gone: the follower ends with its last line
+      await Promise.race([done, new Promise((r) => setTimeout(r, waitMs))]);
+      return [...lines, buf].filter(Boolean).join("\n");
+    },
+    stop() { if (child && child.exitCode === null) child.kill(); },
+  };
+}
+
+/** The docker CLI. Seams: tests replace `which`, `run` and `followLogs`. */
 export const dockerCli = {
   which: (): string | null => findOnPath("docker"),
-  run: (argv: string[], env?: Record<string, string>, timeoutMs = 120_000): Promise<CliResult> =>
+  run: (argv: string[], env?: Record<string, string>, timeoutMs = 120_000, input?: Buffer): Promise<CliResult> =>
     new Promise((resolve) => {
-      execFile(argv[0], argv.slice(1), { env: env ? { ...process.env, ...env } : process.env, timeout: timeoutMs, maxBuffer: 16 << 20, windowsHide: true },
+      const child = execFile(argv[0], argv.slice(1), { env: env ? { ...process.env, ...env } : process.env, timeout: timeoutMs, maxBuffer: 16 << 20, windowsHide: true },
         (error, stdout, stderr) => {
           const e = error as (NodeJS.ErrnoException & { code?: number | string; killed?: boolean }) | null;
           const code = !e ? 0 : typeof e.code === "number" ? e.code : e.killed ? 124 : 127;
           resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") || (e && !stderr ? e.message : "") });
         });
+      if (input !== undefined) child.stdin?.end(input);
     }),
+  followLogs,
 };
 
 const firstLine = (t: string): string => (t ?? "").split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
@@ -208,14 +260,59 @@ export async function checkDocker(): Promise<string> {
   return exe;
 }
 
+/** How long a launched container waits with no CDP client before it stops itself: CLEARCOTE_DOCKER_IDLE_EXIT
+ * (seconds, 0 = never), default 30. */
+export function idleExitSeconds(): number {
+  const raw = (process.env.CLEARCOTE_DOCKER_IDLE_EXIT ?? "").trim();
+  if (!raw) return DEFAULT_IDLE_EXIT_S;
+  if (!/^\d+$/.test(raw)) throw new TypeError(`CLEARCOTE_DOCKER_IDLE_EXIT=${JSON.stringify(raw)} is not a whole number of seconds`);
+  return Number(raw);
+}
+
+/** The named volume a licensed container keeps its engine in (shared, so it downloads once):
+ * CLEARCOTE_DOCKER_CACHE_VOLUME, default clearcote-cache. */
+export function cacheVolume(): string {
+  return (process.env.CLEARCOTE_DOCKER_CACHE_VOLUME ?? "").trim() || DEFAULT_CACHE_VOLUME;
+}
+
+export function pidAlive(pid: number): boolean {
+  if (!(pid > 0)) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM"; // exists, but not ours to signal
+  }
+}
+
+/**
+ * Stop and remove containers an earlier launch on this machine left behind: labelled as ours, with an owner
+ * process that no longer exists (killed, crashed). They would stop on their own after the idle period; this
+ * frees their licence seat now. Containers of live processes, and of other machines sharing the Docker
+ * daemon, are left alone. Resolves to the ids removed.
+ */
+export async function sweepStale(exe: string): Promise<string[]> {
+  const fmt = `{{.ID}}\t{{.Label "${OWNER_HOST_LABEL}"}}\t{{.Label "${OWNER_PID_LABEL}"}}`;
+  const r = await dockerCli.run([exe, "ps", "-a", "--filter", `label=${LABEL}`, "--format", fmt], undefined, 30_000);
+  if (r.code !== 0) return [];
+  const here = hostname();
+  const stale = r.stdout.split(/\r?\n/).map((l) => l.trim().split("\t"))
+    .filter((p) => p.length === 3 && p[1] === here && /^\d+$/.test(p[2]) && !pidAlive(Number(p[2])))
+    .map((p) => p[0]);
+  if (stale.length) {
+    await dockerCli.run([exe, "stop", "--time", "10", ...stale], undefined, 120_000);
+    await dockerCli.run([exe, "rm", "-f", "-v", ...stale], undefined, 60_000);
+  }
+  return stale;
+}
+
 const live = new Map<string, string>(); // container id -> docker executable, for the exit-time sweep
 let sweepInstalled = false;
 
 async function removeContainer(exe: string, id: string): Promise<void> {
-  // stop first: SIGTERM lets the image release a licence seat; rm then deletes what is left. -v takes the
-  // container's anonymous volume with it: the image declares VOLUME /opt/xdg-cache, so every container gets
-  // one holding a copy of the engine (~0.5 GB) that `rm` alone leaves behind. A named volume
-  // (clearcote-cache, mounted when licensed) is never removed by -v.
+  // stop first: SIGTERM lets the image release a licence seat. The container was created with --rm, so
+  // stopping it removes it and its anonymous volume (the image declares VOLUME /opt/xdg-cache: ~0.5 GB);
+  // rm -f -v is for a container that did not go away. A named volume is never removed.
   await dockerCli.run([exe, "stop", "--time", "10", id], undefined, 60_000);
   await dockerCli.run([exe, "rm", "-f", "-v", id], undefined, 60_000);
   live.delete(id);
@@ -224,7 +321,8 @@ async function removeContainer(exe: string, id: string): Promise<void> {
 function installSweep(): void {
   if (sweepInstalled) return;
   sweepInstalled = true;
-  // "exit" handlers must be synchronous: a container a caller never closed is removed outright.
+  // A normal exit removes what a caller never closed ("exit" handlers must be synchronous). Ctrl-C, a kill
+  // or a crash never runs this: the container's idle exit and the next launch's sweepStale cover those.
   process.once("exit", () => {
     for (const [id, exe] of live) {
       try { spawnSync(exe, ["rm", "-f", "-v", id], { timeout: 30_000, windowsHide: true }); } catch { /* best-effort */ }
@@ -253,47 +351,114 @@ async function publishedPort(exe: string, id: string): Promise<number> {
   throw new Error(`could not read the container's published CDP port (${firstLine(r.stderr) || JSON.stringify(r.stdout)})`);
 }
 
-async function waitReady(exe: string, id: string, port: number, budgetMs: number): Promise<void> {
+async function waitReady(exe: string, id: string, port: number, budgetMs: number, logs: LogTail): Promise<void> {
   const deadline = Date.now() + budgetMs;
   for (;;) {
     if (await cdpReady(port)) return;
     const st = await dockerCli.run([exe, "inspect", "-f", "{{.State.Running}}", id], undefined, 30_000);
-    if (st.code !== 0 || st.stdout.trim() !== "true") {
-      const logs = await dockerCli.run([exe, "logs", "--tail", "25", id], undefined, 30_000);
-      throw new Error(`the Clearcote container stopped before its browser came up:\n${(logs.stdout + logs.stderr).trim()}`);
+    if (st.code !== 0 || st.stdout.trim() !== "true") { // stopped (and, with --rm, already gone)
+      throw new Error(`the Clearcote container stopped before its browser came up:\n${(await logs.text()).trim() || "(it left no log)"}`);
     }
     if (Date.now() >= deadline) throw new Error(`the Clearcote container's CDP endpoint did not answer within ${Math.round(budgetMs / 1000)} s`);
     await new Promise((r) => setTimeout(r, 250));
   }
 }
 
+const VOLUME_INIT_RACE = /volumes\/[^/\s]+\/_data\S*: (?:file exists|no such file)/i;
+const NOT_PUBLISHED = /manifest unknown|manifest for .* not found|not found: manifest|pull access denied|repository does not exist/i;
+
+function createFailed(image: string, code: number, stderr: string): Error {
+  const detail = stderr.trim() || `exit ${code}`;
+  if (NOT_PUBLISHED.test(detail)) {
+    const why = image === `${DEFAULT_REPOSITORY}:sdk-${SDK_VERSION}`
+      ? `Images are published a few minutes after each SDK release (after the PyPI package they are built from), so a brand-new SDK can be ahead of its image: try again shortly, or set CLEARCOTE_DOCKER_IMAGE=${DEFAULT_REPOSITORY}:latest to run the newest published image.`
+      : "Check the name, or unset CLEARCOTE_DOCKER_IMAGE / dockerImage to use the default.";
+    return new Error(`the Clearcote image ${image} is not available (${firstLine(detail)}). ${why}`);
+  }
+  return new Error(`\`docker create ${image}\` failed: ${detail}\n(set CLEARCOTE_DOCKER_IMAGE or dockerImage to use another image)`);
+}
+
+/** A ustar archive of one file, as `docker cp -` reads it. */
+export function tarOneFile(name: string, data: Buffer, opts: { uid: number; gid: number; mode: number }): Buffer {
+  const header = Buffer.alloc(512, 0);
+  const put = (s: string, off: number, len: number) => header.write(s, off, len, "ascii");
+  const oct = (n: number, len: number) => n.toString(8).padStart(len - 1, "0") + "\0";
+  put(name, 0, 100);
+  put(oct(opts.mode, 8), 100, 8);
+  put(oct(opts.uid, 8), 108, 8);
+  put(oct(opts.gid, 8), 116, 8);
+  put(oct(data.length, 12), 124, 12);
+  put(oct(Math.floor(Date.now() / 1000), 12), 136, 12);
+  put("        ", 148, 8); // checksum is computed with this field as spaces
+  put("0", 156, 1); // a regular file
+  put("ustar\0", 257, 6);
+  put("00", 263, 2);
+  let sum = 0;
+  for (const b of header) sum += b;
+  put(sum.toString(8).padStart(6, "0") + "\0 ", 148, 8);
+  const pad = Buffer.alloc((512 - (data.length % 512)) % 512, 0);
+  return Buffer.concat([header, data, pad, Buffer.alloc(1024, 0)]);
+}
+
 export interface DockerContainer { id: string; image: string; endpoint: string }
 
-/** Start the image and wait for its CDP endpoint. Nothing is left running when this rejects. */
+/**
+ * Start the image and wait for its CDP endpoint. Nothing is left running when this rejects.
+ *
+ * The container is created with --rm and stops itself once no CDP client has been connected for
+ * idleExitSeconds() (serve.py's CC_IDLE_EXIT_SECONDS), so one whose owner died (Ctrl-C, a kill, a crash)
+ * gives its licence seat back and disappears on its own; the next launch on this machine also sweeps any
+ * still there (sweepStale). It carries the owner's host name and pid as labels for that sweep. The licence
+ * key and the proxy URL are copied in as a file rather than passed with -e, so they are not part of the
+ * container's configuration (`docker inspect`).
+ */
 export async function startContainer(options: Record<string, unknown>): Promise<DockerContainer & { exe: string }> {
   const env = containerEnv(options);
+  const idle = idleExitSeconds();
   const exe = await checkDocker();
+  await sweepStale(exe);
   const image = (options.dockerImage as string | undefined) || defaultImage();
-  const argv = [exe, "run", "-d", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222", "--label", LABEL];
+  const secrets: Record<string, string> = {};
+  for (const k of SECRET_ENV) if (env[k] !== undefined) { secrets[k] = env[k]; delete env[k]; }
+  if (idle) env.CC_IDLE_EXIT_SECONDS = String(idle);
+  if (Object.keys(secrets).length) env.CC_SECRETS_FILE = SECRETS_FILE;
+  const argv = [exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
+    "--label", LABEL, "--label", `${OWNER_HOST_LABEL}=${hostname()}`, "--label", `${OWNER_PID_LABEL}=${process.pid}`];
   for (const name of Object.keys(env).sort()) argv.push("-e", name); // the value comes from the CLI's environment
-  if (env.CLEARCOTE_LICENSE_KEY) argv.push("-v", "clearcote-cache:/opt/xdg-cache"); // the licensed engine downloads once
+  if (secrets.CLEARCOTE_LICENSE_KEY) argv.push("-v", `${cacheVolume()}:/opt/xdg-cache`); // the licensed engine downloads once
   argv.push(image);
   if (!options.quiet) process.stderr.write(`[clearcote] no native macOS build: starting the Clearcote Docker image ${image} (the first run downloads it)\n`);
-  const r = await dockerCli.run(argv, env, 1_800_000);
-  const id = r.stdout.trim().split(/\r?\n/).pop()?.trim() ?? "";
-  if (r.code !== 0 || !id) {
-    throw new Error(`\`docker run ${image}\` failed: ${r.stderr.trim() || `exit ${r.code}`}\n(set CLEARCOTE_DOCKER_IMAGE or dockerImage to use another image)`);
+  let r = await dockerCli.run(argv, env, 1_800_000);
+  // Two launches creating their first container on a NEW shared volume at once collide in Docker's own volume
+  // initialisation ("failed to mkdir .../volumes/<name>/_data/...: file exists"); the loser succeeds a moment
+  // later, once the volume has been filled.
+  for (let attempt = 1; attempt < 4 && r.code !== 0 && VOLUME_INIT_RACE.test(r.stderr); attempt++) {
+    await new Promise((res) => setTimeout(res, 1000 * attempt));
+    r = await dockerCli.run(argv, env, 1_800_000);
   }
+  const id = r.stdout.trim().split(/\r?\n/).pop()?.trim() ?? "";
+  if (r.code !== 0 || !id) throw createFailed(image, r.code, r.stderr);
   live.set(id, exe);
   installSweep();
+  let logs: LogTail | null = null;
   try {
+    if (Object.keys(secrets).length) {
+      const tar = tarOneFile(SECRETS_FILE.split("/").pop()!, Buffer.from(JSON.stringify(secrets), "utf8"), { uid: IMAGE_UID, gid: IMAGE_UID, mode: 0o600 });
+      const cp = await dockerCli.run([exe, "cp", "-", `${id}:${SECRETS_FILE.slice(0, SECRETS_FILE.lastIndexOf("/"))}`], undefined, 60_000, tar);
+      if (cp.code !== 0) throw new Error(`could not copy the licence/proxy settings into the container: ${firstLine(cp.stderr)}`);
+    }
+    const st = await dockerCli.run([exe, "start", id], undefined, 120_000);
+    if (st.code !== 0) throw new Error(`\`docker start\` failed: ${st.stderr.trim() || `exit ${st.code}`}`);
+    logs = dockerCli.followLogs(exe, id);
     const port = await publishedPort(exe, id);
     const timeout = options.timeout as number | undefined;
-    await waitReady(exe, id, port, timeout ? Math.max(timeout, 1000) : READY_TIMEOUT_MS);
+    await waitReady(exe, id, port, timeout ? Math.max(timeout, 1000) : READY_TIMEOUT_MS, logs);
     return { id, image, endpoint: `http://127.0.0.1:${port}`, exe };
   } catch (e) {
     await removeContainer(exe, id);
     throw e;
+  } finally {
+    logs?.stop();
   }
 }
 

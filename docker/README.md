@@ -42,6 +42,8 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | `CC_SHADER_DIALECT` | `hlsl` \| `0` | report ANGLE's translated shader as HLSL — **auto-on for `CC_PLATFORM=windows`** |
 | `CLEARCOTE_LICENSE_KEY` | `cc_lic_...` | use the licensed engine instead of the bundled open one — see below |
 | `CC_VERSION` | `152` \| `152.0.7977.82` \| `r24` | with a **Pro** key: pin a major, an exact build or a revision (default: the newest your key allows). Free keys always get the latest build and are refused a pin |
+| `CC_IDLE_EXIT_SECONDS` | `30` | stop once no CDP client has been connected for this long (default: never). Pair it with `--rm` so an abandoned container also disappears |
+| `CC_SECRETS_FILE` | `/tmp/clearcote-secrets.json` | a JSON file holding `CLEARCOTE_LICENSE_KEY` and/or `CC_PROXY`, read once at start and deleted — see [Secrets](#secrets-and-docker-inspect) |
 
 ```bash
 docker run -d -p 9222:9222 \
@@ -98,12 +100,37 @@ The CDP endpoint is **full browser control**. Publish it only to trusted network
 host-local with `-p 127.0.0.1:9222:9222`, or keep it on an internal Docker network. Never expose
 `:9222` to the public internet.
 
+### Secrets and `docker inspect`
+
+Every variable passed with `-e` is part of the container's configuration: anyone who can run
+`docker inspect` on it reads `CLEARCOTE_LICENSE_KEY`, and the password inside a `CC_PROXY` URL, in
+plain text (as do `docker compose config` and most container dashboards). To keep them out of the
+configuration, put them in a JSON file inside the container instead and point `CC_SECRETS_FILE` at it;
+the entrypoint reads the file once and deletes it:
+
+```bash
+id=$(docker create -p 127.0.0.1:9222:9222 -e CC_SECRETS_FILE=/tmp/clearcote-secrets.json \
+  -v clearcote-cache:/opt/xdg-cache teamflatearth/clearcote)
+# a file owned by the image's user (uid 10001), e.g. built with: tar --owner=10001 --group=10001 --mode=600
+docker cp - "$id:/tmp" < clearcote-secrets.tar
+docker start "$id"
+```
+
+The SDKs' macOS `launch()` (which runs this image because there is no native macOS build) does exactly
+that. Anyone with access to the Docker daemon can still read a running container's memory and files, so
+treat daemon access as access to the key.
+
 ## Notes
 
 - Each image tag is built from one SDK release: `sdk-<version>` (e.g. `sdk-0.30.0`), `<browser>` (the
   open binary it bakes in, e.g. `0.1.0-pre.23`) and `latest`. Rebuild + verify this image yourself:
   `docker build -t clearcote .` — every layer is auditable.
 - `--disable-dev-shm-usage` is set; add `--shm-size=1g` on very heavy pages if needed.
+- The SDKs' macOS `launch()` starts this image with `--rm`, `CC_IDLE_EXIT_SECONDS=30` and owner labels
+  (`com.clearcotelabs.sdk-launch`, `com.clearcotelabs.owner-host`, `com.clearcotelabs.owner-pid`), so a
+  container whose program was killed stops on its own and is removed; the next launch on that machine
+  removes any left over at once. Several licensed launches share the `clearcote-cache` volume; the first
+  one downloads the engine and the others wait for it.
 - `tini` is PID 1, so browser helper processes that exit inside the container (for example from
   scripts you `docker exec` that launch their own browsers) are reaped instead of piling up as
   `<defunct>` entries. `docker stop` still reaches the browser and releases the licence seat.

@@ -16,6 +16,7 @@ Uses only the standard library (urllib + hashlib + zipfile); GPG verification is
 only runs if a ``gpg`` executable is on PATH.
 """
 
+import contextlib
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ import shutil
 import subprocess  # noqa: S404
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 
@@ -406,7 +408,56 @@ def _gpg_verify(rel, sums_body, quiet):
         shutil.rmtree(home, ignore_errors=True)
 
 
+@contextlib.contextmanager
+def _install_lock(base):
+    """One installer per build directory at a time, across processes -- and across containers that share
+    an engine-cache volume (the macOS Docker launch mounts one named volume into every licensed container).
+    Without it two first launches both downloaded into ``base``, shared one ``.incoming`` directory, and the
+    loser failed with "Directory not empty" (measured: two parallel licensed containers on a fresh volume)."""
+    os.makedirs(base, exist_ok=True)
+    fh = open(os.path.join(base, ".install.lock"), "a+b")  # noqa: SIM115 -- held for the whole install
+    try:
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                try:
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.25)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        fh.close()
+
+
 def _fetch_and_verify(rel, base, quiet):
+    """Download + verify a resolved release into ``base``; return the extracted chrome.exe path.
+
+    Holds ``base``'s install lock: a second process that missed the cache at the same moment waits, then
+    uses the tree the first one finished instead of downloading over it."""
+    with _install_lock(base):
+        cached = _cached(base, rel.get("binary", "chrome.exe"), quiet)
+        if cached:
+            _log(quiet, f"installed by another process meanwhile: {cached}")
+            return cached
+        return _fetch_and_verify_unlocked(rel, base, quiet)
+
+
+def _fetch_and_verify_unlocked(rel, base, quiet):
     """Download + verify a resolved release into ``base``; return the extracted chrome.exe path."""
     browser_dir = os.path.join(base, "browser")
     os.makedirs(base, exist_ok=True)
