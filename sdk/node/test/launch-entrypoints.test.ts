@@ -99,6 +99,7 @@ vi.mock("../src/profileauto.js", async (importOriginal) => ({
 
 import { launch, launchAgent, launchPersistentContext, serve, serveNeedsNoSandbox } from "../src/index.js";
 import { resolveLicenseKey } from "../src/license.js";
+import { installedPlaywrightDisabledFeatures, PAGE_VISIBLE_PLAYWRIGHT_FEATURES, PLAYWRIGHT_DISABLED_FEATURES } from "../src/launchopts.js";
 
 afterAll(() => {
   if (stub.savedProfileDir === undefined) delete process.env.CLEARCOTE_PROFILE_DIR;
@@ -470,7 +471,10 @@ describe("Playwright's --disable-features is replaced without ThirdPartyStorageP
       const browser = await launch({ ...base(), fingerprint: "s1", platform });
       const feats = disabledFeatures(stub.launches.at(-1)!.opts.args as string[]);
       for (const f of ["ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades"]) expect(feats).not.toContain(f);
-      for (const f of ["MediaRouter", "Translate", "RenderDocument", "PaintHolding"]) expect(feats).toContain(f);
+      // Which entries Playwright disables varies by release (1.63 dropped RenderDocument): check the installed one's.
+      const kept = (installedPlaywrightDisabledFeatures() ?? PLAYWRIGHT_DISABLED_FEATURES).filter((f) => !PAGE_VISIBLE_PLAYWRIGHT_FEATURES.has(f));
+      expect(kept).toContain("MediaRouter");
+      for (const f of kept) expect(feats).toContain(f);
       expect(feats.includes("WebBluetooth")).toBe(platform === "linux");
       await browser.close();
     });

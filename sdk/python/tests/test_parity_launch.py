@@ -543,8 +543,14 @@ def test_launch_replaces_playwrights_list_without_partitioning(prepared, platfor
     for f in ("ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades"):
         assert f not in feats, f  # what a page or a server can observe stays as in genuine Chrome
     # Playwright's stability/UI entries stay off on every claim (a Linux claim used to drop them all,
-    # because its own --disable-features=WebBluetooth replaced Playwright's whole list)
-    for f in ("MediaRouter", "Translate", "RenderDocument", "PaintHolding"):
+    # because its own --disable-features=WebBluetooth replaced Playwright's whole list). Which entries
+    # Playwright disables varies by release (1.63 dropped RenderDocument): check the installed one's.
+    from clearcote._launchopts import (PAGE_VISIBLE_PLAYWRIGHT_FEATURES, PLAYWRIGHT_DISABLED_FEATURES,
+                                       installed_playwright_disabled_features)
+    playwrights = installed_playwright_disabled_features() or PLAYWRIGHT_DISABLED_FEATURES
+    kept = [f for f in playwrights if f not in PAGE_VISIBLE_PLAYWRIGHT_FEATURES]
+    assert "MediaRouter" in kept
+    for f in kept:
         assert f in feats, f
     assert ("WebBluetooth" in feats) == (platform == "linux")
 
