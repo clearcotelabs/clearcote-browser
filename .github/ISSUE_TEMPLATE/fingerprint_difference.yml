@@ -113,7 +113,6 @@ body:
         - Windows 10
         - Linux desktop
         - Linux server, VM or container
-        - macOS
         - Other
     validations:
       required: true
