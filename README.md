@@ -49,6 +49,78 @@ Pick the row that matches what you want to do, then jump to its section. Every p
 | Run it without installing anything | Hosted browsers | [Run it in the cloud](#run-it-in-the-cloud) |
 | Give an AI assistant (Claude, Cursor, Cline) a browser | The MCP server | [Give an AI assistant a browser](#give-an-ai-assistant-a-browser) |
 | Describe a task in words and get JSON back | Agent runs | [Let an agent do the task](#let-an-agent-do-the-task) |
+| Move code I already run on another tool | Usually one changed line | [Switch from another tool](#switch-from-another-tool) |
+
+---
+
+## Switch from another tool
+
+Clearcote is a real Chromium that speaks CDP, so existing code usually moves over by changing the one
+line that starts or finds the browser. The code after that line stays the same.
+
+**From Playwright.** `launch()` returns the same Playwright `Browser`, so only the launch call changes:
+
+```diff
+- from playwright.sync_api import sync_playwright
+- browser = sync_playwright().start().chromium.launch()
++ from clearcote import launch
++ browser = launch(fingerprint="user-7423")
+```
+
+```diff
+- import { chromium } from "playwright";
+- const browser = await chromium.launch();
++ import { launch } from "clearcote";
++ const browser = await launch({ fingerprint: "user-7423" });
+```
+
+**From a tool that connects over CDP.** Start Clearcote as an endpoint (`clearcote-serve --port 9222`,
+the [Docker image](#run-it-in-docker) or `serve()`), then point the tool at it:
+
+| Tool | The line that changes |
+|---|---|
+| Playwright (Python / Node) | `chromium.connect_over_cdp("http://127.0.0.1:9222")` / `chromium.connectOverCDP(...)` |
+| Puppeteer | `puppeteer.connect({ browserURL: "http://127.0.0.1:9222" })` |
+| browser-use | `Browser(cdp_url="http://127.0.0.1:9222")` |
+| Crawl4AI | `BrowserConfig(browser_mode="cdp", cdp_url="http://127.0.0.1:9222")` |
+| nodriver | `uc.start(host="127.0.0.1", port=9222)` |
+| Playwright MCP | `npx @playwright/mcp --cdp-endpoint http://127.0.0.1:9222` |
+| Stagehand 4 | `localBrowser.connect({ cdpUrl: "http://127.0.0.1:9222" })`, then `Stagehand.create({ browser })`. Needs two launch options, below |
+| Any other CDP client | The `webSocketDebuggerUrl` from `http://127.0.0.1:9222/json/version` |
+
+Stagehand 4 runs its own extension inside the browser, so the endpoint needs the two switches that
+Stagehand's own launcher adds. Keep the port on `127.0.0.1`:
+
+```javascript
+import { serve } from "clearcote";
+import { Stagehand, localBrowser } from "@browserbasehq/stagehand";
+
+const srv = await serve({
+  fingerprint: "user-7423",
+  allowOrigins: "*",                               // Stagehand's extension connects back to the endpoint
+  args: ["--enable-unsafe-extension-debugging"],   // lets Stagehand load that extension over CDP
+});
+const stagehand = await Stagehand.create({ browser: await localBrowser.connect({ cdpUrl: srv.cdpUrl }) });
+```
+
+Each row was run against a Clearcote endpoint on 6 October 2026 (Playwright 1.63, Puppeteer 25,
+browser-use 0.13, Crawl4AI 0.9, nodriver 0.50, Playwright MCP 0.0.83, Stagehand 4.1).
+
+**From a hosted browser service.** If your provider gives you a CDP WebSocket URL, use the `connectUrl`
+of a Clearcote cloud session instead. Your connect call does not change. See [Run it in the cloud](#run-it-in-the-cloud).
+
+**From a stealth plugin.** Remove `puppeteer-extra-plugin-stealth`, `playwright-stealth` and similar
+plugins. The persona is set in the engine, and script patches on top of it conflict with it.
+
+**From a closed anti-detect browser.** These usually start a profile through a local API and give your
+script a CDP address. Replace that call with `serve(fingerprint="profile-name")` or `launch(...)`. The
+same seed returns the same machine every time; give `serve()` a `user_data_dir` to keep cookies and storage
+as well, or use the [Profile Manager](https://github.com/clearcotelabs/clearcote-profile-manager) desktop app.
+
+**From Selenium or WebDriver.** This is the exception. Clearcote is driven over CDP, so those scripts need
+porting to Playwright, Puppeteer or nodriver.
+
+Side-by-side comparisons with other tools: [clearcotelabs.com/alternatives](https://www.clearcotelabs.com/alternatives).
 
 ---
 
