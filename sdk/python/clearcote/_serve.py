@@ -169,6 +169,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     from ._fonts import linux_font_env, linux_locale_env
     from ._geometry import fit_served_window, served_geometry, validate_window_size
     from ._launchopts import serve_infobar_args, serve_needs_no_sandbox
+    from ._shaderdialect import shader_dialect_env
     from ._warnings import emit_warnings, serve_exposure_warnings
 
     window_size = validate_window_size(window_size)
@@ -178,6 +179,9 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     # ...so _prepare cannot see it: tell it explicitly (the GPU-blocklist rule depends on headed).
     # serve launches the binary directly, so Playwright's SwiftShader default is never added here.
     kwargs["_cc_headed"] = not headless
+    # ...and never carries Playwright's --disable-features, so _prepare has nothing to replace.
+    kwargs["_cc_direct"] = True
+    shader_dialect = kwargs.pop("shader_dialect", None)  # an env var for the GPU process, not a switch
     # License (opt-in, inert in free mode). This MUST run before _prepare: it converts license_key
     # into the _cc_pro tuple _prepare needs to select the gated binary. Without it serve() silently
     # dropped the key and launched the FREE engine for a licensed caller -- and even had it resolved
@@ -227,6 +231,8 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     env = dict(os.environ)
     env.update(linux_font_env(exe))  # Linux: FONTCONFIG_FILE -> bundled font clones (no-op elsewhere)
     env.update(linux_locale_env(args))  # Linux: UI locale from --lang (no-op elsewhere)
+    # Windows claim on a non-Windows host -> HLSL from WEBGL_debug_shaders, as launch() does.
+    shader_dialect_env(shader_dialect, args, env)
     if lease and lease.token:
         # The PRO engine's gate reads this once at startup and exits if it is missing or invalid.
         env["CLEARCOTE_RUN_TOKEN"] = lease.token

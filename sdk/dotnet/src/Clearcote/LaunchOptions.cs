@@ -77,9 +77,9 @@ public class LaunchOptions : FingerprintOptions
     /// string it already advertises — without it the Vulkan backend answers with SPIR-V and the two
     /// values contradict each other. Rendering is unaffected.</para>
     ///
-    /// <para>OFF by default: the re-translation is a different code path from the one that
-    /// rendered, so a shader the real backend accepts but the HLSL translator rejects falls back to
-    /// the honest dialect. Turn it on if you hit this specific check. Needs a PRO engine 151 r15+.</para>
+    /// <para>ON by default for a Windows claim on a non-Windows host (since 0.39.0); set "off" to
+    /// turn it off. A shader the HLSL translator rejects falls back to the backend's own output, the
+    /// state every launch was in before. Needs a PRO engine 151 r15+; older engines ignore it.</para>
     public string? ShaderDialect { get; set; }
     /// Relay WebRTC's UDP through the SOCKS5 proxy using UDP ASSOCIATE, instead of letting it
     /// egress on the host's own path.

@@ -451,3 +451,74 @@ async function fakeCdpEndpoint(): Promise<{ port: number; close: () => Promise<v
   const port = typeof addr === "object" && addr ? addr.port : 0;
   return { port, close: () => new Promise<void>((r) => server.close(() => r())) };
 }
+
+// -- 2026-10-06 coherence fixes, end to end through every entry point -------------------------------
+
+/** The single --disable-features on a launch line, split. */
+function disabledFeatures(args: string[]): string[] {
+  const found = args.filter((a) => a.startsWith("--disable-features="));
+  expect(found).toHaveLength(1);
+  return found[0].slice("--disable-features=".length).split(",");
+}
+
+describe("Playwright's --disable-features is replaced without ThirdPartyStoragePartitioning", () => {
+  // Measured on r30 vs genuine Chrome 154: with Playwright's switch a cross-site iframe read the
+  // top-level site's storage, or got a SecurityError from localStorage with third-party cookies
+  // blocked; genuine gives it an empty partition either way.
+  for (const platform of ["windows", "linux"] as const) {
+    it(`launch() under a ${platform} claim`, async () => {
+      const browser = await launch({ ...base(), fingerprint: "s1", platform });
+      const feats = disabledFeatures(stub.launches.at(-1)!.opts.args as string[]);
+      expect(feats).not.toContain("ThirdPartyStoragePartitioning");
+      for (const f of ["HttpsUpgrades", "MediaRouter", "Translate", "RenderDocument", "PaintHolding"]) expect(feats).toContain(f);
+      expect(feats.includes("WebBluetooth")).toBe(platform === "linux");
+      await browser.close();
+    });
+  }
+
+  it("launchPersistentContext()", async () => {
+    const context = await launchPersistentContext(join(root, "p"), { ...base(), fingerprint: "s1" });
+    const feats = disabledFeatures(stub.launches.at(-1)!.opts.args as string[]);
+    expect(feats).not.toContain("ThirdPartyStoragePartitioning");
+    expect(feats).toContain("HttpsUpgrades");
+    await context.close();
+  });
+
+  it("not when the caller dropped Playwright's defaults", async () => {
+    const browser = await launch({ ...base(), ephemeralProfile: false, ignoreDefaultArgs: true } as never);
+    const args = stub.launches.at(-1)!.opts.args as string[];
+    expect(args.some((a) => a.includes("HttpsUpgrades"))).toBe(false);
+    await browser.close();
+  });
+
+  it("never on serve(), which starts Chromium itself", async () => {
+    const { port, close } = await fakeCdpEndpoint();
+    try {
+      const srv = await serve({ ...base(), port, fingerprint: "s1" });
+      const line = stub.spawns.at(-1)!;
+      expect(line.some((a) => a.includes("HttpsUpgrades") || a.includes("ThirdPartyStoragePartitioning"))).toBe(false);
+      await srv.close();
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe("profile: \"auto\" from a Windows 11 donor carries the Windows 11 system faces", () => {
+  it("launch()", async () => {
+    const saved = stub.serviceProfile;
+    (stub as { serviceProfile: unknown }).serviceProfile = {
+      navigator: { platform: "Win32", uadata: { platform: "Windows", high_entropy: { platform: "Windows", platformVersion: "15.0.0" } } },
+      fonts: { detected: ["Arial", "HoloLens MDL2 Assets", "Segoe MDL2 Assets"] },
+    };
+    try {
+      const browser = await launch({ ...base(), profile: "auto" });
+      const detected = (decodedProfile(stub.launches.at(-1)!.opts.args as string[]) as { fonts: { detected: string[] } }).fonts.detected;
+      expect(detected).toEqual(expect.arrayContaining(["Segoe Fluent Icons", "Segoe UI Variable Display", "Segoe UI Variable Text"]));
+      expect(detected).not.toContain("Cascadia Code");
+      await browser.close();
+    } finally {
+      (stub as { serviceProfile: unknown }).serviceProfile = saved;
+    }
+  });
+});

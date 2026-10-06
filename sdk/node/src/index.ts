@@ -34,7 +34,7 @@ import { resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from 
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
 import { agentArgs, splitAgentOptions, type AgentOptions } from "./agent.js";
 import { resolveProfileOptions, Profile } from "./profile.js";
-import { resolveAuto, resolveLocal, localSetupHint, engineSupportsProfiles, MIN_PROFILE_ENGINE_MAJOR, DEFAULT_LOCAL_DIR, type AutoOptions, type AutoResult } from "./profileauto.js";
+import { resolveAuto, resolveLocal, localSetupHint, engineSupportsProfiles, MIN_PROFILE_ENGINE_MAJOR, DEFAULT_LOCAL_DIR, profileWithWindows11Faces, type AutoOptions, type AutoResult } from "./profileauto.js";
 import { measureHost, fetchIndex, fetchProfile, hostOsFamily, type ProfileSourceOptions } from "./profilesource.js";
 import { importDirectory, loadImportedProfile, indexEntryFromProfile } from "./profileimport.js";
 import {
@@ -48,6 +48,7 @@ import {
   engineSupportsSwitch,
   warnUnsupportedEngineOptions,
   mergeFeatureFlags,
+  playwrightFeatureOverrideArgs,
   privacySandboxArgs,
   quicArgs,
   socks5UdpArgs,
@@ -210,7 +211,7 @@ interface EphemeralProfileOption {
   userDataDir?: string;
 }
 
-/** Opt-in shader-dialect reporting (see ./shaderdialect.ts). */
+/** Shader-dialect reporting (see ./shaderdialect.ts). */
 interface ShaderDialectOption {
   /** Report ANGLE's translated shader in this dialect for
    * `WEBGL_debug_shaders.getTranslatedShaderSource()`.
@@ -219,10 +220,10 @@ interface ShaderDialectOption {
    * string it already advertises — without it the Vulkan backend answers with SPIR-V and the two
    * values contradict each other. Rendering is unaffected.
    *
-   * OFF by default: the re-translation is a different code path from the one that rendered, so a
-   * shader the real backend accepts but the HLSL translator rejects falls back to the honest
-   * dialect. Turn it on if you hit this specific check. Needs a PRO engine 151 r15+. */
-  shaderDialect?: ShaderDialect;
+   * ON by default for a Windows claim on a non-Windows host (since 0.39.0); pass `false` to turn it
+   * off. A shader the HLSL translator rejects falls back to the backend's own output, the state
+   * every launch was in before. Needs a PRO engine 151 r15+; older engines ignore it. */
+  shaderDialect?: ShaderDialect | false;
 }
 
 /** Engine behaviour switches that are not part of the persona (engine 152 r22+). */
@@ -457,7 +458,12 @@ function assembleArgs(
   userArgs: string[],
   proxyForQuic?: PwProxy,
   socks5Udp?: boolean,
-  extra?: { exe?: string; headed?: boolean; quiet?: boolean; allowThirdPartyCookies?: boolean; transparentProxy?: boolean },
+  extra?: {
+    exe?: string; headed?: boolean; quiet?: boolean; allowThirdPartyCookies?: boolean; transparentProxy?: boolean;
+    /** Set when Playwright starts this browser (launch / launchPersistentContext, not serve): the
+     * caller's ignoreDefaultArgs, `null` when they passed none. See playwrightFeatureOverrideArgs. */
+    playwrightIgnoreDefaultArgs?: string[] | boolean | null;
+  },
 ): string[] {
   // webBluetoothArgs: navigator.bluetooth must follow the CLAIM, in both directions. A Linux
   // build hides it while exposing usb/serial/hid (an OS-origin tell on a Windows persona); a
@@ -476,6 +482,11 @@ function assembleArgs(
   // Sandbox surface Chrome ships" failed as an implausible value — the same defect class as the
   // WebUSB split fixed in r7. Pass disablePrivacySandbox: true when the persona really is
   // de-Googled Chromium.
+  // Playwright disables third-party storage partitioning, which genuine Chrome never does; re-emit
+  // its list without that entry as the last --disable-features. See playwrightFeatureOverrideArgs.
+  if (extra && extra.playwrightIgnoreDefaultArgs !== undefined) {
+    base.push(...playwrightFeatureOverrideArgs(extra.playwrightIgnoreDefaultArgs ?? undefined));
+  }
   if (disablePrivacySandbox === true) base.push(...privacySandboxArgs());
   base.push(...webrtcDefaultDenyArgs([...base, ...userArgs], webrtcIp));
   if (extra) {
@@ -622,7 +633,8 @@ async function applyAutoProfile(
   }
 
   const { profile } = await resolveAuto(host, opts);
-  fingerprint.fingerprintProfile = profile;
+  // The corpus never probed the Windows 11 system fonts; a Windows 11 donor gets them back.
+  fingerprint.fingerprintProfile = profileWithWindows11Faces(profile);
   // A seed alongside a profile is the combination that fails strict scoring, and it also makes
   // profile fields apply only partially. "auto" therefore never sets one — and says so if the
   // caller supplied one, rather than silently doing something different from what was asked.
@@ -1022,10 +1034,11 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined, socks5Udp,
-    { exe, headed, quiet, allowThirdPartyCookies, transparentProxy });
+    { exe, headed, quiet, allowThirdPartyCookies, transparentProxy,
+      playwrightIgnoreDefaultArgs: ((pwOptions as PlaywrightLaunchOptions).ignoreDefaultArgs as string[] | boolean | undefined) ?? null });
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …)
   // and LANGUAGE at the persona's UI locale (after engineArgs: it reads their --lang).
-  const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env, engineArgs));
+  const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env, engineArgs), engineArgs);
   const launchToken = lease?.bindLaunch();
   // A function: a launch retried after a stale-token refusal must carry the lease's fresh token.
   const runtimeEnv = () => (lease ? withRunToken(lease.token, launchEnv, launchToken?.file) : launchEnv);
@@ -1150,8 +1163,9 @@ async function launchLocalPersistentContext(
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined, socks5Udp,
-    { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy });
-  const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env, engineArgs));
+    { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy,
+      playwrightIgnoreDefaultArgs: ignoreDefaultArgs ?? null });
+  const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env, engineArgs), engineArgs);
   const launchToken = lease?.bindLaunch();
   // A function: a launch retried after a stale-token refusal must carry the lease's fresh token.
   const runtimeEnv = () => (lease ? withRunToken(lease.token, ctxEnv, launchToken?.file) : ctxEnv);
@@ -1446,7 +1460,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const launchToken = lease?.bindLaunch();
-  const env = { ...process.env, ...(withShaderDialect(shaderDialect, fontLaunchEnv(exe, undefined, engineArgs)) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token, ...(launchToken ? { CLEARCOTE_RUN_TOKEN_FILE: launchToken.file } : {}) } : {}) };
+  const env = { ...process.env, ...(withShaderDialect(shaderDialect, fontLaunchEnv(exe, undefined, engineArgs), engineArgs) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token, ...(launchToken ? { CLEARCOTE_RUN_TOKEN_FILE: launchToken.file } : {}) } : {}) };
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.

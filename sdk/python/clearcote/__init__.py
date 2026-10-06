@@ -36,7 +36,7 @@ from ._fingerprint import (
     is_fingerprint_passthrough,
     persona_platform,
 )
-from ._fontpersona import ensure_persona_fonts, font_reachability
+from ._fontpersona import ensure_persona_fonts, font_reachability, profile_with_windows11_faces
 from ._fonts import apply_font_env
 from ._shaderdialect import apply_shader_dialect
 from ._geometry import apply_headless_geometry, fit_window_to_work_area
@@ -54,6 +54,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     warn_unsupported_engine_options,
     portable_args,
     merge_feature_flags,
+    playwright_feature_override_args,
     privacy_sandbox_args,
     quic_args,
     socks5_udp_args,
@@ -350,7 +351,8 @@ def _apply_auto_profile(fp, exe, select, quiet=False, pro=None, lease=None):
         major,
     )
     result = resolve_auto(host, license_key=license_key, api_base=api_base, quiet=quiet, **select)
-    fp["fingerprint_profile"] = result["profile"]
+    # The corpus never probed the Windows 11 system fonts; a Windows 11 donor gets them back.
+    fp["fingerprint_profile"] = profile_with_windows11_faces(result["profile"])
     # A seed alongside a profile is the combination that fails strict scoring, and it also makes
     # profile fields apply only partially. "auto" therefore never sets one — and says so if the
     # caller supplied one, rather than silently doing something other than what was asked.
@@ -451,6 +453,8 @@ def _prepare(kwargs):
     # serve() drives headless itself and pops it from kwargs, so it tells us explicitly.
     headed_flag = kwargs.pop("_cc_headed", None)
     headed = bool(headed_flag) if headed_flag is not None else kwargs.get("headless") is False
+    # serve() starts Chromium itself, so there is no Playwright switch list to replace.
+    direct_launch = kwargs.pop("_cc_direct", False)
     passthrough = is_fingerprint_passthrough(fp.get("fingerprint"))
     proxy_opt = kwargs.get("proxy")  # captured before resolve_proxy rewrites it (for quic + warnings)
     if geoip:
@@ -502,6 +506,10 @@ def _prepare(kwargs):
     # it under a Linux claim, which genuine Chrome on Linux does not. The host is never consulted;
     # whichever switch agrees with this build's default is a no-op. See web_bluetooth_args.
     base += web_bluetooth_args(persona_platform(fp))
+    # Playwright disables third-party storage partitioning, which genuine Chrome never does; re-emit
+    # its list without that entry as the last --disable-features. See playwright_feature_override_args.
+    if not direct_launch:
+        base += playwright_feature_override_args(kwargs.get("ignore_default_args"))
     if disable_privacy_sandbox:
         base += privacy_sandbox_args()
     user = list(extra_args or [])
@@ -1030,7 +1038,7 @@ def launch(cloud=None, **kwargs):
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(
         kwargs, lease if owns_lease else None)
     apply_font_env(exe, pw_kwargs, args)  # Linux: bundled font clones + UI-locale LANGUAGE
-    apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
+    apply_shader_dialect(shader_dialect, pw_kwargs, args)  # after fonts: that helper rebuilds the env
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
         inject_run_token(pw_kwargs, lease.token, launch_token[0])
@@ -1092,7 +1100,7 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(
         kwargs, lease if owns_lease else None)
     apply_font_env(exe, pw_kwargs, args)  # Linux: bundled font clones + UI-locale LANGUAGE
-    apply_shader_dialect(shader_dialect, pw_kwargs)  # after fonts: that helper rebuilds the env
+    apply_shader_dialect(shader_dialect, pw_kwargs, args)  # after fonts: that helper rebuilds the env
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
         inject_run_token(pw_kwargs, lease.token, launch_token[0])

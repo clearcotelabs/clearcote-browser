@@ -27,7 +27,7 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | env | example | meaning |
 |---|---|---|
 | `CC_PLATFORM` | `windows` \| `linux` \| `macos` \| `android` | spoofed OS |
-| `CC_FINGERPRINT` | `user-7423` | seed → stable, unlinkable identity |
+| `CC_FINGERPRINT` | `user-7423` | seed → stable, unlinkable identity. Unset: a random seed per container, kept in the profile directory (printed at start) |
 | `CC_BRAND` | `Edge` | brand (UA + UA-CH) |
 | `CC_BRAND_VERSION` | `150.0.4078.65` | brand/version (drives TLS via `match-persona`) |
 | `CC_ACCEPT_LANGUAGE` | `de-DE,de` | locale |

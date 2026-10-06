@@ -157,6 +157,47 @@ public class ParityLaunchTests : IDisposable
         Assert.DoesNotContain("--ignore-gpu-blocklist", legacy);
     }
 
+    // ── Playwright's --disable-features (2026-10-06) ─────────────────────────
+    // Playwright disables ThirdPartyStoragePartitioning. Measured on r30 vs genuine Chrome 154: a
+    // cross-site iframe then read the top-level site's storage, or got a SecurityError from
+    // localStorage with third-party cookies blocked; genuine gives it an empty partition either way.
+
+    private static string[] OnlyDisableFeatures(List<string> args)
+    {
+        var found = args.Where(a => a.StartsWith("--disable-features=", StringComparison.Ordinal)).ToList();
+        Assert.Single(found);
+        return found[0]["--disable-features=".Length..].Split(',');
+    }
+
+    [Theory]
+    [InlineData("windows")]
+    [InlineData("linux")]
+    public void Launch_replaces_playwrights_list_without_partitioning(string platform)
+    {
+        var exe = FakeEngine(AllGated.Select(s => s[2..]));
+        var args = Clearcote.AssembleArgs(Fingerprint.Args(new FingerprintOptions { Fingerprint = "s1", Platform = platform }),
+            new(), new(), null, null, Array.Empty<string>(), null, false,
+            new Clearcote.EngineExtras(exe, false, true, null, null, ViaPlaywright: true));
+        var feats = OnlyDisableFeatures(args);
+        Assert.DoesNotContain("ThirdPartyStoragePartitioning", feats);
+        foreach (var f in new[] { "HttpsUpgrades", "MediaRouter", "Translate", "RenderDocument", "PaintHolding" }) Assert.Contains(f, feats);
+        Assert.Equal(platform == "linux", feats.Contains("WebBluetooth"));
+    }
+
+    [Fact]
+    public void No_copy_of_playwrights_list_for_serve_or_when_the_caller_dropped_it()
+    {
+        var exe = FakeEngine(AllGated.Select(s => s[2..]));
+        var fp = Fingerprint.Args(new FingerprintOptions { Fingerprint = "s1", Platform = "windows" });
+        var served = Clearcote.AssembleArgs(fp, new(), new(), null, null, Array.Empty<string>(), null, false,
+            new Clearcote.EngineExtras(exe, false, true, null, null, ViaPlaywright: false));
+        Assert.DoesNotContain(served, a => a.Contains("HttpsUpgrades") || a.Contains("ThirdPartyStoragePartitioning"));
+        var dropped = Clearcote.AssembleArgs(fp, new(), new(), null, null, Array.Empty<string>(), null, false,
+            new Clearcote.EngineExtras(exe, false, true, null, null, ViaPlaywright: true,
+                IgnoreDefaultArgs: new[] { "--disable-features=AcceptCHFrame,MediaRouter" }));
+        Assert.DoesNotContain(dropped, a => a.Contains("HttpsUpgrades"));
+    }
+
     // ── fingerprint pass-through ─────────────────────────────────────────────
 
     [Theory]

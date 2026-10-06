@@ -58,3 +58,57 @@ def test_env_var_name_is_the_one_the_engine_reads():
     # The engine reads this exact name from the GPU process environment; renaming either side
     # silently disables the feature.
     assert _shaderdialect.ENV_VAR == "CLEARCOTE_SHADER_DIALECT"
+
+
+# ---------------------------------------------------- default for a Windows claim (2026-10-06)
+from clearcote._shaderdialect import default_shader_dialect, shader_dialect_env  # noqa: E402
+
+WIN = ["--fingerprint=s", "--fingerprint-platform=windows"]
+LINUX = ["--fingerprint=s", "--fingerprint-platform=linux"]
+
+
+def test_windows_claim_on_a_linux_host_gets_hlsl_by_default(monkeypatch):
+    # Measured on r30, GPU-less Linux: the Windows persona answered getTranslatedShaderSource with
+    # SwiftShader text beside a Direct3D11 renderer string; with the dialect it answered in HLSL.
+    monkeypatch.delenv(ENV_VAR, raising=False)
+    kw = {}
+    apply_shader_dialect(None, kw, WIN, host_platform="linux")
+    assert kw["env"][ENV_VAR] == "hlsl"
+
+
+@pytest.mark.parametrize("args,host", [
+    (WIN, "win32"),      # the D3D11 backend already answers in HLSL
+    (LINUX, "linux"),    # a Linux claim must keep its own dialect
+    ([], "linux"),       # no claim at all
+    (None, "darwin"),
+])
+def test_no_default_dialect_otherwise(args, host):
+    assert default_shader_dialect(args, host) is None
+
+
+def test_the_last_platform_switch_decides():
+    assert default_shader_dialect(LINUX + ["--fingerprint-platform=windows"], "linux") == "hlsl"
+    assert default_shader_dialect(WIN + ["--fingerprint-platform=linux"], "linux") is None
+
+
+@pytest.mark.parametrize("off", [False, "off", "0", "none", ""])
+def test_explicit_off_beats_the_default(off, monkeypatch):
+    monkeypatch.delenv(ENV_VAR, raising=False)
+    kw = {}
+    apply_shader_dialect(off, kw, WIN, host_platform="linux")
+    assert kw == {}
+
+
+def test_callers_own_env_var_is_not_overridden_by_the_default(monkeypatch):
+    monkeypatch.setenv(ENV_VAR, "hlsl-custom")
+    kw = {}
+    apply_shader_dialect(None, kw, WIN, host_platform="linux")
+    assert kw == {}  # Playwright inherits the caller's variable unchanged
+
+
+def test_serve_env_gets_the_same_default():
+    env = shader_dialect_env(None, WIN, {"PATH": "x"}, host_platform="linux")
+    assert env == {"PATH": "x", ENV_VAR: "hlsl"}
+    assert shader_dialect_env(None, LINUX, {}, host_platform="linux") == {}
+    assert shader_dialect_env(False, WIN, {}, host_platform="linux") == {}
+    assert shader_dialect_env(None, WIN, {ENV_VAR: "mine"}, host_platform="linux") == {ENV_VAR: "mine"}

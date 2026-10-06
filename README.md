@@ -258,7 +258,8 @@ with sync_playwright() as p:
 ```
 
 Set the persona with environment variables: `CC_PLATFORM` (`windows`, `linux`, `macos`, `android`),
-`CC_FINGERPRINT` (the seed), `CC_BRAND`, `CC_TIMEZONE`, `CC_ACCEPT_LANGUAGE`, `CC_TLS_PROFILE`.
+`CC_FINGERPRINT` (the seed; unset, each container gets its own random one), `CC_BRAND`, `CC_TIMEZONE`,
+`CC_ACCEPT_LANGUAGE`, `CC_TLS_PROFILE`.
 
 ```bash
 docker run -d --shm-size=1g -p 127.0.0.1:9222:9222 \

@@ -58,6 +58,49 @@ def merge_feature_flags(args):
     return rest
 
 
+#: Playwright's own ``--disable-features`` list (chromiumSwitches.js ``disabledFeatures``, 1.57).
+#: Playwright puts it on every launch, BEFORE the caller's args, and Chromium keeps only the last
+#: ``--disable-features`` on the line -- so the SDK re-emits this list itself, merged into its own
+#: single switch (see playwright_feature_override_args), minus the entries a page can observe.
+#: An entry a newer Playwright adds and this copy lacks ends up enabled, i.e. as in genuine Chrome.
+PLAYWRIGHT_DISABLED_FEATURES = (
+    "AcceptCHFrame", "AvoidUnnecessaryBeforeUnloadCheckSync", "DestroyProfileOnBrowserClose",
+    "DialMediaRouteProvider", "GlobalMediaControls", "HttpsUpgrades", "LensOverlay", "MediaRouter",
+    "PaintHolding", "ThirdPartyStoragePartitioning", "Translate", "AutoDeElevate", "RenderDocument",
+    "OptimizationHints",
+)
+
+#: Entries of PLAYWRIGHT_DISABLED_FEATURES that change what a web page can observe, kept ENABLED.
+#:
+#: ThirdPartyStoragePartitioning: every Chrome since 115 partitions third-party storage, whatever
+#: the user's cookie settings. With Playwright's switch it is off, so a cross-site iframe either
+#: reads the storage its site wrote as a top-level page, or -- with third-party cookies blocked,
+#: the engine default -- gets a SecurityError from localStorage. Measured 2026-10-06 (r30, genuine
+#: Chrome 154.0.8037.98 on the same host): genuine gives the iframe an empty partition (null, no
+#: error) with third-party cookies allowed AND blocked; genuine launched with Playwright's defaults
+#: reproduces both clearcote results exactly, so the switch is the whole cause.
+PAGE_VISIBLE_PLAYWRIGHT_FEATURES = frozenset({"ThirdPartyStoragePartitioning"})
+
+
+def playwright_feature_override_args(ignore_default_args=None):
+    """``--disable-features`` that replaces Playwright's own, minus PAGE_VISIBLE_PLAYWRIGHT_FEATURES.
+
+    Only for launches Playwright starts (launch / launch_persistent_context); serve() and the Docker
+    entrypoint start Chromium themselves and never carry Playwright's list. merge_feature_flags then
+    folds this into the SDK's single ``--disable-features``, which Playwright places after its own.
+
+    Returns [] when the caller already dropped Playwright's switch -- ``ignore_default_args=True``,
+    or a list naming a ``--disable-features=`` value -- because re-adding the list would disable
+    features that launch otherwise has on."""
+    if ignore_default_args is True:
+        return []
+    if isinstance(ignore_default_args, (list, tuple)) and any(
+            str(a).startswith("--disable-features=") for a in ignore_default_args):
+        return []
+    keep = [f for f in PLAYWRIGHT_DISABLED_FEATURES if f not in PAGE_VISIBLE_PLAYWRIGHT_FEATURES]
+    return ["--disable-features=" + ",".join(keep)]
+
+
 def privacy_sandbox_args():
     """Disable Privacy Sandbox + intrusive APIs (runtime, no rebuild)."""
     return ["--disable-features=" + ",".join(PRIVACY_SANDBOX_FEATURES)]

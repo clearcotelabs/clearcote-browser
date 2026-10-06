@@ -150,3 +150,86 @@ def test_font_reachability_is_none_without_a_font_list(monkeypatch):
 def test_basic_families_always_count_as_reachable():
     # IsBasicFont() (font_cache.cc:207) lets these through whatever the reference list says.
     assert fpm.reachable_count(["Arial", "Times New Roman", "monospace"], frozenset()) == 3
+
+
+# ------------------------------------------------------------- Windows 11 system faces (2026-10-06)
+
+WIN_DONOR = ["Arial", "Bahnschrift", "HoloLens MDL2 Assets", "Ink Free", "Segoe MDL2 Assets",
+             "Segoe UI"] + ["Fake Win %d" % i for i in range(60)]
+
+
+def _win_corpus(tmp_path, fonts):
+    (tmp_path / "w1.json").write_text(json.dumps({
+        "navigator": {"platform": "Win32",
+                      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        "fonts": {"detected": fonts},
+    }), encoding="utf-8")
+    return str(tmp_path)
+
+
+def test_seeded_windows_persona_gets_the_windows11_faces(tmp_path, monkeypatch):
+    # Every seeded Windows persona claims Windows 11, but no corpus donor lists its system faces
+    # (the collector never probed them) -- measured on r30: Segoe Fluent Icons and Segoe UI Variable
+    # Display/Text were absent while platformVersion said 15.0.0.
+    _with_corpus(monkeypatch, _win_corpus(tmp_path, WIN_DONOR))
+    monkeypatch.setattr(fpm, "host_font_families", lambda: None)
+    fp = {"fingerprint": "seed-1", "platform": "windows"}
+    fpm.ensure_persona_fonts(fp, quiet=True)
+    got = fp["fingerprint_profile"]["fonts"]["detected"]
+    assert got[:len(WIN_DONOR)] == WIN_DONOR
+    for face in fpm.WINDOWS11_FACES:
+        assert got.count(face) == 1, face
+    assert "Cascadia Code" not in got  # per-user Windows Terminal font, not a system one
+
+
+def test_a_windows10_claim_does_not_get_them(tmp_path, monkeypatch):
+    _with_corpus(monkeypatch, _win_corpus(tmp_path, WIN_DONOR))
+    monkeypatch.setattr(fpm, "host_font_families", lambda: None)
+    fp = {"fingerprint": "seed-1", "platform": "windows", "platform_version": "10.0.0"}
+    fpm.ensure_persona_fonts(fp, quiet=True)
+    assert fp["fingerprint_profile"]["fonts"]["detected"] == WIN_DONOR
+
+
+def test_linux_persona_never_gets_windows_faces(tmp_path, monkeypatch):
+    _with_corpus(monkeypatch, _corpus(tmp_path, {"d1": DONOR}))
+    monkeypatch.setattr(fpm, "host_font_families", lambda: None)
+    fp = {"fingerprint": "seed-1", "platform": "linux"}
+    fpm.ensure_persona_fonts(fp, quiet=True)
+    assert not set(fpm.WINDOWS11_FACES) & set(fp["fingerprint_profile"]["fonts"]["detected"])
+
+
+def test_windows11_faces_are_not_duplicated():
+    fonts = ["Arial", "segoe fluent icons"]
+    out = fpm.with_windows11_faces(fonts)
+    assert sum(1 for f in out if f.lower() == "segoe fluent icons") == 1
+    assert fonts == ["Arial", "segoe fluent icons"]  # input untouched
+
+
+@pytest.mark.parametrize("version,claims", [
+    (None, True), ("", True), ("19.0.0", True), ("15.0.0", True), ("13.0.0", True),
+    ("10.0.0", False), ("12.0.0", False), ("0.1.0", False), ("garbage", False)])
+def test_claims_windows11(version, claims):
+    assert fpm.claims_windows11(version) is claims
+
+
+def _auto_profile(platform_version, platform="Windows"):
+    return {"navigator": {"platform": "Win32", "uadata": {"platform": platform,
+                          "high_entropy": {"platform": platform, "platformVersion": platform_version}}},
+            "fonts": {"detected": list(WIN_DONOR)}}
+
+
+def test_auto_profile_from_a_windows11_donor_gets_the_faces():
+    src = _auto_profile("15.0.0")
+    out = fpm.profile_with_windows11_faces(src)
+    assert set(fpm.WINDOWS11_FACES) <= set(out["fonts"]["detected"])
+    assert src["fonts"]["detected"] == WIN_DONOR  # the cached corpus entry is never mutated
+
+
+@pytest.mark.parametrize("profile", [
+    _auto_profile("10.0.0"),                      # a Windows 10 donor really lacks them
+    _auto_profile("15.0.0", platform="Linux"),     # not Windows at all
+    {"fonts": {"detected": ["Arial"]}},           # no platformVersion: leave it alone
+    "some/path.json",                             # not a dict
+])
+def test_auto_profile_left_alone_otherwise(profile):
+    assert fpm.profile_with_windows11_faces(profile) is profile

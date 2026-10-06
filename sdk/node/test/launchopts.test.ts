@@ -332,3 +332,16 @@ describe("socks5UdpArgs", () => {
     expect(withDefault).toContain("--webrtc-ip-handling-policy=disable_non_proxied_udp");
   });
 });
+
+describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
+  it("re-emits Playwright's list without ThirdPartyStoragePartitioning", async () => {
+    const { playwrightFeatureOverrideArgs, PLAYWRIGHT_DISABLED_FEATURES } = await import("../src/launchopts.js");
+    const [arg] = playwrightFeatureOverrideArgs();
+    const feats = arg.slice("--disable-features=".length).split(",");
+    expect(feats).not.toContain("ThirdPartyStoragePartitioning");
+    expect(new Set(feats)).toEqual(new Set(PLAYWRIGHT_DISABLED_FEATURES.filter((f) => f !== "ThirdPartyStoragePartitioning")));
+    expect(playwrightFeatureOverrideArgs(true)).toEqual([]);
+    expect(playwrightFeatureOverrideArgs(["--enable-automation"])).toEqual([arg]);
+    expect(playwrightFeatureOverrideArgs(["--disable-features=X"])).toEqual([]);
+  });
+});

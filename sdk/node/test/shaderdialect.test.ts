@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { withShaderDialect, SHADER_DIALECT_ENV } from "../src/shaderdialect.js";
+import { withShaderDialect, defaultShaderDialect, SHADER_DIALECT_ENV } from "../src/shaderdialect.js";
 
 describe("withShaderDialect", () => {
   it("is off by default and leaves the env untouched", () => {
@@ -51,5 +51,38 @@ describe("withShaderDialect", () => {
     // The engine reads this exact name from the GPU process environment; renaming either side
     // silently disables the feature.
     expect(SHADER_DIALECT_ENV).toBe("CLEARCOTE_SHADER_DIALECT");
+  });
+});
+
+describe("default for a Windows claim (2026-10-06)", () => {
+  const WIN = ["--fingerprint=s", "--fingerprint-platform=windows"];
+  const LINUX = ["--fingerprint=s", "--fingerprint-platform=linux"];
+
+  it("a Windows claim on a Linux host gets hlsl", () => {
+    // Measured on r30, GPU-less Linux: the Windows persona answered getTranslatedShaderSource with
+    // SwiftShader text beside a Direct3D11 renderer string; with the dialect it answered in HLSL.
+    expect(withShaderDialect(undefined, { PATH: "x" }, WIN, "linux")).toEqual({ PATH: "x", [SHADER_DIALECT_ENV]: "hlsl" });
+  });
+
+  it("nothing on a Windows host, for a Linux claim, or with no claim", () => {
+    expect(defaultShaderDialect(WIN, "win32")).toBeUndefined();
+    expect(defaultShaderDialect(LINUX, "linux")).toBeUndefined();
+    expect(defaultShaderDialect([], "linux")).toBeUndefined();
+    expect(withShaderDialect(undefined, undefined, LINUX, "linux")).toBeUndefined();
+  });
+
+  it("the last platform switch decides", () => {
+    expect(defaultShaderDialect([...LINUX, "--fingerprint-platform=windows"], "linux")).toBe("hlsl");
+    expect(defaultShaderDialect([...WIN, "--fingerprint-platform=linux"], "linux")).toBeUndefined();
+  });
+
+  it("false or an off spelling beats the default", () => {
+    for (const off of [false, "off", "0", "none", ""] as const) {
+      expect(withShaderDialect(off as never, { A: "1" }, WIN, "linux")).toEqual({ A: "1" });
+    }
+  });
+
+  it("the caller's own exported variable is not overridden by the default", () => {
+    expect(withShaderDialect(undefined, { [SHADER_DIALECT_ENV]: "mine" }, WIN, "linux")).toEqual({ [SHADER_DIALECT_ENV]: "mine" });
   });
 });

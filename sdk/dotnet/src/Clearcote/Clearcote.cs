@@ -111,8 +111,8 @@ public static class Clearcote
         var launchToken = lease?.BindLaunch();
         var callerEnv = Languages.ApplyLinuxLanguage(args, options.Env);  // Linux: UI locale from --lang
         // Built per attempt: a launch retried after a stale-token refusal must carry the lease's fresh token.
-        var envFor = () => ShaderDialect.Apply(options.ShaderDialect,  // opt-in; no-op when unset
-            lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv);
+        var envFor = () => ShaderDialect.Apply(options.ShaderDialect,  // hlsl by default for a Windows claim off Windows
+            lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv, args);
 
         // Headless: the display is browser-wide, so it applies even here (see the geometry caveat).
         var display = Geometry.ResolveHeadless(options.Headless, options.Fingerprint, args, callerSetGeometry: false);
@@ -216,8 +216,8 @@ public static class Clearcote
         var launchToken = lease?.BindLaunch();
         var callerEnv = Languages.ApplyLinuxLanguage(args, options.Env);  // Linux: UI locale from --lang
         // Built per attempt: a launch retried after a stale-token refusal must carry the lease's fresh token.
-        var envFor = () => ShaderDialect.Apply(options.ShaderDialect,  // opt-in; no-op when unset
-            lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv);
+        var envFor = () => ShaderDialect.Apply(options.ShaderDialect,  // hlsl by default for a Windows claim off Windows
+            lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv, args);
 
         var geometry = Geometry.ResolveHeadless(
             options.Headless, options.Fingerprint, args,
@@ -287,7 +287,7 @@ public static class Clearcote
         // blocklist rule still applies to a headed endpoint and on Windows.
         var engineArgs = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
-            Extras(options, exe, headed: options.Headless == false));
+            Extras(options, exe, headed: options.Headless == false, viaPlaywright: false));
 
         var port = options.Port ?? FreePort();
         var ownUdd = string.IsNullOrEmpty(options.UserDataDir);
@@ -336,8 +336,9 @@ public static class Clearcote
             if (launchToken is not null) psi.Environment[License.RunTokenFileEnv] = launchToken.File;
             // serve() starts the engine itself, so the child inherits this process's environment;
             // only the one variable needs setting.
-            var dialect = ShaderDialect.Normalize(options.ShaderDialect);
-            if (dialect is not null) psi.Environment[ShaderDialect.EnvVar] = dialect;
+            var dialect = ShaderDialect.Resolve(options.ShaderDialect, engineArgs);
+            if (dialect is not null && (options.ShaderDialect is not null || !psi.Environment.ContainsKey(ShaderDialect.EnvVar)))
+                psi.Environment[ShaderDialect.EnvVar] = dialect;
             // Linux: the UI locale from --lang (engines before 153 r29 read it only from the env).
             var language = Languages.LinuxLanguageEnv(engineArgs);
             if (language is not null) psi.Environment["LANGUAGE"] = language;
@@ -385,10 +386,14 @@ public static class Clearcote
     }
 
     /// The per-launch inputs for the engine-switch extras and gating in <see cref="AssembleArgs"/>.
-    internal sealed record EngineExtras(string? Exe, bool Headed, bool Quiet, bool? AllowThirdPartyCookies, bool? TransparentProxy);
+    // ViaPlaywright: Playwright starts this browser (Launch / LaunchPersistentContext, not Serve), so
+    // its --disable-features list is on the line and is replaced with the caller's IgnoreDefaultArgs
+    // taken into account; see LaunchOpts.PlaywrightFeatureOverrideArgs.
+    internal sealed record EngineExtras(string? Exe, bool Headed, bool Quiet, bool? AllowThirdPartyCookies, bool? TransparentProxy,
+        bool ViaPlaywright = false, IReadOnlyList<string>? IgnoreDefaultArgs = null);
 
-    private static EngineExtras Extras(LaunchOptions o, string exe, bool headed)
-        => new(exe, headed, o.Quiet, o.AllowThirdPartyCookies, o.TransparentProxy);
+    private static EngineExtras Extras(LaunchOptions o, string exe, bool headed, bool viaPlaywright = true)
+        => new(exe, headed, o.Quiet, o.AllowThirdPartyCookies, o.TransparentProxy, viaPlaywright, o.IgnoreDefaultArgs);
 
     /// fpArgs + extArgs + proxyArgs + quic + (privacy-sandbox unless disabled==false) + webrtc-deny
     /// (+ engine extras + GPU blocklist), then userArgs appended last, then feature-flags collapsed,
@@ -420,6 +425,9 @@ public static class Clearcote
         // carries the Privacy Sandbox surface Chrome ships" failed as an implausible value — the
         // same defect class as the WebUSB split fixed in r7. Set DisablePrivacySandbox = true when
         // the persona genuinely is de-Googled Chromium.
+        // Playwright disables third-party storage partitioning, which genuine Chrome never does;
+        // re-emit its list without that entry as the last --disable-features.
+        if (extra is { ViaPlaywright: true }) baseList.AddRange(LaunchOpts.PlaywrightFeatureOverrideArgs(extra.IgnoreDefaultArgs));
         if (disablePrivacySandbox == true) baseList.AddRange(LaunchOpts.PrivacySandboxArgs());
         baseList.AddRange(LaunchOpts.WebrtcDefaultDenyArgs(baseList.Concat(userArgs), webrtcIp));
         if (extra is not null)

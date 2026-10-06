@@ -332,3 +332,14 @@ def test_warn_unsupported_engine_options_warns_only_for_missing_switches(tmp_pat
         warnings.simplefilter("always")
         warn_unsupported_engine_options(str(old), {"persona_schema": 1}, None)
     assert not caught                                                  # schema 1 is the default: nothing to warn
+
+
+def test_playwright_feature_override_args_keeps_partitioning_enabled():
+    from clearcote._launchopts import PLAYWRIGHT_DISABLED_FEATURES, playwright_feature_override_args
+    (arg,) = playwright_feature_override_args()
+    feats = arg.split("=", 1)[1].split(",")
+    assert "ThirdPartyStoragePartitioning" not in feats
+    assert set(feats) == set(PLAYWRIGHT_DISABLED_FEATURES) - {"ThirdPartyStoragePartitioning"}
+    assert playwright_feature_override_args(True) == []
+    assert playwright_feature_override_args(["--enable-automation"]) == [arg]
+    assert playwright_feature_override_args(["--disable-features=X"]) == []

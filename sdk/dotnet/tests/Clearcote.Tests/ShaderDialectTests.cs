@@ -71,4 +71,52 @@ public class ShaderDialectTests
         Assert.Equal("1", env["CC_TEST_MARKER"]);
         Assert.Equal("hlsl", env[ShaderDialect.EnvVar]);
     }
+
+    // ── default for a Windows claim (2026-10-06) ─────────────────────────────
+    private static readonly string[] Win = { "--fingerprint=s", "--fingerprint-platform=windows" };
+    private static readonly string[] Linux = { "--fingerprint=s", "--fingerprint-platform=linux" };
+
+    [Fact]
+    public void A_windows_claim_off_windows_gets_hlsl_by_default()
+    {
+        // Measured on r30, GPU-less Linux: the Windows persona answered getTranslatedShaderSource
+        // with SwiftShader text beside a Direct3D11 renderer string; with the dialect, HLSL.
+        var env = ShaderDialect.Apply(null, new Dictionary<string, string> { ["PATH"] = "x" }, Win, hostIsWindows: false)!;
+        Assert.Equal("hlsl", env[ShaderDialect.EnvVar]);
+        Assert.Equal("x", env["PATH"]);
+    }
+
+    [Fact]
+    public void No_default_on_windows_for_a_linux_claim_or_without_a_claim()
+    {
+        Assert.Null(ShaderDialect.Default(Win, hostIsWindows: true));
+        Assert.Null(ShaderDialect.Default(Linux, hostIsWindows: false));
+        Assert.Null(ShaderDialect.Default(Array.Empty<string>(), hostIsWindows: false));
+        Assert.Null(ShaderDialect.Apply(null, null, Linux, hostIsWindows: false));
+    }
+
+    [Fact]
+    public void The_last_platform_switch_decides()
+    {
+        Assert.Equal("hlsl", ShaderDialect.Default(Linux.Append("--fingerprint-platform=windows"), hostIsWindows: false));
+        Assert.Null(ShaderDialect.Default(Win.Append("--fingerprint-platform=linux"), hostIsWindows: false));
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("0")]
+    [InlineData("none")]
+    [InlineData("")]
+    public void An_off_spelling_beats_the_default(string off)
+    {
+        var baseEnv = new Dictionary<string, string> { ["A"] = "1" };
+        Assert.Same(baseEnv, ShaderDialect.Apply(off, baseEnv, Win, hostIsWindows: false));
+    }
+
+    [Fact]
+    public void The_callers_own_variable_is_not_overridden_by_the_default()
+    {
+        var baseEnv = new Dictionary<string, string> { [ShaderDialect.EnvVar] = "mine" };
+        Assert.Same(baseEnv, ShaderDialect.Apply(null, baseEnv, Win, hostIsWindows: false));
+    }
 }

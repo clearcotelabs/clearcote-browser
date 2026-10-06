@@ -10,10 +10,14 @@ namespace Clearcote;
 /// HLSL for that query alone — rendering is untouched, and the result is byte-identical to what the
 /// Windows build reports.</para>
 ///
-/// <para>OFF unless asked for. The re-translation is a different code path from the one that
-/// rendered, so a shader the Vulkan backend accepts but the HLSL translator rejects falls back to
-/// the honest SPIR-V for that shader. It is for callers who actually hit this check, not a
-/// default.</para>
+/// <para>ON BY DEFAULT for a Windows claim on a non-Windows host (the Docker entrypoint has done
+/// this for CC_PLATFORM=windows since 0.31). Measured 2026-10-06 on a GPU-less Linux host with r30:
+/// a Windows persona answered the query with SwiftShader's SPIR-V text next to "Direct3D11"; with
+/// the dialect set it answered in HLSL. A shader the HLSL translator rejects falls back to the
+/// backend's own output for that shader — the state every launch was in before, so the default
+/// cannot make a page see anything worse. Set <c>ShaderDialect = "off"</c> to turn it off. On a
+/// Windows host the D3D11 backend already answers in HLSL and nothing is set; a Linux or macOS
+/// claim never gets HLSL by default.</para>
 ///
 /// <para>Delivered as an environment variable because the code lives in the GPU process, which does
 /// not receive the fingerprint switches. Requires a PRO engine built with the option (151 r15+);
@@ -25,6 +29,31 @@ internal static class ShaderDialect
     internal const string EnvVar = "CLEARCOTE_SHADER_DIALECT";
 
     private static readonly string[] Valid = { "hlsl" };
+
+    private static readonly string[] Off = { "", "0", "off", "false", "no", "none" };
+
+    /// The dialect a launch gets when the caller did not choose one: "hlsl" when the built command
+    /// line claims Windows (<c>--fingerprint-platform=windows</c>, the last one wins) and the host is
+    /// not Windows, else null.
+    internal static string? Default(IEnumerable<string>? args, bool? hostIsWindows = null)
+    {
+        if (hostIsWindows ?? OperatingSystem.IsWindows()) return null;
+        const string flag = "--fingerprint-platform=";
+        string? claimed = null;
+        foreach (var a in args ?? Array.Empty<string>())
+            if (a is not null && a.StartsWith(flag, StringComparison.Ordinal))
+                claimed = a[flag.Length..].Trim().ToLowerInvariant();
+        return claimed == "windows" ? "hlsl" : null;
+    }
+
+    /// null -> the default for this claim/host; an "off" spelling ("", "off", "0", "false", "no",
+    /// "none") -> null; otherwise the validated dialect.
+    internal static string? Resolve(string? dialect, IEnumerable<string>? args, bool? hostIsWindows = null)
+    {
+        if (dialect is null) return Default(args, hostIsWindows);
+        if (Array.IndexOf(Off, dialect.Trim().ToLowerInvariant()) >= 0) return null;
+        return Normalize(dialect);
+    }
 
     /// The validated, lower-cased dialect, or null when none was asked for. Throws on an unknown
     /// value rather than ignoring it: a typo would otherwise look like it worked while the engine
@@ -46,17 +75,25 @@ internal static class ShaderDialect
     /// Fold <c>CLEARCOTE_SHADER_DIALECT</c> into a launch env.
     /// </summary>
     /// <remarks>
-    /// Returns <paramref name="baseEnv"/> untouched when no dialect is requested — including
-    /// <c>null</c>, so Playwright's default child env is preserved rather than replaced by a copy
-    /// of the current process environment.
+    /// <paramref name="dialect"/> null means the default for this claim/host (see
+    /// <see cref="Default"/> over <paramref name="args"/>). Returns <paramref name="baseEnv"/>
+    /// untouched when nothing applies — including <c>null</c>, so Playwright's default child env is
+    /// preserved rather than replaced by a copy of the current process environment. The default
+    /// never overrides a variable the caller already exported.
     ///
     /// Throws on an unknown dialect rather than ignoring it: a typo would otherwise look like it
     /// worked while the engine kept reporting the honest dialect.
     /// </remarks>
-    internal static IDictionary<string, string>? Apply(string? dialect, IDictionary<string, string>? baseEnv)
+    internal static IDictionary<string, string>? Apply(string? dialect, IDictionary<string, string>? baseEnv,
+        IEnumerable<string>? args = null, bool? hostIsWindows = null)
     {
-        var value = Normalize(dialect);
+        var value = Resolve(dialect, args, hostIsWindows);
         if (value is null) return baseEnv;
+        if (dialect is null)
+        {
+            var exported = baseEnv is not null ? baseEnv.ContainsKey(EnvVar) : Environment.GetEnvironmentVariable(EnvVar) is not null;
+            if (exported) return baseEnv;
+        }
 
         var outEnv = new Dictionary<string, string>();
         if (baseEnv is not null)

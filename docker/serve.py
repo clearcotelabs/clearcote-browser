@@ -24,6 +24,7 @@ from clearcote._fingerprint import fingerprint_args
 from clearcote._fonts import linux_font_env
 from clearcote._fingerprint import persona_platform
 from clearcote._launchopts import merge_feature_flags, serve_infobar_args, web_bluetooth_args
+from clearcote._containerseed import container_seed
 
 PROFILE_DIR = os.environ.get("CC_PROFILE_DIR", "/tmp/cc-profile")
 
@@ -56,8 +57,17 @@ except TypeError:
 
 print("[clearcote] engine: %s (%s)" % (exe, "licensed" if _license else "free"), flush=True)
 
+# The seed is the identity. Without CC_FINGERPRINT each container now gets its own random one, kept
+# in the profile directory (it used to be the fixed "clearcote-docker", so every such container was
+# the same device and any two could be linked). See clearcote._containerseed.
+_seed, _seed_source = container_seed(os.environ.get("CC_FINGERPRINT"), PROFILE_DIR)
+if _seed_source == "new":
+    print("[clearcote] persona seed: %s (new for this container, kept in %s; set CC_FINGERPRINT "
+          "to choose one)" % (_seed, PROFILE_DIR), flush=True)
+elif _seed_source == "saved":
+    print("[clearcote] persona seed: %s (this container's, from %s)" % (_seed, PROFILE_DIR), flush=True)
 opts = {
-    "fingerprint": os.environ.get("CC_FINGERPRINT", "clearcote-docker"),
+    "fingerprint": _seed,
     "platform": os.environ.get("CC_PLATFORM", "linux"),
 }
 # Env -> fingerprint option. The option names are the SDK's own launch() kwargs (see

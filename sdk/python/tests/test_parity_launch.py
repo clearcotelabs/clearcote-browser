@@ -426,3 +426,44 @@ def test_release_channel_reaches_every_pro_download_path(monkeypatch):
     assert seen == [(None, "preview"), ("r22", "preview"), ("152", "preview")]
     with pytest.raises(ValueError, match="Unknown release channel"):
         clearcote._resolve_binary(None, pro=pro, version="152", release_channel="beta")
+
+
+# -- Playwright's --disable-features (2026-10-06) ------------------------------------------------
+# Playwright disables ThirdPartyStoragePartitioning. Measured on r30 vs genuine Chrome 154: a
+# cross-site iframe then read the top-level site's storage, or got a SecurityError from localStorage
+# with third-party cookies blocked -- genuine gives it an empty partition either way.
+
+def _only_disable_features(args):
+    found = [a for a in args if a.startswith("--disable-features=")]
+    assert len(found) == 1, found
+    return found[0].split("=", 1)[1].split(",")
+
+
+@pytest.mark.parametrize("platform", ["windows", "linux"])
+def test_launch_replaces_playwrights_list_without_partitioning(prepared, platform):
+    _exe, args, _pw, *_ = prepared(NEW, fingerprint="s1", platform=platform, headless=True)
+    feats = _only_disable_features(args)
+    assert "ThirdPartyStoragePartitioning" not in feats
+    # the rest of Playwright's list survives on every claim (a Linux claim used to drop it all,
+    # because its own --disable-features=WebBluetooth replaced Playwright's)
+    for f in ("HttpsUpgrades", "MediaRouter", "Translate", "RenderDocument", "PaintHolding"):
+        assert f in feats, f
+    assert ("WebBluetooth" in feats) == (platform == "linux")
+
+
+def test_the_users_own_disable_features_are_kept(prepared):
+    _exe, args, _pw, *_ = prepared(NEW, fingerprint="s1", headless=True,
+                                   args=["--disable-features=Foo,ThirdPartyStoragePartitioning"])
+    feats = _only_disable_features(args)
+    assert "Foo" in feats and "ThirdPartyStoragePartitioning" in feats  # asked for explicitly
+
+
+@pytest.mark.parametrize("ignore", [True, ["--disable-features=AcceptCHFrame,MediaRouter"]])
+def test_no_copy_of_playwrights_list_when_the_caller_dropped_it(prepared, ignore):
+    _exe, args, _pw, *_ = prepared(NEW, headless=True, ignore_default_args=ignore)
+    assert not any("HttpsUpgrades" in a for a in args), args
+
+
+def test_serve_never_carries_playwrights_list(served_line):
+    line = served_line()
+    assert not any("HttpsUpgrades" in a or "ThirdPartyStoragePartitioning" in a for a in line), line

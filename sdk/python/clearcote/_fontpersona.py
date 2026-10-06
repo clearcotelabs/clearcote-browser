@@ -42,6 +42,57 @@ _GOOD_REACH = 0.60
 #: Bounded I/O: how many seeded candidates to try before accepting the best one seen.
 _MAX_CANDIDATES = 8
 
+#: Families every Windows 11 install has (Microsoft's Windows 11 font list marks them "Added in
+#: Windows 11"). The capture collector never probed them, so no corpus donor list carries them -- a
+#: seeded Windows persona, which always claims Windows 11 (platformVersion 15.0.0 or 19.0.0), then
+#: hid fonts no Windows 11 machine lacks. Worse, 87% of donor lists DO carry HoloLens MDL2 Assets,
+#: and CreepJS reads "HoloLens + Segoe MDL2 + Bahnschrift + Ink Free without Segoe Fluent Icons" as
+#: Windows 10, which it then flags against a Windows 11 platformVersion ("lied platform version").
+#: Cascadia Code/Mono are deliberately absent: they ship per user with Windows Terminal, so their
+#: absence is normal. Listing a family never over-claims -- the engine reports host INTERSECT list.
+WINDOWS11_FACES = ("Segoe Fluent Icons", "Segoe UI Variable", "Segoe UI Variable Display",
+                   "Segoe UI Variable Small", "Segoe UI Variable Text")
+
+
+def claims_windows11(platform_version) -> bool:
+    """True when a Windows persona with this UA-CH platformVersion claims Windows 11 (major >= 13).
+    None/empty means the engine's own draw, which is always Windows 11 (15.0.0 or 19.0.0)."""
+    if platform_version in (None, ""):
+        return True
+    head = str(platform_version).strip().split(".")[0]
+    return head.isdigit() and int(head) >= 13
+
+
+def with_windows11_faces(fonts: list) -> list:
+    """``fonts`` plus any WINDOWS11_FACES it lacks (order kept, nothing duplicated)."""
+    have = {str(f).lower() for f in fonts}
+    return list(fonts) + [f for f in WINDOWS11_FACES if f.lower() not in have]
+
+
+def profile_with_windows11_faces(profile: Any) -> Any:
+    """A captured profile (dict) whose fonts gain WINDOWS11_FACES when it claims Windows 11.
+
+    For profiles the SDK picked itself (profile="auto"); a profile the caller passed is never touched.
+    Returns the input unchanged unless it is a Windows profile with a font list and a Windows 11
+    platformVersion; otherwise a copy, so a cached corpus entry is never mutated."""
+    if not isinstance(profile, dict):
+        return profile
+    nav = profile.get("navigator") if isinstance(profile.get("navigator"), dict) else {}
+    uadata = nav.get("uadata") if isinstance(nav.get("uadata"), dict) else {}
+    hints = uadata.get("high_entropy") if isinstance(uadata.get("high_entropy"), dict) else {}
+    platform = str(hints.get("platform") or uadata.get("platform") or nav.get("platform") or "")
+    version = hints.get("platformVersion")
+    fonts = profile.get("fonts") if isinstance(profile.get("fonts"), dict) else None
+    detected = fonts.get("detected") if fonts else None
+    if (not platform.lower().startswith("win") or not isinstance(detected, list)
+            or not version or not claims_windows11(version)):
+        return profile
+    out = dict(profile)
+    out["fonts"] = dict(fonts)
+    out["fonts"]["detected"] = with_windows11_faces(detected)
+    return out
+
+
 _host_families: Optional[frozenset] = None
 _host_families_done = False
 _picked: dict = {}          # (seed, platform) -> list[str], one pick per process
@@ -251,6 +302,8 @@ def ensure_persona_fonts(fp: dict, quiet: bool = False) -> None:
         if key not in _picked:
             _picked[key] = _pick_font_list(str(seed), platform, quiet)
         fonts = _picked[key]
+        if fonts and platform == "windows" and claims_windows11(fp.get("platform_version")):
+            fonts = with_windows11_faces(fonts)
         if fonts:
             fp["fingerprint_profile"] = {"fonts": {"detected": list(fonts)}}
     except Exception:
