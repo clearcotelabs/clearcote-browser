@@ -380,6 +380,34 @@ public static class LaunchOpts
         return true;
     }
 
+    /// Library directories searched for Mesa's EGL (Debian/Ubuntu multiarch, Fedora/RHEL lib64, Arch).
+    public static readonly IReadOnlyList<string> EglLibDirs = new[]
+    {
+        "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib/x86_64-linux-gnu", "/lib/aarch64-linux-gnu",
+        "/usr/lib64", "/lib64", "/usr/lib", "/lib",
+    };
+
+    /// Whether Mesa can render WebGL over EGL with no X display (<c>--use-angle=gl-egl</c>). Measured
+    /// on a GPU-less Linux host: with no display, <c>gl-egl</c> renders through
+    /// Mesa's llvmpipe with the same limits as the X display path (16384 textures, 1024 vertex uniform
+    /// vectors), and genuine Chrome on that path reports the same. It needs the system
+    /// <c>libEGL.so.1</c>, Mesa's EGL vendor library and a software rasterizer driver. Without libEGL
+    /// the browser has no WebGL at all, not even the SwiftShader fallback, so this answers true only
+    /// when all three are present.
+    public static bool MesaEglAvailable(IEnumerable<string>? libDirs = null)
+    {
+        var dirs = (libDirs ?? EglLibDirs).ToList();
+        bool Has(string name) => dirs.Any(d => System.IO.File.Exists(System.IO.Path.Combine(d, name)));
+        if (!Has("libEGL.so.1") || !Has("libEGL_mesa.so.0")) return false;
+        if (Has("dri/swrast_dri.so") || Has("dri/kms_swrast_dri.so")) return true;
+        // Mesa 24.2+ keeps its drivers in libgallium-<version>.so
+        return dirs.Any(d =>
+        {
+            try { return System.IO.Directory.Exists(d) && System.IO.Directory.EnumerateFiles(d, "libgallium-*.so").Any(); }
+            catch (System.Exception) { return false; }
+        });
+    }
+
     /// The ANGLE backend whose WebGL limits match the platform the page is TOLD it is, on a Linux
     /// host (mirrors Python's gpu_backend_args; measured 2026-10-06). A Windows
     /// claim names Direct3D11: ANGLE's OpenGL backend (Mesa, what a headed launch gets) clamps
@@ -388,10 +416,14 @@ public static class LaunchOpts
     /// makes its translations match). A Linux claim names Mesa/OpenGL: headless Chromium renders
     /// WebGL through SwiftShader (8192 textures, 4096 vertex uniforms), so with an X display
     /// reachable it gets <c>--use-angle=gl</c> (Mesa: 16384 / 1024 / GLSL). Headed launches already
-    /// get Mesa; headless with no display stays as it is. A null claim (pass-through), a host other
-    /// than Linux, or a caller's own <c>--use-angle=</c> / <c>--use-gl=</c> adds nothing.
+    /// get Mesa. Headless with no display gets <c>--use-angle=gl-egl</c> when the host has Mesa's EGL
+    /// (<see cref="MesaEglAvailable"/>): Mesa again, with the same limits and the shader text of an
+    /// OpenGL ES context; without it, headless stays on SwiftShader. A null claim (pass-through), a host
+    /// other than Linux, or a caller's own <c>--use-angle=</c> / <c>--use-gl=</c> adds nothing.
+    /// <paramref name="mesaEgl"/> null probes this host; tests pass true/false.
     public static List<string> GpuBackendArgs(string? claimedPlatform, bool headed, string? osTag = null,
-                                              IEnumerable<string>? userArgs = null, string? display = null)
+                                              IEnumerable<string>? userArgs = null, string? display = null,
+                                              bool? mesaEgl = null)
     {
         if (claimedPlatform is null || (osTag ?? Native.OsTag) != "linux") return new();
         var user = userArgs?.ToList() ?? new List<string>();
@@ -399,8 +431,14 @@ public static class LaunchOpts
             return new();
         var claim = claimedPlatform.Trim().ToLowerInvariant();
         if (claim == "windows") return new() { "--use-angle=swiftshader-webgl" };
-        if (claim == "linux" && !headed && XDisplayAvailable(display))
-            return user.Contains("--ignore-gpu-blocklist") ? new() { "--use-angle=gl" } : new() { "--use-angle=gl", "--ignore-gpu-blocklist" };
+        if (claim == "linux" && !headed)
+        {
+            string backend;
+            if (XDisplayAvailable(display)) backend = "--use-angle=gl";
+            else if (mesaEgl ?? MesaEglAvailable()) backend = "--use-angle=gl-egl";
+            else return new();
+            return user.Contains("--ignore-gpu-blocklist") ? new() { backend } : new() { backend, "--ignore-gpu-blocklist" };
+        }
         return new();
     }
 

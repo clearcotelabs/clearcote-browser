@@ -110,5 +110,6 @@ host-local with `-p 127.0.0.1:9222:9222`, or keep it on an internal Docker netwo
 - There is no GPU in the container, so WebGL renders in software through the backend that matches
   the GPU the persona names: a Linux persona (Mesa/OpenGL) through Mesa's own GL on the Xvfb display
   (headful, the default), a Windows persona (Direct3D11) through SwiftShader. Under `CC_HEADLESS=1`
-  there is no display for Mesa, so both use SwiftShader. A `--use-angle=` in `CC_EXTRA_ARGS` wins.
+  there is no display, so a Linux persona renders through Mesa over EGL instead (same limits).
+  A `--use-angle=` in `CC_EXTRA_ARGS` wins.
   Pair with the [canvas bridge](../docs/CANVAS-BRIDGE.md) for real-GPU pixel coherence.

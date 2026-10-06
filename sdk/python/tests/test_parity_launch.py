@@ -17,6 +17,7 @@ from clearcote._launchopts import (
     gate_engine_switches,
     gpu_backend_args,
     gpu_blocklist_args,
+    mesa_egl_available,
     serve_infobar_args,
     x_display_available,
     serve_needs_no_sandbox,
@@ -77,17 +78,21 @@ def test_windows_claim_on_linux_gets_swiftshader_headed_and_headless():
     assert gpu_backend_args("windows", False, "linux") == ["--use-angle=swiftshader-webgl"]
 
 
-def test_linux_claim_headless_uses_mesa_only_with_a_reachable_display(monkeypatch):
+def test_linux_claim_headless_uses_mesa_over_the_display_else_over_egl(monkeypatch):
     _xsock(monkeypatch, True)
-    assert gpu_backend_args("linux", False, "linux", environ={"DISPLAY": ":99"}) == ["--use-angle=gl", "--ignore-gpu-blocklist"]
+    for egl in (True, False):  # a reachable display always wins: GLX, the format of the persona's own label
+        assert gpu_backend_args("linux", False, "linux", environ={"DISPLAY": ":99"}, mesa_egl=egl) == [
+            "--use-angle=gl", "--ignore-gpu-blocklist"]
     _xsock(monkeypatch, False)
-    assert gpu_backend_args("linux", False, "linux", environ={"DISPLAY": ":99"}) == []   # dead local display
-    assert gpu_backend_args("linux", False, "linux", environ={}) == []                   # no display at all
+    for env in ({"DISPLAY": ":99"}, {}):  # a dead local display, or none at all
+        assert gpu_backend_args("linux", False, "linux", environ=env, mesa_egl=True) == [
+            "--use-angle=gl-egl", "--ignore-gpu-blocklist"]
+        assert gpu_backend_args("linux", False, "linux", environ=env, mesa_egl=False) == []  # stays on SwiftShader
 
 
 def test_linux_claim_headed_is_left_to_the_default_gl_path(monkeypatch):
     _xsock(monkeypatch, True)
-    assert gpu_backend_args("linux", True, "linux", environ={"DISPLAY": ":99"}) == []
+    assert gpu_backend_args("linux", True, "linux", environ={"DISPLAY": ":99"}, mesa_egl=True) == []
 
 
 def test_backend_choice_never_overrides_the_caller_or_other_hosts(monkeypatch):
@@ -96,6 +101,10 @@ def test_backend_choice_never_overrides_the_caller_or_other_hosts(monkeypatch):
     assert gpu_backend_args("windows", True, "linux", ["--use-angle=vulkan"]) == []
     assert gpu_backend_args("linux", False, "linux", ["--use-gl=egl"], environ=env) == []
     assert gpu_backend_args("linux", False, "linux", ["--ignore-gpu-blocklist"], environ=env) == ["--use-angle=gl"]
+    assert gpu_backend_args("linux", False, "linux", ["--use-angle=swiftshader"], environ={}, mesa_egl=True) == []
+    assert gpu_backend_args("linux", False, "linux", ["--ignore-gpu-blocklist"], environ={}, mesa_egl=True) == [
+        "--use-angle=gl-egl"]
+    assert gpu_backend_args("windows", False, "linux", environ={}, mesa_egl=True) == ["--use-angle=swiftshader-webgl"]
     assert gpu_backend_args("windows", True, "win32") == []
     assert gpu_backend_args("windows", True, "darwin") == []
     assert gpu_backend_args(None, False, "linux", environ=env) == []        # pass-through: no persona
@@ -108,6 +117,30 @@ def test_x_display_available(monkeypatch):
     assert x_display_available({"DISPLAY": "remotehost:0"}) is True
     assert x_display_available({"DISPLAY": ""}) is False
     assert x_display_available({"DISPLAY": ":abc"}) is False
+
+
+def _libs(root, *names):
+    for n in names:
+        p = root / n
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"")
+    return [str(root)]
+
+
+def test_mesa_egl_needs_libegl_the_mesa_vendor_and_a_software_rasterizer(tmp_path):
+    full = ("libEGL.so.1", "libEGL_mesa.so.0", "dri/swrast_dri.so")
+    assert mesa_egl_available(_libs(tmp_path / "debian", *full)) is True
+    assert mesa_egl_available(_libs(tmp_path / "kms", "libEGL.so.1", "libEGL_mesa.so.0", "dri/kms_swrast_dri.so")) is True
+    # Mesa 24.2+ keeps its drivers in libgallium-<version>.so
+    assert mesa_egl_available(_libs(tmp_path / "gallium", "libEGL.so.1", "libEGL_mesa.so.0", "libgallium-24.2.8.so")) is True
+    # libEGL alone (the slim image before libegl1 shipped it: no WebGL at all under gl-egl), no vendor, no driver
+    assert mesa_egl_available(_libs(tmp_path / "nolib", "libEGL_mesa.so.0", "dri/swrast_dri.so")) is False
+    assert mesa_egl_available(_libs(tmp_path / "novendor", "libEGL.so.1", "dri/swrast_dri.so")) is False
+    assert mesa_egl_available(_libs(tmp_path / "nodriver", "libEGL.so.1", "libEGL_mesa.so.0")) is False
+    # the pieces may sit in different directories (multiarch dir + /usr/lib)
+    split = _libs(tmp_path / "a", "libEGL.so.1") + _libs(tmp_path / "b", "libEGL_mesa.so.0", "dri/swrast_dri.so")
+    assert mesa_egl_available(split) is True
+    assert mesa_egl_available([str(tmp_path / "missing")]) is False
 
 
 # -- gate_engine_switches -----------------------------------------------------------------------
@@ -358,6 +391,11 @@ def test_serve_headed_puts_test_type_on_the_command_line_only_with_no_sandbox(se
 
 @pytest.fixture
 def prepared(monkeypatch, tmp_path):
+    # The WebGL backend choice reads the host (X display, Mesa's EGL) and has its own tests above;
+    # keep these end-to-end ones the same on every host. A test can patch either back on.
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr("clearcote._launchopts.mesa_egl_available", lambda *a, **k: False)
+
     def run(switches, **kwargs):
         exe = fake_engine(tmp_path, switches)
         monkeypatch.setattr(clearcote, "_resolve_binary", lambda *a, **k: exe)
@@ -389,6 +427,17 @@ def test_prepare_serve_headed_flag(prepared, monkeypatch):
     assert "--ignore-gpu-blocklist" in args
     _exe, args, *_ = prepared(NEW, _cc_headed=False)
     assert "--ignore-gpu-blocklist" not in args
+
+
+def test_prepare_headless_linux_claim_renders_through_mesa_egl_without_a_display(prepared, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("clearcote._launchopts.mesa_egl_available", lambda *a, **k: True)
+    _exe, args, *_ = prepared(NEW, headless=True, platform="linux")
+    assert "--use-angle=gl-egl" in args and "--ignore-gpu-blocklist" in args
+    _exe, args, *_ = prepared(NEW, headless=True, platform="windows")
+    assert "--use-angle=swiftshader-webgl" in args and "--use-angle=gl-egl" not in args
+    _exe, args, *_ = prepared(NEW, headless=True, fingerprint="off")  # pass-through: no persona to match
+    assert not any(a.startswith("--use-angle=") for a in args)
 
 
 def test_prepare_passthrough_and_extras_on_new_engine(prepared):

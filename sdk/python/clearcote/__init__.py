@@ -48,6 +48,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     engine_supports_switch,
     gate_engine_switches,
     gpu_backend_args,
+    mesa_egl_available,
     gpu_blocklist_args,
     serve_infobar_args,
     serve_needs_no_sandbox,
@@ -128,6 +129,7 @@ __all__ = [
     "is_fingerprint_passthrough",
     "DEFAULT_IGNORED_ARGS",
     "gpu_backend_args",
+    "mesa_egl_available",
     "gpu_blocklist_args",
     "gate_engine_switches",
     "engine_supports_switch",
@@ -521,8 +523,8 @@ def _prepare(kwargs):
     # Pairs with stripping Playwright's --enable-unsafe-swiftshader (DEFAULT_IGNORED_ARGS).
     base += gpu_blocklist_args(headed, sys.platform, user)
     # On a Linux host, render WebGL through the backend whose limits match the CLAIMED platform:
-    # SwiftShader for a Windows claim (Direct3D11-like limits), Mesa for a Linux claim when an X
-    # display is reachable. Pass-through has no persona to match. See gpu_backend_args.
+    # SwiftShader for a Windows claim (Direct3D11-like limits), Mesa for a Linux claim (over the X
+    # display, or over EGL when there is none). Pass-through has no persona to match. See gpu_backend_args.
     base += gpu_backend_args(None if passthrough else persona_platform(fp), headed, sys.platform, user)
     # collapse all --enable-features/--disable-features (ours + the user's) into one of each, else
     # Chromium keeps only the last occurrence and the rest are silently dropped.

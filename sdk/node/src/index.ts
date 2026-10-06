@@ -110,7 +110,7 @@ export { resolveGeo, resolveGeoDetailed, geoipTimeoutMs, GeoipError, type Geo, t
 export { proxiedRequest, toProxySpec, type ProxySpec } from "./net.js";
 export { resolveReleaseChannel, type ReleaseChannel } from "./download.js";
 export { isFingerprintPassthrough } from "./fingerprint.js";
-export { DEFAULT_IGNORED_ARGS, gpuBlocklistArgs, gpuBackendArgs, xDisplayAvailable, gateEngineSwitches, engineSupportsSwitch } from "./launchopts.js";
+export { DEFAULT_IGNORED_ARGS, gpuBlocklistArgs, gpuBackendArgs, xDisplayAvailable, mesaEglAvailable, gateEngineSwitches, engineSupportsSwitch } from "./launchopts.js";
 export { serveMultiplex, type MultiplexOptions, type MultiplexServer } from "./multiplex.js";
 export type { HumanizeOptions } from "./humanize.js";
 export { Profile, listProfiles, loadProfile, PROFILE_DIR, type ProfileOptions } from "./profile.js";

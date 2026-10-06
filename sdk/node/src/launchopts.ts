@@ -3,7 +3,7 @@
 // the Python SDK exactly.
 
 import { hostPersonaPlatform } from "./fingerprint.js";
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
@@ -484,6 +484,34 @@ export function xDisplayAvailable(env: NodeJS.ProcessEnv = process.env): boolean
   return true;
 }
 
+/** Library directories searched for Mesa's EGL (Debian/Ubuntu multiarch, Fedora/RHEL lib64, Arch). */
+export const EGL_LIB_DIRS: readonly string[] = [
+  "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib/x86_64-linux-gnu", "/lib/aarch64-linux-gnu",
+  "/usr/lib64", "/lib64", "/usr/lib", "/lib",
+];
+
+/**
+ * Whether Mesa can render WebGL over EGL with no X display (`--use-angle=gl-egl`). Measured on a
+ * GPU-less Linux host: with no display, `gl-egl` renders through Mesa's llvmpipe
+ * with the same limits as the X display path (16384 textures, 1024 vertex uniform vectors), and genuine
+ * Chrome on that path reports the same. It needs the system `libEGL.so.1`, Mesa's EGL vendor library and
+ * a software rasterizer driver. Without libEGL the browser has no WebGL at all, not even the SwiftShader
+ * fallback, so this answers true only when all three are present.
+ */
+export function mesaEglAvailable(libDirs: readonly string[] = EGL_LIB_DIRS): boolean {
+  const has = (name: string) => libDirs.some((d) => existsSync(join(d, name)));
+  if (!has("libEGL.so.1") || !has("libEGL_mesa.so.0")) return false;
+  if (has("dri/swrast_dri.so") || has("dri/kms_swrast_dri.so")) return true;
+  // Mesa 24.2+ keeps its drivers in libgallium-<version>.so
+  return libDirs.some((d) => {
+    try {
+      return readdirSync(d).some((f) => /^libgallium-.*\.so$/.test(f));
+    } catch {
+      return false;
+    }
+  });
+}
+
 /**
  * The ANGLE backend whose WebGL limits match the platform the page is TOLD it is, on a Linux host
  * (mirrors Python's gpu_backend_args; measured 2026-10-06).
@@ -495,10 +523,13 @@ export function xDisplayAvailable(env: NodeJS.ProcessEnv = process.env): boolean
  * - A **Linux** claim names Mesa/OpenGL. Headless Chromium renders WebGL through SwiftShader (8192
  *   textures, 4096 vertex uniforms, SwiftShader shader text); with an X display reachable,
  *   `--use-angle=gl` renders through Mesa (16384 / 1024 / GLSL, what real Mesa machines report).
- *   Headed launches already get Mesa (gpuBlocklistArgs). Headless with no display stays as it is.
+ *   Headed launches already get Mesa (gpuBlocklistArgs). Headless with no display gets
+ *   `--use-angle=gl-egl` when the host has Mesa's EGL (mesaEglAvailable): Mesa again, with the same
+ *   limits and the shader text of an OpenGL ES context. Without it, headless stays on SwiftShader.
  *
  * `claimedPlatform` undefined (pass-through: no persona) adds nothing, nor does a host other than
- * Linux, nor a caller who chose a backend with their own `--use-angle=` / `--use-gl=`.
+ * Linux, nor a caller who chose a backend with their own `--use-angle=` / `--use-gl=`. `mesaEgl`
+ * undefined probes this host; tests pass true/false.
  */
 export function gpuBackendArgs(
   claimedPlatform: string | undefined,
@@ -506,13 +537,18 @@ export function gpuBackendArgs(
   platform: NodeJS.Platform = process.platform,
   userArgs: readonly string[] = [],
   env: NodeJS.ProcessEnv = process.env,
+  mesaEgl?: boolean,
 ): string[] {
   if (claimedPlatform === undefined || platform !== "linux") return [];
   if (userArgs.some((a) => a.startsWith("--use-angle=") || a.startsWith("--use-gl="))) return [];
   const claim = claimedPlatform.trim().toLowerCase();
   if (claim === "windows") return ["--use-angle=swiftshader-webgl"];
-  if (claim === "linux" && !headed && xDisplayAvailable(env)) {
-    return userArgs.includes("--ignore-gpu-blocklist") ? ["--use-angle=gl"] : ["--use-angle=gl", "--ignore-gpu-blocklist"];
+  if (claim === "linux" && !headed) {
+    let backend: string;
+    if (xDisplayAvailable(env)) backend = "--use-angle=gl";
+    else if (mesaEgl ?? mesaEglAvailable()) backend = "--use-angle=gl-egl";
+    else return [];
+    return userArgs.includes("--ignore-gpu-blocklist") ? [backend] : [backend, "--ignore-gpu-blocklist"];
   }
   return [];
 }

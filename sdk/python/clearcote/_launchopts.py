@@ -2,6 +2,7 @@
 proxy resolution. Kept pure (input -> switches / cleaned options) so they're unit-testable and
 mirror the Node SDK exactly."""
 
+import glob
 import os
 import re
 import sys
@@ -540,7 +541,31 @@ def x_display_available(environ=None):
     return True
 
 
-def gpu_backend_args(claimed_platform, headed, platform=None, user_args=(), environ=None):
+# Library directories searched for Mesa's EGL (Debian/Ubuntu multiarch, Fedora/RHEL lib64, Arch).
+EGL_LIB_DIRS = (
+    "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib/x86_64-linux-gnu", "/lib/aarch64-linux-gnu",
+    "/usr/lib64", "/lib64", "/usr/lib", "/lib",
+)
+
+
+def mesa_egl_available(lib_dirs=EGL_LIB_DIRS):
+    """Whether Mesa can render WebGL over EGL with no X display (``--use-angle=gl-egl``).
+
+    Measured on a GPU-less Linux host: with no display, ``gl-egl`` renders through
+    Mesa's llvmpipe with the same limits as the X display path (16384 textures, 1024 vertex uniform
+    vectors), and genuine Chrome on that path reports the same. It needs the system ``libEGL.so.1``,
+    Mesa's EGL vendor library and a software rasterizer driver. Without libEGL the browser has no WebGL
+    at all, not even the SwiftShader fallback, so this answers True only when all three are present."""
+    def has(name):
+        return any(os.path.exists(os.path.join(d, name)) for d in lib_dirs)
+
+    if not (has("libEGL.so.1") and has("libEGL_mesa.so.0")):
+        return False
+    return has("dri/swrast_dri.so") or has("dri/kms_swrast_dri.so") or any(
+        glob.glob(os.path.join(d, "libgallium-*.so")) for d in lib_dirs)
+
+
+def gpu_backend_args(claimed_platform, headed, platform=None, user_args=(), environ=None, mesa_egl=None):
     """The ANGLE backend whose WebGL limits match the platform the page is TOLD it is, on a Linux host.
 
     A persona's renderer string names a GPU and an API; the limits the page reads next to it come
@@ -556,10 +581,13 @@ def gpu_backend_args(claimed_platform, headed, platform=None, user_args=(), envi
       (8192 textures, 4096 vertex uniforms, SwiftShader shader text: nothing like Mesa); with an X
       display reachable, ``--use-angle=gl`` renders through Mesa instead (16384 / 1024 / GLSL, the
       values real Mesa machines report). Headed launches already get Mesa (gpu_blocklist_args).
-      Headless with NO display stays as it is: the GL backend cannot start without one.
+      Headless with NO display gets ``--use-angle=gl-egl`` when the host has Mesa's EGL
+      (mesa_egl_available): Mesa again, with the same limits and the shader text of an OpenGL ES
+      context. Without it, headless stays on SwiftShader.
 
     ``claimed_platform`` None (pass-through: no persona) adds nothing, nor does any host other than
-    Linux, nor a caller who chose a backend with their own ``--use-angle=`` / ``--use-gl=``."""
+    Linux, nor a caller who chose a backend with their own ``--use-angle=`` / ``--use-gl=``.
+    ``mesa_egl`` None probes this host; tests pass True/False."""
     platform = sys.platform if platform is None else platform
     if claimed_platform is None or not str(platform).startswith("linux"):
         return []
@@ -569,8 +597,14 @@ def gpu_backend_args(claimed_platform, headed, platform=None, user_args=(), envi
     claim = str(claimed_platform).strip().lower()
     if claim == "windows":
         return ["--use-angle=swiftshader-webgl"]
-    if claim == "linux" and not headed and x_display_available(environ):
-        return ["--use-angle=gl"] + ([] if "--ignore-gpu-blocklist" in user else ["--ignore-gpu-blocklist"])
+    if claim == "linux" and not headed:
+        if x_display_available(environ):
+            backend = "--use-angle=gl"
+        elif mesa_egl_available() if mesa_egl is None else mesa_egl:
+            backend = "--use-angle=gl-egl"
+        else:
+            return []
+        return [backend] + ([] if "--ignore-gpu-blocklist" in user else ["--ignore-gpu-blocklist"])
     return []
 
 

@@ -57,11 +57,45 @@ public class ParityLaunchTests : IDisposable
         // Windows claim: SwiftShader, headed and headless (GL clamps VUV to 1024 under a D3D11 label).
         Assert.Equal(new[] { "--use-angle=swiftshader-webgl" }, LaunchOpts.GpuBackendArgs("windows", true, "linux"));
         Assert.Equal(new[] { "--use-angle=swiftshader-webgl" }, LaunchOpts.GpuBackendArgs("windows", false, "linux"));
-        // Linux claim, headless: Mesa only when an X display is reachable.
-        Assert.Equal(new[] { "--use-angle=gl", "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", null, "remotehost:0"));
-        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", false, "linux", null, ":4242"));
+        // Linux claim, headless: Mesa over a reachable X display (whatever EGL offers) ...
+        foreach (var egl in new[] { true, false })
+            Assert.Equal(new[] { "--use-angle=gl", "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", null, "remotehost:0", egl));
+        // ... else over EGL when the host has Mesa's EGL, else nothing (stays on SwiftShader).
+        Assert.Equal(new[] { "--use-angle=gl-egl", "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", null, ":4242", true));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", false, "linux", null, ":4242", false));
+        Assert.Equal(new[] { "--use-angle=gl-egl" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--ignore-gpu-blocklist" }, ":4242", true));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--use-angle=swiftshader" }, ":4242", true));
+        Assert.Equal(new[] { "--use-angle=swiftshader-webgl" }, LaunchOpts.GpuBackendArgs("windows", false, "linux", null, ":4242", true));
         // Headed Linux claim: already on the default GL path.
-        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", true, "linux", null, "remotehost:0"));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", true, "linux", null, "remotehost:0", true));
+    }
+
+    [Fact]
+    public void Mesa_egl_needs_libegl_the_mesa_vendor_and_a_software_rasterizer()
+    {
+        var root = TestTemp.Create("cc-egl-");
+        _dirs.Add(root);
+        string[] Libs(string dir, params string[] names)
+        {
+            foreach (var n in names)
+            {
+                var p = Path.Combine(root, dir, n);
+                Directory.CreateDirectory(Path.GetDirectoryName(p)!);
+                File.WriteAllBytes(p, Array.Empty<byte>());
+            }
+            return new[] { Path.Combine(root, dir) };
+        }
+        Assert.True(LaunchOpts.MesaEglAvailable(Libs("debian", "libEGL.so.1", "libEGL_mesa.so.0", "dri/swrast_dri.so")));
+        Assert.True(LaunchOpts.MesaEglAvailable(Libs("kms", "libEGL.so.1", "libEGL_mesa.so.0", "dri/kms_swrast_dri.so")));
+        // Mesa 24.2+ keeps its drivers in libgallium-<version>.so
+        Assert.True(LaunchOpts.MesaEglAvailable(Libs("gallium", "libEGL.so.1", "libEGL_mesa.so.0", "libgallium-24.2.8.so")));
+        // libEGL missing (no WebGL at all under gl-egl), no Mesa vendor, no rasterizer
+        Assert.False(LaunchOpts.MesaEglAvailable(Libs("nolib", "libEGL_mesa.so.0", "dri/swrast_dri.so")));
+        Assert.False(LaunchOpts.MesaEglAvailable(Libs("novendor", "libEGL.so.1", "dri/swrast_dri.so")));
+        Assert.False(LaunchOpts.MesaEglAvailable(Libs("nodriver", "libEGL.so.1", "libEGL_mesa.so.0")));
+        // the pieces may sit in different directories (multiarch dir + /usr/lib)
+        Assert.True(LaunchOpts.MesaEglAvailable(Libs("a", "libEGL.so.1").Concat(Libs("b", "libEGL_mesa.so.0", "dri/swrast_dri.so"))));
+        Assert.False(LaunchOpts.MesaEglAvailable(new[] { Path.Combine(root, "missing") }));
     }
 
     [Fact]

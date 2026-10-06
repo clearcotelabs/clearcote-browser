@@ -278,14 +278,15 @@ stops looking like one. The check therefore also measures limits the string cann
 allocation — and reports them as `max_texture_size`, `max_vertex_uniform_vectors`,
 `max_fragment_uniform_vectors` and `can_allocate_16k_texture`. A renderer naming a desktop GPU while
 `MAX_TEXTURE_SIZE` is below 16384 is a spoof over a software rasterizer and comes back
-`coherent: False`. **Headless on Linux with no GPU hits exactly this** — Chromium falls back to
-SwiftShader (8192) whatever the persona claims, and no launch flag changes it on a display-less
-host. Run headed under Xvfb, or use the canvas bridge.
+`coherent: False`. **Headless on Linux with no GPU hits exactly this** when Chromium renders through
+SwiftShader (8192): a Windows persona always does, and a Linux persona does on a host without Mesa's
+EGL (`libegl1`). Run headed under Xvfb, or use the canvas bridge.
 
 On a Linux host the SDK picks the software backend that matches the GPU the persona names: a Linux
-persona (Mesa/OpenGL) renders through Mesa's own GL whenever an X display is reachable — headed, or
-headless with `DISPLAY` pointing at an Xvfb — and a Windows persona (Direct3D11) renders through
-SwiftShader, whose limits match Direct3D11. Your own `--use-angle=` / `--use-gl=` in `args` wins.
+persona (Mesa/OpenGL) renders through Mesa's own GL — over the X display when one is reachable
+(headed, or headless with `DISPLAY` pointing at an Xvfb), otherwise over EGL when the host has Mesa's
+EGL (`libegl1` on Debian/Ubuntu) — and a Windows persona (Direct3D11) renders through SwiftShader,
+whose limits match Direct3D11. Your own `--use-angle=` / `--use-gl=` in `args` wins.
 
 ### Hardened launch defaults
 

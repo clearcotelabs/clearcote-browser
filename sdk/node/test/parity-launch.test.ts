@@ -1,14 +1,15 @@
 // Launch behaviour: GPU defaults, new engine-switch gating, pass-through,
 // voices, third-party cookies, transparent proxy, release channel.
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   DEFAULT_IGNORED_ARGS,
   gpuBlocklistArgs,
   gpuBackendArgs,
   xDisplayAvailable,
+  mesaEglAvailable,
   gateEngineSwitches,
   engineExtrasArgs,
   GATED_ENGINE_SWITCHES,
@@ -60,14 +61,44 @@ describe("GPU launch defaults (#1 + #2)", () => {
     expect(gpuBackendArgs("windows", false, "linux")).toEqual(["--use-angle=swiftshader-webgl"]);
   });
 
-  it("gives a headless Linux claim Mesa only when an X display is reachable", () => {
-    expect(gpuBackendArgs("linux", false, "linux", [], remote)).toEqual(["--use-angle=gl", "--ignore-gpu-blocklist"]);
-    expect(gpuBackendArgs("linux", false, "linux", [], {} as NodeJS.ProcessEnv)).toEqual([]);
-    expect(gpuBackendArgs("linux", false, "linux", [], { DISPLAY: ":4242" } as NodeJS.ProcessEnv)).toEqual([]); // no such socket
+  it("gives a headless Linux claim Mesa over the X display, else over EGL when the host has it", () => {
+    for (const egl of [true, false]) {
+      expect(gpuBackendArgs("linux", false, "linux", [], remote, egl)).toEqual(["--use-angle=gl", "--ignore-gpu-blocklist"]);
+    }
+    for (const env of [{}, { DISPLAY: ":4242" }] as NodeJS.ProcessEnv[]) { // none, or no such socket
+      expect(gpuBackendArgs("linux", false, "linux", [], env, true)).toEqual(["--use-angle=gl-egl", "--ignore-gpu-blocklist"]);
+      expect(gpuBackendArgs("linux", false, "linux", [], env, false)).toEqual([]); // stays on SwiftShader
+    }
+    expect(gpuBackendArgs("linux", false, "linux", ["--ignore-gpu-blocklist"], {}, true)).toEqual(["--use-angle=gl-egl"]);
+    expect(gpuBackendArgs("linux", false, "linux", ["--use-angle=swiftshader"], {}, true)).toEqual([]);
+    expect(gpuBackendArgs("windows", false, "linux", [], {}, true)).toEqual(["--use-angle=swiftshader-webgl"]);
   });
 
   it("leaves a headed Linux claim on the default GL path", () => {
-    expect(gpuBackendArgs("linux", true, "linux", [], remote)).toEqual([]);
+    expect(gpuBackendArgs("linux", true, "linux", [], remote, true)).toEqual([]);
+  });
+
+  it("mesaEglAvailable needs libEGL, Mesa's EGL vendor and a software rasterizer", () => {
+    const root = mkdtempSync(join(tmpdir(), "cc-egl-"));
+    dirs.push(root);
+    const libs = (dir: string, ...names: string[]) => {
+      for (const n of names) {
+        mkdirSync(dirname(join(root, dir, n)), { recursive: true });
+        writeFileSync(join(root, dir, n), "");
+      }
+      return [join(root, dir)];
+    };
+    expect(mesaEglAvailable(libs("debian", "libEGL.so.1", "libEGL_mesa.so.0", "dri/swrast_dri.so"))).toBe(true);
+    expect(mesaEglAvailable(libs("kms", "libEGL.so.1", "libEGL_mesa.so.0", "dri/kms_swrast_dri.so"))).toBe(true);
+    // Mesa 24.2+ keeps its drivers in libgallium-<version>.so
+    expect(mesaEglAvailable(libs("gallium", "libEGL.so.1", "libEGL_mesa.so.0", "libgallium-24.2.8.so"))).toBe(true);
+    // libEGL missing (no WebGL at all under gl-egl), no Mesa vendor, no rasterizer
+    expect(mesaEglAvailable(libs("nolib", "libEGL_mesa.so.0", "dri/swrast_dri.so"))).toBe(false);
+    expect(mesaEglAvailable(libs("novendor", "libEGL.so.1", "dri/swrast_dri.so"))).toBe(false);
+    expect(mesaEglAvailable(libs("nodriver", "libEGL.so.1", "libEGL_mesa.so.0"))).toBe(false);
+    // the pieces may sit in different directories (multiarch dir + /usr/lib)
+    expect(mesaEglAvailable([...libs("a", "libEGL.so.1"), ...libs("b", "libEGL_mesa.so.0", "dri/swrast_dri.so")])).toBe(true);
+    expect(mesaEglAvailable([join(root, "missing")])).toBe(false);
   });
 
   it("never overrides the caller's backend, other hosts, pass-through or android", () => {

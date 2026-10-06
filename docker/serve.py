@@ -25,6 +25,16 @@ from clearcote._fonts import linux_font_env
 from clearcote._fingerprint import persona_platform
 from clearcote._launchopts import merge_feature_flags, serve_infobar_args, web_bluetooth_args
 try:
+    from clearcote._launchopts import mesa_egl_available
+except ImportError:  # an image built with an SDK older than this entrypoint: same check, inline
+    def mesa_egl_available():
+        import glob
+        dirs = ("/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64", "/usr/lib")
+        has = lambda name: any(os.path.exists(os.path.join(d, name)) for d in dirs)  # noqa: E731
+        return (has("libEGL.so.1") and has("libEGL_mesa.so.0")
+                and (has("dri/swrast_dri.so") or has("dri/kms_swrast_dri.so")
+                     or any(glob.glob(os.path.join(d, "libgallium-*.so")) for d in dirs)))
+try:
     from clearcote._containerseed import container_seed
 except ImportError:  # an image built with an SDK older than this entrypoint: same behaviour, inline
     def container_seed(env_value, profile_dir):
@@ -376,17 +386,22 @@ else:
 # GPU the persona NAMES (measured 2026-10-06 against real captures):
 # * a Linux persona names "Mesa Intel ... OpenGL 4.6". SwiftShader gives it 8192 textures, 4096 vertex
 #   uniform vectors and SwiftShader shader text, which no Mesa machine reports; Mesa's own software GL
-#   (llvmpipe, shipped in this image) gives 16384 / 1024 / GLSL like real Mesa machines. It needs an X
-#   display, so it is used headful (the default) and not under CC_HEADLESS.
+#   (llvmpipe, shipped in this image) gives 16384 / 1024 / GLSL like real Mesa machines. Headful (the
+#   default) it runs over the Xvfb display; under CC_HEADLESS there is no display, so it runs over EGL
+#   (libegl1 in this image): the same limits, with the shader text of an OpenGL ES context.
 # * a Windows persona names Direct3D11. SwiftShader gives the Direct3D11-like 4096 vertex uniform vectors
 #   (Mesa's GL clamps them to 1024) and, with the HLSL dialect below, matching shader translations.
-# --enable-unsafe-swiftshader stays on both: if Mesa cannot start, WebGL falls back rather than vanishing.
+# --enable-unsafe-swiftshader stays on: if Mesa cannot start over the display, WebGL falls back rather than
+# vanishing. Over EGL there is no such fallback, hence the check that Mesa's EGL is installed.
 # CC_EXTRA_ARGS comes last on the line, so a --use-angle= there still wins.
 if persona_platform(opts) == "linux" and not headless:
     gpu_args = ["--use-gl=angle", "--use-angle=gl", "--ignore-gpu-blocklist", "--enable-unsafe-swiftshader"]
+elif persona_platform(opts) == "linux" and mesa_egl_available():
+    gpu_args = ["--use-gl=angle", "--use-angle=gl-egl", "--ignore-gpu-blocklist", "--enable-unsafe-swiftshader"]
 else:
     gpu_args = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
-print("[clearcote] WebGL backend: %s" % ("Mesa GL (llvmpipe)" if "--use-angle=gl" in gpu_args else "SwiftShader"),
+_BACKENDS = {"--use-angle=gl": "Mesa GL (llvmpipe)", "--use-angle=gl-egl": "Mesa GL over EGL (llvmpipe)"}
+print("[clearcote] WebGL backend: %s" % next((v for k, v in _BACKENDS.items() if k in gpu_args), "SwiftShader"),
       flush=True)
 
 base_args = [
