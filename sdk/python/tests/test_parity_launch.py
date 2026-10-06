@@ -443,10 +443,11 @@ def _only_disable_features(args):
 def test_launch_replaces_playwrights_list_without_partitioning(prepared, platform):
     _exe, args, _pw, *_ = prepared(NEW, fingerprint="s1", platform=platform, headless=True)
     feats = _only_disable_features(args)
-    assert "ThirdPartyStoragePartitioning" not in feats
-    # the rest of Playwright's list survives on every claim (a Linux claim used to drop it all,
-    # because its own --disable-features=WebBluetooth replaced Playwright's)
-    for f in ("HttpsUpgrades", "MediaRouter", "Translate", "RenderDocument", "PaintHolding"):
+    for f in ("ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades"):
+        assert f not in feats, f  # what a page or a server can observe stays as in genuine Chrome
+    # Playwright's stability/UI entries stay off on every claim (a Linux claim used to drop them all,
+    # because its own --disable-features=WebBluetooth replaced Playwright's whole list)
+    for f in ("MediaRouter", "Translate", "RenderDocument", "PaintHolding"):
         assert f in feats, f
     assert ("WebBluetooth" in feats) == (platform == "linux")
 
@@ -458,10 +459,16 @@ def test_the_users_own_disable_features_are_kept(prepared):
     assert "Foo" in feats and "ThirdPartyStoragePartitioning" in feats  # asked for explicitly
 
 
-@pytest.mark.parametrize("ignore", [True, ["--disable-features=AcceptCHFrame,MediaRouter"]])
-def test_no_copy_of_playwrights_list_when_the_caller_dropped_it(prepared, ignore):
-    _exe, args, _pw, *_ = prepared(NEW, headless=True, ignore_default_args=ignore)
-    assert not any("HttpsUpgrades" in a for a in args), args
+def test_no_copy_of_playwrights_list_when_the_caller_dropped_it(prepared):
+    from clearcote._launchopts import PLAYWRIGHT_DISABLED_FEATURES, installed_playwright_disabled_features
+    exact = "--disable-features=" + ",".join(installed_playwright_disabled_features()
+                                              or PLAYWRIGHT_DISABLED_FEATURES)
+    for ignore in (True, [exact]):
+        _exe, args, _pw, *_ = prepared(NEW, headless=True, ignore_default_args=ignore)
+        assert not any("MediaRouter" in a for a in args), args
+    # a different --disable-features value does NOT remove Playwright's list (exact match only)
+    _exe, args, _pw, *_ = prepared(NEW, headless=True, ignore_default_args=["--disable-features=X"])
+    assert "MediaRouter" in _only_disable_features(args)
 
 
 def test_serve_never_carries_playwrights_list(served_line):

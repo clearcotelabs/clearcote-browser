@@ -334,14 +334,52 @@ describe("socks5UdpArgs", () => {
 });
 
 describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
-  it("re-emits Playwright's list without ThirdPartyStoragePartitioning", async () => {
-    const { playwrightFeatureOverrideArgs, PLAYWRIGHT_DISABLED_FEATURES } = await import("../src/launchopts.js");
-    const [arg] = playwrightFeatureOverrideArgs();
-    const feats = arg.slice("--disable-features=".length).split(",");
-    expect(feats).not.toContain("ThirdPartyStoragePartitioning");
-    expect(new Set(feats)).toEqual(new Set(PLAYWRIGHT_DISABLED_FEATURES.filter((f) => f !== "ThirdPartyStoragePartitioning")));
-    expect(playwrightFeatureOverrideArgs(true)).toEqual([]);
-    expect(playwrightFeatureOverrideArgs(["--enable-automation"])).toEqual([arg]);
-    expect(playwrightFeatureOverrideArgs(["--disable-features=X"])).toEqual([]);
+  const PW157 = ["AcceptCHFrame", "AvoidUnnecessaryBeforeUnloadCheckSync", "HttpsUpgrades", "MediaRouter",
+    "PaintHolding", "ThirdPartyStoragePartitioning", "RenderDocument"];
+
+  it("re-enables only what a page or server can observe", async () => {
+    const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
+    expect(playwrightFeatureOverrideArgs(undefined, PW157, false))
+      .toEqual(["--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,MediaRouter,PaintHolding,RenderDocument"]);
+    expect(playwrightFeatureOverrideArgs(undefined, ["LazyFrameLoading", "Translate"], false))
+      .toEqual(["--disable-features=Translate"]);
+  });
+
+  it("is skipped only when Playwright's exact switch is dropped", async () => {
+    const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
+    const exact = `--disable-features=${PW157.join(",")}`;
+    expect(playwrightFeatureOverrideArgs(true, PW157, false)).toEqual([]);
+    expect(playwrightFeatureOverrideArgs([exact], PW157, false)).toEqual([]);
+    // Playwright drops only an EXACT match; anything else leaves its list on the line.
+    expect(playwrightFeatureOverrideArgs(["--disable-features=MediaRouter"], PW157, false)).not.toEqual([]);
+  });
+
+  it("re-emits the screenshot surface switch", async () => {
+    const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
+    expect(playwrightFeatureOverrideArgs(undefined, ["MediaRouter"], true))
+      .toEqual(["--disable-features=MediaRouter", "--enable-features=CDPScreenshotNewSurface"]);
+  });
+
+  it("parses every Playwright release shape", async () => {
+    const { parsePlaywrightDisabledFeatures: parse } = await import("../src/launchopts.js");
+    expect(parse(`const disabledFeatures = (assistantMode) => [
+  // See https://github.com/microsoft/playwright/pull/10380
+  "AcceptCHFrame",
+  assistantMode ? "AutomationControlled" : ""
+].filter(Boolean);`)).toEqual(["AcceptCHFrame"]);
+    expect(parse(`    disabledFeatures = [
+      // See https://github.com/microsoft/playwright/issues/38568
+      "BoundaryEventDispatchTracksNodeRemoval",
+      "HttpsUpgrades"
+    ].filter(Boolean);`)).toEqual(["BoundaryEventDispatchTracksNodeRemoval", "HttpsUpgrades"]);
+    expect(parse("['--disable-features=LazyFrameLoading,HttpsUpgrades', '--no-first-run']")).toEqual(["LazyFrameLoading", "HttpsUpgrades"]);
+    expect(parse("")).toBeUndefined();
+  });
+
+  it("reads the installed playwright-core's list (drift guard)", async () => {
+    const { installedPlaywrightDisabledFeatures } = await import("../src/launchopts.js");
+    const feats = installedPlaywrightDisabledFeatures();
+    expect(feats?.length).toBeGreaterThan(0);
+    expect(feats).toContain("MediaRouter");
   });
 });

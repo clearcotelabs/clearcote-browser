@@ -14,7 +14,8 @@
  * set it answered in HLSL. A shader the HLSL translator rejects falls back to the backend's own
  * output for that shader -- the state every launch was in before, so the default cannot make a page
  * see anything worse. Pass `shaderDialect: false` to turn it off. On a Windows host the D3D11
- * backend already answers in HLSL and nothing is set; a Linux or macOS claim never gets HLSL.
+ * backend already answers in HLSL and nothing is set; a Linux or macOS claim never gets HLSL, nor
+ * does a launch that shows the real GPU string or a custom non-Direct3D renderer.
  *
  * Delivered as an environment variable because the code lives in the GPU process, which does not
  * receive the fingerprint switches.
@@ -31,18 +32,32 @@ const VALID: readonly string[] = ["hlsl"];
 
 const OFF: readonly string[] = ["", "0", "off", "false", "no", "none"];
 
+/** Switches under which the renderer string is the host's real GPU (SwiftShader, Mesa, ...), not the
+ * persona's Direct3D11 one — HLSL beside it would be the contradiction this option removes. */
+const REAL_GPU_STRING_SWITCHES: readonly string[] = ["--disable-gpu-fingerprint", "--disable-gpu-string-spoof"];
+
 /** The dialect a launch gets when the caller did not choose one: `"hlsl"` when the built command
- * line claims Windows (`--fingerprint-platform=windows`, the last one wins) and the host is not
- * Windows, else undefined. */
+ * line claims Windows (`--fingerprint-platform=windows`, the last one wins) with a Direct3D renderer
+ * string and the host is not Windows, else undefined. No default when the page sees the real GPU
+ * string (`--disable-gpu-fingerprint` / `--disable-gpu-string-spoof`) or a custom
+ * `--fingerprint-gpu-renderer` that does not name Direct3D. */
 export function defaultShaderDialect(args?: readonly string[], hostPlatform: string = process.platform): ShaderDialect | undefined {
   if (hostPlatform === "win32") return undefined;
   let claimed: string | undefined;
+  let renderer: string | undefined;
   for (const a of args ?? []) {
-    if (typeof a === "string" && a.startsWith("--fingerprint-platform=")) {
+    if (typeof a !== "string") continue;
+    if (a.startsWith("--fingerprint-platform=")) {
       claimed = a.slice("--fingerprint-platform=".length).trim().toLowerCase();
+    } else if (a.startsWith("--fingerprint-gpu-renderer=")) {
+      renderer = a.slice("--fingerprint-gpu-renderer=".length);
+    } else if (REAL_GPU_STRING_SWITCHES.includes(a.split("=", 1)[0])) {
+      return undefined;
     }
   }
-  return claimed === "windows" ? "hlsl" : undefined;
+  if (claimed !== "windows") return undefined;
+  if (renderer !== undefined && !renderer.toLowerCase().includes("direct3d")) return undefined;
+  return "hlsl";
 }
 
 /**
@@ -57,13 +72,13 @@ export function defaultShaderDialect(args?: readonly string[], hostPlatform: str
  * while the engine kept reporting the honest dialect.
  */
 export function withShaderDialect(
-  dialect: string | false | undefined,
+  dialect: string | false | null | undefined,
   baseEnv: Record<string, string | undefined> | undefined,
   args?: readonly string[],
   hostPlatform: string = process.platform,
 ): Record<string, string | undefined> | undefined {
   let value: string | undefined;
-  if (dialect === undefined) {
+  if (dialect === undefined || dialect === null) {  // null (from JS callers) means "not chosen" too
     value = defaultShaderDialect(args, hostPlatform);
     if (!value) return baseEnv;
     if ((baseEnv ?? process.env)[SHADER_DIALECT_ENV] !== undefined) return baseEnv;

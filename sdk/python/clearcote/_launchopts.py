@@ -58,11 +58,13 @@ def merge_feature_flags(args):
     return rest
 
 
-#: Playwright's own ``--disable-features`` list (chromiumSwitches.js ``disabledFeatures``, 1.57).
-#: Playwright puts it on every launch, BEFORE the caller's args, and Chromium keeps only the last
-#: ``--disable-features`` on the line -- so the SDK re-emits this list itself, merged into its own
-#: single switch (see playwright_feature_override_args), minus the entries a page can observe.
-#: An entry a newer Playwright adds and this copy lacks ends up enabled, i.e. as in genuine Chrome.
+#: Playwright puts its own ``--disable-features`` list on every launch, BEFORE the caller's args, and
+#: Chromium keeps only the last ``--disable-features`` on the line -- so the SDK re-emits that list
+#: itself, merged into its own single switch, minus PAGE_VISIBLE_PLAYWRIGHT_FEATURES (see
+#: playwright_feature_override_args). The list differs between Playwright releases (1.49 also disables
+#: LazyFrameLoading and PlzDedicatedWorker; 1.61 drops AcceptCHFrame and adds
+#: BoundaryEventDispatchTracksNodeRemoval), so the installed driver's own list is read at launch
+#: (installed_playwright_disabled_features); this copy (1.57) is only the fallback.
 PLAYWRIGHT_DISABLED_FEATURES = (
     "AcceptCHFrame", "AvoidUnnecessaryBeforeUnloadCheckSync", "DestroyProfileOnBrowserClose",
     "DialMediaRouteProvider", "GlobalMediaControls", "HttpsUpgrades", "LensOverlay", "MediaRouter",
@@ -70,35 +72,117 @@ PLAYWRIGHT_DISABLED_FEATURES = (
     "OptimizationHints",
 )
 
-#: Entries of PLAYWRIGHT_DISABLED_FEATURES that change what a web page can observe, kept ENABLED.
+#: Entries of Playwright's list that a web page or server can observe, kept ENABLED as in genuine
+#: Chrome 154 (all four default on). The rest stay off: they keep Playwright's automation stable
+#: (beforeunload, frame tracking, paint timing for screenshots) or only touch browser UI and
+#: background services.
 #:
-#: ThirdPartyStoragePartitioning: every Chrome since 115 partitions third-party storage, whatever
-#: the user's cookie settings. With Playwright's switch it is off, so a cross-site iframe either
-#: reads the storage its site wrote as a top-level page, or -- with third-party cookies blocked,
-#: the engine default -- gets a SecurityError from localStorage. Measured 2026-10-06 (r30, genuine
-#: Chrome 154.0.8037.98 on the same host): genuine gives the iframe an empty partition (null, no
-#: error) with third-party cookies allowed AND blocked; genuine launched with Playwright's defaults
-#: reproduces both clearcote results exactly, so the switch is the whole cause.
-PAGE_VISIBLE_PLAYWRIGHT_FEATURES = frozenset({"ThirdPartyStoragePartitioning"})
+#: * ThirdPartyStoragePartitioning: every Chrome since 115 partitions third-party storage, whatever
+#:   the user's cookie settings. With it off, a cross-site iframe reads the storage its site wrote as
+#:   a top-level page, or -- with third-party cookies blocked, the engine default -- gets a
+#:   SecurityError from localStorage. Measured 2026-10-06 (r30, genuine Chrome 154.0.8037.98 on the
+#:   same host): genuine gives the iframe an empty partition (null, no error) with third-party
+#:   cookies allowed AND blocked; genuine launched with Playwright's defaults reproduces both
+#:   clearcote results exactly.
+#: * AcceptCHFrame: client hints requested in the TLS/HTTP2 ACCEPT_CH frame reach the server on the
+#:   first request.
+#: * HttpsUpgrades: an http:// navigation is tried over https first -- the server sees which.
+#: * LazyFrameLoading (Playwright <= 1.49): loading="lazy" iframes load lazily, as the page expects.
+PAGE_VISIBLE_PLAYWRIGHT_FEATURES = frozenset(
+    {"ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading"})
+
+_PW_ARRAY = re.compile(r"disabledFeatures\s*=\s*(?:\([^)]*\)\s*=>\s*)?\[(.*?)\]", re.S)
+_PW_LITERAL = re.compile(r"""["'`]--disable-features=([A-Za-z0-9_,]+)["'`]""")
+_PW_TERNARY = re.compile(r"""\w+\s*\?\s*["'][^"']*["']\s*:\s*["'][^"']*["']""")
+_PW_LINE_COMMENT = re.compile(r"//[^\n]*")
+_PW_NAME = re.compile(r"""["']([A-Za-z0-9_]+)["']""")
 
 
-def playwright_feature_override_args(ignore_default_args=None):
-    """``--disable-features`` that replaces Playwright's own, minus PAGE_VISIBLE_PLAYWRIGHT_FEATURES.
+def parse_playwright_disabled_features(source):
+    """The ``--disable-features`` list in a Playwright chromiumSwitches source (1.5x/1.6x array form,
+    bundled or not, or the older literal-string form), as a tuple; None when it is not there.
+    A conditional entry (``assistantMode ? "AutomationControlled" : ""``) is not part of the default."""
+    if not source:
+        return None
+    m = _PW_ARRAY.search(source)
+    if m:
+        body = _PW_TERNARY.sub("", _PW_LINE_COMMENT.sub("", m.group(1)))
+        names = tuple(_PW_NAME.findall(body))
+        if names:
+            return names
+    m = _PW_LITERAL.search(source)
+    if m:
+        names = tuple(n for n in m.group(1).split(",") if n)
+        return names or None
+    return None
+
+
+_installed_pw = []  # [(disabled features or None, source mentions CDPScreenshotNewSurface)] once read
+
+
+def _installed_playwright_switches_source():
+    try:
+        import os
+        import playwright
+        lib = os.path.join(os.path.dirname(playwright.__file__), "driver", "package", "lib")
+        for rel in (("server", "chromium", "chromiumSwitches.js"), ("coreBundle.js",)):
+            path = os.path.join(lib, *rel)
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    return handle.read()
+    except Exception:
+        pass
+    return None
+
+
+def _installed_playwright():
+    if not _installed_pw:
+        src = _installed_playwright_switches_source()
+        _installed_pw.append((parse_playwright_disabled_features(src),
+                              bool(src) and "CDPScreenshotNewSurface" in src))
+    return _installed_pw[0]
+
+
+def installed_playwright_disabled_features():
+    """The list the installed Playwright driver puts on a Chromium launch (read once per process),
+    or None when it cannot be read."""
+    return _installed_playwright()[0]
+
+
+def playwright_feature_override_args(ignore_default_args=None, playwright_features=None,
+                                     screenshot_surface=None):
+    """Switches that replace Playwright's own ``--disable-features`` without the page-visible entries.
 
     Only for launches Playwright starts (launch / launch_persistent_context); serve() and the Docker
     entrypoint start Chromium themselves and never carry Playwright's list. merge_feature_flags then
     folds this into the SDK's single ``--disable-features``, which Playwright places after its own.
 
-    Returns [] when the caller already dropped Playwright's switch -- ``ignore_default_args=True``,
-    or a list naming a ``--disable-features=`` value -- because re-adding the list would disable
-    features that launch otherwise has on."""
+    ``playwright_features`` defaults to the installed driver's list (the 1.57 copy when unreadable).
+    Returns [] when Playwright's switch is not on the line at all: ``ignore_default_args=True``, or a
+    list holding that exact switch (Playwright drops only exact matches, so anything else leaves its
+    list in place and still needs replacing).
+
+    Also re-emits Playwright's ``--enable-features=CDPScreenshotNewSurface`` (unless
+    PLAYWRIGHT_LEGACY_SCREENSHOT is set), because the SDK's own ``--enable-features`` -- e.g.
+    WebBluetooth for a Windows claim -- would otherwise replace it the same way."""
     if ignore_default_args is True:
         return []
-    if isinstance(ignore_default_args, (list, tuple)) and any(
-            str(a).startswith("--disable-features=") for a in ignore_default_args):
+    features = tuple(playwright_features if playwright_features is not None
+                     else (installed_playwright_disabled_features() or PLAYWRIGHT_DISABLED_FEATURES))
+    playwright_switch = "--disable-features=" + ",".join(features)
+    if isinstance(ignore_default_args, (list, tuple)) and playwright_switch in ignore_default_args:
         return []
-    keep = [f for f in PLAYWRIGHT_DISABLED_FEATURES if f not in PAGE_VISIBLE_PLAYWRIGHT_FEATURES]
-    return ["--disable-features=" + ",".join(keep)]
+    out = []
+    keep = [f for f in features if f not in PAGE_VISIBLE_PLAYWRIGHT_FEATURES]
+    if keep:
+        out.append("--disable-features=" + ",".join(keep))
+    if screenshot_surface is None:
+        import os
+        screenshot_surface = (_installed_playwright()[1]
+                              and not os.environ.get("PLAYWRIGHT_LEGACY_SCREENSHOT"))
+    if screenshot_surface:
+        out.append("--enable-features=CDPScreenshotNewSurface")
+    return out
 
 
 def privacy_sandbox_args():

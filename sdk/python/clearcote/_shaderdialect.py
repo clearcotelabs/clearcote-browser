@@ -14,7 +14,9 @@ it answered in HLSL. The re-translation is a different code path from the one th
 shader the HLSL translator rejects falls back to the backend's own output for that shader -- the
 state every launch was in before, so the default cannot make a page see anything worse. Pass
 ``shader_dialect=False`` to turn it off. On a Windows host the D3D11 backend already answers in HLSL
-and nothing is set; a Linux or macOS claim never gets HLSL by default.
+and nothing is set; a Linux or macOS claim never gets HLSL by default, nor does a launch that shows
+the real GPU string (disable_gpu_fingerprint / gpu_string_spoof=False) or a custom non-Direct3D
+renderer.
 
 Delivered as an environment variable because the code lives in the GPU process, which does not
 receive the fingerprint switches. Requires a PRO engine built with the option (151 r15+); older
@@ -29,18 +31,36 @@ _VALID = ("hlsl",)
 _OFF = ("", "0", "off", "false", "no", "none")
 
 
+#: Switches under which the renderer string is the host's real GPU (SwiftShader, Mesa, ...), not the
+#: persona's Direct3D11 one -- HLSL beside it would be the contradiction this option removes.
+_REAL_GPU_STRING_SWITCHES = ("--disable-gpu-fingerprint", "--disable-gpu-string-spoof")
+
+
 def default_shader_dialect(args, host_platform=None):
     """The dialect a launch gets when the caller did not choose one: ``"hlsl"`` when the built
-    command line claims Windows (``--fingerprint-platform=windows``) and the host is not Windows,
-    else None."""
+    command line claims Windows (``--fingerprint-platform=windows``) with a Direct3D renderer string
+    and the host is not Windows, else None. No default when the page sees the real GPU string
+    (``--disable-gpu-fingerprint`` / ``--disable-gpu-string-spoof``) or a custom
+    ``--fingerprint-gpu-renderer`` that does not name Direct3D."""
     host = sys.platform if host_platform is None else host_platform
     if host == "win32":
         return None
     claimed = None
+    renderer = None
     for arg in args or ():
-        if isinstance(arg, str) and arg.startswith("--fingerprint-platform="):
+        if not isinstance(arg, str):
+            continue
+        if arg.startswith("--fingerprint-platform="):
             claimed = arg.split("=", 1)[1].strip().lower()  # the last one wins, as in Chromium
-    return "hlsl" if claimed == "windows" else None
+        elif arg.startswith("--fingerprint-gpu-renderer="):
+            renderer = arg.split("=", 1)[1]
+        elif arg.split("=", 1)[0] in _REAL_GPU_STRING_SWITCHES:
+            return None
+    if claimed != "windows":
+        return None
+    if renderer is not None and "direct3d" not in renderer.lower():
+        return None
+    return "hlsl"
 
 
 def resolve_shader_dialect(value, args=None, host_platform=None):

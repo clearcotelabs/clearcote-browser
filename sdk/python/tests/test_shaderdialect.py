@@ -86,6 +86,20 @@ def test_no_default_dialect_otherwise(args, host):
     assert default_shader_dialect(args, host) is None
 
 
+@pytest.mark.parametrize("extra", [
+    ["--disable-gpu-fingerprint"],                         # the page sees the host's real GPU string
+    ["--disable-gpu-string-spoof"],
+    ["--fingerprint-gpu-renderer=ANGLE (Intel, Mesa Intel(R) UHD Graphics 770, OpenGL 4.6)"],
+])
+def test_no_default_when_the_renderer_is_not_direct3d(extra):
+    assert default_shader_dialect(WIN + extra, "linux") is None
+
+
+def test_a_custom_direct3d_renderer_keeps_the_default():
+    custom = "--fingerprint-gpu-renderer=ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"
+    assert default_shader_dialect(WIN + [custom], "linux") == "hlsl"
+
+
 def test_the_last_platform_switch_decides():
     assert default_shader_dialect(LINUX + ["--fingerprint-platform=windows"], "linux") == "hlsl"
     assert default_shader_dialect(WIN + ["--fingerprint-platform=linux"], "linux") is None

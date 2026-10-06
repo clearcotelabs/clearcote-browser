@@ -23,12 +23,13 @@ LEGACY_SHARED_SEED = "clearcote-docker"
 def container_seed(env_value, profile_dir):
     """``(seed, source)`` for this container.
 
-    ``source`` is ``"env"`` when ``CC_FINGERPRINT`` is set (an empty value counts as unset),
-    ``"saved"`` when a seed generated earlier is read back from ``profile_dir``, and ``"new"`` when
-    one is generated now. A new seed is saved when the directory is writable; when it is not, the
-    seed still holds for this run, it just will not outlive it.
+    ``source`` is ``"env"`` when ``CC_FINGERPRINT`` is set -- including set to an empty value, which
+    keeps its old meaning (no seed at all, so no persona) --, ``"saved"`` when a seed generated
+    earlier is read back from ``profile_dir``, and ``"new"`` when one is generated now. A new seed is
+    saved when the directory is writable; when it is not, the seed still holds for this run, it just
+    will not outlive it.
     """
-    if env_value is not None and str(env_value).strip() != "":
+    if env_value is not None:
         return str(env_value), "env"
     path = os.path.join(profile_dir, SEED_FILE)
     try:

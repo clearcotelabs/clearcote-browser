@@ -3,7 +3,8 @@
 // the Python SDK exactly.
 
 import { hostPersonaPlatform } from "./fingerprint.js";
-import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
 /** A Playwright proxy descriptor. */
@@ -50,11 +51,13 @@ export function mergeFeatureFlags(args: string[]): string[] {
   return rest;
 }
 
-/** Playwright's own `--disable-features` list (chromiumSwitches.js `disabledFeatures`, 1.57).
- * Playwright puts it on every launch, BEFORE the caller's args, and Chromium keeps only the last
- * `--disable-features` on the line — so the SDK re-emits this list itself, merged into its own
- * single switch (see {@link playwrightFeatureOverrideArgs}), minus the entries a page can observe.
- * An entry a newer Playwright adds and this copy lacks ends up enabled, i.e. as in genuine Chrome. */
+/** Playwright puts its own `--disable-features` list on every launch, BEFORE the caller's args, and
+ * Chromium keeps only the last `--disable-features` on the line — so the SDK re-emits that list
+ * itself, merged into its own single switch, minus {@link PAGE_VISIBLE_PLAYWRIGHT_FEATURES} (see
+ * {@link playwrightFeatureOverrideArgs}). The list differs between Playwright releases (1.49 also
+ * disables LazyFrameLoading and PlzDedicatedWorker; 1.61 drops AcceptCHFrame and adds
+ * BoundaryEventDispatchTracksNodeRemoval), so the installed playwright-core's own list is read at
+ * launch ({@link installedPlaywrightDisabledFeatures}); this copy (1.57) is only the fallback. */
 export const PLAYWRIGHT_DISABLED_FEATURES = [
   "AcceptCHFrame", "AvoidUnnecessaryBeforeUnloadCheckSync", "DestroyProfileOnBrowserClose",
   "DialMediaRouteProvider", "GlobalMediaControls", "HttpsUpgrades", "LensOverlay", "MediaRouter",
@@ -62,34 +65,98 @@ export const PLAYWRIGHT_DISABLED_FEATURES = [
   "OptimizationHints",
 ] as const;
 
-/** Entries of {@link PLAYWRIGHT_DISABLED_FEATURES} that change what a web page can observe, kept
- * ENABLED.
+/** Entries of Playwright's list that a web page or server can observe, kept ENABLED as in genuine
+ * Chrome 154 (all four default on). The rest stay off: they keep Playwright's automation stable
+ * (beforeunload, frame tracking, paint timing for screenshots) or only touch browser UI and
+ * background services.
  *
- * ThirdPartyStoragePartitioning: every Chrome since 115 partitions third-party storage, whatever
- * the user's cookie settings. With Playwright's switch it is off, so a cross-site iframe either
- * reads the storage its site wrote as a top-level page, or — with third-party cookies blocked, the
- * engine default — gets a SecurityError from localStorage. Measured 2026-10-06 (r30, genuine
- * Chrome 154.0.8037.98 on the same host): genuine gives the iframe an empty partition (null, no
- * error) with third-party cookies allowed AND blocked; genuine launched with Playwright's defaults
- * reproduces both clearcote results exactly, so the switch is the whole cause. */
-export const PAGE_VISIBLE_PLAYWRIGHT_FEATURES: ReadonlySet<string> = new Set(["ThirdPartyStoragePartitioning"]);
+ * - ThirdPartyStoragePartitioning: every Chrome since 115 partitions third-party storage, whatever
+ *   the user's cookie settings. With it off, a cross-site iframe reads the storage its site wrote as
+ *   a top-level page, or — with third-party cookies blocked, the engine default — gets a
+ *   SecurityError from localStorage. Measured 2026-10-06 (r30, genuine Chrome 154.0.8037.98 on the
+ *   same host): genuine gives the iframe an empty partition (null, no error) with third-party
+ *   cookies allowed AND blocked; genuine launched with Playwright's defaults reproduces both
+ *   clearcote results exactly.
+ * - AcceptCHFrame: client hints requested in the TLS/HTTP2 ACCEPT_CH frame reach the server on the
+ *   first request.
+ * - HttpsUpgrades: an http:// navigation is tried over https first — the server sees which.
+ * - LazyFrameLoading (Playwright <= 1.49): loading="lazy" iframes load lazily, as the page expects. */
+export const PAGE_VISIBLE_PLAYWRIGHT_FEATURES: ReadonlySet<string> = new Set([
+  "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading",
+]);
 
-/** `--disable-features` that replaces Playwright's own, minus {@link PAGE_VISIBLE_PLAYWRIGHT_FEATURES}.
+/** The `--disable-features` list in a Playwright chromiumSwitches source (1.5x/1.6x array form,
+ * bundled or not, or the older literal-string form); undefined when it is not there. A conditional
+ * entry (`assistantMode ? "AutomationControlled" : ""`) is not part of the default. */
+export function parsePlaywrightDisabledFeatures(source: string | undefined): string[] | undefined {
+  if (!source) return undefined;
+  const arr = /disabledFeatures\s*=\s*(?:\([^)]*\)\s*=>\s*)?\[([\s\S]*?)\]/.exec(source);
+  if (arr) {
+    const body = arr[1]
+      .replace(/\/\/[^\n]*/g, "")
+      .replace(/\w+\s*\?\s*["'][^"']*["']\s*:\s*["'][^"']*["']/g, "");
+    const names = [...body.matchAll(/["']([A-Za-z0-9_]+)["']/g)].map((m) => m[1]);
+    if (names.length) return names;
+  }
+  const lit = /["'`]--disable-features=([A-Za-z0-9_,]+)["'`]/.exec(source);
+  if (lit) {
+    const names = lit[1].split(",").filter(Boolean);
+    return names.length ? names : undefined;
+  }
+  return undefined;
+}
+
+let installedPw: { features?: string[]; screenshotSurface: boolean } | undefined;
+
+function installedPlaywright(): { features?: string[]; screenshotSurface: boolean } {
+  if (installedPw) return installedPw;
+  let source: string | undefined;
+  try {
+    const lib = join(dirname(createRequire(import.meta.url).resolve("playwright-core/package.json")), "lib");
+    for (const rel of [join("server", "chromium", "chromiumSwitches.js"), "coreBundle.js"]) {
+      const path = join(lib, rel);
+      if (existsSync(path)) { source = readFileSync(path, "utf8"); break; }
+    }
+  } catch { /* unreadable: the 1.57 copy is used */ }
+  installedPw = { features: parsePlaywrightDisabledFeatures(source), screenshotSurface: !!source && source.includes("CDPScreenshotNewSurface") };
+  return installedPw;
+}
+
+/** The list the installed playwright-core puts on a Chromium launch (read once per process), or
+ * undefined when it cannot be read. */
+export function installedPlaywrightDisabledFeatures(): string[] | undefined {
+  return installedPlaywright().features;
+}
+
+/** Switches that replace Playwright's own `--disable-features` without the page-visible entries.
  *
  * Only for launches Playwright starts (launch / launchPersistentContext); serve() starts Chromium
- * itself and never carries Playwright's list. mergeFeatureFlags then folds this into the SDK's
- * single `--disable-features`, which Playwright places after its own.
+ * itself and never carries Playwright's list. mergeFeatureFlags then folds this into the SDK's single
+ * `--disable-features`, which Playwright places after its own.
  *
- * Returns [] when the caller already dropped Playwright's switch — `ignoreDefaultArgs: true`, or a
- * list naming a `--disable-features=` value — because re-adding the list would disable features
- * that launch otherwise has on. */
-export function playwrightFeatureOverrideArgs(ignoreDefaultArgs?: string[] | boolean): string[] {
+ * `playwrightFeatures` defaults to the installed playwright-core's list (the 1.57 copy when
+ * unreadable). Returns [] when Playwright's switch is not on the line at all: `ignoreDefaultArgs:
+ * true`, or a list holding that exact switch (Playwright drops only exact matches, so anything else
+ * leaves its list in place and still needs replacing).
+ *
+ * Also re-emits Playwright's `--enable-features=CDPScreenshotNewSurface` (unless
+ * PLAYWRIGHT_LEGACY_SCREENSHOT is set), because the SDK's own `--enable-features` — e.g. WebBluetooth
+ * for a Windows claim — would otherwise replace it the same way. */
+export function playwrightFeatureOverrideArgs(
+  ignoreDefaultArgs?: string[] | boolean,
+  playwrightFeatures?: readonly string[],
+  screenshotSurface?: boolean,
+): string[] {
   if (ignoreDefaultArgs === true) return [];
-  if (Array.isArray(ignoreDefaultArgs) && ignoreDefaultArgs.some((a) => String(a).startsWith("--disable-features="))) {
-    return [];
-  }
-  const keep = PLAYWRIGHT_DISABLED_FEATURES.filter((f) => !PAGE_VISIBLE_PLAYWRIGHT_FEATURES.has(f));
-  return [`--disable-features=${keep.join(",")}`];
+  const features = [...(playwrightFeatures ?? installedPlaywrightDisabledFeatures() ?? PLAYWRIGHT_DISABLED_FEATURES)];
+  const playwrightSwitch = `--disable-features=${features.join(",")}`;
+  if (Array.isArray(ignoreDefaultArgs) && ignoreDefaultArgs.includes(playwrightSwitch)) return [];
+  const out: string[] = [];
+  const keep = features.filter((f) => !PAGE_VISIBLE_PLAYWRIGHT_FEATURES.has(f));
+  if (keep.length) out.push(`--disable-features=${keep.join(",")}`);
+  const surface = screenshotSurface ?? (installedPlaywright().screenshotSurface && !process.env.PLAYWRIGHT_LEGACY_SCREENSHOT);
+  if (surface) out.push("--enable-features=CDPScreenshotNewSurface");
+  return out;
 }
 
 /** Disable Privacy Sandbox + intrusive APIs (runtime, no rebuild). */

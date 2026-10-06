@@ -32,18 +32,32 @@ internal static class ShaderDialect
 
     private static readonly string[] Off = { "", "0", "off", "false", "no", "none" };
 
+    /// Switches under which the renderer string is the host's real GPU, not the persona's Direct3D11
+    /// one — HLSL beside it would be the contradiction this option removes.
+    private static readonly string[] RealGpuStringSwitches = { "--disable-gpu-fingerprint", "--disable-gpu-string-spoof" };
+
     /// The dialect a launch gets when the caller did not choose one: "hlsl" when the built command
-    /// line claims Windows (<c>--fingerprint-platform=windows</c>, the last one wins) and the host is
-    /// not Windows, else null.
+    /// line claims Windows (<c>--fingerprint-platform=windows</c>, the last one wins) with a Direct3D
+    /// renderer string and the host is not Windows, else null. No default when the page sees the real
+    /// GPU string (<c>--disable-gpu-fingerprint</c> / <c>--disable-gpu-string-spoof</c>) or a custom
+    /// <c>--fingerprint-gpu-renderer</c> that does not name Direct3D.
     internal static string? Default(IEnumerable<string>? args, bool? hostIsWindows = null)
     {
         if (hostIsWindows ?? OperatingSystem.IsWindows()) return null;
         const string flag = "--fingerprint-platform=";
+        const string rendererFlag = "--fingerprint-gpu-renderer=";
         string? claimed = null;
+        string? renderer = null;
         foreach (var a in args ?? Array.Empty<string>())
-            if (a is not null && a.StartsWith(flag, StringComparison.Ordinal))
-                claimed = a[flag.Length..].Trim().ToLowerInvariant();
-        return claimed == "windows" ? "hlsl" : null;
+        {
+            if (a is null) continue;
+            if (a.StartsWith(flag, StringComparison.Ordinal)) claimed = a[flag.Length..].Trim().ToLowerInvariant();
+            else if (a.StartsWith(rendererFlag, StringComparison.Ordinal)) renderer = a[rendererFlag.Length..];
+            else if (Array.IndexOf(RealGpuStringSwitches, a.Split('=', 2)[0]) >= 0) return null;
+        }
+        if (claimed != "windows") return null;
+        if (renderer is not null && !renderer.Contains("direct3d", StringComparison.OrdinalIgnoreCase)) return null;
+        return "hlsl";
     }
 
     /// null -> the default for this claim/host; an "off" spelling ("", "off", "0", "false", "no",

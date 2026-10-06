@@ -229,10 +229,11 @@ ${localSetupHint(opts.localDir ?? DEFAULT_LOCAL_DIR)}`);
  * Windows 11 donor would otherwise hide fonts no Windows 11 machine lacks. 87% of donors DO list
  * HoloLens MDL2 Assets, and CreepJS reads that set without Segoe Fluent Icons as Windows 10, which
  * it flags against a Windows 11 platformVersion. Cascadia Code/Mono are deliberately absent: they
- * ship per user with Windows Terminal. Listing a family never over-claims (host ∩ list). */
+ * ship per user with Windows Terminal. So is the bare "Segoe UI Variable": genuine Chrome 154 on
+ * Windows 11 reports that family absent (only the Display/Small/Text faces resolve). Listing a family
+ * never over-claims on a Windows host (host ∩ list). */
 export const WINDOWS11_FACES = [
-  "Segoe Fluent Icons", "Segoe UI Variable", "Segoe UI Variable Display",
-  "Segoe UI Variable Small", "Segoe UI Variable Text",
+  "Segoe Fluent Icons", "Segoe UI Variable Display", "Segoe UI Variable Small", "Segoe UI Variable Text",
 ] as const;
 
 /** True when a UA-CH platformVersion claims Windows 11 (major >= 13). */
@@ -250,7 +251,7 @@ export function profileWithWindows11Faces<T>(profile: T): T {
   const nav = p.navigator && typeof p.navigator === "object" ? p.navigator : {};
   const uadata = nav.uadata && typeof nav.uadata === "object" ? nav.uadata : {};
   const hints = uadata.high_entropy && typeof uadata.high_entropy === "object" ? uadata.high_entropy : {};
-  const platform = String(hints.platform ?? uadata.platform ?? nav.platform ?? "");
+  const platform = String(hints.platform || uadata.platform || nav.platform || "");
   const fonts = p.fonts && typeof p.fonts === "object" ? p.fonts : undefined;
   const detected = fonts?.detected;
   if (!platform.toLowerCase().startsWith("win") || !Array.isArray(detected) || !claimsWindows11(hints.platformVersion)) {

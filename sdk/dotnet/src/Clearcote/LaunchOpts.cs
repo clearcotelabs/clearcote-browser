@@ -26,43 +26,107 @@ public static class LaunchOpts
     public static List<string> PrivacySandboxArgs()
         => new() { $"--disable-features={string.Join(",", PrivacySandboxFeatures)}" };
 
-    /// Playwright's own <c>--disable-features</c> list (chromiumSwitches.js <c>disabledFeatures</c>,
-    /// 1.57). Playwright puts it on every launch, BEFORE the caller's args, and Chromium keeps only the
-    /// last <c>--disable-features</c> on the line — so the SDK re-emits this list itself, merged into
-    /// its own single switch (see <see cref="PlaywrightFeatureOverrideArgs"/>), minus the entries a
-    /// page can observe. An entry a newer Playwright adds and this copy lacks ends up enabled, i.e. as
-    /// in genuine Chrome.
+    /// Playwright puts its own <c>--disable-features</c> list on every launch, BEFORE the caller's
+    /// args, and Chromium keeps only the last <c>--disable-features</c> on the line — so the SDK
+    /// re-emits that list itself, merged into its own single switch, minus
+    /// <see cref="PageVisiblePlaywrightFeatures"/> (see <see cref="PlaywrightFeatureOverrideArgs"/>).
+    /// The list differs between Playwright releases, so the driver the app ships
+    /// (<c>.playwright/package</c>) is read at launch; this copy — Microsoft.Playwright 1.49, the
+    /// version this package references — is only the fallback.
     public static readonly string[] PlaywrightDisabledFeatures =
     {
-        "AcceptCHFrame", "AvoidUnnecessaryBeforeUnloadCheckSync", "DestroyProfileOnBrowserClose",
-        "DialMediaRouteProvider", "GlobalMediaControls", "HttpsUpgrades", "LensOverlay", "MediaRouter",
-        "PaintHolding", "ThirdPartyStoragePartitioning", "Translate", "AutoDeElevate", "RenderDocument",
-        "OptimizationHints",
+        "ImprovedCookieControls", "LazyFrameLoading", "GlobalMediaControls", "DestroyProfileOnBrowserClose",
+        "MediaRouter", "DialMediaRouteProvider", "AcceptCHFrame", "AutoExpandDetailsElement",
+        "CertificateTransparencyComponentUpdater", "AvoidUnnecessaryBeforeUnloadCheckSync", "Translate",
+        "HttpsUpgrades", "PaintHolding", "ThirdPartyStoragePartitioning", "LensOverlay", "PlzDedicatedWorker",
     };
 
-    /// Entries of <see cref="PlaywrightDisabledFeatures"/> that change what a web page can observe,
-    /// kept ENABLED. ThirdPartyStoragePartitioning: every Chrome since 115 partitions third-party
-    /// storage, whatever the user's cookie settings. With Playwright's switch it is off, so a
-    /// cross-site iframe either reads the storage its site wrote as a top-level page, or — with
-    /// third-party cookies blocked, the engine default — gets a SecurityError from localStorage.
-    /// Measured 2026-10-06 (r30, genuine Chrome 154.0.8037.98 on the same host): genuine gives the
-    /// iframe an empty partition (null, no error) with third-party cookies allowed AND blocked;
+    /// Entries of Playwright's list that a web page or server can observe, kept ENABLED as in genuine
+    /// Chrome 154 (all four default on). The rest stay off: they keep Playwright's automation stable
+    /// or only touch browser UI and background services.
+    /// ThirdPartyStoragePartitioning: every Chrome since 115 partitions third-party storage, whatever
+    /// the user's cookie settings; with it off a cross-site iframe reads the storage its site wrote as
+    /// a top-level page, or — with third-party cookies blocked, the engine default — gets a
+    /// SecurityError from localStorage. Measured 2026-10-06 (r30, genuine Chrome 154.0.8037.98 on the
+    /// same host): genuine gives the iframe an empty partition with cookies allowed AND blocked, and
     /// genuine launched with Playwright's defaults reproduces both clearcote results exactly.
-    public static readonly IReadOnlySet<string> PageVisiblePlaywrightFeatures =
-        new HashSet<string>(StringComparer.Ordinal) { "ThirdPartyStoragePartitioning" };
+    /// AcceptCHFrame: ACCEPT_CH client hints reach the server on the first request. HttpsUpgrades: an
+    /// http:// navigation is tried over https first. LazyFrameLoading: loading="lazy" iframes load lazily.
+    public static readonly IReadOnlySet<string> PageVisiblePlaywrightFeatures = new HashSet<string>(StringComparer.Ordinal)
+        { "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading" };
 
-    /// <c>--disable-features</c> that replaces Playwright's own, minus
+    private static readonly Regex PwArray = new(@"disabledFeatures\s*=\s*(?:\([^)]*\)\s*=>\s*)?\[([\s\S]*?)\]", RegexOptions.Compiled);
+    private static readonly Regex PwLiteral = new(@"[""'`]--disable-features=([A-Za-z0-9_,]+)[""'`]", RegexOptions.Compiled);
+    private static readonly Regex PwTernary = new(@"\w+\s*\?\s*[""'][^""']*[""']\s*:\s*[""'][^""']*[""']", RegexOptions.Compiled);
+    private static readonly Regex PwComment = new(@"//[^\n]*", RegexOptions.Compiled);
+    private static readonly Regex PwName = new(@"[""']([A-Za-z0-9_]+)[""']", RegexOptions.Compiled);
+
+    /// The <c>--disable-features</c> list in a Playwright chromiumSwitches source (array form, bundled
+    /// or not, or the older literal-string form); null when it is not there.
+    internal static string[]? ParsePlaywrightDisabledFeatures(string? source)
+    {
+        if (string.IsNullOrEmpty(source)) return null;
+        var arr = PwArray.Match(source);
+        if (arr.Success)
+        {
+            var body = PwTernary.Replace(PwComment.Replace(arr.Groups[1].Value, ""), "");
+            var names = PwName.Matches(body).Select(m => m.Groups[1].Value).ToArray();
+            if (names.Length > 0) return names;
+        }
+        var lit = PwLiteral.Match(source);
+        if (lit.Success)
+        {
+            var names = lit.Groups[1].Value.Split(',', StringSplitOptions.RemoveEmptyEntries);
+            return names.Length > 0 ? names : null;
+        }
+        return null;
+    }
+
+    private static readonly Lazy<(string[]? Features, bool ScreenshotSurface)> InstalledPw = new(() =>
+    {
+        try
+        {
+            foreach (var root in new[] { AppContext.BaseDirectory, Path.GetDirectoryName(typeof(Microsoft.Playwright.IPlaywright).Assembly.Location) })
+            {
+                if (string.IsNullOrEmpty(root)) continue;
+                var lib = Path.Combine(root, ".playwright", "package", "lib");
+                foreach (var rel in new[] { Path.Combine("server", "chromium", "chromiumSwitches.js"), "coreBundle.js" })
+                {
+                    var path = Path.Combine(lib, rel);
+                    if (!File.Exists(path)) continue;
+                    var src = File.ReadAllText(path);
+                    return (ParsePlaywrightDisabledFeatures(src), src.Contains("CDPScreenshotNewSurface", StringComparison.Ordinal));
+                }
+            }
+        }
+        catch { /* unreadable: the 1.49 copy is used */ }
+        return (null, false);
+    });
+
+    /// The list the app's Playwright driver puts on a Chromium launch, or null when it cannot be read.
+    internal static string[]? InstalledPlaywrightDisabledFeatures() => InstalledPw.Value.Features;
+
+    /// Switches that replace Playwright's own <c>--disable-features</c> without
     /// <see cref="PageVisiblePlaywrightFeatures"/>. Only for launches Playwright starts (Launch /
     /// LaunchPersistentContext); Serve starts Chromium itself and never carries Playwright's list.
-    /// Empty when the caller's IgnoreDefaultArgs already drops a <c>--disable-features=</c> value,
-    /// because re-adding the list would disable features that launch otherwise has on.
-    public static List<string> PlaywrightFeatureOverrideArgs(IReadOnlyList<string>? ignoreDefaultArgs = null)
+    /// Empty when the caller's IgnoreDefaultArgs holds Playwright's EXACT switch (Playwright drops only
+    /// exact matches, so any other value leaves its list in place and still needs replacing). Also
+    /// re-emits Playwright's <c>--enable-features=CDPScreenshotNewSurface</c> when its driver passes
+    /// it (unless PLAYWRIGHT_LEGACY_SCREENSHOT is set), since the SDK's own --enable-features would
+    /// otherwise replace that too.
+    public static List<string> PlaywrightFeatureOverrideArgs(IReadOnlyList<string>? ignoreDefaultArgs = null,
+        IReadOnlyList<string>? playwrightFeatures = null, bool? screenshotSurface = null)
     {
-        if (ignoreDefaultArgs is not null
-            && ignoreDefaultArgs.Any(a => a is not null && a.StartsWith("--disable-features=", StringComparison.Ordinal)))
-            return new List<string>();
-        var keep = PlaywrightDisabledFeatures.Where(f => !PageVisiblePlaywrightFeatures.Contains(f));
-        return new List<string> { $"--disable-features={string.Join(",", keep)}" };
+        var features = (playwrightFeatures ?? InstalledPlaywrightDisabledFeatures() ?? PlaywrightDisabledFeatures).ToArray();
+        var playwrightSwitch = $"--disable-features={string.Join(",", features)}";
+        if (ignoreDefaultArgs is not null && ignoreDefaultArgs.Contains(playwrightSwitch)) return new List<string>();
+        var outList = new List<string>();
+        var keep = features.Where(f => !PageVisiblePlaywrightFeatures.Contains(f)).ToArray();
+        if (keep.Length > 0) outList.Add($"--disable-features={string.Join(",", keep)}");
+        var surface = screenshotSurface ?? (InstalledPw.Value.ScreenshotSurface
+            && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PLAYWRIGHT_LEGACY_SCREENSHOT")));
+        if (surface) outList.Add("--enable-features=CDPScreenshotNewSurface");
+        return outList;
     }
 
     /// Chromium keeps only the LAST --enable-features / --disable-features; collapse all occurrences

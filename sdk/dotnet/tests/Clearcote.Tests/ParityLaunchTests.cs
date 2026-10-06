@@ -179,9 +179,37 @@ public class ParityLaunchTests : IDisposable
             new(), new(), null, null, Array.Empty<string>(), null, false,
             new Clearcote.EngineExtras(exe, false, true, null, null, ViaPlaywright: true));
         var feats = OnlyDisableFeatures(args);
-        Assert.DoesNotContain("ThirdPartyStoragePartitioning", feats);
-        foreach (var f in new[] { "HttpsUpgrades", "MediaRouter", "Translate", "RenderDocument", "PaintHolding" }) Assert.Contains(f, feats);
+        foreach (var f in new[] { "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading" })
+            Assert.DoesNotContain(f, feats);  // what a page or a server can observe stays as in genuine Chrome
+        foreach (var f in new[] { "MediaRouter", "Translate", "PaintHolding" }) Assert.Contains(f, feats);
         Assert.Equal(platform == "linux", feats.Contains("WebBluetooth"));
+    }
+
+    [Fact]
+    public void Override_re_enables_only_what_a_site_can_observe_and_needs_the_exact_switch_to_skip()
+    {
+        var pw = new[] { "AcceptCHFrame", "LazyFrameLoading", "MediaRouter", "ThirdPartyStoragePartitioning", "Translate" };
+        Assert.Equal(new[] { "--disable-features=MediaRouter,Translate" },
+            LaunchOpts.PlaywrightFeatureOverrideArgs(null, pw, screenshotSurface: false));
+        Assert.Empty(LaunchOpts.PlaywrightFeatureOverrideArgs(new[] { "--disable-features=" + string.Join(",", pw) }, pw, false));
+        // Playwright drops only an EXACT match, so a different value still needs the replacement.
+        Assert.NotEmpty(LaunchOpts.PlaywrightFeatureOverrideArgs(new[] { "--disable-features=MediaRouter" }, pw, false));
+        Assert.Equal(new[] { "--disable-features=MediaRouter", "--enable-features=CDPScreenshotNewSurface" },
+            LaunchOpts.PlaywrightFeatureOverrideArgs(null, new[] { "MediaRouter" }, true));
+    }
+
+    [Fact]
+    public void Parses_every_Playwright_release_shape_and_reads_the_installed_driver()
+    {
+        Assert.Equal(new[] { "AcceptCHFrame" }, LaunchOpts.ParsePlaywrightDisabledFeatures(
+            "const disabledFeatures = (assistantMode) => [\n  // c\n  \"AcceptCHFrame\",\n  assistantMode ? \"AutomationControlled\" : \"\"\n].filter(Boolean);"));
+        Assert.Equal(new[] { "LazyFrameLoading", "HttpsUpgrades" }, LaunchOpts.ParsePlaywrightDisabledFeatures(
+            "['--disable-features=LazyFrameLoading,HttpsUpgrades', '--no-first-run']"));
+        Assert.Null(LaunchOpts.ParsePlaywrightDisabledFeatures(""));
+        // Drift guard: the driver this test project ships must be readable.
+        var installed = LaunchOpts.InstalledPlaywrightDisabledFeatures();
+        Assert.NotNull(installed);
+        Assert.Contains("MediaRouter", installed!);
     }
 
     [Fact]
@@ -191,11 +219,11 @@ public class ParityLaunchTests : IDisposable
         var fp = Fingerprint.Args(new FingerprintOptions { Fingerprint = "s1", Platform = "windows" });
         var served = Clearcote.AssembleArgs(fp, new(), new(), null, null, Array.Empty<string>(), null, false,
             new Clearcote.EngineExtras(exe, false, true, null, null, ViaPlaywright: false));
-        Assert.DoesNotContain(served, a => a.Contains("HttpsUpgrades") || a.Contains("ThirdPartyStoragePartitioning"));
+        Assert.DoesNotContain(served, a => a.Contains("MediaRouter") || a.Contains("ThirdPartyStoragePartitioning"));
+        var exact = "--disable-features=" + string.Join(",", LaunchOpts.InstalledPlaywrightDisabledFeatures() ?? LaunchOpts.PlaywrightDisabledFeatures);
         var dropped = Clearcote.AssembleArgs(fp, new(), new(), null, null, Array.Empty<string>(), null, false,
-            new Clearcote.EngineExtras(exe, false, true, null, null, ViaPlaywright: true,
-                IgnoreDefaultArgs: new[] { "--disable-features=AcceptCHFrame,MediaRouter" }));
-        Assert.DoesNotContain(dropped, a => a.Contains("HttpsUpgrades"));
+            new Clearcote.EngineExtras(exe, false, true, null, null, ViaPlaywright: true, IgnoreDefaultArgs: new[] { exact }));
+        Assert.DoesNotContain(dropped, a => a.Contains("MediaRouter"));
     }
 
     // ── fingerprint pass-through ─────────────────────────────────────────────

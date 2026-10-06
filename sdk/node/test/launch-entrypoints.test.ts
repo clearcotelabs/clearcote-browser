@@ -469,8 +469,8 @@ describe("Playwright's --disable-features is replaced without ThirdPartyStorageP
     it(`launch() under a ${platform} claim`, async () => {
       const browser = await launch({ ...base(), fingerprint: "s1", platform });
       const feats = disabledFeatures(stub.launches.at(-1)!.opts.args as string[]);
-      expect(feats).not.toContain("ThirdPartyStoragePartitioning");
-      for (const f of ["HttpsUpgrades", "MediaRouter", "Translate", "RenderDocument", "PaintHolding"]) expect(feats).toContain(f);
+      for (const f of ["ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades"]) expect(feats).not.toContain(f);
+      for (const f of ["MediaRouter", "Translate", "RenderDocument", "PaintHolding"]) expect(feats).toContain(f);
       expect(feats.includes("WebBluetooth")).toBe(platform === "linux");
       await browser.close();
     });
@@ -480,14 +480,14 @@ describe("Playwright's --disable-features is replaced without ThirdPartyStorageP
     const context = await launchPersistentContext(join(root, "p"), { ...base(), fingerprint: "s1" });
     const feats = disabledFeatures(stub.launches.at(-1)!.opts.args as string[]);
     expect(feats).not.toContain("ThirdPartyStoragePartitioning");
-    expect(feats).toContain("HttpsUpgrades");
+    expect(feats).toContain("MediaRouter");
     await context.close();
   });
 
   it("not when the caller dropped Playwright's defaults", async () => {
     const browser = await launch({ ...base(), ephemeralProfile: false, ignoreDefaultArgs: true } as never);
     const args = stub.launches.at(-1)!.opts.args as string[];
-    expect(args.some((a) => a.includes("HttpsUpgrades"))).toBe(false);
+    expect(args.some((a) => a.includes("MediaRouter"))).toBe(false);
     await browser.close();
   });
 
@@ -496,7 +496,7 @@ describe("Playwright's --disable-features is replaced without ThirdPartyStorageP
     try {
       const srv = await serve({ ...base(), port, fingerprint: "s1" });
       const line = stub.spawns.at(-1)!;
-      expect(line.some((a) => a.includes("HttpsUpgrades") || a.includes("ThirdPartyStoragePartitioning"))).toBe(false);
+      expect(line.some((a) => a.includes("MediaRouter") || a.includes("ThirdPartyStoragePartitioning"))).toBe(false);
       await srv.close();
     } finally {
       await close();
@@ -516,6 +516,7 @@ describe("profile: \"auto\" from a Windows 11 donor carries the Windows 11 syste
       const detected = (decodedProfile(stub.launches.at(-1)!.opts.args as string[]) as { fonts: { detected: string[] } }).fonts.detected;
       expect(detected).toEqual(expect.arrayContaining(["Segoe Fluent Icons", "Segoe UI Variable Display", "Segoe UI Variable Text"]));
       expect(detected).not.toContain("Cascadia Code");
+      expect(detected).not.toContain("Segoe UI Variable");  // genuine Windows 11 reports the bare family absent
       await browser.close();
     } finally {
       (stub as { serviceProfile: unknown }).serviceProfile = saved;

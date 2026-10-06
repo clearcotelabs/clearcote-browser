@@ -24,9 +24,10 @@ def test_unset_generates_a_random_seed_and_keeps_it(tmp_path):
     assert container_seed(None, str(tmp_path / "a")) == (a, "saved")
 
 
-def test_empty_value_counts_as_unset(tmp_path):
-    seed, src = container_seed("  ", str(tmp_path))
-    assert src == "new" and seed.startswith("cc-")
+def test_an_empty_value_keeps_its_old_meaning(tmp_path):
+    # Set-but-empty used to give no seed at all; compose files that rely on that keep working.
+    assert container_seed("", str(tmp_path)) == ("", "env")
+    assert not (tmp_path / SEED_FILE).exists()
 
 
 def test_unwritable_profile_dir_still_returns_a_seed(tmp_path, monkeypatch):

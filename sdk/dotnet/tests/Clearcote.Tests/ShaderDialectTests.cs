@@ -95,6 +95,22 @@ public class ShaderDialectTests
         Assert.Null(ShaderDialect.Apply(null, null, Linux, hostIsWindows: false));
     }
 
+    [Theory]
+    [InlineData("--disable-gpu-fingerprint")]
+    [InlineData("--disable-gpu-string-spoof")]
+    [InlineData("--fingerprint-gpu-renderer=ANGLE (Intel, Mesa Intel(R) UHD Graphics 770, OpenGL 4.6)")]
+    public void No_default_when_the_renderer_the_page_sees_is_not_direct3d(string extra)
+    {
+        Assert.Null(ShaderDialect.Default(Win.Append(extra), hostIsWindows: false));
+    }
+
+    [Fact]
+    public void A_custom_direct3d_renderer_keeps_the_default()
+    {
+        Assert.Equal("hlsl", ShaderDialect.Default(
+            Win.Append("--fingerprint-gpu-renderer=ANGLE (NVIDIA, RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"), hostIsWindows: false));
+    }
+
     [Fact]
     public void The_last_platform_switch_decides()
     {

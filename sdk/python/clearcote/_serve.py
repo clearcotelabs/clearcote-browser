@@ -169,7 +169,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     from ._fonts import linux_font_env, linux_locale_env
     from ._geometry import fit_served_window, served_geometry, validate_window_size
     from ._launchopts import serve_infobar_args, serve_needs_no_sandbox
-    from ._shaderdialect import shader_dialect_env
+    from ._shaderdialect import resolve_shader_dialect, shader_dialect_env
     from ._warnings import emit_warnings, serve_exposure_warnings
 
     window_size = validate_window_size(window_size)
@@ -182,6 +182,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     # ...and never carries Playwright's --disable-features, so _prepare has nothing to replace.
     kwargs["_cc_direct"] = True
     shader_dialect = kwargs.pop("shader_dialect", None)  # an env var for the GPU process, not a switch
+    resolve_shader_dialect(shader_dialect, [])  # a typo raises here, before a lease or a temp dir exists
     # License (opt-in, inert in free mode). This MUST run before _prepare: it converts license_key
     # into the _cc_pro tuple _prepare needs to select the gated binary. Without it serve() silently
     # dropped the key and launched the FREE engine for a licensed caller -- and even had it resolved

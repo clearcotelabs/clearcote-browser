@@ -49,9 +49,12 @@ _MAX_CANDIDATES = 8
 #: and CreepJS reads "HoloLens + Segoe MDL2 + Bahnschrift + Ink Free without Segoe Fluent Icons" as
 #: Windows 10, which it then flags against a Windows 11 platformVersion ("lied platform version").
 #: Cascadia Code/Mono are deliberately absent: they ship per user with Windows Terminal, so their
-#: absence is normal. Listing a family never over-claims -- the engine reports host INTERSECT list.
-WINDOWS11_FACES = ("Segoe Fluent Icons", "Segoe UI Variable", "Segoe UI Variable Display",
-                   "Segoe UI Variable Small", "Segoe UI Variable Text")
+#: absence is normal. So is the bare "Segoe UI Variable": genuine Chrome 154 on Windows 11 reports
+#: that family absent (only the Display/Small/Text faces resolve), and on a Linux host the alias
+#: table would map it to a stand-in. Listing a family never over-claims on a Windows host -- the
+#: engine reports host INTERSECT list.
+WINDOWS11_FACES = ("Segoe Fluent Icons", "Segoe UI Variable Display", "Segoe UI Variable Small",
+                   "Segoe UI Variable Text")
 
 
 def claims_windows11(platform_version) -> bool:

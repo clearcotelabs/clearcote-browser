@@ -71,6 +71,19 @@ describe("default for a Windows claim (2026-10-06)", () => {
     expect(withShaderDialect(undefined, undefined, LINUX, "linux")).toBeUndefined();
   });
 
+  it("no default when the renderer the page sees is not Direct3D", () => {
+    for (const extra of ["--disable-gpu-fingerprint", "--disable-gpu-string-spoof",
+      "--fingerprint-gpu-renderer=ANGLE (Intel, Mesa Intel(R) UHD Graphics 770, OpenGL 4.6)"]) {
+      expect(defaultShaderDialect([...WIN, extra], "linux")).toBeUndefined();
+    }
+    expect(defaultShaderDialect([...WIN, "--fingerprint-gpu-renderer=ANGLE (NVIDIA, RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)"], "linux")).toBe("hlsl");
+  });
+
+  it("null from a JavaScript caller means not chosen", () => {
+    expect(withShaderDialect(null, { A: "1" }, WIN, "linux")).toEqual({ A: "1", [SHADER_DIALECT_ENV]: "hlsl" });
+    expect(withShaderDialect(null, undefined, LINUX, "linux")).toBeUndefined();
+  });
+
   it("the last platform switch decides", () => {
     expect(defaultShaderDialect([...LINUX, "--fingerprint-platform=windows"], "linux")).toBe("hlsl");
     expect(defaultShaderDialect([...WIN, "--fingerprint-platform=linux"], "linux")).toBeUndefined();

@@ -180,6 +180,7 @@ def test_seeded_windows_persona_gets_the_windows11_faces(tmp_path, monkeypatch):
     for face in fpm.WINDOWS11_FACES:
         assert got.count(face) == 1, face
     assert "Cascadia Code" not in got  # per-user Windows Terminal font, not a system one
+    assert "Segoe UI Variable" not in got  # genuine Windows 11 reports the bare family absent
 
 
 def test_a_windows10_claim_does_not_get_them(tmp_path, monkeypatch):

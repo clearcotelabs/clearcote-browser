@@ -24,7 +24,29 @@ from clearcote._fingerprint import fingerprint_args
 from clearcote._fonts import linux_font_env
 from clearcote._fingerprint import persona_platform
 from clearcote._launchopts import merge_feature_flags, serve_infobar_args, web_bluetooth_args
-from clearcote._containerseed import container_seed
+try:
+    from clearcote._containerseed import container_seed
+except ImportError:  # an image built with an SDK older than this entrypoint: same behaviour, inline
+    def container_seed(env_value, profile_dir):
+        import secrets
+        if env_value is not None:
+            return str(env_value), "env"
+        path = os.path.join(profile_dir, ".clearcote-seed")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                saved = handle.read().strip()
+            if saved:
+                return saved, "saved"
+        except OSError:
+            pass
+        seed = "cc-" + secrets.token_hex(8)
+        try:
+            os.makedirs(profile_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(seed + "\n")
+        except OSError:
+            pass
+        return seed, "new"
 
 PROFILE_DIR = os.environ.get("CC_PROFILE_DIR", "/tmp/cc-profile")
 

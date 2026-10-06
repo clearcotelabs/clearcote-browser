@@ -334,12 +334,65 @@ def test_warn_unsupported_engine_options_warns_only_for_missing_switches(tmp_pat
     assert not caught                                                  # schema 1 is the default: nothing to warn
 
 
-def test_playwright_feature_override_args_keeps_partitioning_enabled():
-    from clearcote._launchopts import PLAYWRIGHT_DISABLED_FEATURES, playwright_feature_override_args
-    (arg,) = playwright_feature_override_args()
-    feats = arg.split("=", 1)[1].split(",")
-    assert "ThirdPartyStoragePartitioning" not in feats
-    assert set(feats) == set(PLAYWRIGHT_DISABLED_FEATURES) - {"ThirdPartyStoragePartitioning"}
-    assert playwright_feature_override_args(True) == []
-    assert playwright_feature_override_args(["--enable-automation"]) == [arg]
-    assert playwright_feature_override_args(["--disable-features=X"]) == []
+PW157 = ("AcceptCHFrame", "AvoidUnnecessaryBeforeUnloadCheckSync", "HttpsUpgrades", "MediaRouter",
+         "PaintHolding", "ThirdPartyStoragePartitioning", "RenderDocument")
+
+
+def test_playwright_feature_override_re_enables_only_what_a_site_can_observe():
+    from clearcote._launchopts import playwright_feature_override_args
+    out = playwright_feature_override_args(playwright_features=PW157, screenshot_surface=False)
+    assert out == ["--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,MediaRouter,PaintHolding,"
+                   "RenderDocument"]
+    # LazyFrameLoading (Playwright 1.49) is page-visible too
+    out = playwright_feature_override_args(playwright_features=("LazyFrameLoading", "Translate"),
+                                           screenshot_surface=False)
+    assert out == ["--disable-features=Translate"]
+
+
+def test_playwright_feature_override_is_skipped_only_when_playwrights_exact_switch_is_dropped():
+    from clearcote._launchopts import playwright_feature_override_args
+    exact = "--disable-features=" + ",".join(PW157)
+    kw = dict(playwright_features=PW157, screenshot_surface=False)
+    assert playwright_feature_override_args(True, **kw) == []
+    assert playwright_feature_override_args([exact], **kw) == []
+    # Playwright drops only an EXACT match: a different --disable-features value leaves its list on
+    # the line, so the replacement is still needed.
+    assert playwright_feature_override_args(["--disable-features=MediaRouter"], **kw) != []
+    assert playwright_feature_override_args(["--enable-automation"], **kw) != []
+
+
+def test_playwright_screenshot_surface_is_re_emitted():
+    from clearcote._launchopts import playwright_feature_override_args
+    out = playwright_feature_override_args(playwright_features=("MediaRouter",), screenshot_surface=True)
+    assert out == ["--disable-features=MediaRouter", "--enable-features=CDPScreenshotNewSurface"]
+
+
+def test_parse_playwright_disabled_features_reads_every_release_shape():
+    from clearcote._launchopts import parse_playwright_disabled_features as parse
+    v157 = """const disabledFeatures = (assistantMode) => [
+  // See https://github.com/microsoft/playwright/pull/10380
+  "AcceptCHFrame",
+  // See https://github.com/microsoft/playwright/issues/32230
+  "ThirdPartyStoragePartitioning",
+  assistantMode ? "AutomationControlled" : ""
+].filter(Boolean);"""
+    assert parse(v157) == ("AcceptCHFrame", "ThirdPartyStoragePartitioning")
+    v161 = """var disabledFeatures, chromiumSwitches;
+    disabledFeatures = [
+      // See https://github.com/microsoft/playwright/issues/38568
+      "BoundaryEventDispatchTracksNodeRemoval",
+      "HttpsUpgrades"
+    ].filter(Boolean);"""
+    assert parse(v161) == ("BoundaryEventDispatchTracksNodeRemoval", "HttpsUpgrades")
+    v149 = "const chromiumSwitches = ['--disable-features=LazyFrameLoading,HttpsUpgrades', '--no-first-run'];"
+    assert parse(v149) == ("LazyFrameLoading", "HttpsUpgrades")
+    assert parse("") is None and parse("nothing here") is None
+
+
+def test_the_installed_playwright_list_is_readable():
+    # Drift guard: if a Playwright release reshapes chromiumSwitches, the SDK falls back to its 1.57
+    # copy -- this fails instead of letting that happen silently.
+    from clearcote._launchopts import installed_playwright_disabled_features
+    feats = installed_playwright_disabled_features()
+    assert feats, "could not read the installed Playwright's --disable-features list"
+    assert "MediaRouter" in feats
