@@ -120,19 +120,57 @@ def _missing_shared_libs(exe):
     return [line.strip().split(" ")[0] for line in (r.stdout or "").splitlines() if "not found" in line]
 
 
-def launch_build(cached, env_binary=None, license_key=None, auto_update=False):
+def _pro_tag_matches(tag, version):
+    """Whether a cached licensed build's tag (pro-<version>-r<N>) is what ``version`` selects: a revision
+    ("r30", "154.0.8037.57-r30"), an exact version (its newest revision), a major ("154"), or "latest"."""
+    import re as _re
+
+    if not tag.startswith("pro-"):
+        return False
+    t, v = tag[4:].lower(), str(version).strip().lower()
+    if v in ("latest", "newest"):
+        return True
+    if _re.fullmatch(r"r\d+", v):
+        return t.endswith("-" + v)
+    if _re.fullmatch(r"\d+", v):
+        return t.startswith(v + ".")
+    return t == v or t.startswith(v + "-")
+
+
+def launch_build(cached, env_binary=None, license_key=None, auto_update=False, version=None, offline=False):
     """The build ``launch()`` would run for the current licence state, from what is already cached
     (``info`` never downloads): ``({"path", "tag"?}, how it was chosen)``, or ``(None, why there is none)``.
 
-    CLEARCOTE_BINARY wins. With a licence key, launch() runs a licensed build: the newest one cached
-    (launch() itself asks the licence server, which may name a newer one). Without a key it runs the open
-    build this SDK pins (the newest cached open build with CLEARCOTE_AUTO_UPDATE). A cached licensed build
-    is never picked for a keyless setup: without a key it cannot run, which is what made the old "newest
-    cached build" launch test fail for open-build users."""
-    from .release import RELEASE
+    CLEARCOTE_BINARY wins. A version selector (CLEARCOTE_BROWSER_VERSION) is resolved the way launch()
+    resolves it -- through the version catalog (the bundled copy when ``offline``), a licensed revision
+    straight to the licensed builds -- and picks the cached build it names. Otherwise, with a licence key,
+    launch() runs a licensed build: the newest one cached (launch() itself asks the licence server, which
+    may name a newer one). Without a key it runs the open build this SDK pins (the newest cached open build
+    with CLEARCOTE_AUTO_UPDATE). A cached licensed build is never picked for a keyless setup: without a key
+    it cannot run, which is what made the old "newest cached build" launch test fail for open-build users."""
+    from .download import is_pro_revision_selector, resolve_version
+    from .release import CATALOG_FALLBACK, RELEASE
 
     if env_binary:
         return {"path": env_binary}, "CLEARCOTE_BINARY"
+    version = str(version or "").strip()
+    if version:
+        named = f"CLEARCOTE_BROWSER_VERSION={version}"
+        try:
+            if license_key and is_pro_revision_selector(version):
+                kind, payload = "pro", version
+            else:
+                kind, payload = resolve_version(version, has_license=bool(license_key), quiet=True,
+                                                catalog=CATALOG_FALLBACK if offline else None)
+        except (ValueError, RuntimeError) as e:
+            return None, f"{named}: {(str(e).splitlines() or ['not resolvable'])[0]}"
+        if kind == "pro":
+            matches = [c for c in cached if _pro_tag_matches(c["tag"], payload)]
+            return ((matches[0], f"licensed: the newest cached build {named} selects") if matches else
+                    (None, f"no licensed build for {named} is cached — run: clearcote install --version {version}"))
+        hit = [c for c in cached if c["tag"] == payload["tag"]]
+        return ((hit[0], f"open build {payload['tag']} ({named})") if hit else
+                (None, f"the open build {payload['tag']} ({named}) is not installed — run: clearcote install --version {version}"))
     if license_key:
         licensed = [c for c in cached if c["tag"].startswith("pro-")]
         if licensed:
@@ -164,7 +202,8 @@ def build_info(quick=False, proxy=None, launch_fn=None):
         channel = f"invalid ({e})"
     cached = list_cached_builds()
     env_binary = os.environ.get("CLEARCOTE_BINARY")
-    pick, selected_by = launch_build(cached, env_binary, resolve_license_key(), _auto_update_requested(None))
+    pick, selected_by = launch_build(cached, env_binary, resolve_license_key(), _auto_update_requested(None),
+                                     os.environ.get("CLEARCOTE_BROWSER_VERSION"), offline=quick)
     license_info = {"source": src["source"]}
     if src.get("masked"):
         license_info["key"] = src["masked"]
@@ -353,7 +392,8 @@ def device_login(sleep=None, clock=None):
     Ctrl-C is deterministic: it is noted rather than raised, so a request already on its way is never
     torn down (its answer may be the key, which the server hands out once). Ctrl-C before the key
     arrives saves nothing (exit 130); one that lands while the request that brings the key is in flight
-    still saves it, and says so."""
+    still saves it, and says so. A second Ctrl-C stops at once, request in flight or not, and saves
+    nothing (exit 130)."""
     import signal
     import threading
     import time as _time
@@ -363,10 +403,18 @@ def device_login(sleep=None, clock=None):
     from ._license import save_license_key, save_license_meta
 
     stop = threading.Event()
+
+    def on_sigint(*_a):
+        if stop.is_set():  # the second Ctrl-C: give up on the request in flight too
+            raise KeyboardInterrupt
+        stop.set()
+        _err("")
+        _err("stopping (a request already sent is answered first; press Ctrl-C again to stop at once)")
+
     restore = None
     if threading.current_thread() is threading.main_thread():
         try:
-            restore = signal.signal(signal.SIGINT, lambda *_a: stop.set())
+            restore = signal.signal(signal.SIGINT, on_sigint)
         except ValueError:  # not the main interpreter thread
             restore = None
     wait = sleep or (lambda s: _devicelogin._wait(stop, s))  # ends at once on Ctrl-C
@@ -395,11 +443,15 @@ def device_login(sleep=None, clock=None):
 
             got = poll_for_key(code, sleep=wait, clock=clock or _time.monotonic, on_retry=on_retry,
                                cancelled=stop.is_set)
+        except KeyboardInterrupt:
+            fail("stopped at once (second Ctrl-C). Nothing was saved.", 130)
         except DeviceLoginError as e:
             if e.code == "cancelled":
                 cancelled()
             again = " Run `clearcote login --device` again." if e.code in ("expired_token", "outcome_unknown") else ""
             fail(f"{e}. Nothing was saved.{again}")
+        if restore is not None:  # the key has arrived: Ctrl-C no longer interrupts saving it
+            signal.signal(signal.SIGINT, lambda *_a: stop.set())
         where = save_license_key(got["license_key"])
         save_license_meta(got["license_key"], got.get("plan"), got.get("expires_at"))
     finally:

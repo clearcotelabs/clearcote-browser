@@ -32,7 +32,8 @@ import {
   RELEASE,
   type SessionSeats,
 } from "./index.js";
-import { autoUpdateRequested, defaultCacheRoot, listCachedBuilds } from "./download.js";
+import { autoUpdateRequested, defaultCacheRoot, isProRevisionSelector, listCachedBuilds, resolveVersion } from "./download.js";
+import { CATALOG_FALLBACK } from "./release.js";
 import { DeviceLoginError, pollForKey, requestDeviceCode } from "./devicelogin.js";
 import { licenseExpiry, removeLicenseMeta, saveLicenseMeta, type LicenseExpiry } from "./license.js";
 import { geoCacheRoot } from "./geoip.js";
@@ -142,18 +143,53 @@ function missingSharedLibs(exe: string): string[] {
   return (r.stdout || "").split("\n").filter((l) => l.includes("not found")).map((l) => l.trim().split(" ")[0]);
 }
 
+/** Whether a cached licensed build's tag (pro-<version>-r<N>) is what `version` selects: a revision ("r30",
+ * "154.0.8037.57-r30"), an exact version (its newest revision), a major ("154"), or "latest". */
+export function proTagMatches(tag: string, version: string): boolean {
+  if (!tag.startsWith("pro-")) return false;
+  const t = tag.slice(4).toLowerCase();
+  const v = String(version).trim().toLowerCase();
+  if (v === "latest" || v === "newest") return true;
+  if (/^r\d+$/.test(v)) return t.endsWith(`-${v}`);
+  if (/^\d+$/.test(v)) return t.startsWith(`${v}.`);
+  return t === v || t.startsWith(`${v}-`);
+}
+
 /**
  * The build launch() would run for the current licence state, from what is already cached (`info` never
- * downloads). CLEARCOTE_BINARY wins. With a licence key, launch() runs a licensed build: the newest one
- * cached (launch() itself asks the licence server, which may name a newer one). Without a key it runs the
- * open build this SDK pins (the newest cached open build with CLEARCOTE_AUTO_UPDATE). A cached licensed
- * build is never picked for a keyless setup: it cannot run without a key, which is what made the old
- * "newest cached build" launch test fail for open-build users.
+ * downloads). CLEARCOTE_BINARY wins. A version selector (CLEARCOTE_BROWSER_VERSION) is resolved the way
+ * launch() resolves it -- through the version catalog (the bundled copy when `offline`), a licensed revision
+ * straight to the licensed builds -- and picks the cached build it names. Otherwise, with a licence key,
+ * launch() runs a licensed build: the newest one cached (launch() itself asks the licence server, which may
+ * name a newer one). Without a key it runs the open build this SDK pins (the newest cached open build with
+ * CLEARCOTE_AUTO_UPDATE). A cached licensed build is never picked for a keyless setup: it cannot run without
+ * a key, which is what made the old "newest cached build" launch test fail for open-build users.
  */
-export function launchBuild(
+export async function launchBuild(
   cached: Array<{ tag: string; path: string }>, envBinary?: string, licenseKey?: string, autoUpdate = false,
-): { pick?: { path: string; tag?: string }; selectedBy: string } {
+  version?: string, offline = false,
+): Promise<{ pick?: { path: string; tag?: string }; selectedBy: string }> {
   if (envBinary) return { pick: { path: envBinary }, selectedBy: "CLEARCOTE_BINARY" };
+  const sel = String(version ?? "").trim();
+  if (sel) {
+    const named = `CLEARCOTE_BROWSER_VERSION=${sel}`;
+    let plan;
+    try {
+      plan = licenseKey && isProRevisionSelector(sel)
+        ? { kind: "pro" as const, version: sel }
+        : await resolveVersion(sel, !!licenseKey, true, offline ? CATALOG_FALLBACK : undefined);
+    } catch (e) {
+      return { selectedBy: `${named}: ${(e as Error).message.split("\n")[0]}` };
+    }
+    if (plan.kind === "pro") {
+      const m = cached.find((c) => proTagMatches(c.tag, plan.version));
+      return m ? { pick: m, selectedBy: `licensed: the newest cached build ${named} selects` }
+        : { selectedBy: `no licensed build for ${named} is cached — run: clearcote install --version ${sel}` };
+    }
+    const hit = cached.find((c) => c.tag === plan.rel.tag);
+    return hit ? { pick: hit, selectedBy: `open build ${plan.rel.tag} (${named})` }
+      : { selectedBy: `the open build ${plan.rel.tag} (${named}) is not installed — run: clearcote install --version ${sel}` };
+  }
   if (licenseKey) {
     const licensed = cached.filter((c) => c.tag.startsWith("pro-"));
     return licensed.length
@@ -183,7 +219,8 @@ export async function buildInfo(
   }
   const cached = listCachedBuilds();
   const envBinary = process.env.CLEARCOTE_BINARY;
-  const { pick, selectedBy } = launchBuild(cached, envBinary, resolveLicenseKey(), autoUpdateRequested(undefined));
+  const { pick, selectedBy } = await launchBuild(cached, envBinary, resolveLicenseKey(), autoUpdateRequested(undefined),
+    process.env.CLEARCOTE_BROWSER_VERSION, !!flags.quick);
   const report: InfoReport = {
     sdk: { version: SDK_VERSION, node: process.version, platform: `${process.platform}-${process.arch}` },
     license: { source: src.source, ...(src.masked ? { key: src.masked } : {}) },
@@ -302,8 +339,17 @@ function err(line = ""): void {
  * while the request that brings the key is in flight still saves it, and says so.
  */
 export async function deviceLogin(opts: { sleep?: (s: number, signal?: AbortSignal) => Promise<void>; clock?: () => number } = {}): Promise<void> {
-  const ctrl = new AbortController();
-  const onSigint = () => ctrl.abort();
+  const ctrl = new AbortController(); // Ctrl-C: stop between requests; one already sent is answered first
+  const hard = new AbortController(); // a second Ctrl-C: give up on the request in flight too
+  const onSigint = () => {
+    if (ctrl.signal.aborted) {
+      hard.abort();
+      return;
+    }
+    ctrl.abort();
+    err("");
+    err("stopping (a request already sent is answered first; press Ctrl-C again to stop at once)");
+  };
   process.on("SIGINT", onSigint);
   let grant;
   try {
@@ -319,6 +365,7 @@ export async function deviceLogin(opts: { sleep?: (s: number, signal?: AbortSign
     grant = await pollForKey(code, {
       ...opts,
       signal: ctrl.signal,
+      abort: hard.signal,
       onRetry: (reason) => {
         if (!warned) { // once: a flaky network must not flood the terminal
           warned = true;
@@ -328,10 +375,8 @@ export async function deviceLogin(opts: { sleep?: (s: number, signal?: AbortSign
     });
   } catch (e) {
     if (e instanceof DeviceLoginError) {
-      if (e.code === "cancelled") {
-        err("");
-        fail("cancelled. Nothing was saved.", 130);
-      }
+      if (e.code === "cancelled") fail("cancelled. Nothing was saved.", 130);
+      if (e.code === "aborted") fail("stopped at once (second Ctrl-C). Nothing was saved.", 130);
       const again = e.code === "expired_token" || e.code === "outcome_unknown" ? " Run `clearcote login --device` again." : "";
       fail(`${e.message}. Nothing was saved.${again}`);
     }

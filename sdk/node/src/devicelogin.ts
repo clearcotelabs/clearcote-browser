@@ -69,12 +69,13 @@ export interface DeviceGrant {
 
 type Json = Record<string, unknown>;
 
-async function post(base: string, path: string, body: Json, timeoutMs: number): Promise<{ status: number; body: Json; headers: Record<string, string> }> {
+async function post(base: string, path: string, body: Json, timeoutMs: number, signal?: AbortSignal): Promise<{ status: number; body: Json; headers: Record<string, string> }> {
   const res = await proxiedRequest(`${base}${path}`, {
     method: "POST",
     body: JSON.stringify(body),
     headers: { "content-type": "application/json", accept: "application/json", "User-Agent": licenseUserAgent() },
     timeoutMs,
+    signal,
   });
   let payload: unknown = {};
   try {
@@ -130,8 +131,10 @@ export interface PollOptions {
   sleep?: (seconds: number, signal?: AbortSignal) => Promise<void>;
   /** Milliseconds, monotonic enough for a deadline. Default `performance.now()`. */
   clock?: () => number;
-  /** Ctrl-C: aborting ends the wait with DeviceLoginError("cancelled"). */
+  /** Ctrl-C: aborting ends the wait with DeviceLoginError("cancelled"); a request already sent finishes. */
   signal?: AbortSignal;
+  /** A second Ctrl-C: aborting tears down the request in flight too, DeviceLoginError("aborted"). */
+  abort?: AbortSignal;
   /** Told about each transient failure (network error, 5xx) that is being retried. */
   onRetry?: (reason: string) => void;
 }
@@ -153,7 +156,10 @@ const errCodes = (e: unknown): string[] => {
 /** True when the request certainly never reached the server (refused, no DNS), so it cannot have been the
  * one that collected an approved key. */
 const neverSent = (e: unknown) => errCodes(e).some((c) => ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(c));
-const isTimeout = (e: unknown) => errCodes(e).some((c) => ["TimeoutError", "ETIMEDOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT"].includes(c));
+/** A request that ran out of time: fetch's own (TimeoutError), net.ts's through a proxy (ETIMEDOUT), undici's. */
+export const isRequestTimeout = (e: unknown) =>
+  errCodes(e).some((c) => ["TimeoutError", "ETIMEDOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT"].includes(c))
+  || /timed out/i.test(String((e as Error)?.message ?? ""));
 
 /**
  * Poll the token endpoint until the user approves (resolves with the grant) or the server says the code
@@ -198,10 +204,11 @@ export async function pollForKey(code: DeviceCode, opts: PollOptions = {}): Prom
     checkCancelled();
     let r;
     try {
-      r = await post(base, "/api/v1/device/token", { device_code: code.device_code }, deviceLoginTimeouts.tokenMs);
+      r = await post(base, "/api/v1/device/token", { device_code: code.device_code }, deviceLoginTimeouts.tokenMs, opts.abort);
     } catch (e) {
+      if (opts.abort?.aborted) throw new DeviceLoginError("aborted", "aborted");
       if (!neverSent(e)) uncertain = true;
-      if (isTimeout(e)) interval = Math.min(interval * 2, MAX_INTERVAL);
+      if (isRequestTimeout(e)) interval = Math.min(interval * 2, MAX_INTERVAL);
       opts.onRetry?.(`licence server unreachable (${reasonOf(e)})`);
       continue;
     }

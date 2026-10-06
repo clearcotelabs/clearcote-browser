@@ -94,6 +94,13 @@ class FakeDevice:
                         fake.handed_out = True
                         threading.Event().wait(fake.slow_seconds)  # not time.sleep: tests record that
                         step = "ok"
+                    if step == "sigint2-slow":  # Ctrl-C twice while the (slow) answer is on its way
+                        fake.handed_out = True
+                        signal.raise_signal(signal.SIGINT)
+                        threading.Event().wait(0.3)
+                        signal.raise_signal(signal.SIGINT)
+                        threading.Event().wait(fake.slow_seconds)
+                        step = "ok"
                     if step == "sigint-ok":
                         signal.raise_signal(signal.SIGINT)
                         threading.Event().wait(0.2)

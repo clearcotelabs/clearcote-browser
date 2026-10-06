@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 import time
 
 from ._license import _api_base, _user_agent
@@ -103,6 +104,27 @@ def request_code(api_base: str | None = None, client_version: str | None = None,
 
 
 
+def _post_interruptible(base, path, body, timeout):
+    """_post on a worker thread, waited for in short slices: a blocking socket read is not interrupted by
+    Ctrl-C on every platform (Windows), but these slices are, so a KeyboardInterrupt (the second Ctrl-C)
+    stops the wait at once. The abandoned request ends with the process."""
+    box = {}
+
+    def work():
+        try:
+            box["r"] = _post(base, path, body, timeout)
+        except BaseException as e:  # noqa: BLE001 -- handed to the waiting thread
+            box["e"] = e
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    while t.is_alive():
+        t.join(0.1)
+    if "e" in box:
+        raise box["e"]
+    return box["r"]
+
+
 def _wait(stop, seconds):
     """The pause between polls; ends at once when ``stop`` (a threading.Event: Ctrl-C) is set."""
     stop.wait(seconds)
@@ -161,8 +183,8 @@ def poll_for_key(code: dict, api_base: str | None = None, sleep=time.sleep, cloc
         sleep(interval)
         check_cancelled()
         try:
-            status, body, headers = _post(base, "/api/v1/device/token", {"device_code": code["device_code"]},
-                                          timeout)
+            status, body, headers = _post_interruptible(base, "/api/v1/device/token",
+                                                        {"device_code": code["device_code"]}, timeout)
         except Exception as e:  # noqa: BLE001 -- transient: the code is still valid on the server
             if not _never_sent(e):
                 uncertain = True

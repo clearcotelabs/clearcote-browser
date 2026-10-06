@@ -24,6 +24,12 @@ export interface ProxySpec {
   password?: string;
 }
 
+/** A request that ran out of time, through a proxy or not: `code` "ETIMEDOUT", `name` "TimeoutError" (the
+ * name fetch's own AbortSignal.timeout uses), so callers can tell a timeout from other failures. */
+export function timeoutError(message: string): Error {
+  return Object.assign(new Error(message), { name: "TimeoutError", code: "ETIMEDOUT" });
+}
+
 export interface ProxiedRequestInit {
   method?: string;
   headers?: Record<string, string>;
@@ -32,6 +38,8 @@ export interface ProxiedRequestInit {
   timeoutMs?: number;
   /** Route through this proxy. Omitted/null = direct (global fetch). */
   proxy?: ProxySpec | null;
+  /** Abort the request (direct requests only): it rejects at once with an AbortError. */
+  signal?: AbortSignal;
 }
 
 /** The subset of a fetch Response both callers use. */
@@ -74,7 +82,7 @@ function defaultProxyPort(protocol: string): string {
 function readUntil(socket: net.Socket, predicate: (buf: Buffer) => number, deadline: number): Promise<{ head: Buffer; rest: Buffer }> {
   return new Promise((resolve, reject) => {
     let buf = Buffer.alloc(0);
-    const timer = setTimeout(() => done(new Error("proxy handshake timed out")), Math.max(1, deadline - Date.now()));
+    const timer = setTimeout(() => done(timeoutError("proxy handshake timed out")), Math.max(1, deadline - Date.now()));
     const onData = (chunk: Buffer) => {
       buf = Buffer.concat([buf, chunk]);
       const n = predicate(buf);
@@ -99,7 +107,7 @@ function readUntil(socket: net.Socket, predicate: (buf: Buffer) => number, deadl
 function connectTcp(host: string, port: number, deadline: number): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
     const s = net.connect({ host, port });
-    const timer = setTimeout(() => { s.destroy(); reject(new Error(`connect to ${host}:${port} timed out`)); }, Math.max(1, deadline - Date.now()));
+    const timer = setTimeout(() => { s.destroy(); reject(timeoutError(`connect to ${host}:${port} timed out`)); }, Math.max(1, deadline - Date.now()));
     s.once("connect", () => { clearTimeout(timer); resolve(s); });
     s.once("error", (e) => { clearTimeout(timer); reject(e); });
   });
@@ -194,7 +202,7 @@ async function directFetch(url: string, init: ProxiedRequestInit, timeoutMs: num
     headers: init.headers,
     body: init.body,
     redirect: "follow",
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: init.signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), init.signal]) : AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text();
   const headers: Record<string, string> = {};
@@ -271,7 +279,7 @@ export async function proxiedRequest(url: string, init: ProxiedRequestInit = {})
 
     const raw = await new Promise<Buffer>((resolve, reject) => {
       const chunks: Buffer[] = [];
-      const timer = setTimeout(() => { stream.destroy(); reject(new Error(`request to ${url} timed out`)); }, Math.max(1, deadline - Date.now()));
+      const timer = setTimeout(() => { stream.destroy(); reject(timeoutError(`request to ${url} timed out`)); }, Math.max(1, deadline - Date.now()));
       stream.on("data", (c: Buffer) => chunks.push(c));
       stream.once("end", () => { clearTimeout(timer); resolve(Buffer.concat(chunks)); });
       stream.once("close", () => { clearTimeout(timer); resolve(Buffer.concat(chunks)); });

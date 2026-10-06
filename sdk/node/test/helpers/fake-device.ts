@@ -78,6 +78,7 @@ export async function startFakeDevice(script: string[], o: FakeDeviceOptions = {
           ...(o.accountEmail ? { account_email: o.accountEmail } : {}),
         });
         if (step === "slow-ok") {
+          o.onKeyRequest?.();
           handedOut = true; // handed out now; the answer is what is slow
           setTimeout(() => { try { send(res, 200, grant()); } catch { /* the client gave up on it */ } }, o.slowMs ?? 2000);
           return;

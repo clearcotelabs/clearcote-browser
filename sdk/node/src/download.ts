@@ -625,10 +625,10 @@ export function isProRevisionSelector(selector: string | undefined): boolean {
  * getting stuck. `selector` may be a bare major ("150"), an exact version, or "latest". Throws when
  * the version doesn't exist for this OS, or when it's a PRO build and `hasLicense` is false.
  */
-export async function resolveVersion(selector: string, hasLicense: boolean, quiet?: boolean): Promise<VersionPlan> {
+export async function resolveVersion(selector: string, hasLicense: boolean, quiet?: boolean, catalog?: Catalog): Promise<VersionPlan> {
   const plat = platKey();
   if (!plat) throw new Error("Clearcote ships Windows x64 and Linux x64 only.");
-  const cat = await fetchCatalog(quiet);
+  const cat = catalog ?? (await fetchCatalog(quiet)); // a given catalog (the bundled one): no network
   const builds = cat.builds.filter((b) => b.platforms[plat]);
   const sel = String(selector || "").trim();
 

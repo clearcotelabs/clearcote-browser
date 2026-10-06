@@ -24,7 +24,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("CLEARCOTE_CACHE", str(cache))
-    for k in ("CLEARCOTE_BINARY", "CLEARCOTE_LICENSE_KEY", "CLEARCOTE_RELEASE_CHANNEL", "CLEARCOTE_LICENSE_API"):
+    for k in ("CLEARCOTE_BINARY", "CLEARCOTE_LICENSE_KEY", "CLEARCOTE_RELEASE_CHANNEL", "CLEARCOTE_LICENSE_API",
+              "CLEARCOTE_BROWSER_VERSION", "CLEARCOTE_AUTO_UPDATE"):
         monkeypatch.delenv(k, raising=False)
     _SWITCH_CACHE.clear()
     return {"home": home, "cache": cache}
@@ -150,6 +151,45 @@ def test_info_launch_tests_the_build_launch_would_use(env, monkeypatch, capsys):
     r = _commands.build_info(quick=False, launch_fn=launch_fn)
     assert tested == [pro] and r["launch"]["build"] == "pro-152.0.7977.82-r21"
     assert r["binary"]["selectedBy"].startswith("licensed")
+
+
+def test_info_follows_clearcote_browser_version_as_launch_does(env, monkeypatch):
+    # launch() honours CLEARCOTE_BROWSER_VERSION; info must test the build it names, not the newest one.
+    free149 = fake_cached_build(env["cache"], "v0.1.0-pre.22")  # the bundled catalog's 149 open build
+    fake_cached_build(env["cache"], RELEASE["tag"])
+    r7 = fake_cached_build(env["cache"], "pro-150.0.7871.114-r7")
+    fake_cached_build(env["cache"], "pro-154.0.8037.57-r30")  # the newest
+    tested = []
+
+    class B:
+        version = "1.0"
+
+        def close(self):
+            pass
+
+    def launch_fn(**kw):
+        tested.append(kw["executable_path"])
+        return B()
+
+    monkeypatch.setattr(_license, "proxied_request", lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
+    monkeypatch.setenv("CLEARCOTE_LICENSE_KEY", "cc_lic_info_version_key")
+    monkeypatch.setenv("CLEARCOTE_BROWSER_VERSION", "r7")  # a licensed revision
+    r = _commands.build_info(quick=False, launch_fn=launch_fn)
+    assert tested == [r7] and r["launch"]["build"] == "pro-150.0.7871.114-r7"
+    assert "CLEARCOTE_BROWSER_VERSION=r7" in r["binary"]["selectedBy"]
+
+    monkeypatch.delenv("CLEARCOTE_LICENSE_KEY")
+    monkeypatch.setenv("CLEARCOTE_BROWSER_VERSION", "149")  # an open major, resolved through the catalog
+    r = _commands.build_info(quick=True)  # --quick: the bundled catalog, no network
+    assert r["binary"]["path"] == free149 and r["binary"]["tag"] == "v0.1.0-pre.22"
+    tested.clear()
+    _commands.build_info(quick=False, launch_fn=launch_fn)
+    assert tested == [free149]
+
+    monkeypatch.setenv("CLEARCOTE_BROWSER_VERSION", "999")
+    r = _commands.build_info(quick=True)
+    assert "binary" in r and "path" not in r["binary"]
+    assert r["binary"]["selectedBy"].startswith("CLEARCOTE_BROWSER_VERSION=999: No Clearcote build matches")
 
 
 def test_info_keyless_with_only_a_licensed_build_cached(env):

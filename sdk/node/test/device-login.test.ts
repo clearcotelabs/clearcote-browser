@@ -7,7 +7,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { USAGE, deviceLogin, main } from "../src/cli-commands.js";
-import { deviceLoginTimeouts } from "../src/devicelogin.js";
+import { deviceLoginTimeouts, isRequestTimeout } from "../src/devicelogin.js";
+import net from "node:net";
+import { proxiedRequest } from "../src/net.js";
 import { licenseKeyPath } from "../src/license.js";
 import { startFakeDevice, DEVICE_CODE, LICENSE_KEY, USER_CODE, type FakeDevice, type FakeDeviceOptions } from "./helpers/fake-device.js";
 import { startOrigin } from "./helpers/proxies.js";
@@ -223,6 +225,34 @@ describe("clearcote login --device", () => {
     } finally {
       deviceLoginTimeouts.tokenMs = saved;
     }
+  });
+
+  it("a second Ctrl-C stops at once, even while a request is in flight, and says nothing was saved", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    const ctrlC = () => (onSpy.mock.calls.find(([ev]) => ev === "SIGINT")?.[1] as () => void)();
+    await serve(["pending", "slow-ok"], { slowMs: 5000, onKeyRequest: () => { ctrlC(); ctrlC(); } });
+    const t0 = Date.now();
+    await expect(deviceLogin({ sleep: recordingSleep([]) })).rejects.toThrow("exit 130");
+    expect(Date.now() - t0).toBeLessThan(3000); // did not wait for the 5 s answer
+    expect(errOut).toContain("press Ctrl-C again to stop at once"); // the first Ctrl-C said what it waits for
+    expect(errOut).toContain("clearcote: stopped at once (second Ctrl-C). Nothing was saved.");
+    expect(existsSync(keyFile())).toBe(false);
+  });
+
+  it("a timeout through a proxy is a timeout (ETIMEDOUT), so polling backs off for it too", async () => {
+    // A proxy that accepts the connection and never answers.
+    const sockets = new Set<net.Socket>();
+    const stalled = net.createServer((c) => { sockets.add(c); });
+    await new Promise<void>((r) => stalled.listen(0, "127.0.0.1", () => r()));
+    cleanups.push(async () => { for (const c of sockets) c.destroy(); await new Promise<void>((r) => stalled.close(() => r())); });
+    const port = (stalled.address() as net.AddressInfo).port;
+    const e = await proxiedRequest("http://example.invalid/x", { proxy: { server: `http://127.0.0.1:${port}` }, timeoutMs: 300 })
+      .then(() => null, (x) => x as Error & { code?: string });
+    expect(e?.message).toMatch(/timed out/);
+    expect(e?.code).toBe("ETIMEDOUT");
+    expect(isRequestTimeout(e)).toBe(true);
+    expect(isRequestTimeout(Object.assign(new Error("aborted"), { name: "TimeoutError" }))).toBe(true); // fetch's own
+    expect(isRequestTimeout(Object.assign(new Error("fetch failed"), { cause: { code: "ECONNREFUSED" } }))).toBe(false);
   });
 
   it("Ctrl-C during the request that brings the key still saves it, and says so", async () => {

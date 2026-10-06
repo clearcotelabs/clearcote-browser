@@ -612,7 +612,7 @@ def is_pro_revision_selector(selector):
     return bool(re.search(r"(?:^|-)r\d+$", str(selector or "").strip(), re.IGNORECASE))
 
 
-def resolve_version(selector, has_license=False, quiet=False):
+def resolve_version(selector, has_license=False, quiet=False, catalog=None):
     """Resolve a version selector against the public catalog, VALIDATING that it exists (and is
     reachable) BEFORE any download, so a bad request fails fast with a helpful message instead of
     getting stuck.
@@ -625,7 +625,7 @@ def resolve_version(selector, has_license=False, quiet=False):
     plat = _plat_key()
     if plat is None:
         raise RuntimeError("Clearcote ships Windows x64 and Linux x64 only.")
-    catalog = _fetch_catalog(quiet)
+    catalog = catalog or _fetch_catalog(quiet)  # a given catalog (the bundled one): no network
     builds = [b for b in catalog.get("builds", []) if plat in (b.get("platforms") or {})]
     sel = str(selector or "").strip()
 

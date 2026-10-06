@@ -215,6 +215,19 @@ def test_a_lost_answer_is_reported_as_possibly_approved_with_backoff(home, sleep
     assert len(fake.token_polls()) == 3 and not key_file(home).exists()
 
 
+def test_a_second_ctrl_c_stops_at_once_even_with_a_request_in_flight(home, sleeps, monkeypatch, request, capsys):
+    import time
+
+    serve(monkeypatch, request, ["pending", "sigint2-slow"], slow_seconds=5.0)
+    t0 = time.monotonic()
+    assert _commands.main(["login", "--device"]) == 130
+    assert time.monotonic() - t0 < 3  # did not wait for the 5 s answer
+    err = capsys.readouterr().err
+    assert "press Ctrl-C again to stop at once" in err  # the first Ctrl-C said what it waits for
+    assert "clearcote: stopped at once (second Ctrl-C). Nothing was saved." in err
+    assert not key_file(home).exists()
+
+
 def test_ctrl_c_during_the_request_that_brings_the_key_still_saves_it(home, sleeps, monkeypatch, request, capsys):
     # Ctrl-C lands while the answer carrying the key is on its way. The server has handed it out once; the
     # outcome must not depend on timing: the request finishes, the key is saved, and the CLI says so.

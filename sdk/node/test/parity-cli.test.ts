@@ -18,13 +18,15 @@ const extraCleanups: Array<() => Promise<void>> = [];
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "cc-cli-home-"));
   cache = mkdtempSync(join(tmpdir(), "cc-cli-cache-"));
-  for (const k of ["HOME", "USERPROFILE", "CLEARCOTE_CACHE", "CLEARCOTE_BINARY", "CLEARCOTE_LICENSE_KEY", "CLEARCOTE_RELEASE_CHANNEL", "CLEARCOTE_LICENSE_API"]) saved[k] = process.env[k];
+  for (const k of ["HOME", "USERPROFILE", "CLEARCOTE_CACHE", "CLEARCOTE_BINARY", "CLEARCOTE_LICENSE_KEY", "CLEARCOTE_RELEASE_CHANNEL", "CLEARCOTE_LICENSE_API", "CLEARCOTE_BROWSER_VERSION", "CLEARCOTE_AUTO_UPDATE"]) saved[k] = process.env[k];
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   process.env.CLEARCOTE_CACHE = cache;
   delete process.env.CLEARCOTE_BINARY;
   delete process.env.CLEARCOTE_LICENSE_KEY;
   delete process.env.CLEARCOTE_RELEASE_CHANNEL;
+  delete process.env.CLEARCOTE_BROWSER_VERSION;
+  delete process.env.CLEARCOTE_AUTO_UPDATE;
 });
 afterEach(async () => {
   for (const c of extraCleanups.splice(0)) await c();
@@ -113,6 +115,39 @@ describe("clearcote CLI", () => {
     expect(tested).toEqual([pro]);
     expect(r.launch).toMatchObject({ build: "pro-152.0.7977.82-r21" });
     expect(r.binary.selectedBy).toMatch(/^licensed/);
+  });
+
+  it("info follows CLEARCOTE_BROWSER_VERSION as launch() does", async () => {
+    // launch() honours CLEARCOTE_BROWSER_VERSION; info must test the build it names, not the newest one.
+    const free149 = fakeCachedBuild("v0.1.0-pre.22"); // the bundled catalog's 149 open build
+    fakeCachedBuild(RELEASE.tag);
+    const r7 = fakeCachedBuild("pro-150.0.7871.114-r7");
+    fakeCachedBuild("pro-154.0.8037.57-r30"); // the newest
+    const tested: string[] = [];
+    const launchFn = async (o: Record<string, unknown>) => {
+      tested.push(o.executablePath as string);
+      return { version: () => "1.0", close: async () => {} };
+    };
+    process.env.CLEARCOTE_LICENSE_KEY = "cc_lic_info_version_key";
+    process.env.CLEARCOTE_LICENSE_API = "http://127.0.0.1:1"; // seats: unreachable, never a real server
+    process.env.CLEARCOTE_BROWSER_VERSION = "r7"; // a licensed revision
+    let r = await buildInfo({ quick: false }, launchFn);
+    expect(tested).toEqual([r7]);
+    expect(r.launch).toMatchObject({ build: "pro-150.0.7871.114-r7" });
+    expect(r.binary.selectedBy).toContain("CLEARCOTE_BROWSER_VERSION=r7");
+
+    delete process.env.CLEARCOTE_LICENSE_KEY;
+    process.env.CLEARCOTE_BROWSER_VERSION = "149"; // an open major, resolved through the catalog
+    r = await buildInfo({ quick: true }); // --quick: the bundled catalog, no network
+    expect(r.binary).toMatchObject({ path: free149, tag: "v0.1.0-pre.22" });
+    tested.length = 0;
+    await buildInfo({ quick: false }, launchFn);
+    expect(tested).toEqual([free149]);
+
+    process.env.CLEARCOTE_BROWSER_VERSION = "999";
+    r = await buildInfo({ quick: true });
+    expect(r.binary.path).toBeUndefined();
+    expect(r.binary.selectedBy).toMatch(/^CLEARCOTE_BROWSER_VERSION=999: No Clearcote build matches/);
   });
 
   it("info, keyless, with only a licensed build cached does not launch it", async () => {
