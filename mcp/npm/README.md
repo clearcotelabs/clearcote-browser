@@ -66,7 +66,7 @@ The **persona lives in the environment**, so the tool surface stays clean:
 
 Hardening knobs: `CLEARCOTE_MCP_TOOL_TIMEOUT` (s), `CLEARCOTE_MCP_WRITE_DIR` (sandbox for file
 writes), `CLEARCOTE_MCP_ALLOW_ANY_PATH=1`, `CLEARCOTE_ALLOW_PRIVATE_EGRESS=1` (allow localhost /
-private targets), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`.
+private targets and `file:` urls), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`.
 
 ## Tools
 
@@ -82,7 +82,9 @@ other CDP client to the same stealth browser)
 ## Guardrails (built in)
 
 - Every tool has a wall-clock timeout and returns a **structured error** instead of crashing the server.
-- URL args are **SSRF-checked** — localhost / private / cloud-metadata are refused unless you opt in.
+- **Private addresses are refused** — only `http`/`https` urls, read the way the browser reads them; this machine,
+  the local network and cloud metadata endpoints are refused, for the url a tool gets and for every request the
+  browser then makes, unless you opt in (see the main README for what this does not cover).
 - File writes are **confined** to a sandbox dir (no path traversal).
 - Oversized text is **capped** so a response never floods the agent's context.
 - The shared browser is **rebuilt** automatically if it dies.

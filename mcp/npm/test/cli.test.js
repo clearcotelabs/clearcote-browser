@@ -21,7 +21,8 @@ const STUBS = {
   python3: [
     "#!/bin/sh",
     'case "$*" in',
-    "  *version_info*) echo 3 ;;",
+    '  *"version_info[0]"*) echo "${STUB_PYVER%%.*}" ;;',
+    '  *version_info*) echo "$STUB_PYVER" ;;',
     '  *base_prefix*) echo "${STUB_VENV:-0}" ;;',
     '  *"import clearcote_mcp"*)',
     '    if [ -n "$STUB_INSTALLED" ]; then echo "$STUB_INSTALLED"; exit 0; fi',
@@ -30,6 +31,7 @@ const STUBS = {
     '  "-m pip install"*)',
     '    echo "python3 $*" >> "$STUB_LOG"',
     '    if [ "$STUB_PIP" = refuse ]; then echo "error: externally-managed-environment" >&2; exit 1; fi',
+    '    if [ "$STUB_PIP" = fail ]; then echo "ERROR: No matching distribution found for clearcote-mcp" >&2; exit 1; fi',
     '    : > "$STUB_DIR/pip-installed" ;;',
     '  "-m clearcote_mcp") echo "python3 $*" >> "$STUB_LOG"; exit "${STUB_EXIT:-0}" ;;',
     '  *) echo "unexpected python3 call: $*" >&2; exit 2 ;;',
@@ -60,7 +62,7 @@ function launch(t, stubs, env = {}) {
   const log = path.join(dir, "calls.log");
   const r = spawnSync(process.execPath, [CLI], {
     encoding: "utf8", input: "", timeout: 30000,
-    env: { PATH: dir, STUB_LOG: log, STUB_DIR: dir, STUB_VERSION: VERSION, ...env },
+    env: { PATH: dir, STUB_LOG: log, STUB_DIR: dir, STUB_VERSION: VERSION, STUB_PYVER: "3.12", ...env },
   });
   const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean) : [];
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, calls };
@@ -118,6 +120,25 @@ test("when pip refuses (PEP 668) and there is no uvx or pipx, it says how to fix
     assert.ok(r.stderr.includes(hint), `the message mentions ${hint}:\n${r.stderr}`);
   }
   assert.strictEqual(r.stdout, "");
+});
+
+test("when pip fails for another reason, it does not blame PEP 668", { skip }, (t) => {
+  const r = launch(t, ["python3"], { STUB_PIP: "fail" });
+  assert.strictEqual(r.status, 1);
+  assert.ok(r.stderr.includes("No matching distribution"), "pip's own message is passed on");
+  for (const wrong of ["externally-managed", "PEP 668"]) {
+    assert.ok(!r.stderr.includes(wrong), `the message does not mention ${wrong}:\n${r.stderr}`);
+  }
+  assert.ok(r.stderr.includes("uv") && r.stderr.includes("pipx"), "it still names the other routes");
+});
+
+test("a Python older than the package needs is not used", { skip }, (t) => {
+  const old = launch(t, ["python3", "uvx"], { STUB_PYVER: "3.8" });
+  assert.deepStrictEqual(old.calls, [`uvx --from ${SPEC} clearcote-mcp`]);
+  const none = launch(t, ["python3"], { STUB_PYVER: "3.9" });
+  assert.strictEqual(none.status, 1);
+  assert.deepStrictEqual(none.calls, [], "pip is not run on a Python the package does not support");
+  assert.ok(none.stderr.includes("Python 3.10"), none.stderr);
 });
 
 test("with no Python, uvx or pipx at all, it names all three", { skip }, (t) => {

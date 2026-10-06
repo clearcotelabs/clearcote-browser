@@ -31,3 +31,36 @@ def test_mcp_dependency_has_an_upper_bound():
 def test_clearcote_floor_supports_free_keys():
     floor = re.search(r">=\s*([\d.]+)", _dependency("clearcote")).group(1)
     assert tuple(int(p) for p in floor.split(".")) >= (0, 30), "free-tier keys need clearcote 0.30.0+"
+
+
+def _floor(name: str) -> str:
+    return re.search(r">=\s*([\d.]+)", _dependency(name)).group(1)
+
+
+def test_mcp_floor_passes_tool_images_through():
+    # mcp before 1.19 turns a CallToolResult a tool returns (screenshot_page's inline image) into one JSON text block.
+    assert tuple(int(p) for p in _floor("mcp").split(".")) >= (1, 19)
+
+
+def test_ci_floor_job_pins_the_declared_floors():
+    ci = (ROOT.parent / ".github" / "workflows" / "mcp-ci.yml").read_text(encoding="utf-8")
+    pins = dict(re.findall(r"(mcp|clearcote)==([\d.]+)", ci))  # inside printf 'mcp==..\nclearcote==..'
+
+    def norm(v):
+        parts = [int(p) for p in v.split(".")]
+        while parts and parts[-1] == 0:
+            parts.pop()
+        return parts
+    assert {k: norm(v) for k, v in pins.items()} == {"mcp": norm(_floor("mcp")), "clearcote": norm(_floor("clearcote"))}
+
+
+def test_launcher_requires_the_packages_python():
+    needed = re.search(r'^requires-python\s*=\s*">=\s*([\d.]+)"', PYPROJECT, re.M).group(1)
+    cli = (ROOT / "npm" / "cli.js").read_text(encoding="utf-8")
+    found = re.search(r"MIN_PYTHON\s*=\s*\[(\d+),\s*(\d+)\]", cli)
+    assert found and ".".join(found.groups()) == needed
+
+
+def test_the_changelog_describes_this_version():
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert f"## {clearcote_mcp.__version__}" in changelog

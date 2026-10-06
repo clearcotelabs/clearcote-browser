@@ -4,16 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clearcote-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server for Clearcote — drive the open-source stealth Chromium from Claude Desktop, Cursor, Cline, and any MCP client."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "BSD-3-Clause" }
 dependencies = [
     "clearcote>=0.30",
-    # 1.14 is the first release whose tool registration accepts string annotations (1.2-1.13 raise
-    # at import). Both majors are supported; the cap stops pip resolving an untested one.
-    "mcp[cli]>=1.14,<3",
+    # 1.19 is the first release that passes a CallToolResult a tool returns through as is (1.14-1.18
+    # turn screenshot_page's inline image into one JSON text block; before 1.14 string annotations
+    # raise at import). Both majors are supported; the cap stops pip resolving an untested one.
+    "mcp[cli]>=1.19,<3",
     "markdownify>=0.11",
 ]
 

@@ -46,7 +46,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ "${{ matrix.deps }}" = floor ]; then
-            printf 'mcp==1.14.0\nclearcote==0.30.0\n' > "$RUNNER_TEMP/floor.txt"
+            printf 'mcp==1.19.0\nclearcote==0.30.0\n' > "$RUNNER_TEMP/floor.txt"
             python -m pip install ./mcp pytest pytest-asyncio -c "$RUNNER_TEMP/floor.txt"
           else
             python -m pip install ./mcp pytest pytest-asyncio

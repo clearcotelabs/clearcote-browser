@@ -21,12 +21,19 @@ import base64
 import json
 import os
 
+from . import _egress
+
 
 # page_state: what the page amounts to, from neutral signals only (the main document's HTTP status and how much
 # visible text it has). An agent reads it to decide whether to wait, retry or move on.
 READ_FORMATS = ("markdown", "text", "both")
 BLOCKED_STATUSES = frozenset({401, 403, 429, 503})
 EMPTY_TEXT_CHARS = 20
+
+
+# The shown document's scheme and the HTTP status the browser recorded for its response (0 when it has none).
+_DOCUMENT_STATUS_JS = ("(() => { const e = performance.getEntriesByType('navigation')[0];"
+                       " return [location.protocol, (e && e.responseStatus) || 0]; })()")
 
 
 def page_state(http_status: int | None, text: str) -> str:
@@ -90,9 +97,10 @@ def cloud_launch():
 class ClearcoteBrowser:
     """One shared, stealth clearcote browser + its Playwright attachment."""
 
-    def __init__(self, persona: dict | None = None, cloud: bool = False):
+    def __init__(self, persona: dict | None = None, cloud: bool = False, guard: bool = False):
         self._persona = persona or {}
         self._cloud = cloud
+        self._guard = guard       # check every request the browser makes (see _egress.py)
         self._srv = None          # clearcote._serve.Server
         self._pw = None           # playwright async context manager
         self._browser = None      # playwright Browser (over CDP)
@@ -118,7 +126,8 @@ class ClearcoteBrowser:
             try:
                 self._ctx = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
                 self._page = self._ctx.pages[0] if self._ctx.pages else await self._ctx.new_page()
-                self._watch_context()
+                if self._guard:
+                    await _egress.guard_context(self._ctx)
             except BaseException:
                 # the caller never gets this instance, so nobody else would end the (billed) session
                 await self.close()
@@ -133,48 +142,42 @@ class ClearcoteBrowser:
         self._browser = await self._pw.chromium.connect_over_cdp(self._srv.cdp_url)
         self._ctx = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
         self._page = self._ctx.pages[0] if self._ctx.pages else await self._ctx.new_page()
-        self._watch_context()
+        if self._guard:
+            await _egress.guard_context(self._ctx)
 
-    def _watch_context(self):
-        """Track the main document's HTTP status in every tab, the ones the page opens included."""
-        self._ctx.on("page", self._watch)
-        for page in self._ctx.pages:
-            self._watch(page)
-
-    @staticmethod
-    def _watch(page):
-        if getattr(page, "_cc_watched", False):
-            return
-        page._cc_watched = True
-
-        def on_response(response):
+    async def http_status(self, page) -> int | None:
+        """HTTP status of the document the page shows now, as the browser recorded it for that document: a page
+        brought back by Back reports its own status, not the last response seen. Read in an isolated world, which
+        the page's scripts cannot see. None without an HTTP exchange (about:blank, file:, data:) or when the browser
+        has no status for the document."""
+        try:
+            cdp = await self._ctx.new_cdp_session(page)
+        except Exception:
+            return None
+        try:
+            frame = (await cdp.send("Page.getFrameTree"))["frameTree"]["frame"]["id"]
+            world = await cdp.send("Page.createIsolatedWorld", {"frameId": frame, "worldName": "clearcote-mcp"})
+            answer = await cdp.send("Runtime.evaluate", {"expression": _DOCUMENT_STATUS_JS, "returnByValue": True,
+                                                         "contextId": world["executionContextId"]})
+            scheme, status = answer["result"]["value"]
+            return (status or None) if scheme in ("http:", "https:") else None
+        except Exception:
+            return None
+        finally:
             try:
-                if (response.frame == page.main_frame and response.request.is_navigation_request()
-                        and not 300 <= response.status < 400):  # a redirect on the way: the final answer follows
-                    page._cc_http_status = ClearcoteBrowser._status_of(response)
+                await cdp.detach()
             except Exception:
                 pass
-        page.on("response", on_response)
-
-    @staticmethod
-    def _status_of(response) -> int | None:
-        # Only an HTTP exchange has a status: Chromium also reports a 200 for a file: document.
-        return (response.status or None) if response.url.startswith(("http:", "https:")) else None
-
-    @staticmethod
-    def http_status(page) -> int | None:
-        """HTTP status of the page's main document; None when it had none (about:blank, file:, data:)."""
-        return getattr(page, "_cc_http_status", None)
 
     @staticmethod
     async def _goto(page, url: str, timeout: float = 45000):
-        before = page.url
-        response = await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-        if response is not None:
-            page._cc_http_status = ClearcoteBrowser._status_of(response)
-        elif before.split("#")[0] != page.url.split("#")[0]:
-            page._cc_http_status = None  # a document without a response (about:blank, data:)
-        # else the same document (a #fragment change): its status stands
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        except Exception as exc:
+            if "ERR_BLOCKED_BY_CLIENT" in str(exc) and _egress.refused:  # the request guard stopped it on the way
+                blocked, reason = _egress.refused[-1]
+                raise ValueError(f"{reason} (reached through {blocked[:120]})") from None
+            raise
 
     @staticmethod
     async def _text(page) -> str:
@@ -185,7 +188,7 @@ class ClearcoteBrowser:
             return ""
 
     async def _document(self, page, text: str) -> dict:
-        status = self.http_status(page)
+        status = await self.http_status(page)
         return {"status": "ok", "url": page.url, "title": await page.title(),
                 "http_status": status, "page_state": page_state(status, text)}
 
@@ -337,7 +340,8 @@ class ClearcoteBrowser:
 
     async def new_tab(self, url: str | None = None) -> dict:
         self._page = await self._ctx.new_page()
-        self._watch(self._page)  # also done by the context's "page" event; this one covers fakes
+        if self._guard:  # before its first navigation, so its first redirect is held too
+            await _egress.guard_redirects(self._ctx, self._page)
         if url:
             await self._goto(self._page, url)
         return {"status": "ok", "url": self._page.url, "index": len(self._ctx.pages) - 1}

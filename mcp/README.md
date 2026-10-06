@@ -70,7 +70,7 @@ The **persona lives in the environment**, so the tool surface stays clean:
 
 Hardening knobs: `CLEARCOTE_MCP_TOOL_TIMEOUT` (s), `CLEARCOTE_MCP_RUN_TIMEOUT` (s, `run_task`; default 900), `CLEARCOTE_MCP_WRITE_DIR` (sandbox for file
 writes), `CLEARCOTE_MCP_ALLOW_ANY_PATH=1`, `CLEARCOTE_ALLOW_PRIVATE_EGRESS=1` (allow localhost /
-private targets), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`, `CLEARCOTE_MCP_INLINE_IMAGE_MAX`
+private targets and `file:` urls), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`, `CLEARCOTE_MCP_INLINE_IMAGE_MAX`
 (bytes; default 200000: the largest screenshot also returned inline).
 
 ## Tools
@@ -80,13 +80,14 @@ selectors) · `evaluate_js` · `wait_for` · `current_page` · `get_cookies` · 
 **Act** · `navigate` · `click` (selector or visible text) · `fill_field` (selector/label/placeholder/name)
 · `press_key` · `new_tab` · `close_tab`
 **Capture** · `screenshot_page` (saved under the sandbox dir; up to 200 KB also returned as an image) · `save_page_pdf`
-
-`navigate` and `read_page` also return `http_status` (the main document's HTTP status; `null` for a local file or
-`about:blank`) and `page_state`: `blocked` (HTTP 401, 403, 429 or 503), `empty` (under 20 characters of visible
-text: still loading, or nothing to read) or `ok`.
 **Session** · `save_profile` / `load_profile` (cookies + storage)
 **Stealth / infra** · `get_egress_info` (public IP + active persona) · **`get_cdp_endpoint`** (attach any
 other CDP client to the same stealth browser)
+
+`navigate` and `read_page` also return `http_status` (the shown document's HTTP status; `null` when there is none,
+as for a local file or `about:blank`, or the browser has none for it) and `page_state`: `blocked` (HTTP 401, 403,
+429 or 503), `empty` (under 20 characters of visible text: still loading, or nothing to read) or `ok`. Output
+formats changed in 0.3.0: see [CHANGELOG.md](CHANGELOG.md).
 
 **Cloud** · `run_task(task, url?, schema_json?)`: a whole task run by the hosted agent (Clearcote
 Jet) on a cloud browser, returning its JSON result (`run_status`, `result.output`, `cost_eur`). Listed
@@ -116,12 +117,16 @@ holds it, so `get_cdp_endpoint` has no endpoint to hand out; start your own host
 ## Guardrails (built in)
 
 - Every tool has a wall-clock timeout and returns a **structured error** instead of crashing the server.
-- URL args are **SSRF-checked** — localhost / private / cloud-metadata are refused unless you opt in.
+- **Private addresses are refused** — only `http`/`https` urls, read the way the browser reads them; this machine,
+  the local network and cloud metadata endpoints are refused, for the url a tool gets and for every request the
+  browser then makes (redirects, images, frames, script requests, popups), unless you opt in. Checking every request
+  turns the browser's HTTP cache off. Not covered: WebSocket connections a page script opens, and a host name whose
+  address changes between the check and the browser's own lookup (DNS rebinding).
 - File writes are **confined** to a sandbox dir (no path traversal).
 - Oversized text is **capped** so a response never floods the agent's context, with an explicit
   `<field>_truncated` flag.
-- Page text, Markdown and HTML are **fenced** as untrusted data (`<untrusted_page_content>`), and a page cannot
-  close the fence early.
+- Everything a page controls (text, Markdown, HTML, element lists, script results, titles) is **fenced** as
+  untrusted data (`<untrusted_page_content>`), and nothing in it can pass for a fence tag.
 - The shared browser is **rebuilt** automatically if it dies.
 
 ## Just want the raw endpoint?

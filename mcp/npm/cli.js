@@ -14,6 +14,7 @@ const { spawnSync, spawn } = require("node:child_process");
 const { version: LAUNCHER_VERSION } = require("./package.json");
 
 const SPEC = "clearcote-mcp>=" + LAUNCHER_VERSION;
+const MIN_PYTHON = [3, 10]; // the package's requires-python (mcp/pyproject.toml; a test keeps them equal)
 
 function pythons() {
   return process.platform === "win32" ? ["py", "python", "python3"] : ["python3", "python"];
@@ -23,8 +24,12 @@ function output(cmd, args) {
   const r = spawnSync(cmd, args, { encoding: "utf8" });
   return r.status === 0 ? (r.stdout || "").trim() : null;
 }
+// The first Python on PATH new enough for the package; an older one is passed over.
 function findPython() {
-  return pythons().find((p) => output(p, ["-c", "import sys;print(sys.version_info[0])"]) === "3") || null;
+  return pythons().find((p) => {
+    const v = output(p, ["-c", "import sys;print('%d.%d' % sys.version_info[:2])"]);
+    return v !== null && !older(v, MIN_PYTHON.join("."));
+  }) || null;
 }
 // Version of the importable Python server, or null when it is missing or fails to import (0.1.0
 // fails under mcp 2.x, and a plain `pip install` would call it satisfied and leave it broken).
@@ -67,22 +72,28 @@ function route() {
   if (have && !older(have, LAUNCHER_VERSION)) return [py, ["-m", "clearcote_mcp"]];
   if (onPath("uvx")) return ["uvx", ["--from", SPEC, "clearcote-mcp"]];
   if (onPath("pipx")) return ["pipx", ["run", "--spec", SPEC, "clearcote-mcp"]];
+  const minimum = MIN_PYTHON.join(".");
   if (!py) {
-    fail(["[clearcote-mcp] the server needs Python 3.10+ (with pip), uv or pipx, and none of them was found.",
-          ...FIXES.slice(0, 3), "  - or install Python 3.10+"]);
+    fail([`[clearcote-mcp] the server needs Python ${minimum}+ (with pip), uv or pipx, and none of them was found.`,
+          ...FIXES.slice(0, 3), `  - or install Python ${minimum}+`]);
   }
   console.error(have
     ? `[clearcote-mcp] upgrading the Python package \`clearcote-mcp\` ${have} -> ${LAUNCHER_VERSION}…`
     : "[clearcote-mcp] installing the Python package `clearcote-mcp` with pip…");
-  // pip's stdout goes to stderr: stdout is the MCP channel the client is about to read.
+  // pip's stdout goes to stderr: stdout is the MCP channel the client is about to read. Its stderr is read (and
+  // passed on) to tell a PEP 668 refusal from any other failure.
   const user = inVirtualenv(py) ? [] : ["--user"];
   const install = spawnSync(py, ["-m", "pip", "install", ...user, "--quiet", "--upgrade", SPEC],
-                            { stdio: ["ignore", 2, 2] });
+                            { stdio: ["ignore", 2, "pipe"], encoding: "utf8" });
+  process.stderr.write(install.stderr || "");
   const now = serverVersion(py);
   if (install.status !== 0 || !now || older(now, LAUNCHER_VERSION)) {
+    const why = /externally[- ]managed[- ]environment/i.test(install.stderr || "")
+      ? `This Python refuses \`pip install\` outside a virtual environment (PEP 668: "externally-managed-environment"),
+as Debian 12+, Ubuntu 23.04+ and Homebrew do; pip's own message is above.`
+      : "pip's own message is above.";
     fail([`[clearcote-mcp] could not install the Python package \`clearcote-mcp\`: there is no uvx or pipx on PATH, and pip
-could not install it. Many Pythons (Debian 12+, Ubuntu 23.04+, Homebrew) refuse \`pip install\` outside a virtual
-environment (PEP 668: "externally-managed-environment"); pip's own message is above.`, ...FIXES]);
+could not install it. ${why}`, ...FIXES]);
   }
   return [py, ["-m", "clearcote_mcp"]];
 }
