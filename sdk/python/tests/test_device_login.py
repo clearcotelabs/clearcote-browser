@@ -5,12 +5,13 @@ older server, Ctrl-C, and the expiry `clearcote info --json` then reports. Mirro
 sdk/node/test/device-login.test.ts."""
 import json
 import os
+import signal
 import stat
 import sys
 
 import pytest
 
-from clearcote import __version__, _commands, _license
+from clearcote import __version__, _commands, _devicelogin, _license
 
 from _fake_device import DEVICE_CODE, LICENSE_KEY, USER_CODE, FakeDevice
 from _proxies import start_origin
@@ -30,10 +31,20 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def sleeps(monkeypatch):
-    """time.sleep recorded instead of slept: the polling intervals become an assertion."""
+    """The poll waits recorded instead of waited: the polling intervals become an assertion. (Older
+    code waited with time.sleep; this code with an interruptible wait.)"""
     seen = []
     monkeypatch.setattr("time.sleep", seen.append)
+    monkeypatch.setattr(_devicelogin, "_wait", lambda _stop, s: seen.append(s), raising=False)
     return seen
+
+
+@pytest.fixture(autouse=True)
+def _sigint_restored():
+    before = signal.getsignal(signal.SIGINT)
+    yield
+    assert signal.getsignal(signal.SIGINT) is before  # device login put Ctrl-C back as it found it
+    signal.signal(signal.SIGINT, before)
 
 
 def serve(monkeypatch, request, script, **kw):
@@ -132,16 +143,17 @@ def test_ctrl_c_while_waiting_saves_nothing(home, monkeypatch, request, capsys):
     def sleep(s):
         calls.append(s)
         if len(calls) == 2:
-            raise KeyboardInterrupt
+            signal.raise_signal(signal.SIGINT)  # Ctrl-C, as the terminal delivers it
 
     monkeypatch.setattr("time.sleep", sleep)
+    monkeypatch.setattr(_devicelogin, "_wait", lambda _stop, s: sleep(s), raising=False)
     assert _commands.main(["login", "--device"]) == 130
     assert "clearcote: cancelled. Nothing was saved." in capsys.readouterr().err
     assert not key_file(home).exists()
     assert len(fake.token_polls()) == 1  # the approval after Ctrl-C was never fetched
 
 
-def test_code_expiring_locally_stops_polling(home, monkeypatch, request, capsys):
+def test_a_server_that_never_ends_it_is_given_up_on_two_minutes_past_expiry(home, monkeypatch, request, capsys):
     fake = serve(monkeypatch, request, ["pending"] * 50, expires_in=12)
     t = [0.0]
 
@@ -152,7 +164,65 @@ def test_code_expiring_locally_stops_polling(home, monkeypatch, request, capsys)
         _commands.device_login(sleep=sleep, clock=lambda: t[0])
     assert exc.value.code == 1
     assert "the code expired before it was approved" in capsys.readouterr().err
-    assert len(fake.token_polls()) == 3  # at 5, 10 and 15 s; no poll once the 12 s were up
+    assert len(fake.token_polls()) == 27  # every 5 s up to 12 + 120 s, the hard cap
+
+
+def test_an_approval_collected_after_expires_in_is_kept(home, monkeypatch, request, capsys):
+    # The server keeps an approved key collectable past expires_in, and says authorization_pending while
+    # it prepares one: the client must keep asking rather than trust its own expiry clock.
+    fake = serve(monkeypatch, request, ["pending"] * 5 + ["ok"], expires_in=12)
+    t = [0.0]
+
+    def sleep(s):
+        t[0] += s
+
+    assert _commands.device_login(sleep=sleep, clock=lambda: t[0]) == 0
+    assert key_file(home).read_text().strip() == LICENSE_KEY
+    assert len(fake.token_polls()) == 6 and t[0] == 30
+
+
+def test_the_masked_account_email_is_shown(home, sleeps, monkeypatch, request, capsys):
+    serve(monkeypatch, request, ["ok"], account_email="s***@example.com")
+    assert _commands.main(["login", "--device"]) == 0
+    out = capsys.readouterr().out
+    assert "Signed in as s***@example.com" in out
+
+
+def test_the_token_call_waits_a_minute_for_its_answer(home, sleeps, monkeypatch, request):
+    serve(monkeypatch, request, ["ok"])
+    seen = []
+    real = _devicelogin.proxied_request
+
+    def spy(url, **kw):
+        seen.append((url.rsplit("/", 1)[-1], kw.get("timeout")))
+        return real(url, **kw)
+
+    monkeypatch.setattr(_devicelogin, "proxied_request", spy)
+    assert _commands.main(["login", "--device"]) == 0
+    assert dict(seen)["token"] >= 60  # a key being prepared must not be given up on after 15 s
+
+
+def test_a_lost_answer_is_reported_as_possibly_approved_with_backoff(home, sleeps, monkeypatch, request, capsys):
+    # The token answer (the key) comes after the client gave up: the server has handed it out, so the next
+    # poll is answered expired_token. That must not be reported as "the code expired before it was approved".
+    monkeypatch.setattr(_devicelogin, "TOKEN_TIMEOUT", 0.5, raising=False)
+    fake = serve(monkeypatch, request, ["pending", "slow-ok"], slow_seconds=2.0)
+    assert _commands.main(["login", "--device"]) == 1
+    err = capsys.readouterr().err
+    assert "the sign-in may have been approved" in err and "Run `clearcote login --device` again." in err
+    assert "the code expired before it was approved" not in err
+    assert sleeps == [5, 5, 10]  # the timeout doubled the interval (RFC 8628 section 3.5)
+    assert len(fake.token_polls()) == 3 and not key_file(home).exists()
+
+
+def test_ctrl_c_during_the_request_that_brings_the_key_still_saves_it(home, sleeps, monkeypatch, request, capsys):
+    # Ctrl-C lands while the answer carrying the key is on its way. The server has handed it out once; the
+    # outcome must not depend on timing: the request finishes, the key is saved, and the CLI says so.
+    serve(monkeypatch, request, ["pending", "sigint-ok"])
+    assert _commands.main(["login", "--device"]) == 0
+    out = capsys.readouterr().out
+    assert key_file(home).read_text().strip() == LICENSE_KEY
+    assert "Ctrl-C came after the licence server had sent the key, so it was saved anyway" in out
 
 
 def test_key_and_device_together_is_a_usage_error(home, capsys):

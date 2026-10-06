@@ -105,7 +105,7 @@ function log(quiet: boolean | undefined, msg: string): void {
   if (!quiet) process.stderr.write(`[clearcote] ${msg}\n`);
 }
 
-function autoUpdateRequested(opt: boolean | undefined): boolean {
+export function autoUpdateRequested(opt: boolean | undefined): boolean {
   if (opt !== undefined) return opt;
   const env = process.env.CLEARCOTE_AUTO_UPDATE;
   return env === "1" || env === "true";

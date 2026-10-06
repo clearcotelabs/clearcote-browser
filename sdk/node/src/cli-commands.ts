@@ -13,7 +13,6 @@
 // `info` never downloads: it reports what is already cached and what a launch would resolve to.
 
 import { parseArgs } from "node:util";
-import * as readline from "node:readline";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -33,7 +32,7 @@ import {
   RELEASE,
   type SessionSeats,
 } from "./index.js";
-import { defaultCacheRoot, listCachedBuilds } from "./download.js";
+import { autoUpdateRequested, defaultCacheRoot, listCachedBuilds } from "./download.js";
 import { DeviceLoginError, pollForKey, requestDeviceCode } from "./devicelogin.js";
 import { licenseExpiry, removeLicenseMeta, saveLicenseMeta, type LicenseExpiry } from "./license.js";
 import { geoCacheRoot } from "./geoip.js";
@@ -124,9 +123,11 @@ export interface InfoReport {
     cached: Array<{ tag: string; path: string }>;
     pinnedFree: string;
     releaseChannel: string;
+    /** Why `path` is the build launch() would run for the current licence state (or why there is none). */
+    selectedBy?: string;
   };
   engineFeatures?: Record<string, boolean>;
-  launch?: { tested: boolean; ok?: boolean; version?: string; error?: string; missingLibs?: string[]; reason?: string };
+  launch?: { tested: boolean; ok?: boolean; version?: string; build?: string; error?: string; missingLibs?: string[]; reason?: string };
   fonts?: { bundled: boolean; note: string };
   geoip: { databaseCached: boolean; path: string; proxy?: { exitIp?: string; country?: string; timezone?: string; acceptLanguage?: string; error?: string } };
 }
@@ -141,7 +142,38 @@ function missingSharedLibs(exe: string): string[] {
   return (r.stdout || "").split("\n").filter((l) => l.includes("not found")).map((l) => l.trim().split(" ")[0]);
 }
 
-export async function buildInfo(flags: { quick?: boolean; proxy?: string }): Promise<InfoReport> {
+/**
+ * The build launch() would run for the current licence state, from what is already cached (`info` never
+ * downloads). CLEARCOTE_BINARY wins. With a licence key, launch() runs a licensed build: the newest one
+ * cached (launch() itself asks the licence server, which may name a newer one). Without a key it runs the
+ * open build this SDK pins (the newest cached open build with CLEARCOTE_AUTO_UPDATE). A cached licensed
+ * build is never picked for a keyless setup: it cannot run without a key, which is what made the old
+ * "newest cached build" launch test fail for open-build users.
+ */
+export function launchBuild(
+  cached: Array<{ tag: string; path: string }>, envBinary?: string, licenseKey?: string, autoUpdate = false,
+): { pick?: { path: string; tag?: string }; selectedBy: string } {
+  if (envBinary) return { pick: { path: envBinary }, selectedBy: "CLEARCOTE_BINARY" };
+  if (licenseKey) {
+    const licensed = cached.filter((c) => c.tag.startsWith("pro-"));
+    return licensed.length
+      ? { pick: licensed[0], selectedBy: "licensed: the newest cached licensed build (launch() asks the licence server, which may name a newer one)" }
+      : { selectedBy: "no licensed build is cached — run: clearcote install" };
+  }
+  if (autoUpdate) {
+    const open = cached.filter((c) => !c.tag.startsWith("pro-"));
+    if (open.length) return { pick: open[0], selectedBy: "open build: the newest cached (CLEARCOTE_AUTO_UPDATE)" };
+  }
+  const pinned = cached.find((c) => c.tag === RELEASE.tag);
+  return pinned
+    ? { pick: pinned, selectedBy: `open build pinned by this SDK (${RELEASE.tag})` }
+    : { selectedBy: `the open build this SDK pins (${RELEASE.tag}) is not installed — run: clearcote install` };
+}
+
+export async function buildInfo(
+  flags: { quick?: boolean; proxy?: string },
+  launchFn: (o: Record<string, unknown>) => Promise<{ version(): string; close(): Promise<void> }> = launch as never,
+): Promise<InfoReport> {
   const src = licenseKeySource();
   let channel: string;
   try {
@@ -151,17 +183,18 @@ export async function buildInfo(flags: { quick?: boolean; proxy?: string }): Pro
   }
   const cached = listCachedBuilds();
   const envBinary = process.env.CLEARCOTE_BINARY;
-  const pick = envBinary ? { path: envBinary } : cached[0];
+  const { pick, selectedBy } = launchBuild(cached, envBinary, resolveLicenseKey(), autoUpdateRequested(undefined));
   const report: InfoReport = {
     sdk: { version: SDK_VERSION, node: process.version, platform: `${process.platform}-${process.arch}` },
     license: { source: src.source, ...(src.masked ? { key: src.masked } : {}) },
     binary: {
       source: envBinary ? "CLEARCOTE_BINARY" : pick ? "cache" : "none",
       ...(pick ? { path: pick.path } : {}),
-      ...(!envBinary && pick ? { tag: (pick as { tag: string }).tag } : {}),
+      ...(!envBinary && pick?.tag ? { tag: pick.tag } : {}),
       cached,
       pinnedFree: `${RELEASE.version} (${RELEASE.tag})`,
       releaseChannel: channel,
+      selectedBy,
     },
     geoip: { databaseCached: existsSync(geoDbPath()), path: geoDbPath() },
   };
@@ -190,17 +223,17 @@ export async function buildInfo(flags: { quick?: boolean; proxy?: string }): Pro
   if (flags.quick) {
     report.launch = { tested: false, reason: "skipped (--quick)" };
   } else if (!pick) {
-    report.launch = { tested: false, reason: "no binary installed — run: clearcote install" };
+    report.launch = { tested: false, reason: cached.length ? selectedBy : "no binary installed — run: clearcote install" };
   } else {
     try {
       // cloud: false — this tests the LOCAL install, whatever CLEARCOTE_CLOUD says.
-      const b = await launch({ executablePath: pick.path, headless: true, quiet: true, ephemeralProfile: false, cloud: false });
+      const b = await launchFn({ executablePath: pick.path, headless: true, quiet: true, ephemeralProfile: false, cloud: false });
       const version = b.version();
       await b.close();
-      report.launch = { tested: true, ok: true, version };
+      report.launch = { tested: true, ok: true, version, build: pick.tag ?? pick.path };
     } catch (e) {
       const libs = missingSharedLibs(pick.path);
-      report.launch = { tested: true, ok: false, error: (e as Error).message.split("\n")[0], ...(libs.length ? { missingLibs: libs } : {}) };
+      report.launch = { tested: true, ok: false, error: (e as Error).message.split("\n")[0], build: pick.tag ?? pick.path, ...(libs.length ? { missingLibs: libs } : {}) };
     }
   }
 
@@ -224,7 +257,14 @@ function printInfo(r: InfoReport): void {
     if (seats.state === "ok") out(`Seats           ${seats.used} of ${seats.limit ?? "unlimited"} in use${seats.plan ? `  (plan: ${seats.plan})` : ""}`);
     else out(`Seats           unavailable: ${seats.reason ?? seats.state}`);
   }
-  out(`Binary          ${r.binary.path ? `${r.binary.path}${r.binary.tag ? `  [${r.binary.tag}]` : ""} (${r.binary.source})` : "not installed — run: clearcote install"}`);
+  if (r.binary.path) {
+    out(`Binary          ${r.binary.path}${r.binary.tag ? `  [${r.binary.tag}]` : ""} (${r.binary.source})`);
+    out(`                launch() runs this one: ${r.binary.selectedBy}`);
+  } else if (r.binary.cached.length) {
+    out(`Binary          none for this setup: ${r.binary.selectedBy}`);
+  } else {
+    out("Binary          not installed — run: clearcote install");
+  }
   out(`Release channel ${r.binary.releaseChannel}`);
   out(`Free pin        ${r.binary.pinnedFree}`);
   if (r.binary.cached.length > 1) out(`Also cached     ${r.binary.cached.slice(1).map((c) => c.tag).join(", ")}`);
@@ -233,9 +273,9 @@ function printInfo(r: InfoReport): void {
   }
   if (r.launch) {
     if (!r.launch.tested) out(`Launch test     ${r.launch.reason}`);
-    else if (r.launch.ok) out(`Launch test     ok (${r.launch.version})`);
+    else if (r.launch.ok) out(`Launch test     ok (${r.launch.version}) with ${r.launch.build}`);
     else {
-      out(`Launch test     FAILED: ${r.launch.error}`);
+      out(`Launch test     FAILED with ${r.launch.build}: ${r.launch.error}`);
       for (const lib of r.launch.missingLibs ?? []) out(`                missing library: ${lib}`);
     }
   }
@@ -255,7 +295,11 @@ function err(line = ""): void {
  * `clearcote login --device`: show a link and a short code, wait for the approval in the browser, then
  * save the key it issues exactly as `clearcote login <key>` does. The key is never printed.
  * Instructions go to stderr and the result to stdout, like the paste login's prompt. Output and exit
- * codes match the Python CLI (test/device-login.test.ts). Ctrl-C cancels and saves nothing (exit 130).
+ * codes match the Python CLI (test/device-login.test.ts).
+ *
+ * Ctrl-C is deterministic: it never tears down a request already on its way (its answer may be the key,
+ * which the server hands out once). Ctrl-C before the key arrives saves nothing (exit 130); one that lands
+ * while the request that brings the key is in flight still saves it, and says so.
  */
 export async function deviceLogin(opts: { sleep?: (s: number, signal?: AbortSignal) => Promise<void>; clock?: () => number } = {}): Promise<void> {
   const ctrl = new AbortController();
@@ -264,6 +308,7 @@ export async function deviceLogin(opts: { sleep?: (s: number, signal?: AbortSign
   let grant;
   try {
     const code = await requestDeviceCode();
+    if (ctrl.signal.aborted) throw new DeviceLoginError("cancelled", "cancelled");
     err("To sign in, open this link in a browser and approve the code shown there:");
     err("");
     err(`  ${code.verification_uri_complete}`);
@@ -287,7 +332,8 @@ export async function deviceLogin(opts: { sleep?: (s: number, signal?: AbortSign
         err("");
         fail("cancelled. Nothing was saved.", 130);
       }
-      fail(`${e.message}. Nothing was saved.${e.code === "expired_token" ? " Run `clearcote login --device` again." : ""}`);
+      const again = e.code === "expired_token" || e.code === "outcome_unknown" ? " Run `clearcote login --device` again." : "";
+      fail(`${e.message}. Nothing was saved.${again}`);
     }
     throw e;
   } finally {
@@ -295,21 +341,101 @@ export async function deviceLogin(opts: { sleep?: (s: number, signal?: AbortSign
   }
   const where = saveLicenseKey(grant.licenseKey);
   saveLicenseMeta(grant.licenseKey, grant.plan, grant.expiresAt);
+  if (grant.accountEmail) out(`Signed in as ${grant.accountEmail}`);
   out(`saved to ${where}`);
   out(`plan ${grant.plan || "unknown"}, ${grant.expiresAt ? `expires ${grant.expiresAt}` : "no expiry"}`);
+  if (ctrl.signal.aborted) out("note: Ctrl-C came after the licence server had sent the key, so it was saved anyway");
   if (process.env.CLEARCOTE_LICENSE_KEY) out("note: CLEARCOTE_LICENSE_KEY is set in this environment and takes precedence over the saved key");
+}
+
+/** The parts of a TTY input stream readHidden uses. */
+export interface HiddenInput {
+  isTTY?: boolean;
+  setRawMode?(mode: boolean): unknown;
+  setEncoding(enc: BufferEncoding): unknown;
+  on(ev: "data", fn: (chunk: string) => void): unknown;
+  removeListener(ev: "data", fn: (chunk: string) => void): unknown;
+  resume(): unknown;
+  pause(): unknown;
+}
+
+/**
+ * Read one line from a terminal without echoing it: raw mode, so the terminal shows nothing of what is typed
+ * or pasted (a screen share, a recording or the scrollback must not show a key). Enter ends it, Backspace
+ * edits, Ctrl-C rejects with "cancelled". Terminal escape sequences (bracketed paste) are dropped.
+ */
+export function readHidden(input: HiddenInput, output: { write(s: string): unknown }, prompt: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    output.write(prompt);
+    let value = "";
+    const finish = (err?: Error) => {
+      input.removeListener("data", onData);
+      input.setRawMode?.(false);
+      input.pause();
+      output.write("\n");
+      if (err) reject(err);
+      else resolve(value.replace(/\x1b\[[0-9;]*[~A-Za-z]/g, "").trim());
+    };
+    const onData = (chunk: string) => {
+      for (const ch of chunk) {
+        if (ch === "\r" || ch === "\n" || ch === "\u0004") return finish();
+        if (ch === "\u0003") return finish(new Error("cancelled"));
+        if (ch === "\u007f" || ch === "\b") value = value.slice(0, -1);
+        else value += ch;
+      }
+    };
+    input.setRawMode?.(true);
+    input.setEncoding("utf8");
+    input.on("data", onData);
+    input.resume();
+  });
 }
 
 async function promptKey(): Promise<string> {
   if (!process.stdin.isTTY) {
     fail("no key given. Run `clearcote login <key>`, or copy a key from https://www.clearcotelabs.com/dashboard/licenses");
   }
-  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-  const key = await new Promise<string>((resolve) =>
-    rl.question("Paste your licence key (https://www.clearcotelabs.com/dashboard/licenses): ", (a) => resolve(a)),
-  );
-  rl.close();
-  return key.trim();
+  try {
+    return await readHidden(process.stdin, process.stderr, "Paste your licence key (https://www.clearcotelabs.com/dashboard/licenses; it is not shown): ");
+  } catch {
+    return fail("cancelled. Nothing was saved.", 130);
+  }
+}
+
+/** What `clearcote <command> --help` adds to that command's USAGE lines. */
+const COMMAND_NOTES: Record<string, string> = {
+  login: "Saves a licence key to ~/.clearcote/license.key, where every launch finds it.\n"
+    + "  <key>      the key, checked with the licence server first\n"
+    + "  (no key)   asks for it on the terminal; what you paste is not shown\n"
+    + "  --device   sign in from a browser instead: shows a link and a code, and saves the key the\n"
+    + "             site issues once you approve it there. Nothing to copy or paste.",
+  logout: "Removes the saved key (and what device login recorded about it).",
+  info: "Reports the SDK, the licence, the cached builds and what a launch would use. Never downloads.",
+  install: "Downloads and verifies the build a launch would use.",
+  update: "Fetches a newer build if one exists.",
+  "clear-cache": "Deletes every cached browser build (nothing else in the cache directory).",
+  serve: "A CDP endpoint that gives every connection its own browser and identity.",
+};
+
+/** `clearcote <cmd> --help`: that command's lines from USAGE (with their flag sections) and a note. */
+export function commandUsage(cmd: string): string {
+  const name = cmd === "doctor" ? "info" : cmd;
+  const lines = USAGE.split("\n");
+  const picked: string[] = [];
+  let keep = false;
+  for (const line of lines.slice(lines.indexOf("USAGE") + 1)) {
+    if (!line.trim()) break;
+    if (line.startsWith("  clearcote ")) keep = line.trim().split(/\s+/)[1] === name;
+    if (keep) picked.push(line);
+  }
+  let text = `USAGE\n${picked.join("\n")}`;
+  if (name === "info") {
+    const flags = lines.slice(lines.indexOf("INFO FLAGS"));
+    const end = flags.indexOf("");
+    text += `\n\n${flags.slice(0, end < 0 ? flags.length : end).join("\n")}`;
+  }
+  const note = COMMAND_NOTES[name];
+  return note ? `clearcote ${name} -- ${note}\n\n${text}` : text;
 }
 
 function dirSize(p: string): number {
@@ -337,6 +463,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (cmd === "cloud") {
     const code = await cloudMain(rest);
     if (code) process.exitCode = code;
+    return;
+  }
+
+  const known = ["info", "doctor", "install", "update", "clear-cache", "login", "logout", "serve"];
+  if (known.includes(cmd) && rest.some((a) => a === "-h" || a === "--help")) {
+    out(commandUsage(cmd));
     return;
   }
 

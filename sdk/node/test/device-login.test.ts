@@ -7,6 +7,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { USAGE, deviceLogin, main } from "../src/cli-commands.js";
+import { deviceLoginTimeouts } from "../src/devicelogin.js";
 import { licenseKeyPath } from "../src/license.js";
 import { startFakeDevice, DEVICE_CODE, LICENSE_KEY, USER_CODE, type FakeDevice, type FakeDeviceOptions } from "./helpers/fake-device.js";
 import { startOrigin } from "./helpers/proxies.js";
@@ -175,12 +176,62 @@ describe("clearcote login --device", () => {
     expect(process.listenerCount("SIGINT")).toBe(listeners);
   });
 
-  it("stops polling once the code has expired locally", async () => {
+  it("gives up on a server that never ends it two minutes past expiry", async () => {
     const fake = await serve(Array(50).fill("pending"), { expiresIn: 12 });
     let t = 0;
     await expect(deviceLogin({ sleep: async (s) => { t += s * 1000; }, clock: () => t })).rejects.toThrow("exit 1");
     expect(errOut).toContain("the code expired before it was approved");
-    expect(fake.tokenPolls()).toHaveLength(3); // at 5, 10 and 15 s; none once the 12 s were up
+    expect(fake.tokenPolls()).toHaveLength(27); // every 5 s up to 12 + 120 s, the hard cap
+  });
+
+  it("keeps an approval collected after expires_in", async () => {
+    // The server keeps an approved key collectable past expires_in and says authorization_pending while it
+    // prepares one: the client must keep asking rather than trust its own expiry clock.
+    const fake = await serve([...Array(5).fill("pending"), "ok"], { expiresIn: 12 });
+    let t = 0;
+    await deviceLogin({ sleep: async (s) => { t += s * 1000; }, clock: () => t });
+    expect(readFileSync(keyFile(), "utf8").trim()).toBe(LICENSE_KEY);
+    expect(fake.tokenPolls()).toHaveLength(6);
+    expect(t).toBe(30_000);
+  });
+
+  it("shows the masked account email", async () => {
+    await serve(["ok"], { accountEmail: "s***@example.com" });
+    await deviceLogin({ sleep: recordingSleep([]) });
+    expect(out).toContain("Signed in as s***@example.com");
+  });
+
+  it("the token call waits a minute for its answer", () => {
+    expect(deviceLoginTimeouts.tokenMs).toBeGreaterThanOrEqual(60_000); // a key being prepared is not given up on after 15 s
+  });
+
+  it("a lost answer is reported as possibly approved, with backoff", async () => {
+    // The answer carrying the key comes after the client gave up: the server has handed it out, so the next
+    // poll is answered expired_token. That must not be reported as "the code expired before it was approved".
+    const saved = deviceLoginTimeouts.tokenMs;
+    deviceLoginTimeouts.tokenMs = 500;
+    try {
+      const fake = await serve(["pending", "slow-ok"], { slowMs: 2000 });
+      const sleeps: number[] = [];
+      await expect(deviceLogin({ sleep: recordingSleep(sleeps) })).rejects.toThrow("exit 1");
+      expect(errOut).toContain("the sign-in may have been approved");
+      expect(errOut).toContain("Run `clearcote login --device` again.");
+      expect(errOut).not.toContain("the code expired before it was approved");
+      expect(sleeps).toEqual([5, 5, 10]); // the timeout doubled the interval (RFC 8628 section 3.5)
+      expect(fake.tokenPolls()).toHaveLength(3);
+      expect(existsSync(keyFile())).toBe(false);
+    } finally {
+      deviceLoginTimeouts.tokenMs = saved;
+    }
+  });
+
+  it("Ctrl-C during the request that brings the key still saves it, and says so", async () => {
+    const onSpy = vi.spyOn(process, "on");
+    const ctrlC = () => (onSpy.mock.calls.find(([ev]) => ev === "SIGINT")?.[1] as () => void)();
+    await serve(["pending", "hook-ok"], { onKeyRequest: ctrlC });
+    await deviceLogin({ sleep: recordingSleep([]) });
+    expect(readFileSync(keyFile(), "utf8").trim()).toBe(LICENSE_KEY);
+    expect(out).toContain("Ctrl-C came after the licence server had sent the key, so it was saved anyway");
   });
 
   it("a key and --device together is a usage error", async () => {

@@ -8,7 +8,10 @@
 //     "expired" -> 400 expired_token           "denied"  -> 400 access_denied
 //     "invalid" -> 400 invalid_request         "429"     -> 429 (rate limited)
 //     "500"     -> 500                         "drop"    -> connection destroyed, no answer
-//     "ok"      -> 200 {license_key, plan, expires_at}
+//     "ok"      -> 200 {license_key, plan, expires_at[, account_email]}
+//     "slow-ok" -> the key, but only after `slowMs` (handed out at once: a client that gave up has lost it,
+//                  and later polls are answered expired_token)
+//     "hook-ok" -> calls `onKeyRequest()` (e.g. Ctrl-C landing mid-request), then the key
 //   A wrong device_code is answered 400 invalid_request whatever the script says.
 import http from "node:http";
 import type net from "node:net";
@@ -28,6 +31,9 @@ export interface FakeDeviceOptions {
   expiresIn?: number;
   codeStatus?: number;
   retryAfter?: number;
+  accountEmail?: string;
+  slowMs?: number;
+  onKeyRequest?: () => void;
 }
 
 export interface FakeDevice {
@@ -39,6 +45,7 @@ export interface FakeDevice {
 
 export async function startFakeDevice(script: string[], o: FakeDeviceOptions = {}): Promise<FakeDevice> {
   const queue = [...script];
+  let handedOut = false;
   const log: FakeDevice["log"] = [];
   let url = "";
   const send = (res: http.ServerResponse, status: number, payload: unknown, headers: Record<string, string> = {}) => {
@@ -63,10 +70,27 @@ export async function startFakeDevice(script: string[], o: FakeDeviceOptions = {
       }
       if (req.url === "/api/v1/device/token") {
         if (!body || body.device_code !== DEVICE_CODE) return send(res, 400, { error: "invalid_request" });
+        if (handedOut) return send(res, 400, { error: "expired_token" }); // the key goes out once
         const step = queue.shift() ?? "pending";
         if (step === "drop") return void req.socket.destroy(); // no status line: the client sees the connection go
+        const grant = () => ({
+          license_key: LICENSE_KEY, plan: o.plan ?? "pro", expires_at: o.expiresAt === undefined ? "2027-01-31T00:00:00.000Z" : o.expiresAt,
+          ...(o.accountEmail ? { account_email: o.accountEmail } : {}),
+        });
+        if (step === "slow-ok") {
+          handedOut = true; // handed out now; the answer is what is slow
+          setTimeout(() => { try { send(res, 200, grant()); } catch { /* the client gave up on it */ } }, o.slowMs ?? 2000);
+          return;
+        }
+        if (step === "hook-ok") {
+          o.onKeyRequest?.();
+          handedOut = true;
+          setTimeout(() => send(res, 200, grant()), 200);
+          return;
+        }
         if (step === "ok") {
-          return send(res, 200, { license_key: LICENSE_KEY, plan: o.plan ?? "pro", expires_at: o.expiresAt === undefined ? "2027-01-31T00:00:00.000Z" : o.expiresAt });
+          handedOut = true;
+          return send(res, 200, grant());
         }
         if (step === "429") return send(res, 429, { error: "Rate limit exceeded." }, o.retryAfter ? { "retry-after": String(o.retryAfter) } : {});
         if (step === "500") return send(res, 500, { error: "internal" });

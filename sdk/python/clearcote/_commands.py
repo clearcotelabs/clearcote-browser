@@ -120,13 +120,41 @@ def _missing_shared_libs(exe):
     return [line.strip().split(" ")[0] for line in (r.stdout or "").splitlines() if "not found" in line]
 
 
+def launch_build(cached, env_binary=None, license_key=None, auto_update=False):
+    """The build ``launch()`` would run for the current licence state, from what is already cached
+    (``info`` never downloads): ``({"path", "tag"?}, how it was chosen)``, or ``(None, why there is none)``.
+
+    CLEARCOTE_BINARY wins. With a licence key, launch() runs a licensed build: the newest one cached
+    (launch() itself asks the licence server, which may name a newer one). Without a key it runs the open
+    build this SDK pins (the newest cached open build with CLEARCOTE_AUTO_UPDATE). A cached licensed build
+    is never picked for a keyless setup: without a key it cannot run, which is what made the old "newest
+    cached build" launch test fail for open-build users."""
+    from .release import RELEASE
+
+    if env_binary:
+        return {"path": env_binary}, "CLEARCOTE_BINARY"
+    if license_key:
+        licensed = [c for c in cached if c["tag"].startswith("pro-")]
+        if licensed:
+            return licensed[0], "licensed: the newest cached licensed build (launch() asks the licence server, which may name a newer one)"
+        return None, "no licensed build is cached — run: clearcote install"
+    if auto_update:
+        open_builds = [c for c in cached if not c["tag"].startswith("pro-")]
+        if open_builds:
+            return open_builds[0], "open build: the newest cached (CLEARCOTE_AUTO_UPDATE)"
+    pinned = [c for c in cached if c["tag"] == RELEASE["tag"]]
+    if pinned:
+        return pinned[0], f"open build pinned by this SDK ({RELEASE['tag']})"
+    return None, f"the open build this SDK pins ({RELEASE['tag']}) is not installed — run: clearcote install"
+
+
 def build_info(quick=False, proxy=None, launch_fn=None):
     """What ``clearcote info`` reports; also the ``--json`` shape (same keys as the Node CLI)."""
     import platform as _platform
 
     from ._launchopts import GATED_ENGINE_SWITCHES, engine_supports_switch
-    from ._license import get_session_seats, license_expiry, license_key_source
-    from .download import list_cached_builds, resolve_release_channel
+    from ._license import get_session_seats, license_expiry, license_key_source, resolve_license_key
+    from .download import _auto_update_requested, list_cached_builds, resolve_release_channel
     from .release import RELEASE
 
     src = license_key_source()
@@ -136,7 +164,7 @@ def build_info(quick=False, proxy=None, launch_fn=None):
         channel = f"invalid ({e})"
     cached = list_cached_builds()
     env_binary = os.environ.get("CLEARCOTE_BINARY")
-    pick = {"path": env_binary} if env_binary else (cached[0] if cached else None)
+    pick, selected_by = launch_build(cached, env_binary, resolve_license_key(), _auto_update_requested(None))
     license_info = {"source": src["source"]}
     if src.get("masked"):
         license_info["key"] = src["masked"]
@@ -149,7 +177,7 @@ def build_info(quick=False, proxy=None, launch_fn=None):
         if not env_binary:
             binary["tag"] = pick["tag"]
     binary.update({"cached": cached, "pinnedFree": f"{RELEASE['version']} ({RELEASE['tag']})",
-                   "releaseChannel": channel})
+                   "releaseChannel": channel, "selectedBy": selected_by})
     report = {
         "sdk": {"version": _sdk_version(), "python": _platform.python_version(),
                 "platform": f"{sys.platform}-{_platform.machine().lower()}"},
@@ -176,7 +204,7 @@ def build_info(quick=False, proxy=None, launch_fn=None):
     if quick:
         report["launch"] = {"tested": False, "reason": "skipped (--quick)"}
     elif not pick:
-        report["launch"] = {"tested": False, "reason": "no binary installed — run: clearcote install"}
+        report["launch"] = {"tested": False, "reason": selected_by if cached else "no binary installed — run: clearcote install"}
     else:
         if launch_fn is None:
             from . import launch as launch_fn  # noqa: N806
@@ -189,9 +217,10 @@ def build_info(quick=False, proxy=None, launch_fn=None):
                 version = version() if callable(version) else version
             finally:
                 b.close()
-            report["launch"] = {"tested": True, "ok": True, "version": version}
+            report["launch"] = {"tested": True, "ok": True, "version": version, "build": pick.get("tag") or pick["path"]}
         except Exception as e:  # noqa: BLE001
-            entry = {"tested": True, "ok": False, "error": (str(e).splitlines() or [type(e).__name__])[0]}
+            entry = {"tested": True, "ok": False, "error": (str(e).splitlines() or [type(e).__name__])[0],
+                     "build": pick.get("tag") or pick["path"]}
             libs = _missing_shared_libs(pick["path"])
             if libs:
                 entry["missingLibs"] = libs
@@ -229,6 +258,9 @@ def print_info(r):
     if b.get("path"):
         tag = f"  [{b['tag']}]" if b.get("tag") else ""
         _out(f"Binary          {b['path']}{tag} ({b['source']})")
+        _out(f"                launch() runs this one: {b.get('selectedBy')}")
+    elif b.get("cached"):
+        _out(f"Binary          none for this setup: {b.get('selectedBy')}")
     else:
         _out("Binary          not installed — run: clearcote install")
     _out(f"Release channel {b['releaseChannel']}")
@@ -242,9 +274,9 @@ def print_info(r):
         if not la["tested"]:
             _out(f"Launch test     {la['reason']}")
         elif la.get("ok"):
-            _out(f"Launch test     ok ({la['version']})")
+            _out(f"Launch test     ok ({la['version']}) with {la.get('build')}")
         else:
-            _out(f"Launch test     FAILED: {la['error']}")
+            _out(f"Launch test     FAILED with {la.get('build')}: {la['error']}")
             for lib in la.get("missingLibs") or []:
                 _out(f"                missing library: {lib}")
     if r.get("fonts"):
@@ -257,12 +289,54 @@ def print_info(r):
 
 
 def _prompt_key():
+    """Ask for the key on the terminal without echoing it (it is a secret: a screen share, a recording or
+    the scrollback must not show it). `clearcote login <key>` keeps working for scripts."""
     if not sys.stdin or not sys.stdin.isatty():
         fail("no key given. Run `clearcote login <key>`, or copy a key from "
              "https://www.clearcotelabs.com/dashboard/licenses")
-    sys.stderr.write("Paste your licence key (https://www.clearcotelabs.com/dashboard/licenses): ")
-    sys.stderr.flush()
-    return (sys.stdin.readline() or "").strip()
+    import getpass
+    try:
+        key = getpass.getpass("Paste your licence key (https://www.clearcotelabs.com/dashboard/licenses; "
+                              "it is not shown): ", stream=sys.stderr)
+    except EOFError:
+        key = ""
+    return (key or "").strip()
+
+
+# What `clearcote <command> --help` adds to that command's USAGE lines.
+COMMAND_NOTES = {
+    "login": ("Saves a licence key to ~/.clearcote/license.key, where every launch finds it.\n"
+              "  <key>      the key, checked with the licence server first\n"
+              "  (no key)   asks for it on the terminal; what you paste is not shown\n"
+              "  --device   sign in from a browser instead: shows a link and a code, and saves the key the\n"
+              "             site issues once you approve it there. Nothing to copy or paste."),
+    "logout": "Removes the saved key (and what device login recorded about it).",
+    "info": "Reports the SDK, the licence, the cached builds and what a launch would use. Never downloads.",
+    "install": "Downloads and verifies the build a launch would use.",
+    "update": "Fetches a newer build if one exists.",
+    "clear-cache": "Deletes every cached browser build (nothing else in the cache directory).",
+    "serve": "A CDP endpoint that gives every connection its own browser and identity.",
+}
+
+
+def command_usage(cmd):
+    """``clearcote <cmd> --help``: that command's lines from USAGE (with their flag sections) and a note."""
+    cmd = "info" if cmd == "doctor" else cmd
+    lines = usage().splitlines()
+    picked, keep = [], False
+    for line in lines[lines.index("USAGE") + 1:]:
+        if not line.strip():
+            break
+        if line.startswith("  clearcote "):
+            keep = line.split()[1] == cmd
+        if keep:
+            picked.append(line)
+    text = "USAGE\n" + "\n".join(picked)
+    if cmd == "info":
+        flags = lines[lines.index("INFO FLAGS"):]
+        text += "\n\n" + "\n".join(flags[:flags.index("") if "" in flags else len(flags)])
+    note = COMMAND_NOTES.get(cmd)
+    return f"clearcote {cmd} -- {note}\n\n{text}" if note else text
 
 
 def _err(line=""):
@@ -274,15 +348,38 @@ def device_login(sleep=None, clock=None):
     """``clearcote login --device``: show a link and a short code, wait for the approval in the
     browser, then save the key it issues exactly as ``clearcote login <key>`` does. The key is never
     printed. Instructions go to stderr and the result to stdout, like the paste login's prompt.
-    Output and exit codes match the Node CLI (tests/test_device_login.py)."""
+    Output and exit codes match the Node CLI (tests/test_device_login.py).
+
+    Ctrl-C is deterministic: it is noted rather than raised, so a request already on its way is never
+    torn down (its answer may be the key, which the server hands out once). Ctrl-C before the key
+    arrives saves nothing (exit 130); one that lands while the request that brings the key is in flight
+    still saves it, and says so."""
+    import signal
+    import threading
     import time as _time
 
+    from . import _devicelogin
     from ._devicelogin import DeviceLoginError, poll_for_key, request_code
     from ._license import save_license_key, save_license_meta
+
+    stop = threading.Event()
+    restore = None
+    if threading.current_thread() is threading.main_thread():
+        try:
+            restore = signal.signal(signal.SIGINT, lambda *_a: stop.set())
+        except ValueError:  # not the main interpreter thread
+            restore = None
+    wait = sleep or (lambda s: _devicelogin._wait(stop, s))  # ends at once on Ctrl-C
+
+    def cancelled():
+        if stop.is_set():
+            _err("")
+            fail("cancelled. Nothing was saved.", 130)
 
     try:
         try:
             code = request_code()
+            cancelled()
             _err("To sign in, open this link in a browser and approve the code shown there:")
             _err("")
             _err(f"  {code['verification_uri_complete']}")
@@ -296,19 +393,25 @@ def device_login(sleep=None, clock=None):
                     warned.append(reason)
                     _err(f"note: {reason}; still waiting")
 
-            got = poll_for_key(code, sleep=sleep or _time.sleep, clock=clock or _time.monotonic,
-                               on_retry=on_retry)
+            got = poll_for_key(code, sleep=wait, clock=clock or _time.monotonic, on_retry=on_retry,
+                               cancelled=stop.is_set)
         except DeviceLoginError as e:
-            fail(f"{e}. Nothing was saved." + (" Run `clearcote login --device` again."
-                                              if e.code == "expired_token" else ""))
-    except KeyboardInterrupt:
-        _err("")
-        fail("cancelled. Nothing was saved.", 130)
-    where = save_license_key(got["license_key"])
-    save_license_meta(got["license_key"], got.get("plan"), got.get("expires_at"))
+            if e.code == "cancelled":
+                cancelled()
+            again = " Run `clearcote login --device` again." if e.code in ("expired_token", "outcome_unknown") else ""
+            fail(f"{e}. Nothing was saved.{again}")
+        where = save_license_key(got["license_key"])
+        save_license_meta(got["license_key"], got.get("plan"), got.get("expires_at"))
+    finally:
+        if restore is not None:
+            signal.signal(signal.SIGINT, restore)
+    if got.get("account_email"):
+        _out(f"Signed in as {got['account_email']}")
     _out(f"saved to {where}")
     plan = got.get("plan") or "unknown"
     _out(f"plan {plan}, " + (f"expires {got['expires_at']}" if got.get("expires_at") else "no expiry"))
+    if stop.is_set():
+        _out("note: Ctrl-C came after the licence server had sent the key, so it was saved anyway")
     if os.environ.get("CLEARCOTE_LICENSE_KEY"):
         _out("note: CLEARCOTE_LICENSE_KEY is set in this environment and takes precedence over the saved key")
     return 0
@@ -742,6 +845,9 @@ def _run(argv):
     known = ("info", "doctor", "install", "update", "clear-cache", "login", "logout", "serve")
     if argv[0] not in known:
         fail(f"unknown command '{argv[0]}'. Run `clearcote --help`.", 2)
+    if any(a in ("-h", "--help") for a in argv[1:]):
+        _out(command_usage(argv[0]))
+        return 0
 
     parser = _parser()
 
