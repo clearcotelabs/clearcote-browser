@@ -17,10 +17,10 @@ public sealed class DockerLaunchTests : IDisposable
     private const int DeadPid = (1 << 22) + 12345;   // above any pid_max: never a live process
     private static readonly Dictionary<string, string> Protocol = new() { ["com.clearcotelabs.serve-protocol"] = "2" };
 
-    private static string ServeState(string engine = "open", string? proxy = null, int idle = 30, bool secrets = false) =>
+    private static string ServeState(string engine = "open", string? proxy = null, int idle = 30, bool secrets = false, string? proxyAuth = null) =>
         "[clearcote] serve-state " + JsonSerializer.Serialize(new Dictionary<string, object?>
         {
-            ["engine"] = engine, ["idle_exit"] = idle, ["protocol"] = 2, ["proxy"] = proxy, ["secrets_file"] = secrets,
+            ["engine"] = engine, ["idle_exit"] = idle, ["protocol"] = 2, ["proxy"] = proxy, ["proxy_auth"] = proxyAuth, ["secrets_file"] = secrets,
         });
 
     private sealed class FakeDocker
@@ -123,6 +123,11 @@ public sealed class DockerLaunchTests : IDisposable
     private readonly Func<IReadOnlyList<string>, IDictionary<string, string>?, int, byte[]?, Task<DockerLaunch.CliResult>> _realRun = DockerLaunch.Run;
     private readonly Func<string, string, DockerLaunch.ILogTail> _realLogs = DockerLaunch.FollowLogs;
     private readonly Func<string, BrowserTypeConnectOverCDPOptions, Task<IBrowser>>? _realConnect = DockerLaunch.ConnectOverride;
+    private readonly Func<string, string?> _realProcText = DockerLaunch.ProcText;
+    private readonly Func<bool> _realIsWindows = DockerLaunch.IsWindowsHost;
+    private readonly Func<string?> _realBoot = DockerLaunch.BootIdProbe;
+    private readonly Func<string?> _realPidNs = DockerLaunch.PidNamespaceProbe;
+    private readonly Func<System.Diagnostics.ProcessStartInfo, string?> _realPs = DockerLaunch.RunPs;
     private readonly string _home;
 
     public DockerLaunchTests()
@@ -144,6 +149,11 @@ public sealed class DockerLaunchTests : IDisposable
         DockerLaunch.Run = _realRun;
         DockerLaunch.FollowLogs = _realLogs;
         DockerLaunch.ConnectOverride = _realConnect;
+        DockerLaunch.ProcText = _realProcText;
+        DockerLaunch.IsWindowsHost = _realIsWindows;
+        DockerLaunch.BootIdProbe = _realBoot;
+        DockerLaunch.PidNamespaceProbe = _realPidNs;
+        DockerLaunch.RunPs = _realPs;
         DockerLaunch.ResetOwnerToken();
         _sb.Dispose();
     }
@@ -160,14 +170,40 @@ public sealed class DockerLaunchTests : IDisposable
         return o;
     }
 
-    private string Record(string token, object fields)
+    /// What an image from before sdk-0.40.0 can still log in to: a SOCKS5 proxy, on the licensed engine.
+    private static LaunchOptions KeyedSocks(LaunchOptions? o = null)
+    {
+        o ??= new LaunchOptions();
+        o.LicenseKey = "cc_lic_docker_test_key_1234";
+        o.Proxy = new ProxyOptions { Server = "socks5://proxy.example:1080", Username = "u", Password = "pw-plain" };
+        return o;
+    }
+
+    private string Record(string token, object fields, bool here = true)
     {
         Directory.CreateDirectory(OwnersDir);
         var path = Path.Combine(OwnersDir, token + ".json");
-        var dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(JsonSerializer.Serialize(fields))!;
+        var dict = here ? Here() : new Dictionary<string, object?>();
+        foreach (var (k, v) in JsonSerializer.Deserialize<Dictionary<string, object?>>(JsonSerializer.Serialize(fields))!) dict[k] = v;
         dict["token"] = token;
         File.WriteAllText(path, JsonSerializer.Serialize(dict));
         return path;
+    }
+
+    /// What a record written by this process carries besides pid and start (host, boot id, PID namespace).
+    private static Dictionary<string, object?> Here()
+    {
+        var (host, boot, pidns) = DockerLaunch.OwnerHere();
+        return new() { ["host"] = host, ["boot"] = boot, ["pidns"] = pidns };
+    }
+
+    private static JsonElement Json(Dictionary<string, object?> d) => JsonDocument.Parse(JsonSerializer.Serialize(d)).RootElement.Clone();
+
+    private static Dictionary<string, object?> With(Dictionary<string, object?> d, params (string Key, object? Value)[] more)
+    {
+        var r = new Dictionary<string, object?>(d);
+        foreach (var (k, v) in more) r[k] = v;
+        return r;
     }
 
     [Fact]
@@ -196,7 +232,7 @@ public sealed class DockerLaunchTests : IDisposable
     public async Task Starts_the_image_connects_and_returns_a_working_Playwright_browser()
     {
         if (_chromium is null) return;   // no Chromium here: covered where one is (see CloudLaunchLiveTests)
-        _docker.Marks = new() { ServeState("licensed", "http://proxy.example:8080", 30, true) };
+        _docker.Marks = new() { ServeState("licensed", "http://proxy.example:8080", 30, true, "engine") };
         await using var local = await LocalChromium.StartAsync(_chromium);
         _docker.CdpPort = int.Parse(local.HttpUrl[(local.HttpUrl.LastIndexOf(':') + 1)..]);
         var browser = await Clearcote.LaunchAsync(Keyed(new LaunchOptions
@@ -271,27 +307,29 @@ public sealed class DockerLaunchTests : IDisposable
         using var stub = new CdpStub();
         _docker.CdpPort = stub.Port;
         _docker.Labels = new();
-        _docker.Marks = new() { "[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)", "[clearcote] proxy: http://proxy.example:8080" };
-        var (container, exe) = await DockerLaunch.StartContainerAsync(Keyed(new LaunchOptions { Quiet = true }));
+        _docker.Marks = new() { "[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)", "[clearcote] proxy: socks5://proxy.example:1080" };
+        var (container, exe) = await DockerLaunch.StartContainerAsync(KeyedSocks(new LaunchOptions { Quiet = true }));
         Assert.Equal(0, container.ServeProtocol);
         var (argv, env, _) = _docker.Call("create");
         Assert.Equal("cc_lic_docker_test_key_1234", env["CLEARCOTE_LICENSE_KEY"]);
-        Assert.Equal("http://u:p%20w@proxy.example:8080", env["CC_PROXY"]);
+        Assert.Equal("socks5://u:pw-plain@proxy.example:1080", env["CC_PROXY"]);
         Assert.False(env.ContainsKey("CC_SECRETS_FILE"));
         Assert.False(env.ContainsKey("CC_IDLE_EXIT_SECONDS"));
         Assert.DoesNotContain("cp", _docker.Commands);
-        Assert.DoesNotContain(argv, a => a.Contains("cc_lic_docker_test_key_1234") || a.Contains("p%20w"));   // still not argv
+        Assert.DoesNotContain(argv, a => a.Contains("cc_lic_docker_test_key_1234") || a.Contains("pw-plain"));   // still not argv
         await DockerLaunch.RemoveAsync(exe, container.Id);
     }
 
     public static IEnumerable<object[]> NotApplied() => new[]
     {
-        new object[] { 2, new[] { ServeState("open", "http://proxy.example:8080", 30, true) }, "it runs the open engine" },
+        new object[] { 2, new[] { ServeState("open", "http://proxy.example:8080", 30, true, "relay") }, "it runs the open engine" },
         new object[] { 2, new[] { ServeState("licensed", null, 30, true) }, "did not apply it" },
         new object[] { 2, Array.Empty<string>(), "did not report what it applied" },
-        new object[] { 0, new[] { "[clearcote] engine: /opt/xdg-cache/clearcote/v0.1.0-pre.23/browser/chrome (free)", "[clearcote] proxy: http://proxy.example:8080" }, "it runs the open engine" },
+        // the proxy needs a password and the container did not say it can log in to it: every request would fail
+        new object[] { 2, new[] { ServeState("licensed", "http://proxy.example:8080", 30, true) }, "did not say it can log in" },
+        new object[] { 0, new[] { "[clearcote] engine: /opt/xdg-cache/clearcote/v0.1.0-pre.23/browser/chrome (free)", "[clearcote] proxy: socks5://proxy.example:1080" }, "it runs the open engine" },
         new object[] { 0, new[] { "[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)" }, "did not apply it" },
-        new object[] { 0, new[] { "[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)", "[clearcote] proxy: http://other.example:3128" }, "a different proxy" },
+        new object[] { 0, new[] { "[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)", "[clearcote] proxy: socks5://other.example:3128" }, "a different proxy" },
     };
 
     [Theory]
@@ -302,7 +340,8 @@ public sealed class DockerLaunchTests : IDisposable
         _docker.CdpPort = stub.Port;
         _docker.Labels = protocol > 0 ? new(Protocol) : new();
         _docker.Marks = marks.ToList();
-        var e = await Assert.ThrowsAsync<InvalidOperationException>(() => DockerLaunch.StartContainerAsync(Keyed(new LaunchOptions { Quiet = true })));
+        var opts = protocol > 0 ? Keyed(new LaunchOptions { Quiet = true }) : KeyedSocks(new LaunchOptions { Quiet = true });
+        var e = await Assert.ThrowsAsync<InvalidOperationException>(() => DockerLaunch.StartContainerAsync(opts));
         Assert.Contains("did not apply what LaunchAsync asked for", e.Message);
         Assert.Contains(problem, e.Message);
         Assert.Contains("stopped and removed", e.Message);
@@ -335,6 +374,65 @@ public sealed class DockerLaunchTests : IDisposable
         Assert.DoesNotContain("create", _docker.Commands);
     }
 
+    public static IEnumerable<object[]> OldImageProxies() => new[]
+    {
+        new object[] { "http://proxy.example:8080", "u", "p w", true },
+        new object[] { "https://u:p%20w@proxy.example:8443", "", "", true },
+        new object[] { "socks5://proxy.example:1080", "u", "p w", false },
+        // its licensed engine takes a SOCKS5 password, but the image hands it over as written in the URL: escaped
+        new object[] { "socks5://proxy.example:1080", "u", "p@ss w", true },
+    };
+
+    [Theory]
+    [MemberData(nameof(OldImageProxies))]
+    public async Task An_old_image_is_refused_a_proxy_it_cannot_log_in_to_before_it_starts(string server, string user, string password, bool licensed)
+    {
+        // An image from before sdk-0.40.0 drops an http(s) proxy's password (Chrome is challenged and nothing answers:
+        // every request fails), and only its licensed engine takes a SOCKS5 one. Said up front instead.
+        _docker.Labels = new();
+        var o = new LaunchOptions
+        {
+            Quiet = true, LicenseKey = licensed ? "cc_lic_docker_test_key_1234" : null,
+            Proxy = new ProxyOptions { Server = server, Username = user.Length > 0 ? user : null, Password = password.Length > 0 ? password : null },
+        };
+        var e = await Assert.ThrowsAsync<InvalidOperationException>(() => DockerLaunch.StartContainerAsync(o));
+        Assert.Matches("predates sdk-0.40.0 and cannot use .* needs a password", e.Message);
+        Assert.DoesNotContain("p w", e.Message);
+        Assert.DoesNotContain("p%20w", e.Message);
+        Assert.DoesNotContain("create", _docker.Commands);
+    }
+
+    [Fact]
+    public async Task A_proxy_password_is_accepted_when_the_container_logs_in_to_it()
+    {
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        foreach (var how in new[] { "engine", "relay" })
+        {
+            _docker.Marks = new() { ServeState("open", "http://proxy.example:8080", 30, true, how) };
+            var (container, exe) = await DockerLaunch.StartContainerAsync(new LaunchOptions
+            {
+                Quiet = true, Proxy = new ProxyOptions { Server = "http://proxy.example:8080", Username = "u", Password = "p w" },
+            });
+            await DockerLaunch.RemoveAsync(exe, container.Id);
+        }
+    }
+
+    [Fact]
+    public async Task An_unreachable_registry_is_not_called_an_unpublished_image()
+    {
+        // Docker 29 opens a registry it cannot reach with the same "failed to resolve reference" as a tag that is not
+        // there: offline users of the default tag were told it "is not published yet".
+        _docker.Labels = null;
+        _docker.PullError = $"Error response from daemon: failed to resolve reference \"docker.io/{Image}\": failed to do request: Head \"https://registry-1.docker.io/v2/teamflatearth/clearcote/manifests/sdk-{Clearcote.Version}\": dial tcp: lookup registry-1.docker.io on 192.168.65.7:53: no such host\n";
+        var e = await Assert.ThrowsAsync<InvalidOperationException>(() => Clearcote.LaunchAsync(new LaunchOptions { Quiet = true }));
+        Assert.Contains("registry did not answer", e.Message);
+        Assert.Contains("network", e.Message);
+        Assert.Contains("no such host", e.Message);
+        Assert.DoesNotContain("not available", e.Message);
+        Assert.DoesNotContain("published a few minutes", e.Message);
+    }
+
     // ── who owns a container ────────────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -346,11 +444,79 @@ public sealed class DockerLaunchTests : IDisposable
         var elsewhere = Record(T('d'), new { pid = DeadPid, boot = "another-boot-entirely" });              // another boot: kept
         // T('e'): no record here (another machine, a container given the Docker socket, WSL2): kept
         _docker.Ps = string.Concat(new[] { 'a', 'b', 'd', 'e' }.Select(c => $"{new string(c, 6)}\t{T(c)}\n")) + "fff111\t\n";   // no token: kept
-        var bootHere = File.Exists("/proc/sys/kernel/random/boot_id");
         var swept = await DockerLaunch.SweepStaleAsync("docker");
-        Assert.Equal(bootHere ? new[] { "aaaaaa" } : new[] { "aaaaaa", "dddddd" }, swept);
+        Assert.Equal(new[] { "aaaaaa" }, swept);
         Assert.False(File.Exists(gone));   // its record goes too
-        if (bootHere) Assert.True(File.Exists(elsewhere));
+        Assert.True(File.Exists(elsewhere));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-4242)]
+    public async Task A_record_whose_pid_is_not_a_positive_number_is_left_alone(int pid)
+    {
+        // pid 0 / negative pids name a process group or nothing at all: "not alive" proves nothing about the owner
+        Record(new string('a', 32), new { pid });
+        _docker.Ps = $"aaaaaa\t{new string('a', 32)}\n";
+        Assert.Null(DockerLaunch.OwnerAlive(Json(With(Here(), ("pid", pid)))));
+        Assert.Empty(await DockerLaunch.SweepStaleAsync("docker"));
+        Assert.DoesNotContain("stop", _docker.Commands);
+    }
+
+    public static IEnumerable<object[]> Unverifiable() => new[]
+    {
+        new object[] { "written on macOS/Windows into a shared home", "", "", "" },
+        new object[] { "no PID namespace", "linux-boot-1", "", "" },
+        new object[] { "no boot id", "", "pid:[4026531836]", "" },
+        new object[] { "another host", "linux-boot-1", "pid:[4026531836]", "another-machine" },
+    };
+
+    [Theory]
+    [MemberData(nameof(Unverifiable))]
+    public async Task A_record_that_cannot_be_fully_verified_here_is_left_alone(string label, string boot, string pidns, string host)
+    {
+        // This process is on Linux (boot id + PID namespace). A record that lacks either, or names another host, was
+        // judged by its pid alone, and its live container removed when that pid was free here.
+        Assert.NotEmpty(label);
+        DockerLaunch.BootIdProbe = () => "linux-boot-1";
+        DockerLaunch.PidNamespaceProbe = () => "pid:[4026531836]";
+        var rec = new Dictionary<string, object?>
+        {
+            ["pid"] = DeadPid, ["start"] = "ps-utc:Tue Oct  6 08:00:00 2026", ["host"] = host.Length > 0 ? host : System.Net.Dns.GetHostName(),
+        };
+        if (boot.Length > 0) rec["boot"] = boot;
+        if (pidns.Length > 0) rec["pidns"] = pidns;
+        Record(new string('e', 32), rec, here: false);
+        _docker.Ps = $"eeeeee\t{new string('e', 32)}\n";
+        Assert.Null(DockerLaunch.OwnerAlive(Json(rec)));
+        Assert.Empty(await DockerLaunch.SweepStaleAsync("docker"));
+        Assert.DoesNotContain("stop", _docker.Commands);
+    }
+
+    [Fact]
+    public async Task The_start_marker_is_the_same_in_every_time_zone_and_locale()
+    {
+        // macOS has no /proc: the start time comes from `ps -o lstart=`, which prints local time in the locale's words.
+        // An owner launched with TZ=UTC and a sweeper with TZ=Asia/Tokyo read different strings for one process, and the
+        // sweeper removed the live container as a reused pid (so did one program changing TZ between launches).
+        DockerLaunch.ProcText = path => path.StartsWith("/proc/", StringComparison.Ordinal) ? null : _realProcText(path);   // no /proc here
+        DockerLaunch.IsWindowsHost = () => false;
+        DockerLaunch.RunPs = psi =>
+        {
+            string? Seen(string k) => psi.Environment.TryGetValue(k, out var v) ? v : Environment.GetEnvironmentVariable(k);   // what the ps child sees
+            return $"started 2026-10-06 08:00:00 UTC, printed for TZ={Seen("TZ")} LC_ALL={Seen("LC_ALL")}\n";
+        };
+        var pid = Environment.ProcessId;   // alive
+        _sb.Env("TZ", "UTC").Env("LC_ALL", "en_US.UTF-8");
+        var rec = With(Here(), ("pid", pid), ("start", DockerLaunch.ProcessStart(pid)));
+        Assert.NotNull(rec["start"]);
+        _sb.Env("TZ", "Asia/Tokyo").Env("LC_ALL", "de_DE.UTF-8");
+        Assert.Equal(rec["start"], DockerLaunch.ProcessStart(pid));
+        Assert.True(DockerLaunch.OwnerAlive(Json(rec)));
+        Record(new string('f', 32), rec, here: false);
+        _docker.Ps = $"ffffff\t{new string('f', 32)}\n";
+        Assert.Empty(await DockerLaunch.SweepStaleAsync("docker"));
     }
 
     [Fact]
@@ -378,13 +544,16 @@ public sealed class DockerLaunchTests : IDisposable
         using var doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(OwnersDir, token + ".json")));
         var rec = doc.RootElement.Clone();
         Assert.Equal(Environment.ProcessId, rec.GetProperty("pid").GetInt32());
+        var (host, boot, pidns) = DockerLaunch.OwnerHere();
+        Assert.Equal(host, rec.GetProperty("host").GetString());
+        Assert.Equal(boot, rec.GetProperty("boot").ValueKind == JsonValueKind.String ? rec.GetProperty("boot").GetString() : null);
+        Assert.Equal(pidns, rec.GetProperty("pidns").ValueKind == JsonValueKind.String ? rec.GetProperty("pidns").GetString() : null);
         Assert.True(DockerLaunch.OwnerAlive(rec));
-        var dead = JsonDocument.Parse(JsonSerializer.Serialize(new { pid = DeadPid })).RootElement;
-        Assert.False(DockerLaunch.OwnerAlive(dead));
+        Assert.False(DockerLaunch.OwnerAlive(Json(With(Here(), ("pid", DeadPid)))));
         if (rec.GetProperty("start").ValueKind == JsonValueKind.String)
         {
-            var reused = JsonDocument.Parse(JsonSerializer.Serialize(new { pid = Environment.ProcessId, start = "linux:1" })).RootElement;
-            Assert.False(DockerLaunch.OwnerAlive(reused));   // the same pid, another process
+            var kind = rec.GetProperty("start").GetString()!.Split(':')[0];
+            Assert.False(DockerLaunch.OwnerAlive(Json(With(Here(), ("pid", Environment.ProcessId), ("start", kind + ":1")))));   // the same pid, another process
         }
     }
 

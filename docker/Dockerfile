@@ -48,10 +48,11 @@ RUN mkdir -p /opt/xdg-cache \
 # ~180 MB download happens once rather than per container.
 VOLUME ["/opt/xdg-cache"]
 
-COPY serve.py idle_exit.py /
+COPY serve.py idle_exit.py proxy_relay.py /
 # What the entrypoint does with the settings the SDKs pass (see SERVE_PROTOCOL in serve.py): 2 = takes
-# CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS, and reports what it applied in a "serve-state" line. The SDKs
-# read this label before they start a container; an image without it gets plain variables.
+# CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS, logs in to a proxy that needs a password, and reports what it
+# applied in a "serve-state" line. The SDKs read this label before they start a container; an image
+# without it gets plain variables.
 LABEL com.clearcotelabs.serve-protocol="2"
 
 USER cc

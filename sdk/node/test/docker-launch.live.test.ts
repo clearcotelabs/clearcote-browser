@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import type { Browser } from "playwright-core";
 import { launch } from "../src/index.js";
-import { dockerCli, TEST_ONLY_ASSUME_MACOS } from "../src/docker.js";
+import { dockerCli, imageProtocol, TEST_ONLY_ASSUME_MACOS } from "../src/docker.js";
 import { tempDir } from "./helpers/temp.js";
 
 const IMAGE = process.env.CLEARCOTE_TEST_DOCKER_IMAGE;
@@ -26,6 +26,84 @@ const volumeExists = (name: string) => {
   try { execFileSync("docker", ["volume", "inspect", name], { stdio: "ignore" }); return true; } catch { return false; }
 };
 const containerOf = (b: Browser) => (b as unknown as { dockerContainer: { id: string } }).dockerContainer;
+
+// A proxy the test can see into: a small CONNECT proxy run from the same image (it has Python) on Docker's default
+// network, which the browser's container reaches by address. It logs every tunnel it opens, and with a username and
+// password it turns away (407) whatever does not log in -- so these tests check for themselves that the traffic
+// went through the proxy and logged in, instead of trusting what launch() checked. Same script as the Python test.
+const PROXY_SCRIPT = String.raw`
+import base64, socket, sys, threading
+need = "Basic " + base64.b64encode(("%s:%s" % (sys.argv[1], sys.argv[2])).encode()).decode() if len(sys.argv) > 2 else None
+def pipe(a, b):
+    try:
+        while True:
+            d = a.recv(65536)
+            if not d:
+                break
+            b.sendall(d)
+    except OSError:
+        pass
+    for s in (a, b):
+        try:
+            s.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+def handle(c):
+    f = c.makefile("rb")
+    while True:
+        line = f.readline()
+        if not line:
+            return
+        head = []
+        while True:
+            h = f.readline()
+            if not h or h in (b"\r\n", b"\n"):
+                break
+            head.append(h)
+        method, target = line.decode("latin-1").split()[:2]
+        auth = [h.split(b":", 1)[1].strip().decode() for h in head if h.lower().startswith(b"proxy-authorization:")]
+        if need and auth != [need]:
+            print("REFUSED", method, target, flush=True)
+            c.sendall(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="cc"\r\nContent-Length: 0\r\n\r\n')
+            continue
+        print("TUNNEL", method, target, "logged-in" if need else "open", flush=True)
+        if method != "CONNECT":
+            c.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        host, port = target.rsplit(":", 1)
+        u = socket.create_connection((host, int(port)), timeout=20)
+        c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        threading.Thread(target=pipe, args=(u, c), daemon=True).start()
+        pipe(c, u)
+        return
+srv = socket.create_server(("0.0.0.0", 3128))
+print("READY", flush=True)
+while True:
+    c, _ = srv.accept()
+    threading.Thread(target=handle, args=(c,), daemon=True).start()
+`;
+
+const dk = (...args: string[]) => {
+  try { return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return ""; }
+};
+
+/** The test proxy: its server URL, its log, and stop(). */
+async function startProxy(...creds: string[]) {
+  const id = execFileSync("docker", ["run", "-d", "--rm", "--entrypoint", "python", IMAGE!, "-u", "-c", PROXY_SCRIPT, ...creds], { encoding: "utf8" }).trim();
+  for (let i = 0; i < 100 && !dk("logs", id).includes("READY"); i++) await new Promise((r) => setTimeout(r, 100));
+  const ip = dk("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", id).trim();
+  return { server: `http://${ip}:3128`, log: () => dk("logs", id), stop: () => { dk("rm", "-f", "-v", id); } };
+}
+
+/** The browser binary the container runs, read from its process list (not from its own log). */
+function engineOf(id: string): string | null {
+  for (const line of dk("top", id, "-eo", "pid,args").split("\n").slice(1)) { // docker top wants a pid column
+    const args = line.trim().replace(/^\d+\s+/, "");
+    const exe = args.split(/\s+/)[0] ?? "";
+    if (exe.endsWith("/chrome") && !args.includes("--type=")) return exe;
+  }
+  return null;
+}
 
 async function probe(browser: Browser) {
   const page = await browser.newPage();
@@ -93,29 +171,68 @@ describe.skipIf(!IMAGE || !dockerCli.which())("launch() on macOS against the rea
     expect(vols1.some(volumeExists)).toBe(false);
   }, 600_000);
 
+  it("a proxy with a password carries the traffic", async () => {
+    // Before sdk-0.40.0's image, the password of an http(s) proxy was dropped: the browser was challenged, nothing
+    // answered, every navigation failed. An image that old is refused it before it starts.
+    const tp = await startProxy("cc-user", "p@ss:w rd");
+    try {
+      const proxy = { server: tp.server, username: "cc-user", password: "p@ss:w rd" };
+      if ((await imageProtocol("docker", IMAGE!, true)) < 2) {
+        await expect(launch({ proxy, quiet: true })).rejects.toThrow(/predates sdk-0\.40\.0 and cannot use an HTTP proxy/);
+        return;
+      }
+      const b = await launch({ proxy, quiet: true });
+      const { id } = containerOf(b);
+      try {
+        const page = await b.newPage();
+        await page.goto("https://example.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+        expect(await page.title()).toBe("Example Domain");
+        expect(tp.log()).toContain("TUNNEL CONNECT example.com:443 logged-in");
+        const exe = engineOf(id);
+        expect(exe).toBeTruthy();
+        expect(exe).not.toContain("/pro-"); // no key: the open engine
+      } finally {
+        await b.close();
+      }
+      expect(containerExists(id)).toBe(false);
+    } finally {
+      tp.stop();
+    }
+  }, 300_000);
+
   // Licensed and proxied, against whatever image CLEARCOTE_TEST_DOCKER_IMAGE names (one from before sdk-0.40.0 too):
   // launch() must come back on the licensed engine with the proxy applied -- or refuse -- never on the open engine
-  // with traffic going direct. Needs CLEARCOTE_TEST_DOCKER_KEY, CLEARCOTE_TEST_DOCKER_PROXY (a proxy the container
-  // can reach) and CLEARCOTE_TEST_DOCKER_CACHE_VOLUME (a scratch volume for the licensed engine).
+  // with traffic going direct. The test checks both itself: the engine from the container's process list, the
+  // traffic from the test proxy's log. The proxy wants a password from an image that can log in to one (sdk-0.40.0
+  // and newer); an older image gets one without. Needs CLEARCOTE_TEST_DOCKER_KEY (a real key) and, optionally,
+  // CLEARCOTE_TEST_DOCKER_CACHE_VOLUME (a scratch volume for the licensed engine).
   const KEY = process.env.CLEARCOTE_TEST_DOCKER_KEY;
-  const PROXY = process.env.CLEARCOTE_TEST_DOCKER_PROXY;
-  it.skipIf(!KEY || !PROXY)("a licensed, proxied launch is never downgraded", async () => {
+  it.skipIf(!KEY)("a licensed, proxied launch is never downgraded", async () => {
     if (saved.CLEARCOTE_DOCKER_CACHE_VOLUME === undefined && process.env.CLEARCOTE_TEST_DOCKER_CACHE_VOLUME) {
       process.env.CLEARCOTE_DOCKER_CACHE_VOLUME = process.env.CLEARCOTE_TEST_DOCKER_CACHE_VOLUME;
     }
-    const b = await launch({ licenseKey: KEY, proxy: { server: PROXY! }, quiet: true, timeout: 600_000 });
-    const info = (b as unknown as { dockerContainer: { id: string; serveProtocol: number } }).dockerContainer;
+    const login = (await imageProtocol("docker", IMAGE!, true)) >= 2 ? ["cc-user", "p@ss:w rd"] : [];
+    const tp = await startProxy(...login);
     try {
-      const env = execFileSync("docker", ["inspect", "-f", "{{json .Config.Env}}", info.id], { encoding: "utf8" });
-      // protocol 2 keeps the key out of the container's configuration; an older image gets it as a variable
-      expect(env.includes(KEY!)).toBe(info.serveProtocol < 2);
-      const page = await b.newPage();
-      await page.goto("https://example.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
-      expect(await page.title()).toBe("Example Domain");
+      const proxy = { server: tp.server, ...(login.length ? { username: login[0], password: login[1] } : {}) };
+      const b = await launch({ licenseKey: KEY, proxy, quiet: true, timeout: 600_000 });
+      const info = (b as unknown as { dockerContainer: { id: string; serveProtocol: number } }).dockerContainer;
+      try {
+        const env = execFileSync("docker", ["inspect", "-f", "{{json .Config.Env}}", info.id], { encoding: "utf8" });
+        // protocol 2 keeps the key out of the container's configuration; an older image gets it as a variable
+        expect(env.includes(KEY!)).toBe(info.serveProtocol < 2);
+        expect(engineOf(info.id) ?? "").toContain("/pro-"); // the licensed engine is what runs
+        const page = await b.newPage();
+        await page.goto("https://example.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+        expect(await page.title()).toBe("Example Domain");
+        expect(tp.log()).toContain(`TUNNEL CONNECT example.com:443 ${login.length ? "logged-in" : "open"}`);
+      } finally {
+        await b.close();
+        delete process.env.CLEARCOTE_DOCKER_CACHE_VOLUME;
+      }
+      expect(containerExists(info.id)).toBe(false);
     } finally {
-      await b.close();
-      delete process.env.CLEARCOTE_DOCKER_CACHE_VOLUME;
+      tp.stop();
     }
-    expect(containerExists(info.id)).toBe(false);
   }, 900_000);
 });

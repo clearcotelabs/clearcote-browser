@@ -42,6 +42,7 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | `CC_SHADER_DIALECT` | `hlsl` \| `0` | report ANGLE's translated shader as HLSL — **auto-on for `CC_PLATFORM=windows`** |
 | `CLEARCOTE_LICENSE_KEY` | `cc_lic_...` | use the licensed engine instead of the bundled open one — see below |
 | `CC_VERSION` | `152` \| `152.0.7977.82` \| `r24` | with a **Pro** key: pin a major, an exact build or a revision (default: the newest your key allows). Free keys always get the latest build and are refused a pin |
+| `CC_PROXY` | `http://user:pass@host:8080` \| `socks5://…` | send the browser's traffic through this proxy (http, https, socks4, socks5; the container refuses to start rather than go direct if it cannot apply it). A password is answered by the engine when it can (the licensed builds), otherwise by a relay on the container's own loopback. Pass it through `CC_SECRETS_FILE` to keep the password out of `docker inspect` |
 | `CC_IDLE_EXIT_SECONDS` | `30` | stop once no CDP client has been connected for this long, counted from when the CDP endpoint first answers (default: never). Pair it with `--rm` so an abandoned container also disappears |
 | `CC_SECRETS_FILE` | `/tmp/clearcote-secrets.json` | a JSON file holding `CLEARCOTE_LICENSE_KEY` and/or `CC_PROXY`, read once at start and deleted — see [Secrets](#secrets-and-docker-inspect) |
 
@@ -128,10 +129,11 @@ treat daemon access as access to the key.
 - `--disable-dev-shm-usage` is set; add `--shm-size=1g` on very heavy pages if needed.
 - The image carries the label `com.clearcotelabs.serve-protocol` (2: it takes `CC_SECRETS_FILE` and
   `CC_IDLE_EXIT_SECONDS`), and its entrypoint logs one `[clearcote] serve-state {...}` line saying what it
-  applied: the engine that resolved (`licensed` or `open`), the proxy, the idle exit. The SDKs' macOS
-  `launch()` reads the label before it starts a container (an image without it gets plain variables, with
-  a warning) and refuses a container whose log does not show the licensed engine when a key was given, or
-  the proxy when one was given.
+  applied: the engine that resolved (`licensed` or `open`), the proxy, how a proxy's password is answered
+  (`engine` or `relay`), the idle exit. The SDKs' macOS `launch()` reads the label before it starts a
+  container (an image without it gets plain variables, with a warning, and is refused a proxy password it
+  cannot answer) and refuses a container whose log does not show the licensed engine when a key was
+  given, or the proxy (and its login) when one was given.
 - The SDKs' macOS `launch()` starts this image with `--rm`, `CC_IDLE_EXIT_SECONDS=30` and owner labels
   (`com.clearcotelabs.sdk-launch`, `com.clearcotelabs.owner-host`, `com.clearcotelabs.owner-token`), so a
   container whose program was killed stops on its own and is removed; the next launch from the same user

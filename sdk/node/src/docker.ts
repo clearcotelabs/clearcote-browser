@@ -310,34 +310,51 @@ export function pidAlive(pid: number): boolean {
 // ── who owns a container ───────────────────────────────────────────────────────────────────────────
 // A container carries a random per-process token (OWNER_TOKEN_LABEL); the owner writes a record under
 // ~/.clearcote/docker-owners/<token>.json saying which process it is: pid, a start marker that changes when
-// the pid is reused, and (Linux) its PID namespace and boot id. A sweeper only judges containers whose record
-// it can read in its own home, from the same boot and PID namespace: a process in another namespace (a
-// container given the Docker socket, WSL2 next to Windows on Docker Desktop) or on another machine has its
-// records elsewhere, so its containers are never touched. When in doubt, nothing is removed. The record format
-// is shared by the Python, Node and .NET SDKs, so any of them can sweep any other's containers.
+// the pid is reused, its host name and (Linux) its PID namespace and boot id. A sweeper only judges a record it
+// can verify completely: one in its own home, written on this host, from this boot and PID namespace -- every
+// one of those fields as this process would write it, so a record written on another OS into a shared home (no
+// namespace or boot id), in a container given the Docker socket (another namespace), next to Windows in WSL2,
+// or on another machine is left alone, and so is a pid that is not a positive number. When in doubt, nothing is
+// removed: the container's idle exit still stops it. The record format is shared by the Python, Node and .NET
+// SDKs, so any of them can sweep any other's containers.
 
 const readText = (path: string): string | null => {
   try { return readFileSync(path, "utf8").trim(); } catch { return null; }
 };
-const bootId = () => readText("/proc/sys/kernel/random/boot_id");
-const pidNamespace = (): string | null => {
-  try { return readlinkSync("/proc/self/ns/pid"); } catch { return null; }
+/** What this host says about processes: /proc where there is one, `ps` elsewhere. Seams: tests replace members. */
+export const hostProbe = {
+  platform: (): string => process.platform,
+  readText,
+  bootId: (): string | null => readText("/proc/sys/kernel/random/boot_id"),
+  pidNamespace: (): string | null => {
+    try { return readlinkSync("/proc/self/ns/pid"); } catch { return null; }
+  },
+  spawnSync: spawnSync as typeof spawnSync,
 };
+const bootId = () => hostProbe.bootId();
+const pidNamespace = () => hostProbe.pidNamespace();
+
+/** `ps -o lstart=` prints local time, in the locale's words. Pinned, so an owner and a sweeper that run with
+ * different TZ / LANG settings (or one script that changes TZ between launches) read the same string for the
+ * same process. Without it a sweeper in another time zone took a live owner for a reused pid. */
+export const PS_ENV = { TZ: "UTC0", LC_ALL: "C" } as const;
 
 /** A marker that differs once `pid` belongs to another process (it was reused), or null when it cannot be
- * read here. Linux: the start time from /proc; macOS: `ps -o lstart=`; Windows: not readable from Node (null:
- * the pid alone is then trusted, which only ever keeps a container). The same strings in all three SDKs. */
+ * read here. Linux: the start time from /proc; macOS: `ps -o lstart=` in UTC and the C locale; Windows: not
+ * readable from Node (null: the pid alone is then trusted, which only ever keeps a container). The same
+ * strings in all three SDKs. */
 export function processStart(pid: number): string | null {
-  const stat = readText(`/proc/${pid}/stat`);
+  const stat = hostProbe.readText(`/proc/${pid}/stat`);
   if (stat) {
     const f = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/);
     return f[19] ? `linux:${f[19]}` : null;
   }
-  if (process.platform === "win32") return null;
+  if (hostProbe.platform() === "win32") return null;
   try {
-    const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000 });
+    const r = hostProbe.spawnSync("ps", ["-o", "lstart=", "-p", String(pid)],
+      { encoding: "utf8", timeout: 10_000, env: { ...process.env, ...PS_ENV } });
     const out = String(r.stdout ?? "").split(/\s+/).filter(Boolean).join(" ");
-    return r.status === 0 && out ? `ps:${out}` : null;
+    return r.status === 0 && out ? `ps-utc:${out}` : null;
   } catch {
     return null;
   }
@@ -364,20 +381,26 @@ export function ownerToken(): string {
 /** Forget this process's token (tests: a new HOME gets a new record). */
 export function resetOwnerToken(): void { ownerTokenValue = null; }
 
-type OwnerRecord = { pid?: unknown; start?: string | null; pidns?: string | null; boot?: string | null };
+type OwnerRecord = { pid?: unknown; start?: string | null; pidns?: string | null; boot?: string | null; host?: unknown };
 
-/** true or false for the owner a record describes, or null when it cannot be told from here (another boot,
- * another PID namespace, a malformed record). */
+/** The fields an owner record from this process would carry besides its pid and start marker. */
+export const ownerHere = () => ({ host: hostname(), boot: bootId(), pidns: pidNamespace() });
+
+const markerKind = (m: unknown) => (typeof m === "string" && m.includes(":") ? m.slice(0, m.indexOf(":")) : null);
+
+/** true or false for the owner a record describes, or null when that cannot be told for certain here: a record
+ * whose host, boot id or PID namespace is not exactly what this process would record (missing ones included),
+ * or whose pid is not a positive integer. A pid that is alive with a start marker of the same kind but another
+ * value was reused (false); one whose marker cannot be compared counts as alive. */
 export function ownerAlive(rec: OwnerRecord): boolean | null {
-  const boot = bootId();
-  const ns = pidNamespace();
-  if (rec.boot && boot && rec.boot !== boot) return null;
-  if (rec.pidns && ns && rec.pidns !== ns) return null;
-  if (typeof rec.pid !== "number" || !Number.isInteger(rec.pid)) return null;
+  const here = ownerHere();
+  if (!here.host || typeof rec.host !== "string" || rec.host.toLowerCase() !== here.host.toLowerCase()) return null;
+  if ((rec.boot ?? null) !== here.boot || (rec.pidns ?? null) !== here.pidns) return null;
+  if (typeof rec.pid !== "number" || !Number.isInteger(rec.pid) || rec.pid <= 0) return null;
   if (!pidAlive(rec.pid)) return false;
   if (rec.start) {
     const now = processStart(rec.pid);
-    if (now && now !== rec.start) return false; // the pid now belongs to another process
+    if (now && markerKind(now) === markerKind(rec.start) && now !== rec.start) return false; // the pid was reused
   }
   return true;
 }
@@ -487,11 +510,17 @@ async function waitReady(exe: string, id: string, port: number, budgetMs: number
 
 const VOLUME_INIT_RACE = /volumes\/[^/\s]+\/_data\S*: (?:file exists|no such file)/i;
 // A tag that is not there: Docker 29 says `failed to resolve reference "docker.io/...:tag": ...: not found`;
-// older ones `manifest unknown` / `manifest for ... not found`.
-const NOT_PUBLISHED = /failed to resolve reference|manifest unknown|manifest for .* not found|not found: manifest|pull access denied|repository does not exist|: not found\b/i;
+// older ones `manifest unknown` / `manifest for ... not found`. Docker 29 reports a registry it cannot reach with
+// the same "failed to resolve reference" opening, so that phrase alone proves nothing: the network wordings are
+// looked for first.
+const NOT_PUBLISHED = /manifest unknown|manifest for .* not found|not found: manifest|pull access denied|repository does not exist|: not found\s*$/im;
+const REGISTRY_UNREACHABLE = /dial tcp|no such host|i\/o timeout|connection refused|connection reset|network is unreachable|no route to host|TLS handshake timeout|context deadline exceeded|failed to do request|Client\.Timeout|temporary failure in name resolution|server misbehaving/i;
 
 function imageFailed(image: string, code: number, stderr: string, what = "docker pull"): Error {
   const detail = stderr.trim() || `exit ${code}`;
+  if (REGISTRY_UNREACHABLE.test(detail)) {
+    return new Error(`could not download the Clearcote image ${image}: the registry did not answer (${firstLine(detail)}). Check this machine's network (and any proxy Docker itself needs), or set CLEARCOTE_DOCKER_IMAGE / dockerImage to an image that is already here (\`docker images ${DEFAULT_REPOSITORY}\`).`);
+  }
   if (NOT_PUBLISHED.test(detail)) {
     const why = image === `${DEFAULT_REPOSITORY}:sdk-${SDK_VERSION}`
       ? `Each image is published a few minutes after its SDK release (it is built from the PyPI package of the same version), so a brand-new SDK can be ahead of its image: try again in a few minutes. To launch meanwhile, set CLEARCOTE_DOCKER_IMAGE to an earlier tag of ${DEFAULT_REPOSITORY} (${DEFAULT_REPOSITORY}:latest is the newest published one). An image older than ${FIRST_PROTOCOL_TAG} still works, but the licence key and the proxy reach it as container variables that \`docker inspect\` shows, and it does not stop on its own if this program dies; launch() says so when that happens.`
@@ -533,14 +562,39 @@ function proxyHostPort(url: string | null | undefined): [string | null, number |
   }
 }
 
+/** [scheme, whether the proxy URL carries a username or password, whether they are percent-escaped]. */
+function proxyLogin(url: string): [string, boolean, boolean] {
+  try {
+    const u = new URL(url.includes("://") ? url : `http://${url}`);
+    return [u.protocol.replace(/:$/, "").toLowerCase(), !!(u.username || u.password), `${u.username}:${u.password}`.includes("%")];
+  } catch {
+    return ["http", url.includes("@"), url.includes("%")];
+  }
+}
+
+/** Why an image older than FIRST_PROTOCOL_TAG cannot take this proxy, or null. Its entrypoint drops the password
+ * of an http(s) proxy (Chrome is then challenged and nothing answers: every request fails), and hands a SOCKS5
+ * password to an engine switch only the licensed engine has -- as written in the URL, without decoding it, so a
+ * username or password with characters that have to be escaped there arrives wrong. */
+export function legacyProxyRefusal(image: string, proxyUrlValue: string | null | undefined, licensed: boolean): string | null {
+  if (!proxyUrlValue) return null;
+  const [scheme, creds, escaped] = proxyLogin(proxyUrlValue);
+  if (!creds || (scheme.startsWith("socks5") && licensed && !escaped)) return null;
+  const what = scheme.startsWith("http") ? "an HTTP proxy that needs a password"
+    : !licensed ? "a SOCKS5 proxy that needs a password without a licence key (its open engine cannot log in)"
+      : "a SOCKS5 proxy that needs a password with characters a URL has to escape (it would send them escaped)";
+  return `the Clearcote image ${image} predates ${FIRST_PROTOCOL_TAG} and cannot use ${what}: every request through it would fail. Use ${DEFAULT_REPOSITORY}:${FIRST_PROTOCOL_TAG} or newer (the default image is), or a proxy that does not need a password.`;
+}
+
 /** What the container did not apply that was asked for (empty when all is well), from the lines its
  * entrypoint logged: serve-state (protocol 2) or, for an older image, its engine and proxy lines. */
 export function verifyApplied(marks: string[], protocol: number, expect: { licensed: boolean; proxy?: string | null }): string[] {
   const problems: string[] = [];
   let engine: string | null;
   let proxy: string | null;
+  let proxyAuth: unknown = null;
   if (protocol >= 2) {
-    let state: { engine?: string; proxy?: string | null } | null = null;
+    let state: { engine?: string; proxy?: string | null; proxy_auth?: unknown } | null = null;
     for (const line of marks) {
       const i = line.indexOf("serve-state ");
       if (i >= 0) { try { state = JSON.parse(line.slice(i + "serve-state ".length)); } catch { state = null; } }
@@ -548,6 +602,7 @@ export function verifyApplied(marks: string[], protocol: number, expect: { licen
     if (!state || typeof state !== "object") return ["it did not report what it applied (no serve-state line)"];
     engine = state.engine ?? null;
     proxy = state.proxy ?? null;
+    proxyAuth = state.proxy_auth ?? null;
   } else {
     const engineLine = marks.find((m) => m.includes("] engine: ")) ?? "";
     engine = engineLine.includes("(licensed)") && engineLine.includes("/pro-") ? "licensed" : engineLine ? "open" : null;
@@ -562,6 +617,8 @@ export function verifyApplied(marks: string[], protocol: number, expect: { licen
     const [gh, gp] = proxyHostPort(proxy);
     if (!proxy || gh !== wh || (wp && gp && wp !== gp)) {
       problems.push(proxy ? `it applied a different proxy (${proxy})` : "a proxy was given, but it did not apply it (its traffic would leave from the container's own address)");
+    } else if (protocol >= 2 && proxyLogin(expect.proxy)[1] && proxyAuth !== "engine" && proxyAuth !== "relay") {
+      problems.push("the proxy needs a password, but it did not say it can log in to it (every request through it would fail)");
     }
   }
   return problems;
@@ -598,10 +655,11 @@ export interface DockerContainer { id: string; image: string; endpoint: string; 
  * --rm, an idle exit (it stops once no CDP client has been connected for idleExitSeconds(), counted from when
  * its CDP answers) and the licence key and proxy URL as a file copied in, not as -e variables `docker inspect`
  * would show. An older image gets plain variables -- they still work -- and a warning that they are visible
- * and that it will not stop on its own. Either way, once the browser answers, the container's own log must
- * show the licensed engine when a key was given and the proxy when one was given (verifyApplied); otherwise it
- * is stopped and removed and launch() rejects: a browser on the open engine, or one sending traffic direct, is
- * never handed back in their place. The container carries this process's owner token for sweepStale().
+ * and that it will not stop on its own -- and is refused, before it starts, a proxy password it cannot answer
+ * (legacyProxyRefusal). Either way, once the browser answers, the container's own log must show the licensed
+ * engine when a key was given and the proxy when one was given, logged in to when it needs a password
+ * (verifyApplied); otherwise it is stopped and removed and launch() rejects: a browser on the open engine, one
+ * sending traffic direct, or one whose every request the proxy turns away is never handed back in their place. The container carries this process's owner token for sweepStale().
  */
 export async function startContainer(options: Record<string, unknown>): Promise<DockerContainer & { exe: string }> {
   const env = containerEnv(options);
@@ -617,6 +675,8 @@ export async function startContainer(options: Record<string, unknown>): Promise<
     if (idle) env.CC_IDLE_EXIT_SECONDS = String(idle);
     if (Object.keys(secrets).length) env.CC_SECRETS_FILE = SECRETS_FILE;
   } else {
+    const refusal = legacyProxyRefusal(image, expect.proxy, expect.licensed);
+    if (refusal) throw new Error(refusal);
     if (!options.quiet) {
       process.stderr.write(`[clearcote] warning: the image ${image} predates ${FIRST_PROTOCOL_TAG}: `
         + (Object.keys(secrets).length ? "its licence key and proxy are passed as container variables, which `docker inspect` shows, and " : "")

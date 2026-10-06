@@ -7,6 +7,7 @@ Mirrors sdk/node/test/docker-launch.live.test.ts and DockerLaunchLiveTests.cs.""
 import os
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -93,31 +94,150 @@ def test_launch_on_macos_runs_the_real_image():
     assert volumes and not any(volume_exists(v) for v in volumes)
 
 
+# A proxy the test can see into: a small CONNECT proxy run from the same image (it has Python) on Docker's
+# default network, which the browser's container reaches by address. It logs every tunnel it opens, and with
+# a username and password it turns away (407) whatever does not log in -- so these tests check for themselves
+# that the traffic went through the proxy and logged in, instead of trusting what launch() checked.
+PROXY_SCRIPT = r"""
+import base64, socket, sys, threading
+need = "Basic " + base64.b64encode(("%s:%s" % (sys.argv[1], sys.argv[2])).encode()).decode() if len(sys.argv) > 2 else None
+def pipe(a, b):
+    try:
+        while True:
+            d = a.recv(65536)
+            if not d:
+                break
+            b.sendall(d)
+    except OSError:
+        pass
+    for s in (a, b):
+        try:
+            s.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+def handle(c):
+    f = c.makefile("rb")
+    while True:
+        line = f.readline()
+        if not line:
+            return
+        head = []
+        while True:
+            h = f.readline()
+            if not h or h in (b"\r\n", b"\n"):
+                break
+            head.append(h)
+        method, target = line.decode("latin-1").split()[:2]
+        auth = [h.split(b":", 1)[1].strip().decode() for h in head if h.lower().startswith(b"proxy-authorization:")]
+        if need and auth != [need]:
+            print("REFUSED", method, target, flush=True)
+            c.sendall(b'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="cc"\r\nContent-Length: 0\r\n\r\n')
+            continue
+        print("TUNNEL", method, target, "logged-in" if need else "open", flush=True)
+        if method != "CONNECT":
+            c.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return
+        host, port = target.rsplit(":", 1)
+        u = socket.create_connection((host, int(port)), timeout=20)
+        c.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        threading.Thread(target=pipe, args=(u, c), daemon=True).start()
+        pipe(c, u)
+        return
+srv = socket.create_server(("0.0.0.0", 3128))
+print("READY", flush=True)
+while True:
+    c, _ = srv.accept()
+    threading.Thread(target=handle, args=(c,), daemon=True).start()
+"""
+
+
+def dk(*args, check=True):
+    return subprocess.run(["docker", *args], capture_output=True, text=True, check=check).stdout
+
+
+def start_proxy(username=None, password=None):
+    """The test proxy -> (server URL, container id, its log as text)."""
+    creds = [username, password] if username else []
+    cid = dk("run", "-d", "--rm", "--entrypoint", "python", IMAGE, "-u", "-c", PROXY_SCRIPT, *creds).strip()
+    for _ in range(100):
+        if "READY" in dk("logs", cid, check=False):
+            break
+        time.sleep(0.1)
+    ip = dk("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", cid).strip()
+    return f"http://{ip}:3128", cid, lambda: dk("logs", cid, check=False)
+
+
+def engine_of(cid):
+    """The browser binary the container runs, read from its process list (not from its own log)."""
+    for line in dk("top", cid, "-eo", "pid,args").splitlines()[1:]:  # docker top wants a pid column
+        args = line.split(None, 1)[1] if len(line.split(None, 1)) > 1 else ""
+        exe = args.split()[0] if args.split() else ""
+        if exe.endswith("/chrome") and "--type=" not in args:
+            return exe
+    return None
+
+
+def test_a_proxy_with_a_password_carries_the_traffic():
+    # Before sdk-0.40.0's image, the password of an http(s) proxy was dropped: the browser was challenged,
+    # nothing answered, every navigation failed. An image that old is refused it before it starts.
+    server, proxy_cid, proxy_log = start_proxy("cc-user", "p@ss:w rd")
+    try:
+        proxy = {"server": server, "username": "cc-user", "password": "p@ss:w rd"}
+        if image_protocol() < 2:
+            with pytest.raises(RuntimeError, match="predates sdk-0.40.0 and cannot use an HTTP proxy"):
+                clearcote.launch(proxy=proxy, quiet=True)
+            return
+        b = clearcote.launch(proxy=proxy, quiet=True)
+        try:
+            cid = b.docker_container["id"]
+            page = b.new_page()
+            page.goto("https://example.com/", wait_until="domcontentloaded", timeout=60_000)
+            assert page.title() == "Example Domain"
+            assert "TUNNEL CONNECT example.com:443 logged-in" in proxy_log()
+            assert "/pro-" not in (engine_of(cid) or "/pro-")  # no key: the open engine (and one was found)
+        finally:
+            b.close()
+        assert not container_exists(cid)
+    finally:
+        dk("rm", "-f", "-v", proxy_cid, check=False)
+
+
+def image_protocol():
+    return _docker.image_protocol("docker", IMAGE, quiet=True)
+
+
 # Licensed and proxied, against whatever image CLEARCOTE_TEST_DOCKER_IMAGE names (one from before sdk-0.40.0
 # too): launch() must come back on the licensed engine with the proxy applied -- or refuse -- never on the open
-# engine with traffic going direct. Needs a real key and a proxy the container can reach:
-#   CLEARCOTE_TEST_DOCKER_KEY, CLEARCOTE_TEST_DOCKER_PROXY (e.g. http://172.17.0.1:3128 on Linux),
-#   CLEARCOTE_TEST_DOCKER_CACHE_VOLUME (a scratch volume for the licensed engine).
+# engine with traffic going direct. The test checks both itself: the engine from the container's process
+# list, the traffic from the test proxy's log. The proxy wants a password from an image that can log in to
+# one (sdk-0.40.0 and newer); an older image gets one without. Needs CLEARCOTE_TEST_DOCKER_KEY (a real key)
+# and, optionally, CLEARCOTE_TEST_DOCKER_CACHE_VOLUME (a scratch volume for the licensed engine).
 KEY = os.environ.get("CLEARCOTE_TEST_DOCKER_KEY")
-PROXY = os.environ.get("CLEARCOTE_TEST_DOCKER_PROXY")
 
 
-@pytest.mark.skipif(not KEY or not PROXY, reason="set CLEARCOTE_TEST_DOCKER_KEY and CLEARCOTE_TEST_DOCKER_PROXY")
+@pytest.mark.skipif(not KEY, reason="set CLEARCOTE_TEST_DOCKER_KEY")
 def test_licensed_and_proxied_launch_is_never_downgraded(monkeypatch):
     if os.environ.get("CLEARCOTE_TEST_DOCKER_CACHE_VOLUME"):
         monkeypatch.setenv("CLEARCOTE_DOCKER_CACHE_VOLUME", os.environ["CLEARCOTE_TEST_DOCKER_CACHE_VOLUME"])
-    b = clearcote.launch(license_key=KEY, proxy=PROXY, quiet=True, timeout=600_000)
+    login = ("cc-user", "p@ss:w rd") if image_protocol() >= 2 else (None, None)
+    server, proxy_cid, proxy_log = start_proxy(*login)
     try:
-        info = b.docker_container
-        env = subprocess.run(["docker", "inspect", "-f", "{{json .Config.Env}}", info["id"]], capture_output=True,
-                             text=True, check=True).stdout
-        # protocol 2 keeps the key out of the container's configuration; an older image gets it as a variable.
-        # (A bool first: pytest would print both operands of a failing `in`, the key among them.)
-        key_visible = KEY in env
-        assert key_visible == (info["serve_protocol"] < 2)
-        page = b.new_page()
-        page.goto("https://example.com/", wait_until="domcontentloaded", timeout=60_000)
-        assert page.title() == "Example Domain"
+        proxy = {"server": server, **({"username": login[0], "password": login[1]} if login[0] else {})}
+        b = clearcote.launch(license_key=KEY, proxy=proxy, quiet=True, timeout=600_000)
+        try:
+            info = b.docker_container
+            env = dk("inspect", "-f", "{{json .Config.Env}}", info["id"])
+            # protocol 2 keeps the key out of the container's configuration; an older image gets it as a variable.
+            # (A bool first: pytest would print both operands of a failing `in`, the key among them.)
+            key_visible = KEY in env
+            assert key_visible == (info["serve_protocol"] < 2)
+            assert "/pro-" in (engine_of(info["id"]) or "")  # the licensed engine is what runs
+            page = b.new_page()
+            page.goto("https://example.com/", wait_until="domcontentloaded", timeout=60_000)
+            assert page.title() == "Example Domain"
+            assert ("TUNNEL CONNECT example.com:443 " + ("logged-in" if login[0] else "open")) in proxy_log()
+        finally:
+            b.close()
+        assert not container_exists(info["id"])
     finally:
-        b.close()
-    assert not container_exists(info["id"])
+        dk("rm", "-f", "-v", proxy_cid, check=False)

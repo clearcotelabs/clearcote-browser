@@ -298,11 +298,13 @@ def _pid_alive(pid) -> bool:
 # ── who owns a container ───────────────────────────────────────────────────────────────────────────
 # A container carries a random per-process token (OWNER_TOKEN_LABEL); the owner writes a record under
 # ~/.clearcote/docker-owners/<token>.json saying which process it is: pid, a start marker that changes when
-# the pid is reused, and (Linux) its PID namespace and boot id. A sweeper only judges containers whose
-# record it can read in its own home, from the same boot and PID namespace: a process in another namespace
-# (a container given the Docker socket, WSL2 next to Windows on Docker Desktop) or on another machine has
-# its records elsewhere, so its containers are never touched. When in doubt, nothing is removed. The record
-# format is shared by the Python, Node and .NET SDKs, so any of them can sweep any other's containers.
+# the pid is reused, its host name and (Linux) its PID namespace and boot id. A sweeper only judges a record
+# it can verify completely: one in its own home, written on this host, from this boot and PID namespace --
+# every one of those fields as this process would write it, so a record written on another OS into a shared
+# home (no namespace or boot id), in a container given the Docker socket (another namespace), next to
+# Windows in WSL2, or on another machine is left alone, and so is a pid that is not a positive number. When
+# in doubt, nothing is removed: the container's idle exit still stops it. The record format is shared by
+# the Python, Node and .NET SDKs, so any of them can sweep any other's containers.
 
 def _read_text(path):
     try:
@@ -323,10 +325,26 @@ def _pid_namespace():
         return None
 
 
+# `ps -o lstart=` prints local time, in the locale's words. Pinned, so an owner and a sweeper that run with
+# different TZ / LANG settings (or one script that changes TZ between launches) read the same string for
+# the same process. Without it a sweeper in another time zone took a live owner for a reused pid.
+PS_ENV = {"TZ": "UTC0", "LC_ALL": "C"}
+
+
+def _ps_start(pid):
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10,
+                           env={**os.environ, **PS_ENV})
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = " ".join((r.stdout or "").split())
+    return "ps-utc:" + out if r.returncode == 0 and out else None
+
+
 def process_start(pid):
     """A marker that differs once ``pid`` belongs to another process (it was reused), or None when it
     cannot be read here. Linux: the start time from /proc; Windows: the creation time; elsewhere (macOS):
-    ``ps -o lstart=``. The same strings in all three SDKs."""
+    ``ps -o lstart=`` in UTC and the C locale. The same strings in all three SDKs."""
     stat = _read_text(f"/proc/{pid}/stat")
     if stat:
         try:
@@ -347,12 +365,7 @@ def process_start(pid):
             return "win:%d" % ((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
         finally:
             kernel32.CloseHandle(handle)
-    try:
-        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    out = " ".join((r.stdout or "").split())
-    return "ps:" + out if r.returncode == 0 and out else None
+    return _ps_start(pid)
 
 
 def _owners_dir():
@@ -390,22 +403,35 @@ def owner_token() -> str:
         return token
 
 
+def _here():
+    """The fields an owner record from this process would carry besides its pid and start marker."""
+    return {"host": socket.gethostname(), "boot": _boot_id(), "pidns": _pid_namespace()}
+
+
+def _marker_kind(marker):
+    return marker.split(":", 1)[0] if isinstance(marker, str) and ":" in marker else None
+
+
 def owner_alive(record):
-    """True or False for the owner a record describes, or None when it cannot be told from here (another
-    boot, another PID namespace, a malformed record)."""
-    boot, ns = _boot_id(), _pid_namespace()
-    if record.get("boot") and boot and record["boot"] != boot:
+    """True or False for the owner a record describes, or None when that cannot be told for certain here:
+    a record whose host, boot id or PID namespace is not exactly what this process would record (missing
+    ones included), or whose pid is not a positive integer. A pid that is alive with a start marker of the
+    same kind but another value was reused (False); one whose marker cannot be compared counts as alive."""
+    here = _here()
+    host = record.get("host")
+    if not here["host"] or not isinstance(host, str) or host.lower() != here["host"].lower():
         return None
-    if record.get("pidns") and ns and record["pidns"] != ns:
+    if record.get("boot") != here["boot"] or record.get("pidns") != here["pidns"]:
         return None
     pid = record.get("pid")
-    if not isinstance(pid, int) or isinstance(pid, bool):
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
     if not _pid_alive(pid):
         return False
-    if record.get("start"):
+    start = record.get("start")
+    if start:
         now = process_start(pid)
-        if now and now != record["start"]:
+        if now and _marker_kind(now) == _marker_kind(start) and now != start:
             return False  # the pid now belongs to another process
     return True
 
@@ -421,8 +447,8 @@ def _load_record(path):
 
 def sweep_stale(exe) -> list:
     """Stop and remove containers an earlier launch left behind whose owner process is certainly gone
-    (killed, crashed): their token's record is in this home, from this boot and PID namespace, and its
-    process no longer exists. They would stop on their own after the idle period; this frees their licence
+    (killed, crashed): their token's record is in this home, verifiably from this host, boot and PID
+    namespace (owner_alive), and its process no longer exists. They would stop on their own after the idle period; this frees their licence
     seat now. Anything else -- live owners, owners in another namespace or on another machine, containers
     without a token -- is left alone. Returns the ids removed."""
     fmt = '{{.ID}}\t{{.Label "%s"}}' % OWNER_TOKEN_LABEL
@@ -564,13 +590,24 @@ def _wait_ready(exe, cid, port, deadline_s, logs, sleep=time.sleep):
 
 _VOLUME_INIT_RACE = re.compile(r"volumes/[^/\s]+/_data\S*: (?:file exists|no such file)", re.I)
 # A tag that is not there: Docker 29 says `failed to resolve reference "docker.io/...:tag": ...: not found`;
-# older ones `manifest unknown` / `manifest for ... not found`.
-_NOT_PUBLISHED = re.compile(r"failed to resolve reference|manifest unknown|manifest for .* not found|"
-                            r"not found: manifest|pull access denied|repository does not exist|: not found\b", re.I)
+# older ones `manifest unknown` / `manifest for ... not found`. Docker 29 reports a registry it cannot reach
+# with the same "failed to resolve reference" opening, so that phrase alone proves nothing: the network
+# wordings are looked for first.
+_NOT_PUBLISHED = re.compile(r"manifest unknown|manifest for .* not found|not found: manifest|pull access denied|"
+                            r"repository does not exist|: not found\s*$", re.I | re.M)
+_REGISTRY_UNREACHABLE = re.compile(r"dial tcp|no such host|i/o timeout|connection refused|connection reset|"
+                                   r"network is unreachable|no route to host|TLS handshake timeout|"
+                                   r"context deadline exceeded|failed to do request|Client\.Timeout|"
+                                   r"temporary failure in name resolution|server misbehaving", re.I)
 
 
 def _image_failed(image, code, err, what="docker pull"):
     detail = (err or "").strip() or f"exit {code}"
+    if _REGISTRY_UNREACHABLE.search(detail):
+        return RuntimeError(f"could not download the Clearcote image {image}: the registry did not answer "
+                            f"({_first_line(detail)}). Check this machine's network (and any proxy Docker "
+                            "itself needs), or set CLEARCOTE_DOCKER_IMAGE / docker_image= to an image that is "
+                            f"already here (`docker images {DEFAULT_REPOSITORY}`).")
     if _NOT_PUBLISHED.search(detail):
         if image == f"{DEFAULT_REPOSITORY}:sdk-{_sdk_version()}":
             why = ("Each image is published a few minutes after its SDK release (it is built from the PyPI "
@@ -624,6 +661,37 @@ def _proxy_host_port(url):
         return None, None
 
 
+def _proxy_login(url):
+    """(scheme, whether the proxy URL carries a username or password, whether they are percent-escaped)."""
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(url if "://" in str(url) else f"http://{url}")
+        info = u.netloc.rpartition("@")[0]
+        return (u.scheme or "http").lower(), bool(u.username or u.password), "%" in info
+    except ValueError:
+        return "http", "@" in str(url), "%" in str(url)
+
+
+def legacy_proxy_refusal(image, proxy_url, licensed):
+    """Why an image older than FIRST_PROTOCOL_TAG cannot take this proxy, or None. Its entrypoint drops the
+    password of an http(s) proxy (Chrome is then challenged and nothing answers: every request fails), and
+    hands a SOCKS5 password to an engine switch only the licensed engine has -- as written in the URL, without
+    decoding it, so a username or password with characters that have to be escaped there arrives wrong."""
+    if not proxy_url:
+        return None
+    scheme, creds, escaped = _proxy_login(proxy_url)
+    if not creds or (scheme.startswith("socks5") and licensed and not escaped):
+        return None
+    what = ("an HTTP proxy that needs a password" if scheme.startswith("http") else
+            "a SOCKS5 proxy that needs a password without a licence key (its open engine cannot log in)"
+            if not licensed else
+            "a SOCKS5 proxy that needs a password with characters a URL has to escape (it would send them "
+            "escaped)")
+    return (f"the Clearcote image {image} predates {FIRST_PROTOCOL_TAG} and cannot use {what}: every request "
+            f"through it would fail. Use {DEFAULT_REPOSITORY}:{FIRST_PROTOCOL_TAG} or newer (the default image "
+            "is), or a proxy that does not need a password.")
+
+
 def verify_applied(marks, protocol, expect) -> list:
     """What the container did not apply that was asked for (empty when all is well), from the lines its
     entrypoint logged: serve-state (protocol 2) or, for an older image, its engine and proxy lines.
@@ -655,6 +723,9 @@ def verify_applied(marks, protocol, expect) -> list:
             problems.append("a proxy was given, but it did not apply it (its traffic would leave from the "
                             "container's own address)" if not proxy else
                             f"it applied a different proxy ({proxy})")
+        elif protocol >= 2 and _proxy_login(expect["proxy"])[1] and state.get("proxy_auth") not in ("engine", "relay"):
+            problems.append("the proxy needs a password, but it did not say it can log in to it (every request "
+                            "through it would fail)")
     return problems
 
 
@@ -678,10 +749,12 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     gets --rm, an idle exit (it stops once no CDP client has been connected for idle_exit_seconds(),
     counted from when its CDP answers) and the licence key and proxy URL as a file copied in, not as -e
     variables `docker inspect` would show. An older image gets plain variables -- they still work -- and a
-    warning that they are visible and that it will not stop on its own. Either way, once the browser
-    answers, the container's own log must show the licensed engine when a key was given and the proxy when
-    one was given (verify_applied); otherwise it is stopped and removed and launch() raises: a browser on
-    the open engine, or one sending traffic direct, is never handed back in their place. The container
+    warning that they are visible and that it will not stop on its own -- and is refused, before it starts, a
+    proxy password it cannot answer (legacy_proxy_refusal). Either way, once the browser answers, the
+    container's own log must show the licensed engine when a key was given and the proxy when one was given,
+    logged in to when it needs a password (verify_applied); otherwise it is stopped and removed and launch()
+    raises: a browser on the open engine, one sending traffic direct, or one whose every request the proxy
+    turns away is never handed back in their place. The container
     carries this process's owner token for sweep_stale()."""
     env = container_env(kwargs)
     idle = idle_exit_seconds()
@@ -697,6 +770,9 @@ def start_container(kwargs: dict, quiet=False) -> dict:
         if secrets:
             env["CC_SECRETS_FILE"] = SECRETS_FILE
     else:
+        refusal = legacy_proxy_refusal(image, expect["proxy"], expect["licensed"])
+        if refusal:
+            raise RuntimeError(refusal)
         if not quiet:
             sys.stderr.write(
                 f"[clearcote] warning: the image {image} predates {FIRST_PROTOCOL_TAG}: "

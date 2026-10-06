@@ -294,48 +294,88 @@ internal static class DockerLaunch
     // ── who owns a container ────────────────────────────────────────────────────────────────────────
     // A container carries a random per-process token (OwnerTokenLabel); the owner writes a record under
     // ~/.clearcote/docker-owners/<token>.json saying which process it is: pid, a start marker that changes when
-    // the pid is reused, and (Linux) its PID namespace and boot id. A sweeper only judges containers whose
-    // record it can read in its own home, from the same boot and PID namespace: a process in another namespace
-    // (a container given the Docker socket, WSL2 next to Windows on Docker Desktop) or on another machine has
-    // its records elsewhere, so its containers are never touched. When in doubt, nothing is removed. The record
-    // format is shared by the Python, Node and .NET SDKs, so any of them can sweep any other's containers.
+    // the pid is reused, its host name and (Linux) its PID namespace and boot id. A sweeper only judges a record
+    // it can verify completely: one in its own home, written on this host, from this boot and PID namespace --
+    // every one of those fields as this process would write it, so a record written on another OS into a shared
+    // home (no namespace or boot id), in a container given the Docker socket (another namespace), next to Windows
+    // in WSL2, or on another machine is left alone, and so is a pid that is not a positive number. When in doubt,
+    // nothing is removed: the container's idle exit still stops it. The record format is shared by the Python,
+    // Node and .NET SDKs, so any of them can sweep any other's containers.
 
     private static string? ReadText(string path)
     {
         try { return File.ReadAllText(path).Trim(); } catch { return null; }
     }
 
-    private static string? BootId() => ReadText("/proc/sys/kernel/random/boot_id");
-
-    private static string? PidNamespace()
+    // What this host says about processes: /proc where there is one, `ps` elsewhere. Test seams.
+    internal static Func<string, string?> ProcText = ReadText;
+    internal static Func<bool> IsWindowsHost = OperatingSystem.IsWindows;
+    internal static Func<string?> BootIdProbe = () => ProcText("/proc/sys/kernel/random/boot_id");
+    internal static Func<string?> PidNamespaceProbe = () =>
     {
         try { return new FileInfo("/proc/self/ns/pid").LinkTarget; } catch { return null; }
+    };
+    /// Runs `ps` as the start info says: its standard output, or null when it failed.
+    internal static Func<ProcessStartInfo, string?> RunPs = psi =>
+    {
+        using var ps = Process.Start(psi)!;
+        var output = ps.StandardOutput.ReadToEnd();
+        ps.WaitForExit(10_000);
+        return ps.ExitCode == 0 ? output : null;
+    };
+
+    private static string? BootId() => BootIdProbe();
+    private static string? PidNamespace() => PidNamespaceProbe();
+
+    /// `ps -o lstart=` prints local time, in the locale's words. Pinned, so an owner and a sweeper that run with
+    /// different TZ / LANG settings (or one program that changes TZ between launches) read the same string for the
+    /// same process. Without it a sweeper in another time zone took a live owner for a reused pid.
+    internal static readonly IReadOnlyDictionary<string, string> PsEnv = new Dictionary<string, string> { ["TZ"] = "UTC0", ["LC_ALL"] = "C" };
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    /// The creation time Windows keeps for a process, as the FILETIME it stores (UTC). Process.StartTime goes
+    /// through local time, and a start inside the hour a clock change repeats came back an hour off.
+    private static long? WindowsCreationTime(int pid)
+    {
+        var h = OpenProcess(0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, false, pid);
+        if (h == IntPtr.Zero) return null;
+        try { return GetProcessTimes(h, out var created, out _, out _, out _) ? created : null; }
+        finally { CloseHandle(h); }
     }
 
     /// A marker that differs once <paramref name="pid"/> belongs to another process (it was reused), or null when
     /// it cannot be read here. Linux: the start time from /proc; Windows: the creation time (FILETIME, UTC);
-    /// elsewhere (macOS): `ps -o lstart=`. The same strings in all three SDKs.
+    /// elsewhere (macOS): `ps -o lstart=` in UTC and the C locale. The same strings in all three SDKs.
     internal static string? ProcessStart(int pid)
     {
-        if (ReadText($"/proc/{pid}/stat") is { } stat)
+        if (ProcText($"/proc/{pid}/stat") is { } stat)
         {
             var f = stat[(stat.LastIndexOf(')') + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
             return f.Length > 19 ? $"linux:{f[19]}" : null;
         }
-        if (OperatingSystem.IsWindows())
+        if (IsWindowsHost())
         {
-            try { using var p = Process.GetProcessById(pid); return $"win:{p.StartTime.ToFileTimeUtc()}"; }
+            try { return WindowsCreationTime(pid) is { } created ? $"win:{created}" : null; }
             catch { return null; }
         }
         try
         {
             var psi = new ProcessStartInfo("ps") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
             foreach (var a in new[] { "-o", "lstart=", "-p", pid.ToString(CultureInfo.InvariantCulture) }) psi.ArgumentList.Add(a);
-            using var ps = Process.Start(psi)!;
-            var output = ps.StandardOutput.ReadToEnd();
-            ps.WaitForExit(10_000);
-            var text = string.Join(' ', output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-            return ps.ExitCode == 0 && text.Length > 0 ? $"ps:{text}" : null;
+            foreach (var (k, v) in PsEnv) psi.Environment[k] = v;
+            var output = RunPs(psi);
+            var text = output is null ? "" : string.Join(' ', output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            return text.Length > 0 ? $"ps-utc:{text}" : null;
         }
         catch { return null; }
     }
@@ -371,18 +411,25 @@ internal static class DockerLaunch
         }
     }
 
-    /// True or false for the owner a record describes, or null when it cannot be told from here (another boot,
-    /// another PID namespace, a malformed record).
+    /// The fields an owner record from this process would carry besides its pid and start marker.
+    internal static (string? Host, string? Boot, string? PidNs) OwnerHere() => (System.Net.Dns.GetHostName(), BootId(), PidNamespace());
+
+    private static string? MarkerKind(string marker) => marker.IndexOf(':') is var i and > 0 ? marker[..i] : null;
+
+    /// True or false for the owner a record describes, or null when that cannot be told for certain here: a record
+    /// whose host, boot id or PID namespace is not exactly what this process would record (missing ones included),
+    /// or whose pid is not a positive integer. A pid that is alive with a start marker of the same kind but another
+    /// value was reused (false); one whose marker cannot be compared counts as alive.
     internal static bool? OwnerAlive(JsonElement rec)
     {
         string? Str(string name) => rec.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-        var boot = BootId();
-        var ns = PidNamespace();
-        if (Str("boot") is { Length: > 0 } rb && boot is not null && rb != boot) return null;
-        if (Str("pidns") is { Length: > 0 } rn && ns is not null && rn != ns) return null;
-        if (!rec.TryGetProperty("pid", out var p) || p.ValueKind != JsonValueKind.Number || !p.TryGetInt32(out var pid)) return null;
+        var here = OwnerHere();
+        if (string.IsNullOrEmpty(here.Host) || Str("host") is not { } host || !string.Equals(host, here.Host, StringComparison.OrdinalIgnoreCase)) return null;
+        if (Str("boot") != here.Boot || Str("pidns") != here.PidNs) return null;
+        if (!rec.TryGetProperty("pid", out var p) || p.ValueKind != JsonValueKind.Number || !p.TryGetInt32(out var pid) || pid <= 0) return null;
         if (!PidAlive(pid)) return false;
-        if (Str("start") is { Length: > 0 } start && ProcessStart(pid) is { } now && now != start) return false;   // the pid now belongs to another process
+        if (Str("start") is { Length: > 0 } start && ProcessStart(pid) is { } now && MarkerKind(now) == MarkerKind(start) && now != start)
+            return false;   // the pid now belongs to another process
         return true;
     }
 
@@ -573,14 +620,21 @@ internal static class DockerLaunch
         @"volumes/[^/\s]+/_data\S*: (?:file exists|no such file)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     // A tag that is not there: Docker 29 says `failed to resolve reference "docker.io/...:tag": ...: not found`;
-    // older ones `manifest unknown` / `manifest for ... not found`.
+    // older ones `manifest unknown` / `manifest for ... not found`. Docker 29 reports a registry it cannot reach with
+    // the same "failed to resolve reference" opening, so that phrase alone proves nothing: the network wordings are
+    // looked for first.
     private static readonly System.Text.RegularExpressions.Regex NotPublished = new(
-        @"failed to resolve reference|manifest unknown|manifest for .* not found|not found: manifest|pull access denied|repository does not exist|: not found\b",
+        @"manifest unknown|manifest for .* not found|not found: manifest|pull access denied|repository does not exist|: not found\s*$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Multiline);
+    private static readonly System.Text.RegularExpressions.Regex RegistryUnreachable = new(
+        @"dial tcp|no such host|i/o timeout|connection refused|connection reset|network is unreachable|no route to host|TLS handshake timeout|context deadline exceeded|failed to do request|Client\.Timeout|temporary failure in name resolution|server misbehaving",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     private static Exception ImageFailed(string image, int code, string stderr, string what = "docker pull")
     {
         var detail = stderr.Trim() is { Length: > 0 } e ? e : $"exit {code}";
+        if (RegistryUnreachable.IsMatch(detail))
+            return new InvalidOperationException($"could not download the Clearcote image {image}: the registry did not answer ({FirstLine(detail)}). Check this machine's network (and any proxy Docker itself needs), or set CLEARCOTE_DOCKER_IMAGE / DockerImage to an image that is already here (`docker images {DefaultRepository}`).");
         if (NotPublished.IsMatch(detail))
         {
             var why = image == $"{DefaultRepository}:sdk-{Clearcote.Version}"
@@ -625,12 +679,35 @@ internal static class DockerLaunch
             : (null, null);
     }
 
+    /// The scheme of a proxy URL, whether it carries a username or password, and whether they are percent-escaped.
+    private static (string Scheme, bool Creds, bool Escaped) ProxyLogin(string url)
+    {
+        return Uri.TryCreate(url.Contains("://") ? url : "http://" + url, UriKind.Absolute, out var u)
+            ? (u.Scheme.ToLowerInvariant(), u.UserInfo.Length > 0, u.UserInfo.Contains('%'))
+            : ("http", url.Contains('@'), url.Contains('%'));
+    }
+
+    /// Why an image older than FirstProtocolTag cannot take this proxy, or null. Its entrypoint drops the password
+    /// of an http(s) proxy (Chrome is then challenged and nothing answers: every request fails), and hands a SOCKS5
+    /// password to an engine switch only the licensed engine has -- as written in the URL, without decoding it, so a
+    /// username or password with characters that have to be escaped there arrives wrong.
+    internal static string? LegacyProxyRefusal(string image, string? proxyUrl, bool licensed)
+    {
+        if (string.IsNullOrEmpty(proxyUrl)) return null;
+        var (scheme, creds, escaped) = ProxyLogin(proxyUrl);
+        if (!creds || (scheme.StartsWith("socks5", StringComparison.Ordinal) && licensed && !escaped)) return null;
+        var what = scheme.StartsWith("http", StringComparison.Ordinal) ? "an HTTP proxy that needs a password"
+            : !licensed ? "a SOCKS5 proxy that needs a password without a licence key (its open engine cannot log in)"
+            : "a SOCKS5 proxy that needs a password with characters a URL has to escape (it would send them escaped)";
+        return $"the Clearcote image {image} predates {FirstProtocolTag} and cannot use {what}: every request through it would fail. Use {DefaultRepository}:{FirstProtocolTag} or newer (the default image is), or a proxy that does not need a password.";
+    }
+
     /// What the container did not apply that was asked for (empty when all is well), from the lines its entrypoint
     /// logged: serve-state (protocol 2) or, for an older image, its engine and proxy lines.
     internal static IReadOnlyList<string> VerifyApplied(IReadOnlyList<string> marks, int protocol, bool licensed, string? proxyWanted)
     {
         var problems = new List<string>();
-        string? engine, proxy;
+        string? engine, proxy, proxyAuth = null;
         if (protocol >= 2)
         {
             JsonElement? state = null;
@@ -644,6 +721,7 @@ internal static class DockerLaunch
             if (state is not { ValueKind: JsonValueKind.Object } st) return new[] { "it did not report what it applied (no serve-state line)" };
             engine = st.TryGetProperty("engine", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : null;
             proxy = st.TryGetProperty("proxy", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+            proxyAuth = st.TryGetProperty("proxy_auth", out var pa) && pa.ValueKind == JsonValueKind.String ? pa.GetString() : null;
         }
         else
         {
@@ -660,6 +738,8 @@ internal static class DockerLaunch
             var (gh, gp) = ProxyHostPort(proxy);
             if (proxy is null || gh != wh || (wp is not null && gp is not null && wp != gp))
                 problems.Add(proxy is null ? "a proxy was given, but it did not apply it (its traffic would leave from the container's own address)" : $"it applied a different proxy ({proxy})");
+            else if (protocol >= 2 && ProxyLogin(proxyWanted).Creds && proxyAuth is not ("engine" or "relay"))
+                problems.Add("the proxy needs a password, but it did not say it can log in to it (every request through it would fail)");
         }
         return problems;
     }
@@ -687,10 +767,12 @@ internal static class DockerLaunch
     /// gets --rm, an idle exit (it stops once no CDP client has been connected for IdleExitSeconds(), counted from
     /// when its CDP answers) and the licence key and proxy URL as a file copied in, not as -e variables
     /// `docker inspect` would show. An older image gets plain variables -- they still work -- and a warning that
-    /// they are visible and that it will not stop on its own. Either way, once the browser answers, the
-    /// container's own log must show the licensed engine when a key was given and the proxy when one was given
-    /// (VerifyApplied); otherwise it is stopped and removed and LaunchAsync throws: a browser on the open engine,
-    /// or one sending traffic direct, is never handed back in their place. The container carries this process's
+    /// they are visible and that it will not stop on its own -- and is refused, before it starts, a proxy password
+    /// it cannot answer (LegacyProxyRefusal). Either way, once the browser answers, the container's own log must
+    /// show the licensed engine when a key was given and the proxy when one was given, logged in to when it needs
+    /// a password (VerifyApplied); otherwise it is stopped and removed and LaunchAsync throws: a browser on the
+    /// open engine, one sending traffic direct, or one whose every request the proxy turns away is never handed
+    /// back in their place. The container carries this process's
     /// owner token for SweepStaleAsync.
     internal static async Task<(DockerContainer Container, string Exe)> StartContainerAsync(LaunchOptions o)
     {
@@ -712,6 +794,7 @@ internal static class DockerLaunch
         }
         else
         {
+            if (LegacyProxyRefusal(image, proxyWanted, licensed) is { } refusal) throw new InvalidOperationException(refusal);
             if (!o.Quiet)
                 Console.Error.WriteLine($"[clearcote] warning: the image {image} predates {FirstProtocolTag}: "
                     + (secrets.Count > 0 ? "its licence key and proxy are passed as container variables, which `docker inspect` shows, and " : "")

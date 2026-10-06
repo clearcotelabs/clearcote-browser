@@ -334,38 +334,36 @@ if pin_screen:
     if not any(str(a).startswith("--window-size=") for a in args):
         window_args.append("--window-size=%d,%d" % (avail_w, avail_h))
 
-# Proxy (CC_PROXY="[scheme://][user:pass@]host:port"). launch() hands a proxy to Playwright; this
-# entrypoint exec's chrome itself, so it has to become switches. Reuses the SDK's own parser and
-# resolver so the container and launch() agree on the awkward case: clearcote implements RFC 1929,
-# so an authenticated SOCKS5 proxy rides --proxy-server + --socks5-credentials (engine >= 151 r14)
-# instead of failing outright or needing a local relay.
+# Proxy (CC_PROXY="[scheme://][user:pass@]host:port"). launch() hands a proxy to its automation driver; this
+# entrypoint exec's chrome itself, so it has to become switches. A proxy that needs a password is logged in
+# to the way launch() does it on a host (proxy_relay.plan): by the engine itself when it has the switch
+# (--proxy-auth for http/https, --socks5-credentials for SOCKS5 -- the licensed builds), otherwise through a
+# relay on this container's loopback that adds the login on the way out, standing in for the driver that
+# answers the 407 challenge on a host. Before, the password of an http(s) proxy was dropped with a warning:
+# the browser was challenged, nothing answered, and every request failed.
 #
 # This is the one place that DOES refuse to start, and deliberately: continuing without the proxy
 # would send the very traffic the operator wanted proxied straight out of the container's own IP.
 # Only a container that sets CC_PROXY can reach it, so no configuration that boots today can break.
 proxy_args = []
 _proxy = os.environ.get("CC_PROXY", "").strip()
+_proxy_server = _proxy_auth = _proxy_relay = None
 if _proxy:
     try:
-        from clearcote._launchopts import quic_args, resolve_proxy, webrtc_default_deny_args
-        from clearcote._serve import _parse_proxy
+        import proxy_relay
+        from clearcote._launchopts import quic_args, webrtc_default_deny_args
 
-        _pd = _parse_proxy(_proxy)
-        proxy_args, _remaining = resolve_proxy(_pd)
-        if _remaining:  # everything except authenticated SOCKS5: --proxy-server carries it
-            proxy_args = ["--proxy-server=%s" % _remaining["server"]]
-            if _remaining.get("username") or _remaining.get("password"):
-                # --proxy-server has nowhere to put HTTP credentials, and there is no Playwright
-                # here to answer the challenge the way launch() does.
-                print("[clearcote] WARNING: CC_PROXY carries credentials for a non-SOCKS5 proxy. "
-                      "Chrome will be challenged (407) and nothing in this container can answer "
-                      "it: handle Fetch.authRequired on your CDP client, use socks5:// (the engine "
-                      "authenticates that itself), or use an IP-allowlisted endpoint.", flush=True)
+        _scheme, _host, _pport, _user, _pw = proxy_relay.split_proxy(_proxy)
+        _proxy_server = proxy_relay.server_url(_scheme, _host, _pport)  # never the credentials
+        proxy_args, _proxy_auth, _proxy_relay = proxy_relay.plan(_proxy, exe)
         # Behind a proxy real Chrome cannot use QUIC (an HTTP/SOCKS proxy carries only TCP), and
         # WebRTC's non-proxied UDP would egress around it -- the same two defaults launch() applies.
         # Scoped to the proxied path so an unproxied container's behaviour is untouched.
-        proxy_args += quic_args(_pd) + webrtc_default_deny_args(proxy_args + extra)
-        print("[clearcote] proxy: %s" % _pd["server"], flush=True)  # server only -- never the creds
+        proxy_args += quic_args({"server": _proxy_server}) + webrtc_default_deny_args(proxy_args + extra)
+        print("[clearcote] proxy: %s" % _proxy_server, flush=True)  # server only -- never the creds
+        if _proxy_auth:
+            print("[clearcote] proxy login: %s" % ("by the engine" if _proxy_auth == "engine" else
+                                                   "through a relay on this container's loopback"), flush=True)
     except Exception as exc:  # noqa: BLE001 -- never fall back to an unproxied browser silently
         print("[clearcote] ERROR: CC_PROXY could not be applied (%s: %s). Refusing to start rather "
               "than send traffic direct from the container's own IP."
@@ -539,13 +537,15 @@ except ValueError:
 # com.clearcotelabs.serve-protocol, so the SDK knows before it starts a container whether the image takes
 # CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS (2), or only plain variables (no label: older images). The
 # serve-state line says what was actually applied -- the engine tier that resolved, the proxy, the idle
-# exit -- so the SDK can refuse a container that did not do what it was asked instead of handing back a
-# browser on the free engine, or one that goes direct when a proxy was asked for.
+# exit, how a proxy's password is answered -- so the SDK can refuse a container that did not do what it was
+# asked instead of handing back a browser on the free engine, one that goes direct when a proxy was asked
+# for, or one whose every request a proxy turns away.
 SERVE_PROTOCOL = 2
 _applied = {
     "protocol": SERVE_PROTOCOL,
     "engine": "licensed" if "/pro-" in exe.replace(os.sep, "/") else "open",
-    "proxy": _pd["server"] if _proxy else None,
+    "proxy": _proxy_server,
+    "proxy_auth": _proxy_auth,  # how a proxy's password is answered: "engine", "relay" (None: no password)
     "idle_exit": _idle_limit if _idle_limit > 0 else 0,
     "secrets_file": bool(_secrets_file),
 }

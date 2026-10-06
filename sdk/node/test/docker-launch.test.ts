@@ -14,8 +14,8 @@ import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { DockerUnavailableError, launch } from "../src/index.js";
 import {
-  dockerCli, dockerRequested, ownerAlive, ownerToken, pidAlive, processStart, resetOwnerToken, startContainer, sweepStale,
-  TEST_ONLY_ASSUME_MACOS, type CliResult,
+  dockerCli, dockerRequested, hostProbe, ownerAlive, ownerHere, ownerToken, pidAlive, processStart, resetOwnerToken,
+  startContainer, sweepStale, TEST_ONLY_ASSUME_MACOS, type CliResult,
 } from "../src/docker.js";
 import { LocalChromium, findChromium } from "./helpers/chromium.js";
 import { tempDir } from "./helpers/temp.js";
@@ -42,8 +42,8 @@ const DEAD_PID = 2 ** 22 + 12345; // above any pid_max: never a live process
 const PROTOCOL = { "com.clearcotelabs.serve-protocol": "2" };
 const saved: Record<string, string | undefined> = {};
 
-const serveState = (engine = "open", proxy: string | null = null, idle = 30, secrets = false) =>
-  `[clearcote] serve-state ${JSON.stringify({ engine, idle_exit: idle, protocol: 2, proxy, secrets_file: secrets })}`;
+const serveState = (engine = "open", proxy: string | null = null, idle = 30, secrets = false, proxyAuth: string | null = null) =>
+  `[clearcote] serve-state ${JSON.stringify({ engine, idle_exit: idle, protocol: 2, proxy, proxy_auth: proxyAuth, secrets_file: secrets })}`;
 
 /** Stands in for the docker CLI: records every call (argv, the environment it was given, stdin). */
 class FakeDocker {
@@ -140,6 +140,8 @@ function untar(buf: Buffer): { name: string; mode: number; uid: number; gid: num
 }
 
 const KEYED = { licenseKey: "cc_lic_docker_test_key_1234", proxy: { server: "http://proxy.example:8080", username: "u", password: "p w" } };
+// what an image from before sdk-0.40.0 can still log in to: a SOCKS5 proxy, on the licensed engine
+const KEYED_SOCKS = { licenseKey: "cc_lic_docker_test_key_1234", proxy: { server: "socks5://proxy.example:1080", username: "u", password: "pw-plain" } };
 const ownersDir = () => join(homedir(), ".clearcote", "docker-owners");
 function record(token: string, fields: Record<string, unknown>): string {
   mkdirSync(ownersDir(), { recursive: true });
@@ -147,6 +149,8 @@ function record(token: string, fields: Record<string, unknown>): string {
   writeFileSync(path, JSON.stringify({ token, ...fields }));
   return path;
 }
+/** What a record written by this process carries besides pid and start (host, boot id, PID namespace). */
+const here = () => ({ host: hostname(), boot: hostProbe.bootId(), pidns: hostProbe.pidNamespace() });
 
 describe("launch() on macOS runs the Clearcote Docker image", () => {
   it("decides by platform, option, binary and environment", async () => {
@@ -169,7 +173,7 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
   });
 
   it.skipIf(!CHROMIUM)("starts the image, connects, and resolves to a working Playwright Browser", async () => {
-    docker.marks = [serveState("licensed", "http://proxy.example:8080", 30, true)];
+    docker.marks = [serveState("licensed", "http://proxy.example:8080", 30, true, "engine")];
     const local = await new LocalChromium().start(CHROMIUM!);
     try {
       docker.cdpPort = Number(/:(\d+)$/.exec(local.httpUrl)![1]);
@@ -258,15 +262,15 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
     try {
       docker.cdpPort = stub.port;
       docker.labels = {};
-      docker.marks = ["[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)", "[clearcote] proxy: http://proxy.example:8080"];
-      const c = await startContainer({ ...KEYED });
+      docker.marks = ["[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)", "[clearcote] proxy: socks5://proxy.example:1080"];
+      const c = await startContainer({ ...KEYED_SOCKS });
       expect(c.serveProtocol).toBe(0);
     } finally {
       await stub.close();
     }
     const { argv, env } = docker.call("create");
     expect(env.CLEARCOTE_LICENSE_KEY).toBe("cc_lic_docker_test_key_1234");
-    expect(env.CC_PROXY).toBe("http://u:p%20w@proxy.example:8080");
+    expect(env.CC_PROXY).toBe("socks5://u:pw-plain@proxy.example:1080");
     expect(env.CC_SECRETS_FILE).toBeUndefined();
     expect(env.CC_IDLE_EXIT_SECONDS).toBeUndefined();
     expect(docker.commands()).not.toContain("cp");
@@ -277,12 +281,14 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
   });
 
   for (const [protocol, marks, problem] of [
-    [2, [serveState("open", "http://proxy.example:8080", 30, true)], "it runs the open engine"],
+    [2, [serveState("open", "http://proxy.example:8080", 30, true, "relay")], "it runs the open engine"],
     [2, [serveState("licensed", null, 30, true)], "did not apply it"],
     [2, [], "did not report what it applied"],
-    [0, ["[clearcote] engine: /opt/xdg-cache/clearcote/v0.1.0-pre.23/browser/chrome (free)", "[clearcote] proxy: http://proxy.example:8080"], "it runs the open engine"],
+    // the proxy needs a password and the container did not say it can log in to it: every request would fail
+    [2, [serveState("licensed", "http://proxy.example:8080", 30, true)], "did not say it can log in"],
+    [0, ["[clearcote] engine: /opt/xdg-cache/clearcote/v0.1.0-pre.23/browser/chrome (free)", "[clearcote] proxy: socks5://proxy.example:1080"], "it runs the open engine"],
     [0, ["[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)"], "did not apply it"],
-    [0, ["[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)", "[clearcote] proxy: http://other.example:3128"], "a different proxy"],
+    [0, ["[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)", "[clearcote] proxy: socks5://other.example:3128"], "a different proxy"],
   ] as Array<[number, string[], string]>) {
     it(`a container that did not apply the key or proxy is refused and removed (protocol ${protocol}: ${problem})`, async () => {
       const stub = await cdpStub();
@@ -290,7 +296,7 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
         docker.cdpPort = stub.port;
         docker.labels = protocol ? { ...PROTOCOL } : {};
         docker.marks = marks;
-        const err = await startContainer({ ...KEYED, quiet: true }).then(() => null, (e) => e as Error);
+        const err = await startContainer({ ...(protocol ? KEYED : KEYED_SOCKS), quiet: true }).then(() => null, (e) => e as Error);
         expect(err!.message).toContain("did not apply what launch() asked for");
         expect(err!.message).toContain(problem);
         expect(err!.message).toContain("stopped and removed");
@@ -326,6 +332,52 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
     expect(docker.commands()).not.toContain("create");
   });
 
+  for (const [proxy, licensed] of [
+    [{ server: "http://proxy.example:8080", username: "u", password: "p w" }, true],
+    ["https://u:p%20w@proxy.example:8443", true],
+    [{ server: "socks5://proxy.example:1080", username: "u", password: "p w" }, false],
+    // its licensed engine takes a SOCKS5 password, but the image hands it over as written in the URL: escaped
+    [{ server: "socks5://proxy.example:1080", username: "u", password: "p@ss w" }, true],
+  ] as Array<[unknown, boolean]>) {
+    it(`an old image is refused a proxy it cannot log in to, before it starts (${JSON.stringify(proxy).slice(0, 40)})`, async () => {
+      // An image from before sdk-0.40.0 drops an http(s) proxy's password (Chrome is challenged and nothing
+      // answers: every request fails), and only its licensed engine takes a SOCKS5 one. Said up front instead.
+      docker.labels = {};
+      const err = await startContainer({ proxy, ...(licensed ? { licenseKey: "cc_lic_docker_test_key_1234" } : {}), quiet: true })
+        .then(() => null, (e) => e as Error);
+      expect(err!.message).toMatch(/predates sdk-0\.40\.0 and cannot use .* needs a password/);
+      expect(err!.message).not.toMatch(/p w|p%20w/);
+      expect(docker.commands()).not.toContain("create");
+    });
+  }
+
+  it("a proxy password is accepted when the container logs in to it", async () => {
+    const stub = await cdpStub();
+    try {
+      docker.cdpPort = stub.port;
+      for (const how of ["engine", "relay"]) {
+        docker.marks = [serveState("open", "http://proxy.example:8080", 30, true, how)];
+        const c = await startContainer({ proxy: KEYED.proxy, quiet: true });
+        expect(c.id).toBe("c0ffee1234");
+      }
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("an unreachable registry is not called an unpublished image (Docker 29)", async () => {
+    // Docker 29 opens a registry it cannot reach with the same "failed to resolve reference" as a tag that is not
+    // there: offline users of the default tag were told it "is not published yet".
+    docker.labels = null;
+    docker.pullError = `Error response from daemon: failed to resolve reference "docker.io/${IMAGE}": failed to do request: Head "https://registry-1.docker.io/v2/teamflatearth/clearcote/manifests/sdk-${SDK_VERSION}": dial tcp: lookup registry-1.docker.io on 192.168.65.7:53: no such host\n`;
+    const err = await onMac(() => launch().then(() => null, (e) => e as Error));
+    expect(err!.message).toContain("registry did not answer");
+    expect(err!.message).toContain("network");
+    expect(err!.message).toContain("no such host");
+    expect(err!.message).not.toContain("not available");
+    expect(err!.message).not.toContain("published a few minutes");
+  });
+
   for (const e of [
     "Error response from daemon: manifest for x:y not found: manifest unknown: manifest unknown",
     "Error response from daemon: pull access denied for x, repository does not exist or may require 'docker login'",
@@ -341,16 +393,15 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
 
   it("sweeps only containers whose owner is certainly gone", async () => {
     const t = (c: string) => c.repeat(32);
-    const gone = record(t("a"), { pid: DEAD_PID, start: null }); // owner gone: swept
-    record(t("b"), { pid: process.pid, start: processStart(process.pid) }); // owner alive: kept
-    const elsewhere = record(t("d"), { pid: DEAD_PID, boot: "another-boot-entirely" }); // another boot: kept
+    const gone = record(t("a"), { pid: DEAD_PID, start: null, ...here() }); // owner gone: swept
+    record(t("b"), { pid: process.pid, start: processStart(process.pid), ...here() }); // owner alive: kept
+    const elsewhere = record(t("d"), { pid: DEAD_PID, ...here(), boot: "another-boot-entirely" }); // another boot: kept
     // t("e"): no record here (another machine, a container given the Docker socket, WSL2): kept
     docker.ps = ["a", "b", "d", "e"].map((c) => `${c.repeat(6)}\t${t(c)}\n`).join("") + "fff111\t\n"; // no token (older SDK): kept
-    const bootHere = existsSync("/proc/sys/kernel/random/boot_id");
-    expect(await sweepStale("docker")).toEqual(bootHere ? ["aaaaaa"] : ["aaaaaa", "dddddd"]);
-    expect(docker.stopsAndRms()[0]).toEqual(["--time", "10", "aaaaaa", ...(bootHere ? [] : ["dddddd"])]);
+    expect(await sweepStale("docker")).toEqual(["aaaaaa"]);
+    expect(docker.stopsAndRms()[0]).toEqual(["--time", "10", "aaaaaa"]);
     expect(existsSync(gone)).toBe(false); // its record goes too
-    if (bootHere) expect(existsSync(elsewhere)).toBe(true);
+    expect(existsSync(elsewhere)).toBe(true);
   });
 
   it("a process in another namespace with this host name is left alone", async () => {
@@ -370,10 +421,73 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
     const token = ownerToken();
     expect(ownerToken()).toBe(token); // one per process
     const rec = JSON.parse(readFileSync(join(ownersDir(), `${token}.json`), "utf8"));
-    expect(rec).toMatchObject({ pid: process.pid, sdk: "node", start: processStart(process.pid) });
+    expect(rec).toMatchObject({ pid: process.pid, sdk: "node", start: processStart(process.pid), ...here() });
+    expect(ownerHere()).toEqual(here());
     expect(ownerAlive(rec)).toBe(true);
     expect(ownerAlive({ ...rec, pid: DEAD_PID })).toBe(false);
-    if (rec.start) expect(ownerAlive({ ...rec, start: "linux:1" })).toBe(false); // the same pid, another process
+    if (rec.start) expect(ownerAlive({ ...rec, start: `${rec.start.split(":")[0]}:1` })).toBe(false); // the same pid, another process
+  });
+
+  for (const pid of [0, -1, -4242]) {
+    it(`a record whose pid is not a positive number is left alone (${pid})`, async () => {
+      // pid 0 / negative pids name a process group or nothing at all: "not alive" proves nothing about the owner
+      record("a".repeat(32), { pid, start: null, ...here() });
+      docker.ps = `aaaaaa\t${"a".repeat(32)}\n`;
+      expect(ownerAlive({ pid, ...here() })).toBeNull();
+      expect(await sweepStale("docker")).toEqual([]);
+      expect(docker.commands()).not.toContain("stop");
+    });
+  }
+
+  for (const [label, fields] of [
+    ["written on macOS/Windows into a shared home", {}],
+    ["no PID namespace", { boot: "linux-boot-1" }],
+    ["no boot id", { pidns: "pid:[4026531836]" }],
+    ["another host", { boot: "linux-boot-1", pidns: "pid:[4026531836]", host: "another-machine" }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    it(`a record that cannot be fully verified here is left alone (${label})`, async () => {
+      // This process is on Linux (boot id + PID namespace). A record that lacks either, or names another host, was
+      // judged by its pid alone, and its live container removed when that pid was free here.
+      vi.spyOn(hostProbe, "bootId").mockReturnValue("linux-boot-1");
+      vi.spyOn(hostProbe, "pidNamespace").mockReturnValue("pid:[4026531836]");
+      const rec = { pid: DEAD_PID, start: "ps-utc:Tue Oct  6 08:00:00 2026", host: hostname(), ...fields };
+      record("e".repeat(32), rec);
+      docker.ps = `eeeeee\t${"e".repeat(32)}\n`;
+      expect(ownerAlive(rec)).toBeNull();
+      expect(await sweepStale("docker")).toEqual([]);
+      expect(docker.commands()).not.toContain("stop");
+    });
+  }
+
+  it("the start marker is the same in every time zone and locale", async () => {
+    // macOS has no /proc: the start time comes from `ps -o lstart=`, which prints local time in the locale's words.
+    // An owner launched with TZ=UTC and a sweeper with TZ=Asia/Tokyo read different strings for one process, and the
+    // sweeper removed the live container as a reused pid (so did one script changing TZ between launches).
+    vi.spyOn(hostProbe, "readText").mockReturnValue(null); // no /proc here
+    vi.spyOn(hostProbe, "platform").mockReturnValue("darwin");
+    vi.spyOn(hostProbe, "spawnSync").mockImplementation(((_cmd: string, _args: string[], opts?: { env?: NodeJS.ProcessEnv }) => {
+      const e = opts?.env ?? process.env; // what the ps child would see
+      return { status: 0, stdout: `started 2026-10-06 08:00:00 UTC, printed for TZ=${e.TZ} LC_ALL=${e.LC_ALL}\n`, stderr: "" };
+    }) as never);
+    vi.spyOn(process, "kill").mockImplementation((() => true) as never); // pid 4242 is alive
+    const saveTz = process.env.TZ;
+    const saveLc = process.env.LC_ALL;
+    try {
+      process.env.TZ = "UTC";
+      process.env.LC_ALL = "en_US.UTF-8";
+      const rec = { ...here(), pid: 4242, start: processStart(4242) };
+      expect(rec.start).toBeTruthy();
+      process.env.TZ = "Asia/Tokyo";
+      process.env.LC_ALL = "de_DE.UTF-8";
+      expect(processStart(4242)).toBe(rec.start);
+      expect(ownerAlive(rec)).toBe(true);
+      record("f".repeat(32), rec);
+      docker.ps = `ffffff\t${"f".repeat(32)}\n`;
+      expect(await sweepStale("docker")).toEqual([]);
+    } finally {
+      if (saveTz === undefined) delete process.env.TZ; else process.env.TZ = saveTz;
+      if (saveLc === undefined) delete process.env.LC_ALL; else process.env.LC_ALL = saveLc;
+    }
   });
 
   it("pidAlive", () => {

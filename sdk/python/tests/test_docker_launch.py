@@ -30,9 +30,10 @@ DEAD_PID = 2 ** 22 + 12345  # above any pid_max: never a live process
 PROTOCOL = {"com.clearcotelabs.serve-protocol": "2"}
 
 
-def serve_state(engine="open", proxy=None, idle=30, secrets=False):
+def serve_state(engine="open", proxy=None, idle=30, secrets=False, proxy_auth=None):
     return "[clearcote] serve-state " + json.dumps({"engine": engine, "idle_exit": idle, "protocol": 2,
-                                                    "proxy": proxy, "secrets_file": secrets}, sort_keys=True)
+                                                    "proxy": proxy, "proxy_auth": proxy_auth,
+                                                    "secrets_file": secrets}, sort_keys=True)
 
 
 class FakeDocker:
@@ -191,6 +192,9 @@ def tar_members(data):
 
 KEYED = {"license_key": "cc_lic_docker_test_key_1234",
          "proxy": {"server": "http://proxy.example:8080", "username": "u", "password": "p w"}}
+# what an image from before sdk-0.40.0 can still log in to: a SOCKS5 proxy, on the licensed engine
+KEYED_SOCKS = {"license_key": "cc_lic_docker_test_key_1234",
+               "proxy": {"server": "socks5://proxy.example:1080", "username": "u", "password": "pw-plain"}}
 
 
 def test_the_decision(monkeypatch):
@@ -217,7 +221,7 @@ def test_the_decision(monkeypatch):
 
 @needs_chromium
 def test_macos_launch_runs_the_image_and_returns_a_working_browser(mac, docker):
-    docker.marks = [serve_state("licensed", "http://proxy.example:8080", secrets=True)]
+    docker.marks = [serve_state("licensed", "http://proxy.example:8080", secrets=True, proxy_auth="engine")]
     with LocalChromium(CHROMIUM) as chromium:
         docker.cdp_port = int(chromium.http_url.rsplit(":", 1)[1])
         browser = clearcote.launch(
@@ -306,39 +310,41 @@ def test_an_image_without_the_protocol_label_gets_plain_variables_and_a_warning(
     # start it on the open engine with no proxy. It gets the variables it understands instead, and a warning.
     docker.labels = {}
     docker.marks = ["[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)",
-                    "[clearcote] proxy: http://proxy.example:8080"]
-    container = _docker.start_container(dict(KEYED))
+                    "[clearcote] proxy: socks5://proxy.example:1080"]
+    container = _docker.start_container(dict(KEYED_SOCKS))
     assert container["serve_protocol"] == 0
     create = docker.call("create")
     assert create["env"]["CLEARCOTE_LICENSE_KEY"] == "cc_lic_docker_test_key_1234"
-    assert create["env"]["CC_PROXY"] == "http://u:p%20w@proxy.example:8080"
+    assert create["env"]["CC_PROXY"] == "socks5://u:pw-plain@proxy.example:1080"
     assert "CC_SECRETS_FILE" not in create["env"] and "CC_IDLE_EXIT_SECONDS" not in create["env"]
     assert "cp" not in docker.commands()
-    assert not any("cc_lic_docker_test_key_1234" in a or "p%20w" in a for a in create["argv"])  # still not argv
+    assert not any("cc_lic_docker_test_key_1234" in a or "pw-plain" in a for a in create["argv"])  # still not argv
     err = capsys.readouterr().err
     assert "predates sdk-0.40.0" in err and "docker inspect" in err and "will not stop on its own" in err
     _docker._remove("docker", container["id"])
 
 
 @pytest.mark.parametrize("protocol,marks,problem", [
-    (2, [serve_state("open", "http://proxy.example:8080", secrets=True)], "it runs the open engine"),
+    (2, [serve_state("open", "http://proxy.example:8080", secrets=True, proxy_auth="relay")], "it runs the open engine"),
     (2, [serve_state("licensed", None, secrets=True)], "did not apply it"),
     (2, [], "did not report what it applied"),
+    # the proxy needs a password and the container did not say it can log in to it: every request would fail
+    (2, [serve_state("licensed", "http://proxy.example:8080", secrets=True)], "did not say it can log in"),
     (0, ["[clearcote] engine: /opt/xdg-cache/clearcote/v0.1.0-pre.23/browser/chrome (free)",
-         "[clearcote] proxy: http://proxy.example:8080"], "it runs the open engine"),
+         "[clearcote] proxy: socks5://proxy.example:1080"], "it runs the open engine"),
     (0, ["[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)"],
      "did not apply it"),  # an image from before CC_PROXY: the traffic would go direct
     (0, ["[clearcote] engine: /opt/xdg-cache/clearcote/pro-154.0.8037.57-r30/browser/chrome (licensed)",
-         "[clearcote] proxy: http://other.example:3128"], "a different proxy"),
+         "[clearcote] proxy: socks5://other.example:3128"], "a different proxy"),
 ])
 def test_a_container_that_did_not_apply_the_key_or_proxy_is_refused_and_removed(mac, docker, cdp, protocol, marks, problem):
     docker.labels = dict(PROTOCOL) if protocol else {}
     docker.marks = marks
     with pytest.raises(RuntimeError, match="did not apply what launch\\(\\) asked for") as e:
-        _docker.start_container(dict(KEYED), quiet=True)
+        _docker.start_container(dict(KEYED if protocol else KEYED_SOCKS), quiet=True)
     assert problem in str(e.value) and "stopped and removed" in str(e.value)
     assert docker.commands()[-2:] == ["stop", "rm"]
-    assert "cc_lic_docker_test_key_1234" not in str(e.value) and "p%20w" not in str(e.value)
+    assert not any(s in str(e.value) for s in ("cc_lic_docker_test_key_1234", "p%20w", "pw-plain"))
     assert _docker._LIVE == {}
 
 
@@ -365,6 +371,47 @@ def test_an_image_not_published_yet_says_what_to_do(mac, docker):
     assert "create" not in docker.commands()
 
 
+@pytest.mark.parametrize("proxy,licensed", [
+    ({"server": "http://proxy.example:8080", "username": "u", "password": "p w"}, True),
+    ("https://u:p%20w@proxy.example:8443", True),
+    ({"server": "socks5://proxy.example:1080", "username": "u", "password": "p w"}, False),
+    # its licensed engine takes a SOCKS5 password, but the image hands it over as written in the URL: escaped
+    ({"server": "socks5://proxy.example:1080", "username": "u", "password": "p@ss w"}, True),
+])
+def test_an_old_image_is_refused_a_proxy_it_cannot_log_in_to_before_it_starts(mac, docker, cdp, proxy, licensed):
+    # An image from before sdk-0.40.0 drops an http(s) proxy's password (Chrome is challenged and nothing
+    # answers: every request fails), and only its licensed engine takes a SOCKS5 one. Said up front instead.
+    docker.labels = {}
+    kwargs = {"proxy": proxy, **({"license_key": "cc_lic_docker_test_key_1234"} if licensed else {})}
+    with pytest.raises(RuntimeError, match="predates sdk-0.40.0 and cannot use .* needs a password") as e:
+        _docker.start_container(kwargs, quiet=True)
+    assert "create" not in docker.commands()
+    assert "p w" not in str(e.value) and "p%20w" not in str(e.value)
+
+
+def test_a_proxy_password_is_accepted_when_the_container_logs_in(mac, docker, cdp):
+    for how in ("engine", "relay"):
+        docker.calls.clear()
+        docker.marks = [serve_state("open", "http://proxy.example:8080", secrets=True, proxy_auth=how)]
+        container = _docker.start_container({"proxy": KEYED["proxy"]}, quiet=True)
+        _docker._remove("docker", container["id"])
+
+
+def test_an_unreachable_registry_is_not_called_an_unpublished_image(mac, docker):
+    # Docker 29 opens a registry it cannot reach with the same "failed to resolve reference" as a tag that is
+    # not there: offline users of the default tag were told it "is not published yet".
+    docker.labels = None
+    docker.pull_error = (f'Error response from daemon: failed to resolve reference "docker.io/{IMAGE}": failed to '
+                         f'do request: Head "https://registry-1.docker.io/v2/teamflatearth/clearcote/manifests/'
+                         f'sdk-{clearcote.__version__}": dial tcp: lookup registry-1.docker.io on 192.168.65.7:53: '
+                         "no such host\n")
+    with pytest.raises(RuntimeError) as e:
+        clearcote.launch()
+    msg = str(e.value)
+    assert "registry did not answer" in msg and "network" in msg and "no such host" in msg
+    assert "not available" not in msg and "published a few minutes" not in msg
+
+
 @pytest.mark.parametrize("err", [
     "Error response from daemon: manifest for x:y not found: manifest unknown: manifest unknown",
     "Error response from daemon: pull access denied for x, repository does not exist or may require 'docker login'",
@@ -386,16 +433,26 @@ def _record(token, **fields):
     return path
 
 
+def _here_fields():
+    """What a record written by this process carries besides pid and start (host, boot id, PID namespace)."""
+    return {"host": socket.gethostname(), "boot": _docker._boot_id(), "pidns": _docker._pid_namespace()}
+
+
+def _kind():
+    return _docker.process_start(os.getpid()).split(":", 1)[0]
+
+
 def test_sweep_removes_only_containers_whose_owner_is_certainly_gone(mac, docker, monkeypatch):
     me = os.getpid()
+    monkeypatch.setattr(_docker, "_pid_namespace", lambda: "pid:[4026531836]")
+    here = _here_fields()
     t = {k: k * 32 for k in "abcdef"}
-    gone = _record(t["a"], pid=DEAD_PID, start=None)                              # owner gone: swept
-    _record(t["b"], pid=me, start=_docker.process_start(me))                      # owner alive: kept
-    reused = _record(t["c"], pid=me, start="linux:1")                             # pid reused: swept
-    _record(t["d"], pid=DEAD_PID, pidns="pid:[4026531836]-elsewhere")             # another PID namespace: kept
+    gone = _record(t["a"], pid=DEAD_PID, start=None, **here)                      # owner gone: swept
+    _record(t["b"], pid=me, start=_docker.process_start(me), **here)              # owner alive: kept
+    reused = _record(t["c"], pid=me, start=_kind() + ":1", **here)                # pid reused: swept
+    _record(t["d"], pid=DEAD_PID, **dict(here, pidns="pid:[4026531836]-elsewhere"))  # another PID namespace: kept
     # t["e"]: no record here (another machine, a container given the Docker socket, WSL2): kept
     docker.ps = "".join(f"{c * 6}\t{t[c]}\n" for c in "abcde") + "fff111\t\n"     # no token (older SDK): kept
-    monkeypatch.setattr(_docker, "_pid_namespace", lambda: "pid:[4026531836]")
     assert _docker.sweep_stale("docker") == ["aaaaaa", "cccccc"]
     assert [c["argv"][2:] for c in docker.calls if c["argv"][1] in ("stop", "rm")] == [
         ["--time", "10", "aaaaaa", "cccccc"], ["-f", "-v", "aaaaaa", "cccccc"]]
@@ -420,9 +477,65 @@ def test_owner_record(mac):
     rec = json.loads(open(os.path.join(_docker._owners_dir(), token + ".json"), encoding="utf-8").read())
     assert rec["pid"] == os.getpid() and rec["sdk"] == "python"
     assert rec["start"] == _docker.process_start(os.getpid()) and rec["start"]
+    assert {k: rec[k] for k in ("host", "boot", "pidns")} == _here_fields()
     assert _docker.owner_alive(rec) is True
-    assert _docker.owner_alive(dict(rec, start="linux:1")) is False  # the same pid, another process
+    assert _docker.owner_alive(dict(rec, start=_kind() + ":1")) is False  # the same pid, another process
     assert _docker.owner_alive(dict(rec, pid=DEAD_PID)) is False
+
+
+@pytest.mark.parametrize("pid", [0, -1, -4242])
+def test_a_record_whose_pid_is_not_a_positive_number_is_left_alone(mac, docker, pid):
+    # pid 0 / negative pids name a process group or nothing at all: "not alive" proves nothing about the owner
+    docker.ps = f"aaaaaa\t{'a' * 32}\n"
+    _record("a" * 32, pid=pid, start=None, **_here_fields())
+    assert _docker.owner_alive(dict(_here_fields(), pid=pid)) is None
+    assert _docker.sweep_stale("docker") == []
+    assert not any(c["argv"][1] in ("stop", "rm") for c in docker.calls)
+
+
+@pytest.mark.parametrize("record", [
+    {},                                                   # written on macOS/Windows into a shared home
+    {"boot": "linux-boot-1"},                             # no PID namespace
+    {"pidns": "pid:[4026531836]"},                        # no boot id
+    {"boot": "linux-boot-1", "pidns": "pid:[4026531836]", "host": "another-machine"},  # another host
+])
+def test_a_record_that_cannot_be_fully_verified_here_is_left_alone(mac, docker, monkeypatch, record):
+    # This process is on Linux (boot id + PID namespace). A record that lacks either, or that names another
+    # host, was judged by its pid alone, and its live container removed when that pid was free here.
+    monkeypatch.setattr(_docker, "_boot_id", lambda: "linux-boot-1")
+    monkeypatch.setattr(_docker, "_pid_namespace", lambda: "pid:[4026531836]")
+    rec = dict({"pid": DEAD_PID, "start": "ps-utc:Tue Oct  6 08:00:00 2026", "host": socket.gethostname()}, **record)
+    _record("e" * 32, **rec)
+    docker.ps = f"eeeeee\t{'e' * 32}\n"
+    assert _docker.owner_alive(rec) is None
+    assert _docker.sweep_stale("docker") == []
+    assert not any(c["argv"][1] in ("stop", "rm") for c in docker.calls)
+
+
+def test_the_start_marker_is_the_same_in_every_time_zone_and_locale(mac, docker, monkeypatch):
+    # macOS has no /proc: the start time comes from `ps -o lstart=`, which prints local time in the locale's
+    # words. An owner launched with TZ=UTC and a sweeper with TZ=Asia/Tokyo read different strings for one
+    # process, and the sweeper removed the live container as a reused pid (so did one script changing TZ).
+    def ps(argv, capture_output=True, text=True, timeout=None, env=None, **_k):
+        e = os.environ if env is None else env  # what the ps child would see
+        out = f"started 2026-10-06 08:00:00 UTC, printed for TZ={e.get('TZ')} LC_ALL={e.get('LC_ALL')}\n"
+        return types.SimpleNamespace(returncode=0, stdout=out, stderr="")
+
+    monkeypatch.setattr(_docker, "_read_text", lambda path: None)  # no /proc here
+    monkeypatch.setattr(_docker, "os", types.SimpleNamespace(**{**vars(os), "name": "posix"}))  # not Windows
+    monkeypatch.setattr(_docker.subprocess, "run", ps)
+    monkeypatch.setattr(_docker, "_pid_alive", lambda pid: True)
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setenv("LC_ALL", "en_US.UTF-8")
+    rec = dict(_here_fields(), pid=4242, start=_docker.process_start(4242))
+    assert rec["start"]
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    assert _docker.process_start(4242) == rec["start"]
+    assert _docker.owner_alive(rec) is True
+    _record("f" * 32, **rec)
+    docker.ps = f"ffffff\t{'f' * 32}\n"
+    assert _docker.sweep_stale("docker") == []
 
 
 def test_pid_alive():
