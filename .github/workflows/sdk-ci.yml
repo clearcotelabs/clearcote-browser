@@ -1,7 +1,11 @@
-# Unit tests + version-drift guard for the Node and Python SDKs.
+# Unit tests for the Node and Python SDKs + the version-drift guard for the pin in all
+# three SDKs (Node, Python, .NET).
 # Runs on every PR / push that touches the SDKs, and is reused by the publish
 # workflows (workflow_call) so a release can never go out with failing tests or a
 # RELEASE pin that points at a missing / mismatched browser build.
+# When a GitHub release is published, only the drift guard runs: it re-checks the pin
+# once the release (and its assets) exist, closing the window where a pin-bump push
+# ran the guard before `gh release create` had finished.
 name: SDK CI
 
 on:
@@ -9,13 +13,19 @@ on:
     paths:
       - "sdk/**"
       - "scripts/check_release_pin.py"
+      - "scripts/tests/**"
+      - ".github/ISSUE_TEMPLATE/**"
       - ".github/workflows/sdk-ci.yml"
   push:
     branches: [main]
     paths:
       - "sdk/**"
       - "scripts/check_release_pin.py"
+      - "scripts/tests/**"
+      - ".github/ISSUE_TEMPLATE/**"
       - ".github/workflows/sdk-ci.yml"
+  release:
+    types: [published]
   workflow_call: {} # callable as a gate by npm.yml / pypi.yml
   workflow_dispatch: {}
 
@@ -25,6 +35,7 @@ permissions:
 jobs:
   node:
     name: node SDK tests
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -50,6 +61,7 @@ jobs:
 
   python:
     name: python SDK tests
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -78,6 +90,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # Offline tests of the guard itself (and of the issue forms): every check is driven to fail.
+      - name: Unit tests for the drift guard and issue forms
+        run: |
+          python -m pip install pyyaml
+          python -m unittest discover -s scripts/tests -v
       - name: Assert RELEASE pin exists on GitHub and checksums match
         run: python scripts/check_release_pin.py
         env:
