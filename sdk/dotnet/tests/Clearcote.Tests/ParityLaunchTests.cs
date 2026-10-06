@@ -199,12 +199,26 @@ public class ParityLaunchTests : IDisposable
     }
 
     [Fact]
+    public void Dropping_the_disable_switch_keeps_the_screenshot_switch_and_parse_is_robust()
+    {
+        var pw = new[] { "MediaRouter", "Translate" };
+        Assert.Equal(new[] { "--enable-features=CDPScreenshotNewSurface" },
+            LaunchOpts.PlaywrightFeatureOverrideArgs(new[] { "--disable-features=MediaRouter,Translate" }, pw, true));
+        Assert.Equal(new[] { "--disable-features=MediaRouter,Translate" },
+            LaunchOpts.PlaywrightFeatureOverrideArgs(new[] { "--enable-features=CDPScreenshotNewSurface" }, pw, true));
+        Assert.Equal(new[] { "MediaRouter", "Translate" }, LaunchOpts.ParsePlaywrightDisabledFeatures(
+            "const disabledFeatures = [\n // see ] here\n \"MediaRouter\",\n \"Translate\"\n];"));
+        Assert.Null(LaunchOpts.ParsePlaywrightDisabledFeatures("disabledFeatures = [\"SomethingElse\"];"));
+        Assert.Null(LaunchOpts.ParsePlaywrightDisabledFeatures("const disabledFeatures2 = [\"MediaRouter\"];"));
+    }
+
+    [Fact]
     public void Parses_every_Playwright_release_shape_and_reads_the_installed_driver()
     {
-        Assert.Equal(new[] { "AcceptCHFrame" }, LaunchOpts.ParsePlaywrightDisabledFeatures(
-            "const disabledFeatures = (assistantMode) => [\n  // c\n  \"AcceptCHFrame\",\n  assistantMode ? \"AutomationControlled\" : \"\"\n].filter(Boolean);"));
-        Assert.Equal(new[] { "LazyFrameLoading", "HttpsUpgrades" }, LaunchOpts.ParsePlaywrightDisabledFeatures(
-            "['--disable-features=LazyFrameLoading,HttpsUpgrades', '--no-first-run']"));
+        Assert.Equal(new[] { "AcceptCHFrame", "MediaRouter" }, LaunchOpts.ParsePlaywrightDisabledFeatures(
+            "const disabledFeatures = (assistantMode) => [\n  // c\n  \"AcceptCHFrame\",\n  \"MediaRouter\",\n  assistantMode ? \"AutomationControlled\" : \"\"\n].filter(Boolean);"));
+        Assert.Equal(new[] { "LazyFrameLoading", "MediaRouter" }, LaunchOpts.ParsePlaywrightDisabledFeatures(
+            "['--disable-features=LazyFrameLoading,MediaRouter', '--no-first-run']"));
         Assert.Null(LaunchOpts.ParsePlaywrightDisabledFeatures(""));
         // Drift guard: the driver this test project ships must be readable.
         var installed = LaunchOpts.InstalledPlaywrightDisabledFeatures();

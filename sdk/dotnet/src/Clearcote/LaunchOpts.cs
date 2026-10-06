@@ -51,11 +51,18 @@ public static class LaunchOpts
     /// same host): genuine gives the iframe an empty partition with cookies allowed AND blocked, and
     /// genuine launched with Playwright's defaults reproduces both clearcote results exactly.
     /// AcceptCHFrame: ACCEPT_CH client hints reach the server on the first request. HttpsUpgrades: an
-    /// http:// navigation is tried over https first. LazyFrameLoading: loading="lazy" iframes load lazily.
+    /// http:// navigation is tried over https first (a route handler for http:// can now see the
+    /// https:// attempt; Args "--disable-features=HttpsUpgrades" turns it back off). LazyFrameLoading:
+    /// loading="lazy" iframes load lazily — it no longer exists in Chromium 154, so re-enabling it
+    /// is a no-op there, as are 1.49's PlzDedicatedWorker, AutoExpandDetailsElement and
+    /// ImprovedCookieControls.
     public static readonly IReadOnlySet<string> PageVisiblePlaywrightFeatures = new HashSet<string>(StringComparer.Ordinal)
         { "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading" };
 
-    private static readonly Regex PwArray = new(@"disabledFeatures\s*=\s*(?:\([^)]*\)\s*=>\s*)?\[([\s\S]*?)\]", RegexOptions.Compiled);
+    private static readonly Regex PwAssign = new(@"\bdisabledFeatures\s*=", RegexOptions.Compiled);
+    private static readonly Regex PwArray = new(@"^\s*(?:\([^)]*\)\s*=>\s*)?\[([\s\S]*?)\]", RegexOptions.Compiled);
+    // A parse must contain one of these to be trusted; a reshaped source falls back to the copy.
+    private static readonly string[] PwKnown = { "MediaRouter", "Translate", "ThirdPartyStoragePartitioning", "DestroyProfileOnBrowserClose" };
     private static readonly Regex PwLiteral = new(@"[""'`]--disable-features=([A-Za-z0-9_,]+)[""'`]", RegexOptions.Compiled);
     private static readonly Regex PwTernary = new(@"\w+\s*\?\s*[""'][^""']*[""']\s*:\s*[""'][^""']*[""']", RegexOptions.Compiled);
     private static readonly Regex PwComment = new(@"//[^\n]*", RegexOptions.Compiled);
@@ -66,20 +73,23 @@ public static class LaunchOpts
     internal static string[]? ParsePlaywrightDisabledFeatures(string? source)
     {
         if (string.IsNullOrEmpty(source)) return null;
-        var arr = PwArray.Match(source);
-        if (arr.Success)
+        var names = Array.Empty<string>();
+        var assign = PwAssign.Match(source);
+        if (assign.Success)
         {
-            var body = PwTernary.Replace(PwComment.Replace(arr.Groups[1].Value, ""), "");
-            var names = PwName.Matches(body).Select(m => m.Groups[1].Value).ToArray();
-            if (names.Length > 0) return names;
+            // Strip comments BEFORE looking for the closing bracket: a "]" in a comment must not end it.
+            var start = assign.Index + assign.Length;
+            var tail = PwComment.Replace(source.Substring(start, Math.Min(6000, source.Length - start)), "");
+            var arr = PwArray.Match(tail);
+            if (arr.Success)
+                names = PwName.Matches(PwTernary.Replace(arr.Groups[1].Value, "")).Select(m => m.Groups[1].Value).ToArray();
         }
-        var lit = PwLiteral.Match(source);
-        if (lit.Success)
+        if (names.Length == 0)
         {
-            var names = lit.Groups[1].Value.Split(',', StringSplitOptions.RemoveEmptyEntries);
-            return names.Length > 0 ? names : null;
+            var lit = PwLiteral.Match(source);
+            if (lit.Success) names = lit.Groups[1].Value.Split(',', StringSplitOptions.RemoveEmptyEntries);
         }
-        return null;
+        return names.Any(n => PwKnown.Contains(n)) ? names : null;
     }
 
     private static readonly Lazy<(string[]? Features, bool ScreenshotSurface)> InstalledPw = new(() =>
@@ -109,8 +119,8 @@ public static class LaunchOpts
     /// Switches that replace Playwright's own <c>--disable-features</c> without
     /// <see cref="PageVisiblePlaywrightFeatures"/>. Only for launches Playwright starts (Launch /
     /// LaunchPersistentContext); Serve starts Chromium itself and never carries Playwright's list.
-    /// Empty when the caller's IgnoreDefaultArgs holds Playwright's EXACT switch (Playwright drops only
-    /// exact matches, so any other value leaves its list in place and still needs replacing). Also
+    /// Nothing is re-emitted for a switch the caller's IgnoreDefaultArgs drops (Playwright drops only
+    /// exact matches, so any other value leaves its list in place and it still needs replacing). Also
     /// re-emits Playwright's <c>--enable-features=CDPScreenshotNewSurface</c> when its driver passes
     /// it (unless PLAYWRIGHT_LEGACY_SCREENSHOT is set), since the SDK's own --enable-features would
     /// otherwise replace that too.
@@ -118,14 +128,17 @@ public static class LaunchOpts
         IReadOnlyList<string>? playwrightFeatures = null, bool? screenshotSurface = null)
     {
         var features = (playwrightFeatures ?? InstalledPlaywrightDisabledFeatures() ?? PlaywrightDisabledFeatures).ToArray();
-        var playwrightSwitch = $"--disable-features={string.Join(",", features)}";
-        if (ignoreDefaultArgs is not null && ignoreDefaultArgs.Contains(playwrightSwitch)) return new List<string>();
+        var ignored = ignoreDefaultArgs ?? Array.Empty<string>();
         var outList = new List<string>();
-        var keep = features.Where(f => !PageVisiblePlaywrightFeatures.Contains(f)).ToArray();
-        if (keep.Length > 0) outList.Add($"--disable-features={string.Join(",", keep)}");
+        if (!ignored.Contains($"--disable-features={string.Join(",", features)}"))
+        {
+            var keep = features.Where(f => !PageVisiblePlaywrightFeatures.Contains(f)).ToArray();
+            if (keep.Length > 0) outList.Add($"--disable-features={string.Join(",", keep)}");
+        }
+        const string screenshotSwitch = "--enable-features=CDPScreenshotNewSurface";
         var surface = screenshotSurface ?? (InstalledPw.Value.ScreenshotSurface
             && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PLAYWRIGHT_LEGACY_SCREENSHOT")));
-        if (surface) outList.Add("--enable-features=CDPScreenshotNewSurface");
+        if (surface && !ignored.Contains(screenshotSwitch)) outList.Add(screenshotSwitch);
         return outList;
     }
 

@@ -365,14 +365,15 @@ describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
     expect(parse(`const disabledFeatures = (assistantMode) => [
   // See https://github.com/microsoft/playwright/pull/10380
   "AcceptCHFrame",
+  "MediaRouter",
   assistantMode ? "AutomationControlled" : ""
-].filter(Boolean);`)).toEqual(["AcceptCHFrame"]);
+].filter(Boolean);`)).toEqual(["AcceptCHFrame", "MediaRouter"]);
     expect(parse(`    disabledFeatures = [
       // See https://github.com/microsoft/playwright/issues/38568
       "BoundaryEventDispatchTracksNodeRemoval",
-      "HttpsUpgrades"
-    ].filter(Boolean);`)).toEqual(["BoundaryEventDispatchTracksNodeRemoval", "HttpsUpgrades"]);
-    expect(parse("['--disable-features=LazyFrameLoading,HttpsUpgrades', '--no-first-run']")).toEqual(["LazyFrameLoading", "HttpsUpgrades"]);
+      "MediaRouter"
+    ].filter(Boolean);`)).toEqual(["BoundaryEventDispatchTracksNodeRemoval", "MediaRouter"]);
+    expect(parse("['--disable-features=LazyFrameLoading,MediaRouter', '--no-first-run']")).toEqual(["LazyFrameLoading", "MediaRouter"]);
     expect(parse("")).toBeUndefined();
   });
 
@@ -381,5 +382,23 @@ describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
     const feats = installedPlaywrightDisabledFeatures();
     expect(feats?.length).toBeGreaterThan(0);
     expect(feats).toContain("MediaRouter");
+  });
+});
+
+describe("playwrightFeatureOverrideArgs, second review (2026-10-06)", () => {
+  it("keeps Playwright's screenshot switch when only its disable switch is dropped", async () => {
+    const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
+    const pw = ["MediaRouter", "Translate"];
+    expect(playwrightFeatureOverrideArgs([`--disable-features=${pw.join(",")}`], pw, true))
+      .toEqual(["--enable-features=CDPScreenshotNewSurface"]);
+    expect(playwrightFeatureOverrideArgs(["--enable-features=CDPScreenshotNewSurface"], pw, true))
+      .toEqual(["--disable-features=MediaRouter,Translate"]);
+  });
+
+  it("is robust to a bracket in a comment and rejects an unrecognised list", async () => {
+    const { parsePlaywrightDisabledFeatures: parse } = await import("../src/launchopts.js");
+    expect(parse('const disabledFeatures = [\n // see ] here\n "MediaRouter",\n "Translate"\n];')).toEqual(["MediaRouter", "Translate"]);
+    expect(parse('disabledFeatures = ["SomethingElse"];')).toBeUndefined();
+    expect(parse('const disabledFeatures2 = ["MediaRouter"];')).toBeUndefined();
   });
 });

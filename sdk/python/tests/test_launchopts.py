@@ -381,11 +381,11 @@ def test_parse_playwright_disabled_features_reads_every_release_shape():
     disabledFeatures = [
       // See https://github.com/microsoft/playwright/issues/38568
       "BoundaryEventDispatchTracksNodeRemoval",
-      "HttpsUpgrades"
+      "MediaRouter"
     ].filter(Boolean);"""
-    assert parse(v161) == ("BoundaryEventDispatchTracksNodeRemoval", "HttpsUpgrades")
-    v149 = "const chromiumSwitches = ['--disable-features=LazyFrameLoading,HttpsUpgrades', '--no-first-run'];"
-    assert parse(v149) == ("LazyFrameLoading", "HttpsUpgrades")
+    assert parse(v161) == ("BoundaryEventDispatchTracksNodeRemoval", "MediaRouter")
+    v149 = "const chromiumSwitches = ['--disable-features=LazyFrameLoading,MediaRouter', '--no-first-run'];"
+    assert parse(v149) == ("LazyFrameLoading", "MediaRouter")
     assert parse("") is None and parse("nothing here") is None
 
 
@@ -396,3 +396,22 @@ def test_the_installed_playwright_list_is_readable():
     feats = installed_playwright_disabled_features()
     assert feats, "could not read the installed Playwright's --disable-features list"
     assert "MediaRouter" in feats
+
+
+def test_dropping_playwrights_disable_switch_still_keeps_its_screenshot_switch():
+    # The SDK's own --enable-features (WebBluetooth) replaces Playwright's CDPScreenshotNewSurface
+    # whether or not the caller dropped Playwright's --disable-features.
+    from clearcote._launchopts import playwright_feature_override_args
+    exact = "--disable-features=" + ",".join(PW157)
+    assert playwright_feature_override_args([exact], PW157, True) == ["--enable-features=CDPScreenshotNewSurface"]
+    # ...but a screenshot switch the caller dropped is not re-added
+    assert playwright_feature_override_args(["--enable-features=CDPScreenshotNewSurface"], ("MediaRouter",), True) \
+        == ["--disable-features=MediaRouter"]
+
+
+def test_parse_is_robust_to_a_bracket_in_a_comment_and_rejects_an_unrecognised_list():
+    from clearcote._launchopts import parse_playwright_disabled_features as parse
+    assert parse('const disabledFeatures = [\n // see ] here\n "MediaRouter",\n "Translate"\n];') \
+        == ("MediaRouter", "Translate")
+    assert parse('disabledFeatures = ["SomethingElse"];') is None      # no known entry: not trusted
+    assert parse('const disabledFeatures2 = ["MediaRouter"];') is None  # a different variable

@@ -86,12 +86,24 @@ PLAYWRIGHT_DISABLED_FEATURES = (
 #:   clearcote results exactly.
 #: * AcceptCHFrame: client hints requested in the TLS/HTTP2 ACCEPT_CH frame reach the server on the
 #:   first request.
-#: * HttpsUpgrades: an http:// navigation is tried over https first -- the server sees which.
+#: * HttpsUpgrades: an http:// navigation is tried over https first -- the server sees which. Note
+#:   for automation: a page.route("http://...") handler can now see the https:// attempt, and an
+#:   http-only site pays the upgrade-and-fallback; args=["--disable-features=HttpsUpgrades"] (or
+#:   AcceptCHFrame) turns one back off, as the merge keeps the caller's entries.
 #: * LazyFrameLoading (Playwright <= 1.49): loading="lazy" iframes load lazily, as the page expects.
+#:   It no longer exists in Chromium 154, so re-enabling it is a no-op there (as are 1.49's
+#:   PlzDedicatedWorker, AutoExpandDetailsElement and ImprovedCookieControls, which stay listed).
+#:
+#: Deliberately left off although a page could observe it: BoundaryEventDispatchTracksNodeRemoval
+#: (Playwright 1.61, microsoft/playwright#38568), which Playwright's own pointer actions rely on.
 PAGE_VISIBLE_PLAYWRIGHT_FEATURES = frozenset(
     {"ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading"})
 
-_PW_ARRAY = re.compile(r"disabledFeatures\s*=\s*(?:\([^)]*\)\s*=>\s*)?\[(.*?)\]", re.S)
+_PW_ASSIGN = re.compile(r"\bdisabledFeatures\s*=")
+_PW_ARRAY = re.compile(r"^\s*(?:\([^)]*\)\s*=>\s*)?\[(.*?)\]", re.S)
+#: A parse must contain one of these to be trusted -- a reshaped source then falls back to the
+#: copy instead of silently re-enabling whatever a truncated parse cut off.
+_PW_KNOWN = ("MediaRouter", "Translate", "ThirdPartyStoragePartitioning", "DestroyProfileOnBrowserClose")
 _PW_LITERAL = re.compile(r"""["'`]--disable-features=([A-Za-z0-9_,]+)["'`]""")
 _PW_TERNARY = re.compile(r"""\w+\s*\?\s*["'][^"']*["']\s*:\s*["'][^"']*["']""")
 _PW_LINE_COMMENT = re.compile(r"//[^\n]*")
@@ -104,19 +116,22 @@ def parse_playwright_disabled_features(source):
     A conditional entry (``assistantMode ? "AutomationControlled" : ""``) is not part of the default."""
     if not source:
         return None
-    m = _PW_ARRAY.search(source)
-    if m:
-        body = _PW_TERNARY.sub("", _PW_LINE_COMMENT.sub("", m.group(1)))
-        names = tuple(_PW_NAME.findall(body))
-        if names:
-            return names
-    m = _PW_LITERAL.search(source)
-    if m:
-        names = tuple(n for n in m.group(1).split(",") if n)
-        return names or None
-    return None
+    names = ()
+    assign = _PW_ASSIGN.search(source)
+    if assign:
+        # strip comments BEFORE looking for the closing bracket: a "]" in a comment must not end it
+        tail = _PW_LINE_COMMENT.sub("", source[assign.end():assign.end() + 6000])
+        m = _PW_ARRAY.match(tail)
+        if m:
+            names = tuple(_PW_NAME.findall(_PW_TERNARY.sub("", m.group(1))))
+    if not names:
+        m = _PW_LITERAL.search(source)
+        if m:
+            names = tuple(n for n in m.group(1).split(",") if n)
+    return names if any(k in names for k in _PW_KNOWN) else None
 
 
+_SCREENSHOT_SWITCH = "--enable-features=CDPScreenshotNewSurface"
 _installed_pw = []  # [(disabled features or None, source mentions CDPScreenshotNewSurface)] once read
 
 
@@ -158,30 +173,29 @@ def playwright_feature_override_args(ignore_default_args=None, playwright_featur
     folds this into the SDK's single ``--disable-features``, which Playwright places after its own.
 
     ``playwright_features`` defaults to the installed driver's list (the 1.57 copy when unreadable).
-    Returns [] when Playwright's switch is not on the line at all: ``ignore_default_args=True``, or a
-    list holding that exact switch (Playwright drops only exact matches, so anything else leaves its
-    list in place and still needs replacing).
+    Nothing is re-emitted for a switch Playwright did not put on the line: ``ignore_default_args=True``
+    drops them all, and a list drops exactly the switches it names (Playwright matches exactly, so
+    any other value leaves its list in place and it still needs replacing).
 
     Also re-emits Playwright's ``--enable-features=CDPScreenshotNewSurface`` (unless
     PLAYWRIGHT_LEGACY_SCREENSHOT is set), because the SDK's own ``--enable-features`` -- e.g.
     WebBluetooth for a Windows claim -- would otherwise replace it the same way."""
     if ignore_default_args is True:
         return []
+    ignored = list(ignore_default_args) if isinstance(ignore_default_args, (list, tuple)) else []
     features = tuple(playwright_features if playwright_features is not None
                      else (installed_playwright_disabled_features() or PLAYWRIGHT_DISABLED_FEATURES))
-    playwright_switch = "--disable-features=" + ",".join(features)
-    if isinstance(ignore_default_args, (list, tuple)) and playwright_switch in ignore_default_args:
-        return []
     out = []
-    keep = [f for f in features if f not in PAGE_VISIBLE_PLAYWRIGHT_FEATURES]
-    if keep:
-        out.append("--disable-features=" + ",".join(keep))
+    if "--disable-features=" + ",".join(features) not in ignored:
+        keep = [f for f in features if f not in PAGE_VISIBLE_PLAYWRIGHT_FEATURES]
+        if keep:
+            out.append("--disable-features=" + ",".join(keep))
     if screenshot_surface is None:
         import os
         screenshot_surface = (_installed_playwright()[1]
                               and not os.environ.get("PLAYWRIGHT_LEGACY_SCREENSHOT"))
-    if screenshot_surface:
-        out.append("--enable-features=CDPScreenshotNewSurface")
+    if screenshot_surface and _SCREENSHOT_SWITCH not in ignored:
+        out.append(_SCREENSHOT_SWITCH)
     return out
 
 

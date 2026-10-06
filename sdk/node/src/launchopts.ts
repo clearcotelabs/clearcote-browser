@@ -79,8 +79,15 @@ export const PLAYWRIGHT_DISABLED_FEATURES = [
  *   clearcote results exactly.
  * - AcceptCHFrame: client hints requested in the TLS/HTTP2 ACCEPT_CH frame reach the server on the
  *   first request.
- * - HttpsUpgrades: an http:// navigation is tried over https first — the server sees which.
- * - LazyFrameLoading (Playwright <= 1.49): loading="lazy" iframes load lazily, as the page expects. */
+ * - HttpsUpgrades: an http:// navigation is tried over https first — the server sees which. Note
+ *   for automation: a page.route("http://...") handler can now see the https:// attempt, and an
+ *   http-only site pays the upgrade-and-fallback; `args: ["--disable-features=HttpsUpgrades"]` (or
+ *   AcceptCHFrame) turns one back off, as the merge keeps the caller's entries.
+ * - LazyFrameLoading (Playwright <= 1.49): loading="lazy" iframes load lazily, as the page expects.
+ *   It no longer exists in Chromium 154, so re-enabling it is a no-op there.
+ *
+ * Deliberately left off although a page could observe it: BoundaryEventDispatchTracksNodeRemoval
+ * (Playwright 1.61, microsoft/playwright#38568), which Playwright's own pointer actions rely on. */
 export const PAGE_VISIBLE_PLAYWRIGHT_FEATURES: ReadonlySet<string> = new Set([
   "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading",
 ]);
@@ -88,22 +95,29 @@ export const PAGE_VISIBLE_PLAYWRIGHT_FEATURES: ReadonlySet<string> = new Set([
 /** The `--disable-features` list in a Playwright chromiumSwitches source (1.5x/1.6x array form,
  * bundled or not, or the older literal-string form); undefined when it is not there. A conditional
  * entry (`assistantMode ? "AutomationControlled" : ""`) is not part of the default. */
+/** A parse must contain one of these to be trusted — a reshaped source then falls back to the copy
+ * instead of silently re-enabling whatever a truncated parse cut off. */
+const PW_KNOWN = ["MediaRouter", "Translate", "ThirdPartyStoragePartitioning", "DestroyProfileOnBrowserClose"];
+
 export function parsePlaywrightDisabledFeatures(source: string | undefined): string[] | undefined {
   if (!source) return undefined;
-  const arr = /disabledFeatures\s*=\s*(?:\([^)]*\)\s*=>\s*)?\[([\s\S]*?)\]/.exec(source);
-  if (arr) {
-    const body = arr[1]
-      .replace(/\/\/[^\n]*/g, "")
-      .replace(/\w+\s*\?\s*["'][^"']*["']\s*:\s*["'][^"']*["']/g, "");
-    const names = [...body.matchAll(/["']([A-Za-z0-9_]+)["']/g)].map((m) => m[1]);
-    if (names.length) return names;
+  let names: string[] = [];
+  const assign = /\bdisabledFeatures\s*=/.exec(source);
+  if (assign) {
+    // strip comments BEFORE looking for the closing bracket: a "]" in a comment must not end it
+    const tail = source.slice(assign.index + assign[0].length, assign.index + assign[0].length + 6000)
+      .replace(/\/\/[^\n]*/g, "");
+    const arr = /^\s*(?:\([^)]*\)\s*=>\s*)?\[([\s\S]*?)\]/.exec(tail);
+    if (arr) {
+      const body = arr[1].replace(/\w+\s*\?\s*["'][^"']*["']\s*:\s*["'][^"']*["']/g, "");
+      names = [...body.matchAll(/["']([A-Za-z0-9_]+)["']/g)].map((m) => m[1]);
+    }
   }
-  const lit = /["'`]--disable-features=([A-Za-z0-9_,]+)["'`]/.exec(source);
-  if (lit) {
-    const names = lit[1].split(",").filter(Boolean);
-    return names.length ? names : undefined;
+  if (!names.length) {
+    const lit = /["'`]--disable-features=([A-Za-z0-9_,]+)["'`]/.exec(source);
+    if (lit) names = lit[1].split(",").filter(Boolean);
   }
-  return undefined;
+  return PW_KNOWN.some((k) => names.includes(k)) ? names : undefined;
 }
 
 let installedPw: { features?: string[]; screenshotSurface: boolean } | undefined;
@@ -135,9 +149,10 @@ export function installedPlaywrightDisabledFeatures(): string[] | undefined {
  * `--disable-features`, which Playwright places after its own.
  *
  * `playwrightFeatures` defaults to the installed playwright-core's list (the 1.57 copy when
- * unreadable). Returns [] when Playwright's switch is not on the line at all: `ignoreDefaultArgs:
- * true`, or a list holding that exact switch (Playwright drops only exact matches, so anything else
- * leaves its list in place and still needs replacing).
+ * unreadable). Nothing is re-emitted for a switch Playwright did not put on the line:
+ * `ignoreDefaultArgs: true` drops them all, and a list drops exactly the switches it names
+ * (Playwright matches exactly, so any other value leaves its list in place and it still needs
+ * replacing).
  *
  * Also re-emits Playwright's `--enable-features=CDPScreenshotNewSurface` (unless
  * PLAYWRIGHT_LEGACY_SCREENSHOT is set), because the SDK's own `--enable-features` — e.g. WebBluetooth
@@ -148,14 +163,16 @@ export function playwrightFeatureOverrideArgs(
   screenshotSurface?: boolean,
 ): string[] {
   if (ignoreDefaultArgs === true) return [];
+  const ignored = Array.isArray(ignoreDefaultArgs) ? ignoreDefaultArgs : [];
   const features = [...(playwrightFeatures ?? installedPlaywrightDisabledFeatures() ?? PLAYWRIGHT_DISABLED_FEATURES)];
-  const playwrightSwitch = `--disable-features=${features.join(",")}`;
-  if (Array.isArray(ignoreDefaultArgs) && ignoreDefaultArgs.includes(playwrightSwitch)) return [];
   const out: string[] = [];
-  const keep = features.filter((f) => !PAGE_VISIBLE_PLAYWRIGHT_FEATURES.has(f));
-  if (keep.length) out.push(`--disable-features=${keep.join(",")}`);
+  if (!ignored.includes(`--disable-features=${features.join(",")}`)) {
+    const keep = features.filter((f) => !PAGE_VISIBLE_PLAYWRIGHT_FEATURES.has(f));
+    if (keep.length) out.push(`--disable-features=${keep.join(",")}`);
+  }
   const surface = screenshotSurface ?? (installedPlaywright().screenshotSurface && !process.env.PLAYWRIGHT_LEGACY_SCREENSHOT);
-  if (surface) out.push("--enable-features=CDPScreenshotNewSurface");
+  const screenshotSwitch = "--enable-features=CDPScreenshotNewSurface";
+  if (surface && !ignored.includes(screenshotSwitch)) out.push(screenshotSwitch);
   return out;
 }
 
