@@ -528,54 +528,51 @@ if _shown.get("fingerprint_profile"):
     _shown["fingerprint_profile"] = "<%d bytes>" % len(str(_shown["fingerprint_profile"]))
 print(f"[clearcote] CDP endpoint on 0.0.0.0:{port} (socat -> chrome 127.0.0.1:{internal}) | persona={_shown}", flush=True)
 
-chrome = subprocess.Popen(cmd, env=env)
-
-
-# CC_IDLE_EXIT_SECONDS: stop once no CDP client has been connected for this long. The SDK's macOS launch()
-# sets it (with --rm), so a container whose owner died -- Ctrl-C, a kill, a crash -- stops on its own,
-# gives its licence seat back and is removed, instead of running forever. A connected client keeps one
-# WebSocket open for as long as it is connected, so "connected" is an ESTABLISHED TCP connection to the
-# published port, read from /proc/net/tcp{,6} (this container's network namespace only). Unset or 0: off.
-def _cdp_clients(listen_port):
-    suffix = ":%04X" % int(listen_port)
-    n = 0
-    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
-        try:
-            with open(table) as fh:
-                next(fh, None)
-                for line in fh:
-                    fields = line.split()
-                    if len(fields) > 3 and fields[1].endswith(suffix) and fields[3] == "01":  # 01 = ESTABLISHED
-                        n += 1
-        except OSError:
-            pass
-    return n
-
-
-def _idle_watch(limit):
-    last = time.monotonic()
-    while chrome.poll() is None:
-        time.sleep(1)
-        if _cdp_clients(port):
-            last = time.monotonic()
-        elif time.monotonic() - last >= limit:
-            print("[clearcote] no CDP client for %d s (CC_IDLE_EXIT_SECONDS): stopping" % limit, flush=True)
-            try:
-                chrome.terminate()
-            except Exception:  # noqa: BLE001 -- already gone
-                pass
-            return
-
-
 try:
     _idle_limit = int(os.environ.get("CC_IDLE_EXIT_SECONDS", "0") or 0)
 except ValueError:
     print("[clearcote] WARNING: CC_IDLE_EXIT_SECONDS=%r is not a whole number; ignoring it."
           % os.environ.get("CC_IDLE_EXIT_SECONDS"), flush=True)
     _idle_limit = 0
+
+# SERVE_PROTOCOL: what this entrypoint does with the SDK's settings. The image carries it as the label
+# com.clearcotelabs.serve-protocol, so the SDK knows before it starts a container whether the image takes
+# CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS (2), or only plain variables (no label: older images). The
+# serve-state line says what was actually applied -- the engine tier that resolved, the proxy, the idle
+# exit -- so the SDK can refuse a container that did not do what it was asked instead of handing back a
+# browser on the free engine, or one that goes direct when a proxy was asked for.
+SERVE_PROTOCOL = 2
+_applied = {
+    "protocol": SERVE_PROTOCOL,
+    "engine": "licensed" if "/pro-" in exe.replace(os.sep, "/") else "open",
+    "proxy": _pd["server"] if _proxy else None,
+    "idle_exit": _idle_limit if _idle_limit > 0 else 0,
+    "secrets_file": bool(_secrets_file),
+}
+print("[clearcote] serve-state %s" % json.dumps(_applied, sort_keys=True), flush=True)
+
+chrome = subprocess.Popen(cmd, env=env)
+
+
+# CC_IDLE_EXIT_SECONDS: stop once no CDP client has been connected for this long, counted from the moment
+# Chrome's DevTools endpoint first answers (idle_exit.py). The SDK's macOS launch() sets it (with --rm), so a
+# container whose owner died -- Ctrl-C, a kill, a crash -- stops on its own, gives its licence seat back and
+# is removed, instead of running forever. Unset or 0: off.
 if _idle_limit > 0:
-    threading.Thread(target=_idle_watch, args=(_idle_limit,), daemon=True).start()
-    print("[clearcote] idle exit: after %d s with no CDP client" % _idle_limit, flush=True)
+    import idle_exit
+
+    def _stop_chrome():
+        try:
+            chrome.terminate()
+        except Exception:  # noqa: BLE001 -- already gone
+            pass
+
+    threading.Thread(target=idle_exit.watch, daemon=True, kwargs={
+        "limit": _idle_limit, "alive": lambda: chrome.poll() is None,
+        "ready": lambda: idle_exit.cdp_ready(internal), "clients": lambda: idle_exit.cdp_clients(port),
+        "stop": _stop_chrome, "log": lambda m: print(m, flush=True)}).start()
+    print("[clearcote] idle exit: after %d s with no CDP client, counted from when CDP answers" % _idle_limit,
+          flush=True)
 
 
 def _forward(signum, _frame):

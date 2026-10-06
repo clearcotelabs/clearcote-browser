@@ -92,4 +92,30 @@ describe.skipIf(!IMAGE || !dockerCli.which())("launch() on macOS against the rea
     expect(vols1.length).toBeGreaterThan(0);
     expect(vols1.some(volumeExists)).toBe(false);
   }, 600_000);
+
+  // Licensed and proxied, against whatever image CLEARCOTE_TEST_DOCKER_IMAGE names (one from before sdk-0.40.0 too):
+  // launch() must come back on the licensed engine with the proxy applied -- or refuse -- never on the open engine
+  // with traffic going direct. Needs CLEARCOTE_TEST_DOCKER_KEY, CLEARCOTE_TEST_DOCKER_PROXY (a proxy the container
+  // can reach) and CLEARCOTE_TEST_DOCKER_CACHE_VOLUME (a scratch volume for the licensed engine).
+  const KEY = process.env.CLEARCOTE_TEST_DOCKER_KEY;
+  const PROXY = process.env.CLEARCOTE_TEST_DOCKER_PROXY;
+  it.skipIf(!KEY || !PROXY)("a licensed, proxied launch is never downgraded", async () => {
+    if (saved.CLEARCOTE_DOCKER_CACHE_VOLUME === undefined && process.env.CLEARCOTE_TEST_DOCKER_CACHE_VOLUME) {
+      process.env.CLEARCOTE_DOCKER_CACHE_VOLUME = process.env.CLEARCOTE_TEST_DOCKER_CACHE_VOLUME;
+    }
+    const b = await launch({ licenseKey: KEY, proxy: { server: PROXY! }, quiet: true, timeout: 600_000 });
+    const info = (b as unknown as { dockerContainer: { id: string; serveProtocol: number } }).dockerContainer;
+    try {
+      const env = execFileSync("docker", ["inspect", "-f", "{{json .Config.Env}}", info.id], { encoding: "utf8" });
+      // protocol 2 keeps the key out of the container's configuration; an older image gets it as a variable
+      expect(env.includes(KEY!)).toBe(info.serveProtocol < 2);
+      const page = await b.newPage();
+      await page.goto("https://example.com/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+      expect(await page.title()).toBe("Example Domain");
+    } finally {
+      await b.close();
+      delete process.env.CLEARCOTE_DOCKER_CACHE_VOLUME;
+    }
+    expect(containerExists(info.id)).toBe(false);
+  }, 900_000);
 });

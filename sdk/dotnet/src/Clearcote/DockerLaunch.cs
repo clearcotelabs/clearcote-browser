@@ -18,7 +18,12 @@ public sealed class DockerUnavailableException : Exception
 }
 
 /// <summary>The container behind a browser that <see cref="Clearcote.LaunchAsync"/> started in Docker.</summary>
-public sealed record DockerContainer(string Id, string Image, string Endpoint);
+/// <param name="Id">The container id.</param>
+/// <param name="Image">The image it runs.</param>
+/// <param name="Endpoint">The CDP endpoint the browser was connected through.</param>
+/// <param name="ServeProtocol">The image's serve protocol: 2 takes the licence key and proxy as a file and stops on
+/// its own; 0 is an image older than sdk-0.40.0 (plain variables, no idle exit).</param>
+public sealed record DockerContainer(string Id, string Image, string Endpoint, int ServeProtocol);
 
 /// LaunchAsync on macOS: run the Clearcote Docker image and connect to it.
 ///
@@ -40,9 +45,14 @@ public sealed record DockerContainer(string Id, string Image, string Endpoint);
 /// deletes, so `docker inspect` does not show them (anyone who can reach the Docker daemon can still read a
 /// running container's files and memory). The CDP port is published on 127.0.0.1 only.
 ///
+/// What an image understands is read from its serve-protocol label before a container is created. An image older
+/// than sdk-0.40.0 has none: it gets the key and proxy as plain variables, with a warning. Whatever the image,
+/// LaunchAsync checks the container's log once the browser answers and refuses -- stopping and removing the
+/// container -- unless it runs the licensed engine when a key was given and the proxy when one was given.
+///
 /// Nothing outlives its owner: the container is created with --rm, stops itself once no CDP client has been
-/// connected for 30 s (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch on the machine removes any whose
-/// owner process is gone. CloseAsync stops it at once.
+/// connected for 30 s after its CDP first answers (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch removes any
+/// whose owner process is certainly gone (SweepStaleAsync). CloseAsync stops it at once.
 /// Mirrors _docker.py (Python) and docker.ts (Node).
 internal static class DockerLaunch
 {
@@ -51,7 +61,12 @@ internal static class DockerLaunch
     private const string Label = "com.clearcotelabs.sdk-launch=1";
     // Who started a container: SweepStaleAsync removes the ones whose owner process is gone.
     private const string OwnerHostLabel = "com.clearcotelabs.owner-host";
-    private const string OwnerPidLabel = "com.clearcotelabs.owner-pid";
+    private const string OwnerTokenLabel = "com.clearcotelabs.owner-token";
+    // The image's serve protocol (docker/serve.py's SERVE_PROTOCOL, carried as this image label). 2: takes
+    // CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS and logs a serve-state line. An image without the label is older.
+    private const string ProtocolLabel = "com.clearcotelabs.serve-protocol";
+    internal const int ServeProtocol = 2;
+    private const string FirstProtocolTag = "sdk-0.40.0";   // the first published image that speaks it
     // A container stops itself once no CDP client has been connected for this long (serve.py's
     // CC_IDLE_EXIT_SECONDS). CLEARCOTE_DOCKER_IDLE_EXIT overrides it; 0 turns it off.
     private const int DefaultIdleExitSeconds = 30;
@@ -276,25 +291,145 @@ internal static class DockerLaunch
         catch (InvalidOperationException) { return false; }
     }
 
-    /// Stop and remove containers an earlier launch on this machine left behind: labelled as ours, with an
-    /// owner process that no longer exists (killed, crashed). They would stop on their own after the idle
-    /// period; this frees their licence seat now. Containers of live processes, and of other machines sharing
-    /// the Docker daemon, are left alone. Returns the ids removed.
+    // ── who owns a container ────────────────────────────────────────────────────────────────────────
+    // A container carries a random per-process token (OwnerTokenLabel); the owner writes a record under
+    // ~/.clearcote/docker-owners/<token>.json saying which process it is: pid, a start marker that changes when
+    // the pid is reused, and (Linux) its PID namespace and boot id. A sweeper only judges containers whose
+    // record it can read in its own home, from the same boot and PID namespace: a process in another namespace
+    // (a container given the Docker socket, WSL2 next to Windows on Docker Desktop) or on another machine has
+    // its records elsewhere, so its containers are never touched. When in doubt, nothing is removed. The record
+    // format is shared by the Python, Node and .NET SDKs, so any of them can sweep any other's containers.
+
+    private static string? ReadText(string path)
+    {
+        try { return File.ReadAllText(path).Trim(); } catch { return null; }
+    }
+
+    private static string? BootId() => ReadText("/proc/sys/kernel/random/boot_id");
+
+    private static string? PidNamespace()
+    {
+        try { return new FileInfo("/proc/self/ns/pid").LinkTarget; } catch { return null; }
+    }
+
+    /// A marker that differs once <paramref name="pid"/> belongs to another process (it was reused), or null when
+    /// it cannot be read here. Linux: the start time from /proc; Windows: the creation time (FILETIME, UTC);
+    /// elsewhere (macOS): `ps -o lstart=`. The same strings in all three SDKs.
+    internal static string? ProcessStart(int pid)
+    {
+        if (ReadText($"/proc/{pid}/stat") is { } stat)
+        {
+            var f = stat[(stat.LastIndexOf(')') + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            return f.Length > 19 ? $"linux:{f[19]}" : null;
+        }
+        if (OperatingSystem.IsWindows())
+        {
+            try { using var p = Process.GetProcessById(pid); return $"win:{p.StartTime.ToFileTimeUtc()}"; }
+            catch { return null; }
+        }
+        try
+        {
+            var psi = new ProcessStartInfo("ps") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            foreach (var a in new[] { "-o", "lstart=", "-p", pid.ToString(CultureInfo.InvariantCulture) }) psi.ArgumentList.Add(a);
+            using var ps = Process.Start(psi)!;
+            var output = ps.StandardOutput.ReadToEnd();
+            ps.WaitForExit(10_000);
+            var text = string.Join(' ', output.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            return ps.ExitCode == 0 && text.Length > 0 ? $"ps:{text}" : null;
+        }
+        catch { return null; }
+    }
+
+    private static string OwnersDir => Path.Combine(Native.ClearcoteDir, "docker-owners");
+    private static string? _ownerToken;
+    private static readonly object OwnerGate = new();
+
+    /// Test seam: forget this process's token (a new HOME gets a new record).
+    internal static void ResetOwnerToken() { lock (OwnerGate) _ownerToken = null; }
+
+    /// This process's owner token, recording it (once) under ~/.clearcote/docker-owners/.
+    internal static string OwnerToken()
+    {
+        lock (OwnerGate)
+        {
+            if (_ownerToken is not null) return _ownerToken;
+            var token = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+            var record = new Dictionary<string, object?>
+            {
+                ["token"] = token, ["pid"] = Environment.ProcessId, ["start"] = ProcessStart(Environment.ProcessId),
+                ["pidns"] = PidNamespace(), ["boot"] = BootId(), ["host"] = System.Net.Dns.GetHostName(), ["sdk"] = "dotnet",
+            };
+            var path = Path.Combine(OwnersDir, token + ".json");
+            try
+            {
+                Directory.CreateDirectory(OwnersDir);
+                File.WriteAllText(path, JsonSerializer.Serialize(record));
+                AppDomain.CurrentDomain.ProcessExit += (_, _) => { try { File.Delete(path); } catch { } };
+            }
+            catch { /* no record: other launches leave its containers alone, and idle exit still ends them */ }
+            return _ownerToken = token;
+        }
+    }
+
+    /// True or false for the owner a record describes, or null when it cannot be told from here (another boot,
+    /// another PID namespace, a malformed record).
+    internal static bool? OwnerAlive(JsonElement rec)
+    {
+        string? Str(string name) => rec.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        var boot = BootId();
+        var ns = PidNamespace();
+        if (Str("boot") is { Length: > 0 } rb && boot is not null && rb != boot) return null;
+        if (Str("pidns") is { Length: > 0 } rn && ns is not null && rn != ns) return null;
+        if (!rec.TryGetProperty("pid", out var p) || p.ValueKind != JsonValueKind.Number || !p.TryGetInt32(out var pid)) return null;
+        if (!PidAlive(pid)) return false;
+        if (Str("start") is { Length: > 0 } start && ProcessStart(pid) is { } now && now != start) return false;   // the pid now belongs to another process
+        return true;
+    }
+
+    private static JsonElement? LoadRecord(string path)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            return doc.RootElement.ValueKind == JsonValueKind.Object ? doc.RootElement.Clone() : null;
+        }
+        catch { return null; }
+    }
+
+    /// Stop and remove containers an earlier launch left behind whose owner process is certainly gone (killed,
+    /// crashed): their token's record is in this home, from this boot and PID namespace, and its process no longer
+    /// exists. They would stop on their own after the idle period; this frees their licence seat now. Anything else
+    /// -- live owners, owners in another namespace or on another machine, containers without a token -- is left
+    /// alone. Returns the ids removed.
     internal static async Task<IReadOnlyList<string>> SweepStaleAsync(string exe)
     {
-        var format = $"{{{{.ID}}}}\t{{{{.Label \"{OwnerHostLabel}\"}}}}\t{{{{.Label \"{OwnerPidLabel}\"}}}}";
+        var format = $"{{{{.ID}}}}\t{{{{.Label \"{OwnerTokenLabel}\"}}}}";
         var r = await Run(new[] { exe, "ps", "-a", "--filter", $"label={Label}", "--format", format }, null, 30_000, null).ConfigureAwait(false);
-        if (r.Code != 0) return Array.Empty<string>();
-        var here = System.Net.Dns.GetHostName();
-        var stale = r.Stdout.Split('\n')
-            .Select(l => l.Trim().Split('\t'))
-            .Where(p => p.Length == 3 && p[1] == here && int.TryParse(p[2], NumberStyles.None, CultureInfo.InvariantCulture, out var pid) && !PidAlive(pid))
-            .Select(p => p[0]).ToList();
+        var stale = new List<string>();
+        var dead = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var line in r.Code == 0 ? r.Stdout.Split('\n') : Array.Empty<string>())
+        {
+            var parts = line.Trim().Split('\t');
+            if (parts.Length != 2 || !System.Text.RegularExpressions.Regex.IsMatch(parts[1], "^[0-9a-f]{32}$")) continue;   // no owner token (an older SDK): not ours to judge
+            var path = Path.Combine(OwnersDir, parts[1] + ".json");
+            if (LoadRecord(path) is { } rec && OwnerAlive(rec) == false)
+            {
+                stale.Add(parts[0]);
+                dead.Add(path);
+            }
+        }
         if (stale.Count > 0)
         {
             await Run(new[] { exe, "stop", "--time", "10" }.Concat(stale).ToList(), null, 120_000, null).ConfigureAwait(false);
             await Run(new[] { exe, "rm", "-f", "-v" }.Concat(stale).ToList(), null, 60_000, null).ConfigureAwait(false);
         }
+        try   // the records of owners that are certainly gone
+        {
+            foreach (var path in Directory.EnumerateFiles(OwnersDir, "*.json"))
+                if (dead.Contains(path) || (LoadRecord(path) is { } rec && OwnerAlive(rec) == false))
+                    try { File.Delete(path); } catch { }
+        }
+        catch { }
         return stale;
     }
 
@@ -330,13 +465,19 @@ internal static class DockerLaunch
     internal interface ILogTail
     {
         Task<string> TextAsync(int waitMs = 3000);
+        /// The lines saying what the entrypoint applied (serve-state, engine, proxy), once one matching
+        /// <paramref name="pattern"/> is among them (or the wait is up). Kept apart from the other lines.
+        Task<IReadOnlyList<string>> WaitMarksAsync(System.Text.RegularExpressions.Regex pattern, int waitMs = 10_000);
         void Stop();
     }
+
+    private static readonly System.Text.RegularExpressions.Regex Mark = new(@"\[clearcote\] (serve-state |engine: |proxy: )");
 
     private sealed class LogTail : ILogTail
     {
         private readonly Process? _proc;
         private readonly Queue<string> _lines = new();
+        private readonly List<string> _marks = new();
         private readonly Task _done = Task.CompletedTask;
 
         public LogTail(string exe, string id)
@@ -357,8 +498,19 @@ internal static class DockerLaunch
                 lock (_lines)
                 {
                     _lines.Enqueue(line);
+                    if (Mark.IsMatch(line)) _marks.Add(line);
                     while (_lines.Count > 40) _lines.Dequeue();
                 }
+        }
+
+        public async Task<IReadOnlyList<string>> WaitMarksAsync(System.Text.RegularExpressions.Regex pattern, int waitMs = 10_000)
+        {
+            var deadline = DateTime.UtcNow.AddMilliseconds(waitMs);
+            while (true)
+            {
+                lock (_lines) if (_marks.Any(pattern.IsMatch) || DateTime.UtcNow >= deadline) return _marks.ToArray();
+                await Task.Delay(50).ConfigureAwait(false);
+            }
         }
 
         public async Task<string> TextAsync(int waitMs = 3000)
@@ -420,21 +572,96 @@ internal static class DockerLaunch
     private static readonly System.Text.RegularExpressions.Regex VolumeInitRace = new(
         @"volumes/[^/\s]+/_data\S*: (?:file exists|no such file)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
+    // A tag that is not there: Docker 29 says `failed to resolve reference "docker.io/...:tag": ...: not found`;
+    // older ones `manifest unknown` / `manifest for ... not found`.
     private static readonly System.Text.RegularExpressions.Regex NotPublished = new(
-        "manifest unknown|manifest for .* not found|not found: manifest|pull access denied|repository does not exist",
+        @"failed to resolve reference|manifest unknown|manifest for .* not found|not found: manifest|pull access denied|repository does not exist|: not found\b",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-    private static Exception CreateFailed(string image, int code, string stderr)
+    private static Exception ImageFailed(string image, int code, string stderr, string what = "docker pull")
     {
         var detail = stderr.Trim() is { Length: > 0 } e ? e : $"exit {code}";
         if (NotPublished.IsMatch(detail))
         {
             var why = image == $"{DefaultRepository}:sdk-{Clearcote.Version}"
-                ? $"Images are published a few minutes after each SDK release (after the PyPI package they are built from), so a brand-new SDK can be ahead of its image: try again shortly, or set CLEARCOTE_DOCKER_IMAGE={DefaultRepository}:latest to run the newest published image."
+                ? $"Each image is published a few minutes after its SDK release (it is built from the PyPI package of the same version), so a brand-new SDK can be ahead of its image: try again in a few minutes. To launch meanwhile, set CLEARCOTE_DOCKER_IMAGE to an earlier tag of {DefaultRepository} ({DefaultRepository}:latest is the newest published one). An image older than {FirstProtocolTag} still works, but the licence key and the proxy reach it as container variables that `docker inspect` shows, and it does not stop on its own if this program dies; LaunchAsync says so when that happens."
                 : "Check the name, or unset CLEARCOTE_DOCKER_IMAGE / DockerImage to use the default.";
             return new InvalidOperationException($"the Clearcote image {image} is not available ({FirstLine(detail)}). {why}");
         }
-        return new InvalidOperationException($"`docker create {image}` failed: {detail}\n(set CLEARCOTE_DOCKER_IMAGE or DockerImage to use another image)");
+        return new InvalidOperationException($"`{what} {image}` failed: {detail}\n(set CLEARCOTE_DOCKER_IMAGE or DockerImage to use another image)");
+    }
+
+    /// The serve protocol <paramref name="image"/> speaks (its ProtocolLabel; 0 for an image without it), pulling
+    /// the image first when it is not here. Known before a container exists, so the settings a container gets are
+    /// always ones its entrypoint understands.
+    internal static async Task<int> ImageProtocolAsync(string exe, string image, bool quiet)
+    {
+        const string fmt = "{{json .Config.Labels}}";
+        var r = await Run(new[] { exe, "image", "inspect", "--format", fmt, image }, null, 60_000, null).ConfigureAwait(false);
+        if (r.Code != 0)
+        {
+            if (!quiet) Console.Error.WriteLine($"[clearcote] downloading the Clearcote Docker image {image}");
+            var pull = await Run(new[] { exe, "pull", "--platform", "linux/amd64", image }, null, 1_800_000, null).ConfigureAwait(false);
+            if (pull.Code != 0) throw ImageFailed(image, pull.Code, pull.Stderr);
+            r = await Run(new[] { exe, "image", "inspect", "--format", fmt, image }, null, 60_000, null).ConfigureAwait(false);
+            if (r.Code != 0) throw ImageFailed(image, r.Code, r.Stderr, "docker image inspect");
+        }
+        try
+        {
+            using var doc = JsonDocument.Parse(r.Stdout.Trim() is { Length: > 0 } t ? t : "null");
+            if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty(ProtocolLabel, out var v)
+                && int.TryParse(v.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
+                return n;
+        }
+        catch (JsonException) { }
+        return 0;
+    }
+
+    private static (string? Host, int? Port) ProxyHostPort(string? url)
+    {
+        if (string.IsNullOrEmpty(url)) return (null, null);
+        return Uri.TryCreate(url.Contains("://") ? url : "http://" + url, UriKind.Absolute, out var u)
+            ? (u.Host.Trim('[', ']').ToLowerInvariant(), u.IsDefaultPort && !url.Contains($":{u.Port}") ? null : u.Port)
+            : (null, null);
+    }
+
+    /// What the container did not apply that was asked for (empty when all is well), from the lines its entrypoint
+    /// logged: serve-state (protocol 2) or, for an older image, its engine and proxy lines.
+    internal static IReadOnlyList<string> VerifyApplied(IReadOnlyList<string> marks, int protocol, bool licensed, string? proxyWanted)
+    {
+        var problems = new List<string>();
+        string? engine, proxy;
+        if (protocol >= 2)
+        {
+            JsonElement? state = null;
+            foreach (var line in marks)
+            {
+                var i = line.IndexOf("serve-state ", StringComparison.Ordinal);
+                if (i < 0) continue;
+                try { using var doc = JsonDocument.Parse(line[(i + "serve-state ".Length)..]); state = doc.RootElement.Clone(); }
+                catch (JsonException) { state = null; }
+            }
+            if (state is not { ValueKind: JsonValueKind.Object } st) return new[] { "it did not report what it applied (no serve-state line)" };
+            engine = st.TryGetProperty("engine", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : null;
+            proxy = st.TryGetProperty("proxy", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+        }
+        else
+        {
+            var engineLine = marks.FirstOrDefault(m => m.Contains("] engine: ", StringComparison.Ordinal)) ?? "";
+            engine = engineLine.Contains("(licensed)", StringComparison.Ordinal) && engineLine.Contains("/pro-", StringComparison.Ordinal) ? "licensed" : engineLine.Length > 0 ? "open" : null;
+            var proxyLine = marks.FirstOrDefault(m => m.Contains("] proxy: ", StringComparison.Ordinal));
+            proxy = proxyLine?[(proxyLine.IndexOf("] proxy: ", StringComparison.Ordinal) + "] proxy: ".Length)..].Trim();
+        }
+        if (licensed && engine != "licensed")
+            problems.Add(engine is not null ? "a licence key was given, but it runs the open engine" : "a licence key was given, but it did not say which engine it runs");
+        if (!string.IsNullOrEmpty(proxyWanted))
+        {
+            var (wh, wp) = ProxyHostPort(proxyWanted);
+            var (gh, gp) = ProxyHostPort(proxy);
+            if (proxy is null || gh != wh || (wp is not null && gp is not null && wp != gp))
+                problems.Add(proxy is null ? "a proxy was given, but it did not apply it (its traffic would leave from the container's own address)" : $"it applied a different proxy ({proxy})");
+        }
+        return problems;
     }
 
     /// A tar holding the secrets file's JSON, owned by the image's user (uid 10001) and readable by it only,
@@ -456,12 +683,15 @@ internal static class DockerLaunch
 
     /// Start the image and wait for its CDP endpoint. Nothing is left running when this throws.
     ///
-    /// The container is created with --rm and stops itself once no CDP client has been connected for
-    /// IdleExitSeconds() (serve.py's CC_IDLE_EXIT_SECONDS), so one whose owner died (Ctrl-C, a kill, a crash)
-    /// gives its licence seat back and disappears on its own; the next launch on this machine also sweeps any
-    /// still there (SweepStaleAsync). It carries the owner's host name and pid as labels for that sweep. The
-    /// licence key and the proxy URL are copied in as a file rather than passed with -e, so they are not part
-    /// of the container's configuration (`docker inspect`).
+    /// What the image does with its settings is known first (ImageProtocolAsync). An image of this SDK's protocol
+    /// gets --rm, an idle exit (it stops once no CDP client has been connected for IdleExitSeconds(), counted from
+    /// when its CDP answers) and the licence key and proxy URL as a file copied in, not as -e variables
+    /// `docker inspect` would show. An older image gets plain variables -- they still work -- and a warning that
+    /// they are visible and that it will not stop on its own. Either way, once the browser answers, the
+    /// container's own log must show the licensed engine when a key was given and the proxy when one was given
+    /// (VerifyApplied); otherwise it is stopped and removed and LaunchAsync throws: a browser on the open engine,
+    /// or one sending traffic direct, is never handed back in their place. The container carries this process's
+    /// owner token for SweepStaleAsync.
     internal static async Task<(DockerContainer Container, string Exe)> StartContainerAsync(LaunchOptions o)
     {
         var env = ContainerEnv(o);
@@ -469,20 +699,35 @@ internal static class DockerLaunch
         var exe = await CheckDockerAsync().ConfigureAwait(false);
         await SweepStaleAsync(exe).ConfigureAwait(false);
         var image = string.IsNullOrEmpty(o.DockerImage) ? DefaultImage() : o.DockerImage;
+        var protocol = await ImageProtocolAsync(exe, image, o.Quiet).ConfigureAwait(false);
         var secrets = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var k in SecretEnv)
             if (env.Remove(k, out var v)) secrets[k] = v;
-        if (idle > 0) env["CC_IDLE_EXIT_SECONDS"] = idle.ToString(CultureInfo.InvariantCulture);
-        if (secrets.Count > 0) env["CC_SECRETS_FILE"] = SecretsFile;
+        var licensed = secrets.ContainsKey("CLEARCOTE_LICENSE_KEY");
+        secrets.TryGetValue("CC_PROXY", out var proxyWanted);
+        if (protocol >= ServeProtocol)
+        {
+            if (idle > 0) env["CC_IDLE_EXIT_SECONDS"] = idle.ToString(CultureInfo.InvariantCulture);
+            if (secrets.Count > 0) env["CC_SECRETS_FILE"] = SecretsFile;
+        }
+        else
+        {
+            if (!o.Quiet)
+                Console.Error.WriteLine($"[clearcote] warning: the image {image} predates {FirstProtocolTag}: "
+                    + (secrets.Count > 0 ? "its licence key and proxy are passed as container variables, which `docker inspect` shows, and " : "")
+                    + $"it will not stop on its own if this program dies (CloseAsync still stops it). Use {DefaultRepository}:{FirstProtocolTag} or newer.");
+            foreach (var (k, v) in secrets) env[k] = v;   // plain variables: names on the command line, values in the CLI's environment
+            secrets.Clear();
+        }
         var argv = new List<string>
         {
             exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
-            "--label", Label, "--label", $"{OwnerHostLabel}={System.Net.Dns.GetHostName()}", "--label", $"{OwnerPidLabel}={Environment.ProcessId}",
+            "--label", Label, "--label", $"{OwnerHostLabel}={System.Net.Dns.GetHostName()}", "--label", $"{OwnerTokenLabel}={OwnerToken()}",
         };
         foreach (var name in env.Keys.OrderBy(k => k, StringComparer.Ordinal)) argv.AddRange(new[] { "-e", name });   // value via the CLI's environment
-        if (secrets.ContainsKey("CLEARCOTE_LICENSE_KEY")) argv.AddRange(new[] { "-v", $"{CacheVolume()}:/opt/xdg-cache" });   // the licensed engine downloads once
+        if (licensed) argv.AddRange(new[] { "-v", $"{CacheVolume()}:/opt/xdg-cache" });   // the licensed engine downloads once
         argv.Add(image);
-        if (!o.Quiet) Console.Error.WriteLine($"[clearcote] no native macOS build: starting the Clearcote Docker image {image} (the first run downloads it)");
+        if (!o.Quiet) Console.Error.WriteLine($"[clearcote] no native macOS build: starting the Clearcote Docker image {image}");
         var r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
         // Two launches creating their first container on a NEW shared volume at once collide in Docker's own
         // volume initialisation ("failed to mkdir .../volumes/<name>/_data/...: file exists"); the loser
@@ -493,7 +738,7 @@ internal static class DockerLaunch
             r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
         }
         var id = r.Stdout.Trim().Split('\n').LastOrDefault()?.Trim() ?? "";
-        if (r.Code != 0 || id.Length == 0) throw CreateFailed(image, r.Code, r.Stderr);
+        if (r.Code != 0 || id.Length == 0) throw ImageFailed(image, r.Code, r.Stderr, "docker create");
         lock (Live) Live[id] = exe;
         InstallSweep();
         ILogTail? logs = null;
@@ -509,7 +754,14 @@ internal static class DockerLaunch
             logs = FollowLogs(exe, id);
             var port = await PublishedPortAsync(exe, id).ConfigureAwait(false);
             await WaitReadyAsync(exe, id, port, o.Timeout is float ms && ms > 0 ? (int)Math.Max(ms, 1000) : ReadyTimeoutMs, logs).ConfigureAwait(false);
-            return (new DockerContainer(id, image, $"http://127.0.0.1:{port}"), exe);
+            if (protocol >= ServeProtocol || licensed || proxyWanted is not null)
+            {
+                var wanted = new System.Text.RegularExpressions.Regex(protocol >= ServeProtocol ? "serve-state " : proxyWanted is not null ? @"\] proxy: " : @"\] engine: ");
+                var problems = VerifyApplied(await logs.WaitMarksAsync(wanted).ConfigureAwait(false), protocol, licensed, proxyWanted);
+                if (problems.Count > 0)
+                    throw new InvalidOperationException($"the Clearcote container ({image}) did not apply what LaunchAsync asked for: {string.Join("; ", problems)}. It was stopped and removed.");
+            }
+            return (new DockerContainer(id, image, $"http://127.0.0.1:{port}", protocol), exe);
         }
         catch
         {

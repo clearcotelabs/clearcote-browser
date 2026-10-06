@@ -42,7 +42,7 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | `CC_SHADER_DIALECT` | `hlsl` \| `0` | report ANGLE's translated shader as HLSL — **auto-on for `CC_PLATFORM=windows`** |
 | `CLEARCOTE_LICENSE_KEY` | `cc_lic_...` | use the licensed engine instead of the bundled open one — see below |
 | `CC_VERSION` | `152` \| `152.0.7977.82` \| `r24` | with a **Pro** key: pin a major, an exact build or a revision (default: the newest your key allows). Free keys always get the latest build and are refused a pin |
-| `CC_IDLE_EXIT_SECONDS` | `30` | stop once no CDP client has been connected for this long (default: never). Pair it with `--rm` so an abandoned container also disappears |
+| `CC_IDLE_EXIT_SECONDS` | `30` | stop once no CDP client has been connected for this long, counted from when the CDP endpoint first answers (default: never). Pair it with `--rm` so an abandoned container also disappears |
 | `CC_SECRETS_FILE` | `/tmp/clearcote-secrets.json` | a JSON file holding `CLEARCOTE_LICENSE_KEY` and/or `CC_PROXY`, read once at start and deleted — see [Secrets](#secrets-and-docker-inspect) |
 
 ```bash
@@ -126,11 +126,18 @@ treat daemon access as access to the key.
   open binary it bakes in, e.g. `0.1.0-pre.23`) and `latest`. Rebuild + verify this image yourself:
   `docker build -t clearcote .` — every layer is auditable.
 - `--disable-dev-shm-usage` is set; add `--shm-size=1g` on very heavy pages if needed.
+- The image carries the label `com.clearcotelabs.serve-protocol` (2: it takes `CC_SECRETS_FILE` and
+  `CC_IDLE_EXIT_SECONDS`), and its entrypoint logs one `[clearcote] serve-state {...}` line saying what it
+  applied: the engine that resolved (`licensed` or `open`), the proxy, the idle exit. The SDKs' macOS
+  `launch()` reads the label before it starts a container (an image without it gets plain variables, with
+  a warning) and refuses a container whose log does not show the licensed engine when a key was given, or
+  the proxy when one was given.
 - The SDKs' macOS `launch()` starts this image with `--rm`, `CC_IDLE_EXIT_SECONDS=30` and owner labels
-  (`com.clearcotelabs.sdk-launch`, `com.clearcotelabs.owner-host`, `com.clearcotelabs.owner-pid`), so a
-  container whose program was killed stops on its own and is removed; the next launch on that machine
-  removes any left over at once. Several licensed launches share the `clearcote-cache` volume; the first
-  one downloads the engine and the others wait for it.
+  (`com.clearcotelabs.sdk-launch`, `com.clearcotelabs.owner-host`, `com.clearcotelabs.owner-token`), so a
+  container whose program was killed stops on its own and is removed; the next launch from the same user
+  and machine removes any whose owner process is certainly gone at once (never one from another machine or
+  container sharing the Docker daemon). Several licensed launches share the `clearcote-cache` volume; the
+  first one downloads the engine and the others wait for it.
 - `tini` is PID 1, so browser helper processes that exit inside the container (for example from
   scripts you `docker exec` that launch their own browsers) are reaped instead of piling up as
   `<defunct>` entries. `docker stop` still reaches the browser and releases the licence seat.

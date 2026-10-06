@@ -22,9 +22,14 @@ container as a file serve.py reads once and deletes, so `docker inspect` does no
 can reach the Docker daemon can still read a running container's files and memory). The CDP port is
 published on 127.0.0.1 only: it is full control of the browser.
 
+What an image understands is read from its serve-protocol label before a container is created. An image
+older than sdk-0.40.0 has none: it gets the key and proxy as plain variables, with a warning. Whatever the
+image, launch() checks the container's log once the browser answers and refuses -- stopping and removing
+the container -- unless it runs the licensed engine when a key was given and the proxy when one was given.
+
 Nothing outlives its owner: the container is created with --rm, stops itself once no CDP client has been
-connected for 30 s (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch on the machine removes any whose
-owner process is gone. close() stops it at once.
+connected for 30 s after its CDP first answers (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch removes
+any whose owner process is certainly gone (sweep_stale). close() stops it at once.
 """
 from __future__ import annotations
 
@@ -42,13 +47,20 @@ import sys
 import tarfile
 import threading
 import time
+import uuid
 
 DEFAULT_REPOSITORY = "teamflatearth/clearcote"
 TEST_ONLY_ASSUME_MACOS = "CLEARCOTE_TEST_ONLY_ASSUME_MACOS"
 LABEL = "com.clearcotelabs.sdk-launch=1"
-# Who started a container: sweep_stale() removes the ones whose owner process is gone.
+# Who started a container (see "who owns a container" below): sweep_stale() removes the ones whose owner
+# process is certainly gone. The host name is for people reading `docker ps`; the token decides.
 OWNER_HOST_LABEL = "com.clearcotelabs.owner-host"
-OWNER_PID_LABEL = "com.clearcotelabs.owner-pid"
+OWNER_TOKEN_LABEL = "com.clearcotelabs.owner-token"
+# The image's serve protocol (docker/serve.py's SERVE_PROTOCOL, carried as this image label). 2: takes
+# CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS and logs a serve-state line. An image without the label is older.
+PROTOCOL_LABEL = "com.clearcotelabs.serve-protocol"
+SERVE_PROTOCOL = 2
+FIRST_PROTOCOL_TAG = "sdk-0.40.0"  # the first published image that speaks it
 # A container stops itself once no CDP client has been connected for this long (serve.py's
 # CC_IDLE_EXIT_SECONDS). CLEARCOTE_DOCKER_IDLE_EXIT overrides it; 0 turns it off.
 DEFAULT_IDLE_EXIT_S = 30
@@ -283,24 +295,159 @@ def _pid_alive(pid) -> bool:
     return True
 
 
+# ── who owns a container ───────────────────────────────────────────────────────────────────────────
+# A container carries a random per-process token (OWNER_TOKEN_LABEL); the owner writes a record under
+# ~/.clearcote/docker-owners/<token>.json saying which process it is: pid, a start marker that changes when
+# the pid is reused, and (Linux) its PID namespace and boot id. A sweeper only judges containers whose
+# record it can read in its own home, from the same boot and PID namespace: a process in another namespace
+# (a container given the Docker socket, WSL2 next to Windows on Docker Desktop) or on another machine has
+# its records elsewhere, so its containers are never touched. When in doubt, nothing is removed. The record
+# format is shared by the Python, Node and .NET SDKs, so any of them can sweep any other's containers.
+
+def _read_text(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def _boot_id():
+    return _read_text("/proc/sys/kernel/random/boot_id")
+
+
+def _pid_namespace():
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except (OSError, AttributeError, NotImplementedError):
+        return None
+
+
+def process_start(pid):
+    """A marker that differs once ``pid`` belongs to another process (it was reused), or None when it
+    cannot be read here. Linux: the start time from /proc; Windows: the creation time; elsewhere (macOS):
+    ``ps -o lstart=``. The same strings in all three SDKs."""
+    stat = _read_text(f"/proc/{pid}/stat")
+    if stat:
+        try:
+            return "linux:" + stat[stat.rindex(")") + 2:].split()[19]
+        except (ValueError, IndexError):
+            return None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+                return None
+            return "win:%d" % ((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = " ".join((r.stdout or "").split())
+    return "ps:" + out if r.returncode == 0 and out else None
+
+
+def _owners_dir():
+    return os.path.join(os.path.expanduser("~"), ".clearcote", "docker-owners")
+
+
+_OWNER = {"token": None}
+_OWNER_LOCK = threading.Lock()
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def owner_token() -> str:
+    """This process's owner token, recording it (once) under ~/.clearcote/docker-owners/."""
+    with _OWNER_LOCK:
+        if _OWNER["token"]:
+            return _OWNER["token"]
+        token = uuid.uuid4().hex
+        record = {"token": token, "pid": os.getpid(), "start": process_start(os.getpid()),
+                  "pidns": _pid_namespace(), "boot": _boot_id(), "host": socket.gethostname(), "sdk": "python"}
+        path = os.path.join(_owners_dir(), token + ".json")
+        try:
+            os.makedirs(_owners_dir(), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(record, fh)
+            atexit.register(_remove_quietly, path)
+        except OSError:
+            pass  # no record: other launches leave its containers alone, and idle exit still ends them
+        _OWNER["token"] = token
+        return token
+
+
+def owner_alive(record):
+    """True or False for the owner a record describes, or None when it cannot be told from here (another
+    boot, another PID namespace, a malformed record)."""
+    boot, ns = _boot_id(), _pid_namespace()
+    if record.get("boot") and boot and record["boot"] != boot:
+        return None
+    if record.get("pidns") and ns and record["pidns"] != ns:
+        return None
+    pid = record.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool):
+        return None
+    if not _pid_alive(pid):
+        return False
+    if record.get("start"):
+        now = process_start(pid)
+        if now and now != record["start"]:
+            return False  # the pid now belongs to another process
+    return True
+
+
+def _load_record(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            rec = json.load(fh)
+        return rec if isinstance(rec, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def sweep_stale(exe) -> list:
-    """Stop and remove containers an earlier launch on this machine left behind: labelled as ours, with an
-    owner process that no longer exists (killed, crashed). They would stop on their own after the idle
-    period; this frees their licence seat now. Containers of live processes, and of other machines sharing
-    the Docker daemon, are left alone. Returns the ids removed."""
-    fmt = "{{.ID}}\t{{.Label \"%s\"}}\t{{.Label \"%s\"}}" % (OWNER_HOST_LABEL, OWNER_PID_LABEL)
+    """Stop and remove containers an earlier launch left behind whose owner process is certainly gone
+    (killed, crashed): their token's record is in this home, from this boot and PID namespace, and its
+    process no longer exists. They would stop on their own after the idle period; this frees their licence
+    seat now. Anything else -- live owners, owners in another namespace or on another machine, containers
+    without a token -- is left alone. Returns the ids removed."""
+    fmt = '{{.ID}}\t{{.Label "%s"}}' % OWNER_TOKEN_LABEL
     code, out, _err = _run([exe, "ps", "-a", "--filter", f"label={LABEL}", "--format", fmt], timeout=30)
-    if code != 0:
-        return []
-    here = socket.gethostname()
-    stale = []
-    for line in (out or "").splitlines():
+    stale, dead = [], set()
+    for line in (out or "").splitlines() if code == 0 else []:
         parts = line.strip().split("\t")
-        if len(parts) == 3 and parts[1] == here and parts[2].isdigit() and not _pid_alive(int(parts[2])):
+        if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{32}", parts[1]):
+            continue  # no owner token (an older SDK): not ours to judge
+        path = os.path.join(_owners_dir(), parts[1] + ".json")
+        rec = _load_record(path)
+        if rec is not None and owner_alive(rec) is False:
             stale.append(parts[0])
+            dead.add(path)
     if stale:
         _run([exe, "stop", "--time", "10", *stale], timeout=120)
         _run([exe, "rm", "-f", "-v", *stale], timeout=60)
+    try:  # the records of owners that are certainly gone
+        for name in os.listdir(_owners_dir()):
+            path = os.path.join(_owners_dir(), name)
+            rec = _load_record(path) if name.endswith(".json") else None
+            if path in dead or (rec is not None and owner_alive(rec) is False):
+                _remove_quietly(path)
+    except OSError:
+        pass
     return stale
 
 
@@ -326,12 +473,17 @@ def _sweep():
         _remove(exe, cid)
 
 
+_MARK = re.compile(r"\[clearcote\] (serve-state |engine: |proxy: )")
+
+
 class _LogTail:
     """``docker logs --follow`` of a starting container, kept in memory: the container is created with
-    --rm, so once it has stopped its logs cannot be asked for any more."""
+    --rm, so once it has stopped its logs cannot be asked for any more. The lines saying what the
+    entrypoint applied (serve-state, engine, proxy) are kept apart, whatever Chrome logs after them."""
 
     def __init__(self, exe, cid):
         self._lines = collections.deque(maxlen=40)
+        self.marks = []
         try:
             self._proc = subprocess.Popen([exe, "logs", "--follow", cid], stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
@@ -343,12 +495,22 @@ class _LogTail:
 
     def _read(self):
         for raw in iter(self._proc.stdout.readline, b""):
-            self._lines.append(raw.decode("utf-8", "replace").rstrip())
+            line = raw.decode("utf-8", "replace").rstrip()
+            self._lines.append(line)
+            if _MARK.search(line):
+                self.marks.append(line)
 
     def text(self, wait=3.0):
         if self._proc is not None:
             self._thread.join(wait)  # the container is gone: the follower ends with its last line
         return "\n".join(self._lines)
+
+    def wait_marks(self, pattern, wait=10.0):
+        """The applied-settings lines, once one matching ``pattern`` is among them (or ``wait`` is up)."""
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and not any(re.search(pattern, m) for m in self.marks):
+            time.sleep(0.05)
+        return list(self.marks)
 
     def stop(self):
         if self._proc is not None and self._proc.poll() is None:
@@ -401,26 +563,99 @@ def _wait_ready(exe, cid, port, deadline_s, logs, sleep=time.sleep):
 
 
 _VOLUME_INIT_RACE = re.compile(r"volumes/[^/\s]+/_data\S*: (?:file exists|no such file)", re.I)
-_NOT_PUBLISHED = re.compile(r"manifest unknown|manifest for .* not found|not found: manifest|pull access denied|"
-                            r"repository does not exist", re.I)
+# A tag that is not there: Docker 29 says `failed to resolve reference "docker.io/...:tag": ...: not found`;
+# older ones `manifest unknown` / `manifest for ... not found`.
+_NOT_PUBLISHED = re.compile(r"failed to resolve reference|manifest unknown|manifest for .* not found|"
+                            r"not found: manifest|pull access denied|repository does not exist|: not found\b", re.I)
 
 
-def _create_failed(image, code, err):
+def _image_failed(image, code, err, what="docker pull"):
     detail = (err or "").strip() or f"exit {code}"
     if _NOT_PUBLISHED.search(detail):
-        default = image == f"{DEFAULT_REPOSITORY}:sdk-{_sdk_version()}"
-        why = ("Images are published a few minutes after each SDK release (after the PyPI package they are "
-               "built from), so a brand-new SDK can be ahead of its image: try again shortly, or set "
-               f"CLEARCOTE_DOCKER_IMAGE={DEFAULT_REPOSITORY}:latest to run the newest published image."
-               if default else "Check the name, or unset CLEARCOTE_DOCKER_IMAGE / docker_image= to use the default.")
+        if image == f"{DEFAULT_REPOSITORY}:sdk-{_sdk_version()}":
+            why = ("Each image is published a few minutes after its SDK release (it is built from the PyPI "
+                   "package of the same version), so a brand-new SDK can be ahead of its image: try again in a "
+                   f"few minutes. To launch meanwhile, set CLEARCOTE_DOCKER_IMAGE to an earlier tag of "
+                   f"{DEFAULT_REPOSITORY} ({DEFAULT_REPOSITORY}:latest is the newest published one). An image "
+                   f"older than {FIRST_PROTOCOL_TAG} still works, but the licence key and the proxy reach it as "
+                   "container variables that `docker inspect` shows, and it does not stop on its own if this "
+                   "program dies; launch() says so when that happens.")
+        else:
+            why = "Check the name, or unset CLEARCOTE_DOCKER_IMAGE / docker_image= to use the default."
         return RuntimeError(f"the Clearcote image {image} is not available ({_first_line(detail)}). {why}")
-    return RuntimeError(f"`docker create {image}` failed: {detail}\n(set CLEARCOTE_DOCKER_IMAGE or "
-                        "docker_image= to use another image)")
+    return RuntimeError(f"`{what} {image}` failed: {detail}\n(set CLEARCOTE_DOCKER_IMAGE or docker_image= "
+                        "to use another image)")
 
 
 def _sdk_version():
     from . import __version__
     return __version__
+
+
+def image_protocol(exe, image, quiet=False) -> int:
+    """The serve protocol ``image`` speaks (its PROTOCOL_LABEL; 0 for an image without it), pulling the
+    image first when it is not here. Known before a container exists, so the settings a container gets
+    are always ones its entrypoint understands."""
+    fmt = "{{json .Config.Labels}}"
+    code, out, _err = _run([exe, "image", "inspect", "--format", fmt, image], timeout=60)
+    if code != 0:
+        if not quiet:
+            sys.stderr.write(f"[clearcote] downloading the Clearcote Docker image {image}\n")
+            sys.stderr.flush()
+        code, _o, err = _run([exe, "pull", "--platform", "linux/amd64", image], timeout=1800)
+        if code != 0:
+            raise _image_failed(image, code, err)
+        code, out, err = _run([exe, "image", "inspect", "--format", fmt, image], timeout=60)
+        if code != 0:
+            raise _image_failed(image, code, err, "docker image inspect")
+    try:
+        labels = json.loads((out or "").strip() or "null") or {}
+        return int(str(labels.get(PROTOCOL_LABEL, "0")).strip() or 0)
+    except (ValueError, AttributeError):
+        return 0
+
+
+def _proxy_host_port(url):
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(url if "://" in str(url) else f"http://{url}")
+        return (u.hostname or "").lower(), u.port
+    except ValueError:
+        return None, None
+
+
+def verify_applied(marks, protocol, expect) -> list:
+    """What the container did not apply that was asked for (empty when all is well), from the lines its
+    entrypoint logged: serve-state (protocol 2) or, for an older image, its engine and proxy lines.
+    ``expect``: {"licensed": bool, "proxy": url or None}."""
+    problems = []
+    state = None
+    if protocol >= 2:
+        for line in marks:
+            if "serve-state " in line:
+                try:
+                    state = json.loads(line.split("serve-state ", 1)[1])
+                except ValueError:
+                    state = None
+        if not isinstance(state, dict):
+            return ["it did not report what it applied (no serve-state line)"]
+        engine, proxy = state.get("engine"), state.get("proxy")
+    else:
+        engine_line = next((m for m in marks if "] engine: " in m), "")
+        engine = "licensed" if "(licensed)" in engine_line and "/pro-" in engine_line else (
+            "open" if engine_line else None)
+        proxy = next((m.split("] proxy: ", 1)[1].strip() for m in marks if "] proxy: " in m), None)
+    if expect.get("licensed") and engine != "licensed":
+        problems.append("a licence key was given, but it runs the open engine" if engine else
+                        "a licence key was given, but it did not say which engine it runs")
+    if expect.get("proxy"):
+        want = _proxy_host_port(expect["proxy"])
+        got = _proxy_host_port(proxy) if proxy else (None, None)
+        if not proxy or got[0] != want[0] or (want[1] and got[1] and want[1] != got[1]):
+            problems.append("a proxy was given, but it did not apply it (its traffic would leave from the "
+                            "container's own address)" if not proxy else
+                            f"it applied a different proxy ({proxy})")
+    return problems
 
 
 def secrets_tar(secrets: dict) -> bytes:
@@ -436,36 +671,52 @@ def secrets_tar(secrets: dict) -> bytes:
 
 
 def start_container(kwargs: dict, quiet=False) -> dict:
-    """Start the image and wait for its CDP endpoint -> {"id", "image", "endpoint", "exe"}. Nothing is
-    left running when this raises.
+    """Start the image and wait for its CDP endpoint -> {"id", "image", "endpoint", "serve_protocol",
+    "exe"}. Nothing is left running when this raises.
 
-    The container is created with --rm and stops itself once no CDP client has been connected for
-    idle_exit_seconds() (serve.py's CC_IDLE_EXIT_SECONDS), so one whose owner died -- Ctrl-C, a kill, a
-    crash -- gives its licence seat back and disappears on its own; the next launch on this machine also
-    sweeps any that are still there (sweep_stale). It carries the owner's host name and pid as labels for
-    that sweep. The licence key and the proxy URL are copied in as a file rather than passed with -e, so
-    they are not part of the container's configuration (`docker inspect`)."""
+    What the image does with its settings is known first (image_protocol). An image of this SDK's protocol
+    gets --rm, an idle exit (it stops once no CDP client has been connected for idle_exit_seconds(),
+    counted from when its CDP answers) and the licence key and proxy URL as a file copied in, not as -e
+    variables `docker inspect` would show. An older image gets plain variables -- they still work -- and a
+    warning that they are visible and that it will not stop on its own. Either way, once the browser
+    answers, the container's own log must show the licensed engine when a key was given and the proxy when
+    one was given (verify_applied); otherwise it is stopped and removed and launch() raises: a browser on
+    the open engine, or one sending traffic direct, is never handed back in their place. The container
+    carries this process's owner token for sweep_stale()."""
     env = container_env(kwargs)
+    idle = idle_exit_seconds()
     exe = check_docker()
     sweep_stale(exe)
     image = kwargs.get("docker_image") or default_image()
+    protocol = image_protocol(exe, image, quiet)
     secrets = {k: env.pop(k) for k in SECRET_ENV if k in env}
-    idle = idle_exit_seconds()
-    if idle:
-        env["CC_IDLE_EXIT_SECONDS"] = str(idle)
-    if secrets:
-        env["CC_SECRETS_FILE"] = SECRETS_FILE
+    expect = {"licensed": "CLEARCOTE_LICENSE_KEY" in secrets, "proxy": secrets.get("CC_PROXY")}
+    if protocol >= SERVE_PROTOCOL:
+        if idle:
+            env["CC_IDLE_EXIT_SECONDS"] = str(idle)
+        if secrets:
+            env["CC_SECRETS_FILE"] = SECRETS_FILE
+    else:
+        if not quiet:
+            sys.stderr.write(
+                f"[clearcote] warning: the image {image} predates {FIRST_PROTOCOL_TAG}: "
+                + ("its licence key and proxy are passed as container variables, which `docker inspect` "
+                   "shows, and " if secrets else "")
+                + "it will not stop on its own if this program dies (close() still stops it). Use "
+                f"{DEFAULT_REPOSITORY}:{FIRST_PROTOCOL_TAG} or newer.\n")
+            sys.stderr.flush()
+        env.update(secrets)  # plain variables: names on the command line, values in the CLI's environment
+        secrets = {}
     argv = [exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
             "--label", LABEL, "--label", f"{OWNER_HOST_LABEL}={socket.gethostname()}",
-            "--label", f"{OWNER_PID_LABEL}={os.getpid()}"]
+            "--label", f"{OWNER_TOKEN_LABEL}={owner_token()}"]
     for name in sorted(env):
         argv += ["-e", name]  # the value comes from the CLI's environment, never its command line
-    if "CLEARCOTE_LICENSE_KEY" in secrets:  # the licensed engine is fetched once into this volume
+    if expect["licensed"]:  # the licensed engine is fetched once into this volume
         argv += ["-v", f"{cache_volume()}:/opt/xdg-cache"]
     argv.append(image)
     if not quiet:
-        sys.stderr.write(f"[clearcote] no native macOS build: starting the Clearcote Docker image {image} "
-                         "(the first run downloads it)\n")
+        sys.stderr.write(f"[clearcote] no native macOS build: starting the Clearcote Docker image {image}\n")
         sys.stderr.flush()
     for attempt in range(4):
         code, out, err = _run(argv, env=env, timeout=1800)
@@ -477,7 +728,7 @@ def start_container(kwargs: dict, quiet=False) -> dict:
         time.sleep(1.0 + attempt)
     cid = (out or "").strip().splitlines()[-1] if (out or "").strip() else ""
     if code != 0 or not cid:
-        raise _create_failed(image, code, err)
+        raise _image_failed(image, code, err, "docker create")
     with _LIVE_LOCK:
         _LIVE[cid] = exe
     logs = None
@@ -494,13 +745,22 @@ def start_container(kwargs: dict, quiet=False) -> dict:
         port = _published_port(exe, cid)
         timeout_ms = kwargs.get("timeout")
         _wait_ready(exe, cid, port, _READY_TIMEOUT_S if not timeout_ms else max(timeout_ms / 1000.0, 1.0), logs)
+        if protocol >= SERVE_PROTOCOL or expect["licensed"] or expect["proxy"]:
+            wanted = r"serve-state " if protocol >= SERVE_PROTOCOL else (
+                r"\] proxy: " if expect["proxy"] else r"\] engine: ")
+            problems = verify_applied(logs.wait_marks(wanted), protocol, expect)
+        else:
+            problems = []
+        if problems:
+            raise RuntimeError(f"the Clearcote container ({image}) did not apply what launch() asked for: "
+                               + "; ".join(problems) + ". It was stopped and removed.")
     except BaseException:
         _remove(exe, cid)
         raise
     finally:
         if logs is not None:
             logs.stop()
-    return {"id": cid, "image": image, "endpoint": f"http://127.0.0.1:{port}", "exe": exe}
+    return {"id": cid, "image": image, "endpoint": f"http://127.0.0.1:{port}", "serve_protocol": protocol, "exe": exe}
 
 
 def _connect_options(kwargs):
@@ -510,7 +770,7 @@ def _connect_options(kwargs):
 
 
 def _info(container):
-    return {k: container[k] for k in ("id", "image", "endpoint")}
+    return {k: container[k] for k in ("id", "image", "endpoint", "serve_protocol")}
 
 
 def launch_docker(kwargs: dict):

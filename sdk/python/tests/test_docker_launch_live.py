@@ -91,3 +91,33 @@ def test_launch_on_macos_runs_the_real_image():
         b.close()
     assert not container_exists(cid)
     assert volumes and not any(volume_exists(v) for v in volumes)
+
+
+# Licensed and proxied, against whatever image CLEARCOTE_TEST_DOCKER_IMAGE names (one from before sdk-0.40.0
+# too): launch() must come back on the licensed engine with the proxy applied -- or refuse -- never on the open
+# engine with traffic going direct. Needs a real key and a proxy the container can reach:
+#   CLEARCOTE_TEST_DOCKER_KEY, CLEARCOTE_TEST_DOCKER_PROXY (e.g. http://172.17.0.1:3128 on Linux),
+#   CLEARCOTE_TEST_DOCKER_CACHE_VOLUME (a scratch volume for the licensed engine).
+KEY = os.environ.get("CLEARCOTE_TEST_DOCKER_KEY")
+PROXY = os.environ.get("CLEARCOTE_TEST_DOCKER_PROXY")
+
+
+@pytest.mark.skipif(not KEY or not PROXY, reason="set CLEARCOTE_TEST_DOCKER_KEY and CLEARCOTE_TEST_DOCKER_PROXY")
+def test_licensed_and_proxied_launch_is_never_downgraded(monkeypatch):
+    if os.environ.get("CLEARCOTE_TEST_DOCKER_CACHE_VOLUME"):
+        monkeypatch.setenv("CLEARCOTE_DOCKER_CACHE_VOLUME", os.environ["CLEARCOTE_TEST_DOCKER_CACHE_VOLUME"])
+    b = clearcote.launch(license_key=KEY, proxy=PROXY, quiet=True, timeout=600_000)
+    try:
+        info = b.docker_container
+        env = subprocess.run(["docker", "inspect", "-f", "{{json .Config.Env}}", info["id"]], capture_output=True,
+                             text=True, check=True).stdout
+        # protocol 2 keeps the key out of the container's configuration; an older image gets it as a variable.
+        # (A bool first: pytest would print both operands of a failing `in`, the key among them.)
+        key_visible = KEY in env
+        assert key_visible == (info["serve_protocol"] < 2)
+        page = b.new_page()
+        page.goto("https://example.com/", wait_until="domcontentloaded", timeout=60_000)
+        assert page.title() == "Example Domain"
+    finally:
+        b.close()
+    assert not container_exists(info["id"])

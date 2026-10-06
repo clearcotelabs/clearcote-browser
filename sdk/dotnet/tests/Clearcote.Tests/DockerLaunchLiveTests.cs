@@ -98,4 +98,30 @@ public sealed class DockerLaunchLiveTests : IDisposable
         Assert.NotEmpty(vols1);
         Assert.DoesNotContain(vols1, VolumeExists);
     }
+
+    /// Licensed and proxied, against whatever image CLEARCOTE_TEST_DOCKER_IMAGE names (one from before sdk-0.40.0
+    /// too): LaunchAsync must come back on the licensed engine with the proxy applied -- or refuse -- never on the
+    /// open engine with traffic going direct. Needs CLEARCOTE_TEST_DOCKER_KEY, CLEARCOTE_TEST_DOCKER_PROXY (a proxy the
+    /// container can reach) and CLEARCOTE_TEST_DOCKER_CACHE_VOLUME (a scratch volume for the licensed engine).
+    [Fact]
+    public async Task A_licensed_proxied_launch_is_never_downgraded()
+    {
+        var key = Environment.GetEnvironmentVariable("CLEARCOTE_TEST_DOCKER_KEY");
+        var proxy = Environment.GetEnvironmentVariable("CLEARCOTE_TEST_DOCKER_PROXY");
+        if (string.IsNullOrEmpty(_image) || string.IsNullOrEmpty(key) || string.IsNullOrEmpty(proxy) || DockerLaunch.Which() is null) return;
+        _sb.Env("CLEARCOTE_DOCKER_CACHE_VOLUME", Environment.GetEnvironmentVariable("CLEARCOTE_TEST_DOCKER_CACHE_VOLUME"));
+        var b = await Clearcote.LaunchAsync(new LaunchOptions { LicenseKey = key, Proxy = new ProxyOptions { Server = proxy }, Quiet = true, Timeout = 600_000 });
+        var info = Clearcote.DockerContainerOf(b)!;
+        try
+        {
+            var env = Docker("inspect", "-f", "{{json .Config.Env}}", info.Id).Out;
+            // protocol 2 keeps the key out of the container's configuration; an older image gets it as a variable
+            Assert.Equal(info.ServeProtocol < 2, env.Contains(key));
+            var page = await b.NewPageAsync();
+            await page.GotoAsync("https://example.com/", new() { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60_000 });
+            Assert.Equal("Example Domain", await page.TitleAsync());
+        }
+        finally { await b.CloseAsync(); }
+        Assert.False(ContainerExists(info.Id));
+    }
 }
