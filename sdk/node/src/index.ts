@@ -63,10 +63,11 @@ import {
   type PwProxy,
 } from "./launchopts.js";
 import { RELEASE, platformRelease } from "./release.js";
-import { fetchWidevine, seedWidevine, widevineArgs } from "./widevine.js";
+import { fetchWidevine, seedWidevine, widevineArgs, widevineCdmArgs } from "./widevine.js";
 import { emitCoherenceWarnings, emitWarnings, serveExposureWarnings } from "./warnings.js";
 import { fontLaunchEnv } from "./fonts.js";
 import { withShaderDialect, type ShaderDialect } from "./shaderdialect.js";
+import { apply as applyPersonaEnv } from "./personaenv.js";
 import {
   applyHeadlessGeometry, fitServedWindow, fitWindowToWorkArea, installWindowFixup, servedGeometry,
 } from "./geometry.js";
@@ -230,6 +231,17 @@ interface ShaderDialectOption {
   shaderDialect?: ShaderDialect | false;
 }
 
+/** Where the persona switches travel (engine patch 1021, see ./personaenv.ts). */
+interface PersonaEnvOption {
+  /** Keep the persona switches (seed, overrides, proxy credentials, canvas-bridge token) off the
+   * browser's command line, which any local user can read: on an engine that implements
+   * `--persona-from-env` they travel in the CLEARCOTE_PERSONA_ARGS environment variable instead.
+   * Unset follows CLEARCOTE_PERSONA_ENV (on unless it says 0/false/off/no); `false` keeps them on the
+   * command line. An older engine gets them on its command line either way; a Docker launch ignores
+   * this (the image's own launch picks the transport). */
+  personaEnv?: boolean;
+}
+
 /** Engine behaviour switches that are not part of the persona (engine 152 r22+). */
 interface EngineExtrasOption {
   /**
@@ -273,7 +285,7 @@ interface CloudSwitchOption {
 }
 
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption, DockerOption {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, PersonaEnvOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption, DockerOption {}
 
 /** The account options a local launch drops (see CloudSwitchOption). */
 function withoutCloudOptions<T extends object>(options: T): T {
@@ -294,6 +306,7 @@ export interface PersistentContextOptions
     DownloadOptions,
     LicenseOptions,
     ShaderDialectOption,
+    PersonaEnvOption,
     Socks5UdpOption,
     EngineExtrasOption,
     CloudSwitchOption {
@@ -999,7 +1012,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // profile= a saved persona: its options are the base, explicit options override. ("auto" is
   // resolved later, once the executable is known.)
   const merged = mergeSavedProfile(options);
-  const { profile, profileSelect, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -1049,8 +1062,10 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   const geom = headed
     ? null
     : applyHeadlessGeometry({ ...(pwOptions as Record<string, unknown>) }, fingerprint.fingerprint, engineArgs, fingerprint);
+  const launchArgs = [...engineArgs, ...(geom?.args ?? [])];
   const browser = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
-    const env = runtimeEnv();
+    // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
+    const { args: finalArgs, env } = applyPersonaEnv(exe, launchArgs, runtimeEnv(), personaEnv);
     return chromium.launch({
       // Drop Playwright's --enable-automation (keeps AutomationControlled off), --enable-unsafe-swiftshader
       // (see DEFAULT_IGNORED_ARGS; paired with --ignore-gpu-blocklist in assembleArgs) and the headless
@@ -1059,7 +1074,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
       ...(pwOptions as PlaywrightLaunchOptions),
       executablePath: exePath,
       ...(env ? { env } : {}),
-      args: [...engineArgs, ...(geom?.args ?? [])],
+      args: finalArgs,
     });
   }, exe)), launchToken);
   // Release the concurrency slot + remove the run-token file when the browser closes.
@@ -1109,7 +1124,7 @@ async function launchLocalPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = mergeSavedProfile(options);
-  const { profile, profileSelect, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
@@ -1154,6 +1169,9 @@ async function launchLocalPersistentContext(
       if (!quiet) process.stderr.write(`[clearcote] [widevine] setup failed (continuing without DRM): ${String(e)}\n`);
     }
   }
+  // A 1022 engine registers the CDM from --widevine-cdm-path in every profile; the seeding above keeps
+  // older engines working. Best-effort on its own: [] on any failure, and the launch goes on.
+  const widevineCdm = widevine ? await widevineCdmArgs(exe, { quiet }) : [];
   delete (opts as Record<string, unknown>).ignoreDefaultArgs;  // passed explicitly below
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
   // License (opt-in): check out a concurrency slot + inject CLEARCOTE_RUN_TOKEN. Inert in free mode.
@@ -1175,14 +1193,16 @@ async function launchLocalPersistentContext(
   const geom = opts.headless === false
     ? null
     : applyHeadlessGeometry(opts as unknown as Record<string, unknown>, fingerprint.fingerprint, engineArgs, fingerprint);
+  const launchArgs = [...engineArgs, ...(geom?.args ?? []), ...widevineCdm];
   const context = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
-    const env = runtimeEnv();
+    // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
+    const { args: finalArgs, env } = applyPersonaEnv(exe, launchArgs, runtimeEnv(), personaEnv);
     return chromium.launchPersistentContext(userDataDir, {
       ...opts,
       ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
       executablePath: exePath,
       ...(env ? { env } : {}),
-      args: [...engineArgs, ...(geom?.args ?? [])],
+      args: finalArgs,
     });
   }, exe)), launchToken);
   if (lease) context.on("close", () => { void lease.stop(); launchToken?.release(); });
@@ -1399,7 +1419,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // Build the same stealth arg set as launch(), then launch the binary ourselves.
   const merged = mergeSavedProfile(launchOpts);
   const {
-    profile, profileSelect, extensions, portableProfile, shaderDialect, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
+    profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
     args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
@@ -1464,10 +1484,11 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
+  const persona = applyPersonaEnv(exe, engineArgs, env, personaEnv);  // persona off the browser's argv (1021)
   const proc = await releaseLeaseOnFailure(lease, () => winAvRetry(
     (exePath) => new Promise<ChildProcess>((resolve, reject) => {
       let settled = false;
-      const p = spawn(exePath, [...engineArgs, ...cdpArgs], { env, stdio: "ignore" });
+      const p = spawn(exePath, [...persona.args, ...cdpArgs], { env: persona.env, stdio: "ignore" });
       p.once("error", (err) => { if (!settled) { settled = true; reject(err); } });
       p.once("spawn", () => { if (!settled) { settled = true; resolve(p); } });
     }),

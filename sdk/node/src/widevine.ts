@@ -16,6 +16,7 @@ import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import extract from "extract-zip";
+import { engineSupportsSwitch } from "./launchopts.js";
 
 /** Chrome's component-updater app id for the Widevine CDM + Google's Omaha JSON endpoint. */
 export const WIDEVINE_APP_ID = "oimompecagnajdejgnnjijobebaeigek";
@@ -212,4 +213,20 @@ export function widevineArgs(
       ? userArgs
       : [...userArgs, "--component-updater=fast-update"];
   return { ignoreDefaultArgs: ida, args };
+}
+
+/**
+ * `["--widevine-cdm-path=<the fetched CDM>"]` when the engine implements that switch (patch 1022),
+ * else `[]`. Such an engine registers the CDM at startup in every profile, Playwright's throwaway ones
+ * included, so DRM no longer depends on the component updater; the hint file {@link seedWidevine}
+ * writes keeps older engines working. Best-effort, like the rest of DRM: any failure answers `[]` and
+ * the launch goes on.
+ */
+export async function widevineCdmArgs(exe: string | undefined, opts: { quiet?: boolean } = {}): Promise<string[]> {
+  try {
+    if (!engineSupportsSwitch(exe, "widevine-cdm-path")) return [];
+    return [`--widevine-cdm-path=${await fetchWidevine({ quiet: opts.quiet })}`];
+  } catch {
+    return [];
+  }
 }
