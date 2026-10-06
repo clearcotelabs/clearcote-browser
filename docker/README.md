@@ -104,6 +104,9 @@ host-local with `-p 127.0.0.1:9222:9222`, or keep it on an internal Docker netwo
   open binary it bakes in, e.g. `0.1.0-pre.23`) and `latest`. Rebuild + verify this image yourself:
   `docker build -t clearcote .` — every layer is auditable.
 - `--disable-dev-shm-usage` is set; add `--shm-size=1g` on very heavy pages if needed.
+- `tini` is PID 1, so browser helper processes that exit inside the container (for example from
+  scripts you `docker exec` that launch their own browsers) are reaped instead of piling up as
+  `<defunct>` entries. `docker stop` still reaches the browser and releases the licence seat.
 - The image runs as a **non-root** user (`cc`). If you run the browser in your own container as
   **root**, add `--cap-add=SYS_NICE` (or run as a normal user): the open build is compiled with
   DCHECKs, and Chromium's process-priority call aborts it when a root container refuses the call.
