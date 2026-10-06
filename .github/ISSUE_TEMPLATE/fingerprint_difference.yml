@@ -1,0 +1,146 @@
+name: Fingerprint difference
+description: Report a value where Clearcote differs from stock Google Chrome on the same machine.
+title: "[Fingerprint]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when a value Clearcote reports differs from what stock Google Chrome reports **on the same machine**.
+
+        Before filing, open the same page or run the same snippet in stock Chrome of the same major version on that computer. Many values come from the machine itself (GPU, fonts, screen, OS settings, network), so a comparison across two machines does not tell us much.
+
+        Remove licence keys, proxy credentials and personal data from everything you paste.
+
+  - type: input
+    id: surface
+    attributes:
+      label: What differs
+      description: The property, API or measurement that differs.
+      placeholder: "e.g. navigator.hardwareConcurrency, WebGL renderer, a canvas hash, the TLS fingerprint"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Repro URL or snippet
+      description: A public test page, or a minimal JavaScript snippet that prints the value. Say where you ran it (page console, a script, a worker).
+      placeholder: |
+        https://example.com/test-page
+        or
+        console.log(navigator.hardwareConcurrency)
+    validations:
+      required: true
+
+  - type: textarea
+    id: clearcote-value
+    attributes:
+      label: Clearcote value
+      description: The exact value Clearcote reports, copied as-is.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: chrome-value
+    attributes:
+      label: Stock Chrome value
+      description: The exact value stock Google Chrome reports for the same page or snippet on the same machine.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: chrome-version
+    attributes:
+      label: Stock Chrome version
+      description: From chrome://version in the stock Chrome you compared against.
+      placeholder: "e.g. 150.0.7871.114"
+    validations:
+      required: true
+
+  - type: textarea
+    id: launch-options
+    attributes:
+      label: Exact launch options
+      description: The full launch call or command, with every option you passed (fingerprint seed, headless, proxy, geoip, locale, timezone, extra flags, profile directory). Replace secrets with placeholders.
+      placeholder: |
+        clearcote.launch(headless=False, fingerprint=12345,
+                         proxy={"server": "http://host:8080", "username": "USER", "password": "PASS"})
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: engine-version
+    attributes:
+      label: Clearcote engine version
+      description: The browser build that ran, from `clearcote info` or chrome://version in the Clearcote window.
+      placeholder: "e.g. 150.0.7871.114 (v0.1.0-pre.23)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sdk
+    attributes:
+      label: SDK
+      description: How you launched Clearcote.
+      options:
+        - Python
+        - Node.js
+        - .NET
+        - Docker image
+        - No SDK (binary launched directly)
+    validations:
+      required: true
+
+  - type: input
+    id: sdk-version
+    attributes:
+      label: SDK version
+      description: "`pip show clearcote`, `npm ls clearcote` or `dotnet list package`. Leave empty if you used no SDK."
+      placeholder: "e.g. 0.38.1"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux desktop
+        - Linux server, VM or container
+        - macOS
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os-details
+    attributes:
+      label: OS version and hardware
+      description: OS version, GPU, and whether the machine is a VM, a container or a server without a GPU.
+      placeholder: "e.g. Windows 11 24H2, NVIDIA RTX 3060 / Ubuntu 22.04 in Docker, no GPU"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I compared against stock Google Chrome of the same major version, on the same machine.
+          required: true
+        - label: I removed licence keys, proxy credentials and personal data from this report.
+          required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Screenshots, whether the difference is stable across runs or seeds, and anything you already ruled out.
+    validations:
+      required: false
