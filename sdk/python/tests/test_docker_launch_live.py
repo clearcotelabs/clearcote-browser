@@ -244,6 +244,21 @@ def test_chrome_runs_with_its_sandbox():
     assert not container_exists(cid)
 
 
+@pytest.mark.parametrize("switch", ["--no-zygote", "--disable-namespace-sandbox"])
+def test_a_switch_chrome_cannot_run_its_sandbox_with_turns_it_off_and_the_browser_comes_up(switch):
+    # With the profile the probe passes, but Chrome refuses --no-zygote with its sandbox on (exit 1) and aborts on
+    # the setuid helper the image does not have with --disable-namespace-sandbox: either way it must run without.
+    b = clearcote.launch(args=[switch], quiet=True)
+    try:
+        cid = b.docker_container["id"]
+        procs = chrome_processes(cid)
+        assert procs and all("--no-sandbox" in args for _ns, args in procs)
+        _page, got = probe(b)
+        assert got["title"] == "loaded in docker"
+    finally:
+        b.close()
+
+
 def test_without_the_profile_the_container_still_serves_without_the_sandbox():
     # A plain `docker run`, no profile: Docker's default refuses the sandbox's namespaces. The container must come
     # up as it always did (Chrome with --no-sandbox), and say why and how to turn the sandbox on.

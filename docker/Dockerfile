@@ -5,8 +5,9 @@
 #   # then:  playwright.chromium.connect_over_cdp("http://localhost:9222")
 #
 # seccomp.json (in this directory, and in the image at /etc/clearcote/seccomp.json) is Docker's default
-# seccomp profile plus the two namespace calls Chrome's sandbox needs. Without it the container still runs,
-# with Chrome's sandbox off (--no-sandbox) and a log line saying so; see README.md.
+# seccomp profile of moby/profiles seccomp v0.2.3 plus the two namespace calls Chrome's sandbox needs; it
+# replaces the daemon's own default. Without it the container still runs, with Chrome's sandbox off
+# (--no-sandbox) and a log line saying so; see README.md.
 #
 # Published image: teamflatearth/clearcote  (docker run -d -p 9222:9222 teamflatearth/clearcote)
 # Builds against the LATEST clearcote SDK (override with --build-arg CLEARCOTE_SPEC='==0.26.0').

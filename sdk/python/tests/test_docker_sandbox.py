@@ -10,6 +10,9 @@ import hashlib
 import importlib.util
 import json
 import os
+import platform
+import signal
+import subprocess
 import sys
 
 import pytest
@@ -70,9 +73,35 @@ def test_the_canvas_bridge_keeps_no_sandbox():
     assert on is False and line == "[clearcote] sandbox: off (the canvas bridge needs --no-sandbox)"
 
 
+@pytest.mark.parametrize("args,why", [
+    # Chrome: "Zygote cannot be disabled if sandbox is enabled", exit 1
+    (["--no-zygote"], "--no-zygote was asked for"),
+    # Chrome falls back to the setuid helper, which the image does not install, and aborts
+    (["--disable-namespace-sandbox"], "--disable-namespace-sandbox was asked for"),
+    (["--lang=de", "--no-zygote=1"], "--no-zygote was asked for"),
+])
+def test_switches_chrome_cannot_run_its_sandbox_with_turn_it_off_without_probing(args, why):
+    on, line = _check().decide(args, 10001, run_probe=_no_probe)
+    assert on is False and line.startswith("[clearcote] sandbox: off (" + why)
+
+
 def test_root_runs_without_the_sandbox_because_chrome_refuses_it_there():
     on, line = _check().decide([], 0, run_probe=_no_probe)
     assert on is False and "runs as root" in line and "--security-opt seccomp=" in line
+
+
+def test_a_host_that_restricts_user_namespaces_is_named_before_the_seccomp_profile():
+    # Every container has a seccomp filter, the profile included: with the profile on an AppArmor-restricted host
+    # the line must name the host's policy, not tell the user to pass the profile they passed.
+    files = {"/proc/self/status": "Seccomp:\t2\n", "/proc/sys/kernel/apparmor_restrict_unprivileged_userns": "1"}
+    on, line = _check().decide([], 10001, run_probe=lambda: (False, ("uid-map", errno.EPERM)), read=files.get)
+    assert on is False and "AppArmor policy restricts user namespaces" in line and "seccomp profile blocks" not in line
+    assert "kernel.apparmor_restrict_unprivileged_userns=0" in line
+
+
+def test_the_profile_is_saved_without_copying_the_engine_volume():
+    sc = _check()
+    assert "--tmpfs /opt/xdg-cache" in sc.SAVE_PROFILE and sc.SAVE_PROFILE in sc.HOW_PROFILE
 
 
 @pytest.mark.parametrize("failure,files,said", [
@@ -84,6 +113,8 @@ def test_root_runs_without_the_sandbox_because_chrome_refuses_it_there():
     (("clone-user", errno.EACCES), {"/proc/sys/kernel/apparmor_restrict_unprivileged_userns": "1"}, "AppArmor"),
     (("probe", errno.ETIMEDOUT), {}, "the sandbox probe did not finish"),
     (("probe", errno.EIO), {}, "the sandbox probe failed"),
+    (("seccomp-arch", 0), {}, "runs emulated on another CPU"),
+    (("seccomp-bpf", errno.EINVAL), {}, "installing a seccomp-bpf filter failed"),
 ])
 def test_each_reason_is_named(failure, files, said):
     on, line = _check().decide([], 10001, run_probe=lambda: (False, failure), read=files.get)
@@ -93,6 +124,7 @@ def test_each_reason_is_named(failure, files, said):
 @pytest.mark.parametrize("stdout,code,result", [
     ("ok\n", 0, (True, None)),
     ("fail unshare-user 1\n", 1, (False, ("unshare-user", 1))),
+    ("fail seccomp-arch 0\n", 1, (False, ("seccomp-arch", 0))),
     ("Traceback (most recent call last):\n", 1, (False, ("probe", errno.EIO))),
     ("ok\n", 1, (False, ("probe", errno.EIO))),
 ])
@@ -115,6 +147,20 @@ def test_the_probe_runs_here():
     # off, is test_docker_launch_live.py's).
     ok, failure = _check().probe()
     assert (ok, failure) == (True, None) or (ok is False and failure[0] in _check().STEPS)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux seccomp-bpf")
+@pytest.mark.parametrize("arch,code", [("own", 0), ("other", -getattr(signal, "SIGSYS", 31))])
+def test_the_filter_kills_a_process_whose_syscalls_are_another_cpus(arch, code):
+    # What an emulated amd64 image meets under Chrome's renderer filter, simulated the other way round: a filter
+    # for another CPU kills the process at its next syscall; one for its own CPU lets it run.
+    own = {"x86_64": 0xC000003E, "aarch64": 0xC00000B7}[platform.machine()]
+    other = 0xC00000B7 if own == 0xC000003E else 0xC000003E
+    script = ("import ctypes, os, sandbox_check as s\n"
+              "s.arch_filter(ctypes.PyDLL(None, use_errno=True), %d)\n"
+              "os.getppid()\nos._exit(0)\n" % (own if arch == "own" else other))
+    r = subprocess.run([sys.executable, "-c", script], cwd=DOCKER, capture_output=True, timeout=30)
+    assert r.returncode == code, r.stderr
 
 
 # ── the profile ──────────────────────────────────────────────────────────────────────────────────────────────

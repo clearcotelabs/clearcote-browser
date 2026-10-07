@@ -7,8 +7,9 @@ the browser.
 ## Pull & run
 
 ```bash
-# the seccomp profile that lets Chrome run with its sandbox (it ships in the image)
-docker run --rm --entrypoint cat teamflatearth/clearcote /etc/clearcote/seccomp.json > clearcote-seccomp.json
+# the seccomp profile that lets Chrome run with its sandbox (it ships in the image; --tmpfs keeps
+# docker from first copying the ~0.5 GB engine into a volume just to read this one file)
+docker run --rm --tmpfs /opt/xdg-cache --entrypoint cat teamflatearth/clearcote /etc/clearcote/seccomp.json > clearcote-seccomp.json
 docker run -d --rm -p 9222:9222 --security-opt seccomp=clearcote-seccomp.json teamflatearth/clearcote
 # CDP on http://localhost:9222
 ```
@@ -128,9 +129,10 @@ With the profile it logs `[clearcote] sandbox: on (...)`, and the `serve-state` 
 `"sandbox": true`.
 
 **The profile.** [`seccomp.json`](seccomp.json) (also in the image at `/etc/clearcote/seccomp.json`)
-is Docker's default profile, unchanged (the one Docker 29.5 to 29.8 build in: moby/profiles seccomp
-v0.2.3), with two rules appended. Each carries a `"comment"` starting with `clearcote:`; drop those
-two and you have Docker's file again.
+is Docker's default profile as published in moby/profiles seccomp v0.2.3 (the one Docker 29.5 to 29.8
+build in), unchanged, with two rules appended. Each carries a `"comment"` starting with `clearcote:`;
+drop those two and you have that file again. It is not your daemon's own built-in default: passing it
+replaces that default, whatever Docker version it came with, by v0.2.3's rules plus these two.
 
 | addition | why Chrome needs it |
 |---|---|
@@ -141,6 +143,14 @@ Nothing else is needed: the calls were measured on the engine this image ships (
 instead of refusing showed exactly these two; with either rule removed Chrome aborts at start). Do
 not use `--privileged`, `--cap-add SYS_ADMIN` or `seccomp=unconfined` instead: they also let the
 sandbox run, but turn off far more of the container's protection.
+
+**What the profile gives up.** With it, any process in the container, not only Chrome, can create a
+user namespace with its own network namespace and hold `CAP_NET_ADMIN` inside it. That reaches kernel
+networking code (netfilter and nf_tables among it) which Docker's default profile keeps out of reach,
+and which has had privilege-escalation bugs. Chrome's renderers, where untrusted pages run, stay under
+Chrome's own seccomp-bpf filter, which refuses these calls; the browser process and anything else that
+runs in the container (`docker exec` included) does not. On balance it is still the better trade:
+without the sandbox, a compromised renderer has everything the container's user has.
 
 ```bash
 docker run -d -p 127.0.0.1:9222:9222 --security-opt seccomp=clearcote-seccomp.json teamflatearth/clearcote
@@ -155,7 +165,9 @@ services:
     security_opt: ["seccomp=./clearcote-seccomp.json"]
 ```
 
-The SDKs' macOS `launch()` passes the profile itself to an image that uses it (serve protocol 3).
+The SDKs' macOS `launch()` passes the profile itself to an image that uses it (serve protocol 3), on a
+Docker that runs on an x86_64 CPU. On another CPU (Docker Desktop on Apple silicon) the image runs
+emulated, and the sandbox has not been tried under that emulation yet, so it stays off there.
 
 The sandbox also needs:
 
@@ -167,11 +179,14 @@ The sandbox also needs:
   one refuses them: `kernel.unprivileged_userns_clone=0`, `user.max_user_namespaces=0`, or an AppArmor
   policy that restricts them (`kernel.apparmor_restrict_unprivileged_userns=1`).
 - **an amd64 machine.** An emulator running the amd64 image on another CPU may refuse the namespace
-  flags; the container then falls back and says so.
+  flags, or pass them and then not run a seccomp-bpf filter written for amd64. The entrypoint tries
+  both before Chrome starts; the container then falls back and says so.
 
-To turn the sandbox off on purpose, pass `CC_EXTRA_ARGS=--no-sandbox`. A `--canvas-bridge-url=` in
-`CC_EXTRA_ARGS` turns it off too: the [canvas bridge](../docs/CANVAS-BRIDGE.md) opens its socket from the
-renderer, which the sandbox does not allow.
+To turn the sandbox off on purpose, pass `CC_EXTRA_ARGS=--no-sandbox`. These in `CC_EXTRA_ARGS` turn
+it off too, because Chrome cannot run its sandbox with them here: `--no-zygote`,
+`--disable-namespace-sandbox` (this image has no setuid sandbox to fall back on), and
+`--canvas-bridge-url=` (the [canvas bridge](../docs/CANVAS-BRIDGE.md) opens its socket from the
+renderer, which the sandbox does not allow).
 
 ### Secrets and `docker inspect`
 
