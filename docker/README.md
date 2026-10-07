@@ -7,8 +7,14 @@ the browser.
 ## Pull & run
 
 ```bash
-docker run -d --rm -p 9222:9222 teamflatearth/clearcote      # CDP on http://localhost:9222
+# the seccomp profile that lets Chrome run with its sandbox (it ships in the image)
+docker run --rm --entrypoint cat teamflatearth/clearcote /etc/clearcote/seccomp.json > clearcote-seccomp.json
+docker run -d --rm -p 9222:9222 --security-opt seccomp=clearcote-seccomp.json teamflatearth/clearcote
+# CDP on http://localhost:9222
 ```
+
+Without `--security-opt` the container still runs, with Chrome's sandbox off; see
+[Chrome's sandbox](#chromes-sandbox).
 
 ```python
 from playwright.sync_api import sync_playwright
@@ -101,6 +107,72 @@ The CDP endpoint is **full browser control**. Publish it only to trusted network
 host-local with `-p 127.0.0.1:9222:9222`, or keep it on an internal Docker network. Never expose
 `:9222` to the public internet.
 
+### Chrome's sandbox
+
+Chrome's Linux sandbox runs every renderer (the process that parses and runs a page) in user, PID and
+network namespaces of its own, under a seccomp-bpf filter, so a page that compromises its renderer is
+still confined to it. With `--no-sandbox` that renderer has everything the container's user has: its
+files, its network and its other processes. (`--no-sandbox` also raises Chrome's "unsupported
+command-line flag" warning bar, which the entrypoint then has to keep off the screen with another switch.)
+
+Docker's default seccomp profile refuses the calls that create those namespaces. So the entrypoint
+checks first: it makes the same calls Chrome's sandbox makes, and runs Chrome **with** its sandbox
+when they work. When they do not, it runs Chrome with `--no-sandbox`, exactly as before, and logs one
+line saying why and how to turn the sandbox on, for example:
+
+```
+[clearcote] sandbox: OFF, Chrome runs with --no-sandbox: clone(CLONE_NEWUSER) failed (Operation not permitted): the container's seccomp profile blocks the namespaces Chrome's sandbox needs (Docker's default profile does). To turn the sandbox on, start the container with --security-opt seccomp=<profile>; ...
+```
+
+With the profile it logs `[clearcote] sandbox: on (...)`, and the `serve-state` line carries
+`"sandbox": true`.
+
+**The profile.** [`seccomp.json`](seccomp.json) (also in the image at `/etc/clearcote/seccomp.json`)
+is Docker's default profile, unchanged (the one Docker 29.5 to 29.8 build in: moby/profiles seccomp
+v0.2.3), with two rules appended. Each carries a `"comment"` starting with `clearcote:`; drop those
+two and you have Docker's file again.
+
+| addition | why Chrome needs it |
+|---|---|
+| `clone` with `CLONE_NEWUSER`, `CLONE_NEWPID`, `CLONE_NEWNET` (mask `0x0E020000` must be clear: mount, cgroup, UTS and IPC namespaces stay refused) | `clone(CLONE_NEWUSER)` checks that user namespaces work, `clone(CLONE_NEWUSER\|CLONE_NEWPID\|CLONE_NEWNET)` starts the zygote, `clone(CLONE_NEWPID)` starts each renderer |
+| `unshare(CLONE_NEWUSER)`, that exact flag only | Chrome's check that a user without privileges can create a user namespace calls it inside the first one |
+
+Nothing else is needed: the calls were measured on the engine this image ships (a profile that logs
+instead of refusing showed exactly these two; with either rule removed Chrome aborts at start). Do
+not use `--privileged`, `--cap-add SYS_ADMIN` or `seccomp=unconfined` instead: they also let the
+sandbox run, but turn off far more of the container's protection.
+
+```bash
+docker run -d -p 127.0.0.1:9222:9222 --security-opt seccomp=clearcote-seccomp.json teamflatearth/clearcote
+```
+
+```yaml
+# docker compose
+services:
+  clearcote:
+    image: teamflatearth/clearcote
+    ports: ["127.0.0.1:9222:9222"]
+    security_opt: ["seccomp=./clearcote-seccomp.json"]
+```
+
+The SDKs' macOS `launch()` passes the profile itself to an image that uses it (serve protocol 3).
+
+The sandbox also needs:
+
+- **the image's own user.** Chrome's sandbox does not run as root, so with `--user 0` the container
+  falls back (and says so).
+- **`CAP_SYS_CHROOT`**, which Docker grants by default; `--cap-drop ALL` removes it (add
+  `--cap-add SYS_CHROOT` back).
+- **a host that allows unprivileged user namespaces.** Most do. The log line names the setting when
+  one refuses them: `kernel.unprivileged_userns_clone=0`, `user.max_user_namespaces=0`, or an AppArmor
+  policy that restricts them (`kernel.apparmor_restrict_unprivileged_userns=1`).
+- **an amd64 machine.** An emulator running the amd64 image on another CPU may refuse the namespace
+  flags; the container then falls back and says so.
+
+To turn the sandbox off on purpose, pass `CC_EXTRA_ARGS=--no-sandbox`. A `--canvas-bridge-url=` in
+`CC_EXTRA_ARGS` turns it off too: the [canvas bridge](../docs/CANVAS-BRIDGE.md) opens its socket from the
+renderer, which the sandbox does not allow.
+
 ### Secrets and `docker inspect`
 
 Every variable passed with `-e` is part of the container's configuration: anyone who can run
@@ -134,13 +206,15 @@ engine keeps the password in the entrypoint's relay instead, off the command lin
   `docker build -t clearcote .` — every layer is auditable.
 - `--disable-dev-shm-usage` is set; add `--shm-size=1g` on very heavy pages if needed.
 - The image carries the label `com.clearcotelabs.serve-protocol` (2: it takes `CC_SECRETS_FILE` and
-  `CC_IDLE_EXIT_SECONDS`), and its entrypoint logs one `[clearcote] serve-state {...}` line saying what it
-  applied: the engine that resolved (`licensed` or `open`), the proxy, how a proxy's password is answered
-  (`engine` or `relay`), the idle exit. The SDKs' macOS `launch()` reads the label before it starts a
+  `CC_IDLE_EXIT_SECONDS`; 3: it also runs Chrome's sandbox when the container allows it), and its
+  entrypoint logs one `[clearcote] serve-state {...}` line saying what it applied: the engine that
+  resolved (`licensed` or `open`), the proxy, how a proxy's password is answered (`engine` or `relay`),
+  the idle exit, the sandbox. The SDKs' macOS `launch()` reads the label before it starts a
   container (an image without it gets plain variables, with a warning, and is refused a proxy password it
   cannot answer) and refuses a container whose log does not show the licensed engine when a key was
   given, or the proxy (and its login) when one was given.
-- The SDKs' macOS `launch()` starts this image with `--rm`, `CC_IDLE_EXIT_SECONDS=30` and owner labels
+- The SDKs' macOS `launch()` starts this image with `--rm`, `CC_IDLE_EXIT_SECONDS=30`, the seccomp profile
+  (serve protocol 3) and owner labels
   (`com.clearcotelabs.sdk-launch`, `com.clearcotelabs.owner-host`, `com.clearcotelabs.owner-token`), so a
   container whose program was killed stops on its own and is removed; the next launch from the same user
   and machine removes any whose owner process is certainly gone at once (never one from another machine or

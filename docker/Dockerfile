@@ -1,8 +1,12 @@
 # clearcote — open-source stealth Chromium, as a CDP-endpoint container.
 #
 #   docker build -t clearcote .
-#   docker run -d -p 9222:9222 clearcote        # CDP on http://localhost:9222
+#   docker run -d -p 9222:9222 --security-opt seccomp=seccomp.json clearcote   # CDP on http://localhost:9222
 #   # then:  playwright.chromium.connect_over_cdp("http://localhost:9222")
+#
+# seccomp.json (in this directory, and in the image at /etc/clearcote/seccomp.json) is Docker's default
+# seccomp profile plus the two namespace calls Chrome's sandbox needs. Without it the container still runs,
+# with Chrome's sandbox off (--no-sandbox) and a log line saying so; see README.md.
 #
 # Published image: teamflatearth/clearcote  (docker run -d -p 9222:9222 teamflatearth/clearcote)
 # Builds against the LATEST clearcote SDK (override with --build-arg CLEARCOTE_SPEC='==0.26.0').
@@ -48,12 +52,14 @@ RUN mkdir -p /opt/xdg-cache \
 # ~180 MB download happens once rather than per container.
 VOLUME ["/opt/xdg-cache"]
 
-COPY serve.py idle_exit.py proxy_relay.py /
+COPY serve.py idle_exit.py proxy_relay.py sandbox_check.py /
+COPY seccomp.json /etc/clearcote/seccomp.json
 # What the entrypoint does with the settings the SDKs pass (see SERVE_PROTOCOL in serve.py): 2 = takes
 # CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS, logs in to a proxy that needs a password, and reports what it
-# applied in a "serve-state" line. The SDKs read this label before they start a container; an image
-# without it gets plain variables.
-LABEL com.clearcotelabs.serve-protocol="2"
+# applied in a "serve-state" line; 3 = also runs Chrome's sandbox when the container allows it, so the SDKs
+# pass the seccomp profile above. The SDKs read this label before they start a container; an image without
+# it gets plain variables.
+LABEL com.clearcotelabs.serve-protocol="3"
 
 USER cc
 EXPOSE 9222

@@ -13,6 +13,10 @@ CC_* env vars.
 
 Modern Chrome binds the DevTools endpoint to 127.0.0.1 only (a security restriction;
 --remote-debugging-address is ignored), so we run a tiny socat TCP proxy to publish it.
+
+Chrome runs WITH its sandbox whenever the container allows it (sandbox_check.py): run the container with
+--security-opt seccomp=<the profile at /etc/clearcote/seccomp.json>. Without it, --no-sandbox, and a log
+line saying why.
 """
 import json
 import os
@@ -429,15 +433,28 @@ _BACKENDS = {"--use-angle=gl": "Mesa GL (llvmpipe)", "--use-angle=gl-egl": "Mesa
 print("[clearcote] WebGL backend: %s" % next((v for k, v in _BACKENDS.items() if k in gpu_args), "SwiftShader"),
       flush=True)
 
-base_args = [
-    "--no-sandbox", "--disable-dev-shm-usage",
+# Chrome's sandbox: on when this container lets Chrome create the user, PID and network namespaces it needs
+# (sandbox_check.probe makes the same calls first). Docker's default seccomp profile refuses them, and Chrome
+# would then abort, so a container started without the profile at /etc/clearcote/seccomp.json gets
+# --no-sandbox and one log line saying why and how to turn the sandbox on: whatever booted before still boots.
+try:
+    import sandbox_check
+
+    sandbox, _sandbox_line = sandbox_check.decide(args + extra, os.geteuid())
+except ImportError:  # a custom image that copied serve.py without its probe
+    sandbox, _sandbox_line = False, "[clearcote] sandbox: OFF, Chrome runs with --no-sandbox: sandbox_check.py is missing"
+print(_sandbox_line, flush=True)
+
+base_args = (["--no-sandbox"] if not sandbox and "--no-sandbox" not in args + extra else []) + [
+    "--disable-dev-shm-usage",
 ] + gpu_args + [
     f"--remote-debugging-port={internal}", "--remote-allow-origins=*",
     "--user-data-dir=%s" % PROFILE_DIR,
 ] + mode_args + window_args + args + web_bluetooth_args(persona_platform(opts)) + proxy_args + extra
 # --no-sandbox is on Chromium's "unsupported command-line flag" list, and the warning bar it raises sits
-# on the first tab: 56px off that tab's innerHeight, a frame (outer - inner) no real Chrome has. The
-# SDK's serve() keeps it off the same way: --disable-infobars headless, --test-type headful.
+# on the first tab: 56px off that tab's innerHeight, a frame (outer - inner) no real Chrome has. With the
+# sandbox on there is no such flag and no bar. Without it, the SDK's serve() keeps the bar off the same way:
+# --disable-infobars headless, --test-type headful.
 base_args += serve_infobar_args(headless, base_args)
 # Chromium keeps only the LAST --enable-features / --disable-features on the line rather than
 # concatenating them, so the layers here would silently clobber each other: web_bluetooth_args
@@ -535,12 +552,14 @@ except ValueError:
 
 # SERVE_PROTOCOL: what this entrypoint does with the SDK's settings. The image carries it as the label
 # com.clearcotelabs.serve-protocol, so the SDK knows before it starts a container whether the image takes
-# CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS (2), or only plain variables (no label: older images). The
-# serve-state line says what was actually applied -- the engine tier that resolved, the proxy, the idle
-# exit, how a proxy's password is answered -- so the SDK can refuse a container that did not do what it was
-# asked instead of handing back a browser on the free engine, one that goes direct when a proxy was asked
-# for, or one whose every request a proxy turns away.
-SERVE_PROTOCOL = 2
+# CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS (2), or only plain variables (no label: older images), and whether
+# it runs Chrome's sandbox when the container allows it (3: the SDK then passes the seccomp profile; it is not
+# given to an older image, whose Chrome runs with --no-sandbox anyway). The serve-state line says what was
+# actually applied -- the engine tier that resolved, the proxy, the idle exit, how a proxy's password is
+# answered, the sandbox -- so the SDK can refuse a container that did not do what it was asked instead of
+# handing back a browser on the free engine, one that goes direct when a proxy was asked for, or one whose
+# every request a proxy turns away.
+SERVE_PROTOCOL = 3
 _applied = {
     "protocol": SERVE_PROTOCOL,
     "engine": "licensed" if "/pro-" in exe.replace(os.sep, "/") else "open",
@@ -548,6 +567,7 @@ _applied = {
     "proxy_auth": _proxy_auth,  # how a proxy's password is answered: "engine", "relay" (None: no password)
     "idle_exit": _idle_limit if _idle_limit > 0 else 0,
     "secrets_file": bool(_secrets_file),
+    "sandbox": sandbox,
 }
 print("[clearcote] serve-state %s" % json.dumps(_applied, sort_keys=True), flush=True)
 
