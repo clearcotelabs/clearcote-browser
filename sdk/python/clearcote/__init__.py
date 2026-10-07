@@ -849,34 +849,49 @@ def _is_win_launch_race(exc):
     return "spawn unknown" in m or "side-by-side" in m or "side by side" in m
 
 
-def _win_av_retry(do_launch, exe):
-    """Launch via ``do_launch(exe_path)``, working around the Windows first-launch AV-scan race.
+def _launch_attempt(do_launch, exe):
+    """``do_launch(exe)``; when Windows could not start the process, first remove the temp
+    directories Playwright made for it (they leak otherwise, see _winlaunch)."""
+    started = time.time()
+    try:
+        return do_launch(exe)
+    except Exception as exc:  # noqa: BLE001
+        if _is_win_launch_race(exc):
+            from ._winlaunch import remove_failed_launch_dirs
+            remove_failed_launch_dirs(exc, started)
+        raise
 
-    A just-extracted, unsigned chrome.exe can fail with "spawn UNKNOWN" / "side-by-side
-    configuration is incorrect" while real-time antivirus is still scanning chrome_elf.dll (the SxS
-    assembly member the exe's manifest depends on). Worse, Windows caches that negative activation
-    context against the *path*, so retrying the same path keeps failing. ``warm_files`` (in
-    ``ensure_binary``) pre-scans to prevent it; here we (1) re-scan + back off + retry a couple
-    times, then (2) as a last resort relaunch from a pristine copy on a fresh temp path, which
-    always gets a clean SxS evaluation. Pass-through on non-Windows."""
+
+def _win_av_retry(do_launch, exe):
+    """Launch via ``do_launch(exe_path)``, working around Windows refusing to start a cached build
+    ("spawn UNKNOWN" / "side-by-side configuration is incorrect").
+
+    Inside an MSIX-packaged app a build downloaded into %LOCALAPPDATA% is invisible to the
+    activation-context check, so it never starts in place; real-time antivirus scanning a freshly
+    extracted chrome_elf.dll can cause the same error for a while (see _winlaunch). So: (1) launch
+    from this build's recovered copy when one exists; else (2) probe the cached exe with a
+    suspended CreateProcess, re-scanning + backing off up to three times, and launch it once the
+    probe passes; else (3) copy the build once to ``~/.clearcote/recovered/`` and launch from
+    there, which every later launch reuses. Probing instead of launching keeps failed attempts
+    from leaking Playwright's temp directories. Pass-through on non-Windows."""
     if sys.platform != "win32":
         return do_launch(exe)
-    for i in range(3):
-        try:
-            return do_launch(exe)
-        except Exception as exc:  # noqa: BLE001
-            if not _is_win_launch_race(exc):
-                raise
-            warm_files(os.path.dirname(exe))
-            time.sleep(0.8 * (i + 1))
-    # The in-place SxS activation-context poison never clears; relaunch from a fresh copy.
-    import shutil
-    import tempfile
+    from . import _winlaunch
 
-    recover = os.path.join(tempfile.mkdtemp(prefix="clearcote-recover-"), "browser")
-    shutil.copytree(os.path.dirname(exe), recover)
-    warm_files(recover)
-    return do_launch(os.path.join(recover, os.path.basename(exe)))
+    ready = _winlaunch.recovered_exe(exe)
+    if ready:
+        return _launch_attempt(do_launch, ready)
+    for i in range(3):
+        failure = _winlaunch.spawn_error(exe)
+        if failure is None or not _winlaunch.is_sxs_error(failure):
+            try:
+                return _launch_attempt(do_launch, exe)
+            except Exception as exc:  # noqa: BLE001
+                if not _is_win_launch_race(exc):
+                    raise
+        warm_files(os.path.dirname(exe))
+        time.sleep(0.8 * (i + 1))
+    return _launch_attempt(do_launch, _winlaunch.make_recovered_copy(exe, warm=warm_files))
 
 
 def _acquire_lease_from_kwargs(kwargs):

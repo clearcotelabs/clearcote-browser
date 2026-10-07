@@ -353,7 +353,8 @@ COMMAND_NOTES = {
     "info": "Reports the SDK, the licence, the cached builds and what a launch would use. Never downloads.",
     "install": "Downloads and verifies the build a launch would use.",
     "update": "Fetches a newer build if one exists.",
-    "clear-cache": "Deletes every cached browser build (nothing else in the cache directory).",
+    "clear-cache": "Deletes every cached browser build (nothing else in the cache directory), and on Windows the "
+                   "recovered copies in ~/.clearcote/recovered.",
     "serve": "A CDP endpoint that gives every connection its own browser and identity.",
 }
 
@@ -934,20 +935,28 @@ def _run(argv):
         return 0
 
     if cmd == "clear-cache":
+        from ._winlaunch import clear_recovered, recover_root
         from .download import default_cache_root
         root = default_cache_root()
-        if not os.path.isdir(root):
-            _out(f"nothing to clear ({root} does not exist)")
-            return 0
-        builds = cache_build_dirs(root)
-        if not builds:
-            _out(f"nothing to clear (no browser builds in {root})")
-            return 0
+        builds = cache_build_dirs(root) if os.path.isdir(root) else []
         size = 0
         for d in builds:
             size += _dir_size(d)
             shutil.rmtree(d, ignore_errors=True)
-        _out(f"removed {len(builds)} build(s) from {root} ({size / 1e6:.0f} MB)")
+        if not os.path.isdir(root):
+            _out(f"nothing to clear ({root} does not exist)")
+        elif not builds:
+            _out(f"nothing to clear (no browser builds in {root})")
+        else:
+            _out(f"removed {len(builds)} build(s) from {root} ({size / 1e6:.0f} MB)")
+        # Windows: the copies launches fall back to when a cached build cannot start in place.
+        n, rsize, in_use = clear_recovered()
+        if n:
+            _out(f"removed {n} recovered build cop{'y' if n == 1 else 'ies'} from {recover_root()} "
+                 f"({rsize / 1e6:.0f} MB)")
+        if in_use:
+            _out(f"kept {in_use} recovered build cop{'y' if in_use == 1 else 'ies'} a running browser "
+                 f"is using (in {recover_root()})")
         return 0
 
     if cmd == "login":

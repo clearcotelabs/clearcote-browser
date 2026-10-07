@@ -25,9 +25,9 @@ hosted session instead; :class:`AsyncCloud` is the asyncio client for the rest o
 import asyncio
 import json
 import os
-import shutil
 import sys
 import tempfile
+import time
 
 from . import (  # shared sync helpers
     _headed_no_viewport, _headless_geometry_kwargs, _prepare, _acquire_lease_from_kwargs,
@@ -194,31 +194,46 @@ async def _start_driver():
     return await async_playwright().start()
 
 
+async def _launch_attempt_async(do_launch, exe):
+    """Async twin of the sync ``_launch_attempt``."""
+    started = time.time()
+    try:
+        return await do_launch(exe)
+    except Exception as exc:  # noqa: BLE001
+        if _is_win_launch_race(exc):
+            from ._winlaunch import remove_failed_launch_dirs
+            await asyncio.to_thread(remove_failed_launch_dirs, exc, started)
+        raise
+
+
 async def _win_av_retry_async(do_launch, exe):
-    """Async mirror of the sync ``_win_av_retry``: work around the Windows first-launch
-    'spawn UNKNOWN' / 'side-by-side configuration is incorrect' race — a just-extracted,
-    unsigned chrome.exe can fail to spawn while real-time AV is still scanning chrome_elf.dll
-    (the SxS assembly member its manifest depends on), and Windows caches that negative
-    activation against the path. Re-scan + back off + retry, then relaunch from a pristine
-    temp copy which always gets a clean SxS evaluation. Pass-through on non-Windows.
+    """Async mirror of the sync ``_win_av_retry``: launch from this build's recovered copy when
+    one exists, else probe the cached exe (suspended CreateProcess) with re-scan + back-off and
+    launch it once the probe passes, else copy the build once to ``~/.clearcote/recovered/`` and
+    launch from there. See _winlaunch for why a cached build can refuse to start in place.
+    Pass-through on non-Windows.
 
     Without this the async API launched the engine directly and surfaced the raw
     'spawn UNKNOWN' (the sync API has had this workaround; the async API did not)."""
     if sys.platform != "win32":
         return await do_launch(exe)
+    from . import _winlaunch
+
+    ready = await asyncio.to_thread(_winlaunch.recovered_exe, exe)
+    if ready:
+        return await _launch_attempt_async(do_launch, ready)
     for i in range(3):
-        try:
-            return await do_launch(exe)
-        except Exception as exc:  # noqa: BLE001
-            if not _is_win_launch_race(exc):
-                raise
-            await asyncio.to_thread(warm_files, os.path.dirname(exe))
-            await asyncio.sleep(0.8 * (i + 1))
-    # The in-place SxS activation-context poison never clears; relaunch from a fresh copy.
-    recover = os.path.join(tempfile.mkdtemp(prefix="clearcote-recover-"), "browser")
-    await asyncio.to_thread(shutil.copytree, os.path.dirname(exe), recover)
-    await asyncio.to_thread(warm_files, recover)
-    return await do_launch(os.path.join(recover, os.path.basename(exe)))
+        failure = await asyncio.to_thread(_winlaunch.spawn_error, exe)
+        if failure is None or not _winlaunch.is_sxs_error(failure):
+            try:
+                return await _launch_attempt_async(do_launch, exe)
+            except Exception as exc:  # noqa: BLE001
+                if not _is_win_launch_race(exc):
+                    raise
+        await asyncio.to_thread(warm_files, os.path.dirname(exe))
+        await asyncio.sleep(0.8 * (i + 1))
+    copy = await asyncio.to_thread(_winlaunch.make_recovered_copy, exe, warm_files)
+    return await _launch_attempt_async(do_launch, copy)
 
 
 async def _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, start):

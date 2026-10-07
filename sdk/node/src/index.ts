@@ -16,7 +16,7 @@
 // hand-off and webhooks.
 
 import { chromium } from "playwright-core";
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readlinkSync, rmSync } from "node:fs";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -28,6 +28,7 @@ import type {
   LaunchOptions as PlaywrightLaunchOptions,
   Page,
 } from "playwright-core";
+import { makeRecoveredCopy, recoveredExe, removeFailedLaunchDirs } from "./winlaunch.js";
 import { checkInstall, ensureBinary, ensureVersion, proEnsureBinary, resolvedEngineVersion, resolveReleaseChannel, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
 import { resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
@@ -511,67 +512,44 @@ export function isWinLaunchRace(err: unknown): boolean {
   return m.includes("spawn unknown") || m.includes("side-by-side") || m.includes("side by side");
 }
 
-/**
- * Launch via `doLaunch(exePath)`, working around the Windows first-launch antivirus-scan race.
- *
- * A just-extracted, unsigned chrome.exe can fail with "spawn UNKNOWN" / "side-by-side configuration
- * is incorrect" while real-time AV scans chrome_elf.dll (the SxS assembly member), and Windows
- * caches that negative activation context against the *path* — so retrying the same path keeps
- * failing. `warmFiles` (in ensureBinary) pre-scans to prevent it; here we (1) re-scan + back off +
- * retry a couple times, then (2) as a last resort relaunch from a pristine copy on a fresh temp
- * path, which always gets a clean SxS evaluation. Pass-through on non-Windows.
- */
-export async function winAvRetry<T>(doLaunch: (exe: string) => Promise<T>, exe: string): Promise<T> {
-  if (process.platform !== "win32") return doLaunch(exe);
-  for (let i = 0; i < 3; i++) {
-    try {
-      return await doLaunch(exe);
-    } catch (err) {
-      if (!isWinLaunchRace(err)) throw err;
-      warmFiles(dirname(exe));
-      await new Promise((resolve) => setTimeout(resolve, 800 * (i + 1)));
-    }
+/** `doLaunch(exe)`; when Windows could not start the process, first remove the temp directories
+ * Playwright made for it (they leak otherwise, see winlaunch.ts). */
+async function launchAttempt<T>(doLaunch: (exe: string) => Promise<T>, exe: string): Promise<T> {
+  const started = Date.now();
+  try {
+    return await doLaunch(exe);
+  } catch (err) {
+    if (isWinLaunchRace(err)) removeFailedLaunchDirs(err, started);
+    throw err;
   }
-  // The in-place SxS activation-context poison never clears; relaunch from a fresh copy.
-  sweepRecoverDirs();
-  const recover = join(mkdtempSync(join(tmpdir(), "clearcote-recover-")), "browser");
-  cpSync(dirname(exe), recover, { recursive: true });
-  warmFiles(recover);
-  return doLaunch(join(recover, basename(exe)));
 }
 
 /**
- * Delete stale `clearcote-recover-*` copies left by earlier runs of the fallback above.
+ * Launch via `doLaunch(exePath)`, working around Windows refusing to start a cached build
+ * ("spawn UNKNOWN" / "side-by-side configuration is incorrect").
  *
- * That fallback copies the WHOLE browser (~400 MB on Windows) to a fresh temp dir and never
- * removed it, so a machine where the SxS/AV race fires on every launch accumulates one ~400 MB
- * directory per launch indefinitely — 75 of them were found on one dev box. It is also why the
- * Windows Firewall re-prompts forever: each launch runs from a path Windows has never seen, and
- * the random name means no per-path firewall rule can ever match.
- *
- * Best-effort by design: the directory belonging to a browser that is still running is locked on
- * Windows, so removal throws and we skip it — it will be swept by a later run instead. Anything
- * newer than `keepMs` is left alone so we never delete a copy a concurrent launch is mid-way
- * through creating. Set `CLEARCOTE_KEEP_RECOVER=1` to retain them for debugging.
+ * Inside an MSIX-packaged app a build downloaded into %LOCALAPPDATA% is invisible to the
+ * activation-context check, so it never starts in place; real-time antivirus scanning a freshly
+ * extracted chrome_elf.dll can cause the same error for a while (see winlaunch.ts). So: (1) launch
+ * from this build's recovered copy when one exists; else (2) re-scan + back off + retry in place up
+ * to three times, removing each failed attempt's temp directories; else (3) copy the build once to
+ * `~/.clearcote/recovered/` and launch from there, which every later launch (Node or Python) reuses.
+ * Pass-through on non-Windows.
  */
-function sweepRecoverDirs(keepMs = 60_000): void {
-  if (process.env.CLEARCOTE_KEEP_RECOVER) return;
-  try {
-    const tmp = tmpdir();
-    const now = Date.now();
-    for (const name of readdirSync(tmp)) {
-      if (!name.startsWith("clearcote-recover-")) continue;
-      const dir = join(tmp, name);
-      try {
-        if (now - statSync(dir).mtimeMs < keepMs) continue;  // possibly an in-flight launch
-        rmSync(dir, { recursive: true, force: true });
-      } catch {
-        /* locked by a live browser, or vanished under us — a later sweep gets it */
-      }
+export async function winAvRetry<T>(doLaunch: (exe: string) => Promise<T>, exe: string, backoffMs = 800): Promise<T> {
+  if (process.platform !== "win32") return doLaunch(exe);
+  const ready = recoveredExe(exe);
+  if (ready) return launchAttempt(doLaunch, ready);
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await launchAttempt(doLaunch, exe);
+    } catch (err) {
+      if (!isWinLaunchRace(err)) throw err;
+      warmFiles(dirname(exe));
+      await new Promise((resolve) => setTimeout(resolve, backoffMs * (i + 1)));
     }
-  } catch {
-    /* never let cleanup break a launch */
   }
+  return launchAttempt(doLaunch, makeRecoveredCopy(exe, warmFiles));
 }
 
 /**

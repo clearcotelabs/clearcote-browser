@@ -39,6 +39,7 @@ import { licenseExpiry, removeLicenseMeta, saveLicenseMeta, type LicenseExpiry }
 import { geoCacheRoot } from "./geoip.js";
 import { GATED_ENGINE_SWITCHES } from "./launchopts.js";
 import { toProxySpec } from "./net.js";
+import { clearRecovered, recoverRoot } from "./winlaunch.js";
 import { Cloud, CloudError, announceHandoff, type Json, type RunOptions } from "./cloud.js";
 
 const SDK_VERSION: string = (() => {
@@ -458,7 +459,8 @@ const COMMAND_NOTES: Record<string, string> = {
   info: "Reports the SDK, the licence, the cached builds and what a launch would use. Never downloads.",
   install: "Downloads and verifies the build a launch would use.",
   update: "Fetches a newer build if one exists.",
-  "clear-cache": "Deletes every cached browser build (nothing else in the cache directory).",
+  "clear-cache": "Deletes every cached browser build (nothing else in the cache directory), and on Windows the " +
+                 "recovered copies in ~/.clearcote/recovered.",
   serve: "A CDP endpoint that gives every connection its own browser and identity.",
 };
 
@@ -544,26 +546,34 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const root = defaultCacheRoot();
     if (!existsSync(root)) {
       out(`nothing to clear (${root} does not exist)`);
-      return;
+    } else {
+      // Only build directories: a CLEARCOTE_CACHE pointing at $HOME or a shared directory must not
+      // become `rm -rf` of that directory. A build dir carries a .verified marker once complete; a
+      // half-finished download has the build-tag name but no marker yet.
+      let bytes = 0;
+      const removed: string[] = [];
+      for (const name of readdirSync(root)) {
+        const dir = join(root, name);
+        let isDir = false;
+        try { isDir = statSync(dir).isDirectory(); } catch { /* vanished */ }
+        if (!isDir) continue;
+        if (!existsSync(join(dir, ".verified")) && !/^(pro-\d|v\d)/.test(name)) continue;
+        bytes += dirSize(dir);
+        rmSync(dir, { recursive: true, force: true });
+        removed.push(name);
+      }
+      out(removed.length
+        ? `removed ${removed.length} cached build${removed.length === 1 ? "" : "s"} from ${root} (${(bytes / 1e6).toFixed(0)} MB)`
+        : `no cached builds in ${root}`);
     }
-    // Only build directories: a CLEARCOTE_CACHE pointing at $HOME or a shared directory must not
-    // become `rm -rf` of that directory. A build dir carries a .verified marker once complete; a
-    // half-finished download has the build-tag name but no marker yet.
-    let bytes = 0;
-    const removed: string[] = [];
-    for (const name of readdirSync(root)) {
-      const dir = join(root, name);
-      let isDir = false;
-      try { isDir = statSync(dir).isDirectory(); } catch { /* vanished */ }
-      if (!isDir) continue;
-      if (!existsSync(join(dir, ".verified")) && !/^(pro-\d|v\d)/.test(name)) continue;
-      bytes += dirSize(dir);
-      rmSync(dir, { recursive: true, force: true });
-      removed.push(name);
+    // Windows: the copies launches fall back to when a cached build cannot start in place.
+    const rec = clearRecovered();
+    if (rec.removed) {
+      out(`removed ${rec.removed} recovered build cop${rec.removed === 1 ? "y" : "ies"} from ${recoverRoot()} (${(rec.bytes / 1e6).toFixed(0)} MB)`);
     }
-    out(removed.length
-      ? `removed ${removed.length} cached build${removed.length === 1 ? "" : "s"} from ${root} (${(bytes / 1e6).toFixed(0)} MB)`
-      : `no cached builds in ${root}`);
+    if (rec.inUse) {
+      out(`kept ${rec.inUse} recovered build cop${rec.inUse === 1 ? "y" : "ies"} a running browser is using (in ${recoverRoot()})`);
+    }
     return;
   }
 

@@ -174,6 +174,8 @@ clearcote cloud run|sessions|stop|events|recording|profile sync|webhooks ...   #
 
 `info` never downloads: it reports the SDK, the cached builds, which engine features the binary supports, a launch test (skipped with `--quick`), licence seats, fonts and missing system libraries.
 
+Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the side-by-side configuration is incorrect"; this happens when the SDK runs inside an MSIX-packaged app, whose writes to `%LOCALAPPDATA%` Windows redirects), launches use one copy of that build in `~/.clearcote/recovered/` instead, made once and reused by every later launch from Python or Node. `clear-cache` removes those copies too.
+
 ### Engine options (PRO 152 r22+)
 
 | Option | Effect |
