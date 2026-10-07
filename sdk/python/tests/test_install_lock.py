@@ -217,21 +217,15 @@ def test_waits_for_the_holder_then_uses_its_build_without_downloading(tmp_path):
     assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]
 
 
-def test_a_failed_install_leaves_no_lock_or_temp_files(tmp_path, monkeypatch):
-    data = _archive()
-
-    def download_to(url, path, size, quiet):
-        with open(path, "wb") as fh:
-            fh.write(data)
-        return hashlib.sha256(data).hexdigest()
-
-    monkeypatch.setattr(download, "_download", download_to)
-    rel = {"tag": TAG, "version": "0.0.0", "url": "https://example.invalid/a.zip", "sha256": "0" * 64,
-           "asset": "a.zip", "archive": "zip", "binary": BINARY, "size": len(data), "unpinned": False}
-    base = str(tmp_path / TAG)
-    with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
-        download._fetch_and_verify(rel, base, True)
-    assert os.listdir(base) == []
+@needs_pro_platform
+def test_a_failed_install_leaves_nothing_behind(tmp_path):
+    """The browser binary fails its own hash check, after the archive was extracted: no lock, no temp
+    files, and no unverified tree at browser/ for anything to pick up."""
+    cache = str(tmp_path / "cache")
+    with FakeBuildServer(exe_sha256="0" * 64) as srv:
+        with pytest.raises(RuntimeError, match=f"{BINARY} SHA-256 mismatch"):
+            download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
+    assert os.listdir(os.path.join(cache, TAG)) == []
 
 
 def test_leftovers_of_an_install_that_stopped_part_way_are_cleared(tmp_path, monkeypatch):

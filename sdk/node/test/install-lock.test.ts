@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { INSTALL_LOCK, acquireInstallLock, installLockTiming, proEnsureBinary } from "../src/download.js";
-import { TAG, startFakeBuild, verifiedTree } from "./helpers/fake-build.js";
+import { BINARY, TAG, startFakeBuild, verifiedTree } from "./helpers/fake-build.js";
 import { tempDir } from "./helpers/temp.js";
 
 const proPlatform = process.platform === "win32" || process.platform === "linux"; // the PRO route serves these
@@ -145,11 +145,13 @@ describe.runIf(proPlatform)("installs under the install lock", () => {
     }
   }, 30_000);
 
-  it("leaves no lock or temp files after a failed install", async () => {
+  it("leaves nothing behind after a failed install", async () => {
+    // The browser binary fails its own hash check, after the archive was extracted: no lock, no temp
+    // files, and no unverified tree at browser/ for anything to pick up.
     const cache = tempDir("cc-lock-");
-    const srv = await startFakeBuild({ sha: "0".repeat(64) });
+    const srv = await startFakeBuild({ exeSha: "0".repeat(64) });
     try {
-      await expect(proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true })).rejects.toThrow("SHA-256 mismatch");
+      await expect(proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true })).rejects.toThrow(`${BINARY} SHA-256 mismatch`);
       expect(readdirSync(path.join(cache, TAG))).toEqual([]);
     } finally {
       await srv.close();

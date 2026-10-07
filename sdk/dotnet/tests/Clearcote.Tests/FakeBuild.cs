@@ -23,14 +23,16 @@ internal sealed class FakeBuildServer : LocalServer
     private readonly byte[] _archive = FakeArchive();
     private readonly int _metaBarrier;
     private readonly int _archiveDelayMs;
+    private readonly string? _exeSha;
     private readonly TaskCompletionSource _allAsked = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _asked;
     private int _archiveHits;
 
-    public FakeBuildServer(int metaBarrier = 1, int archiveDelayMs = 0, string? sha = null)
+    public FakeBuildServer(int metaBarrier = 1, int archiveDelayMs = 0, string? sha = null, string? exeSha = null)
     {
         _metaBarrier = metaBarrier;
         _archiveDelayMs = archiveDelayMs;
+        _exeSha = exeSha;
         Sha = sha ?? Convert.ToHexString(SHA256.HashData(_archive)).ToLowerInvariant();
     }
 
@@ -83,7 +85,7 @@ internal sealed class FakeBuildServer : LocalServer
             await Task.WhenAny(_allAsked.Task, Task.Delay(30_000, ct));
             body = JsonSerializer.SerializeToUtf8Bytes(new
             {
-                tag = Tag, version = "0.0.0", url = $"{Url}/fake.zip", sha256 = Sha, asset = "fake.zip",
+                tag = Tag, version = "0.0.0", url = $"{Url}/fake.zip", sha256 = Sha, exe_sha256 = _exeSha, asset = "fake.zip",
                 archive = "zip", binary = Binary, size = _archive.Length,
             });
             type = "application/json";

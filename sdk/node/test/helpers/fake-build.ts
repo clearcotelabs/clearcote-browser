@@ -91,7 +91,7 @@ export interface FakeBuild {
   close(): Promise<void>;
 }
 
-export async function startFakeBuild(opts: { metaBarrier?: number; archiveDelayMs?: number; sha?: string } = {}): Promise<FakeBuild> {
+export async function startFakeBuild(opts: { metaBarrier?: number; archiveDelayMs?: number; sha?: string; exeSha?: string } = {}): Promise<FakeBuild> {
   const archive = fakeArchive();
   const sha = opts.sha ?? createHash("sha256").update(archive).digest("hex");
   let archiveHits = 0;
@@ -107,7 +107,7 @@ export async function startFakeBuild(opts: { metaBarrier?: number; archiveDelayM
       seen();
       const answer = () => {
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ tag: TAG, version: "0.0.0", url: `${url}/fake.zip`, sha256: sha, asset: "fake.zip", archive: "zip", binary: BINARY, size: archive.length }));
+        res.end(JSON.stringify({ tag: TAG, version: "0.0.0", url: `${url}/fake.zip`, sha256: sha, exe_sha256: opts.exeSha, asset: "fake.zip", archive: "zip", binary: BINARY, size: archive.length }));
       };
       waiting.push(answer);
       if (waiting.length >= (opts.metaBarrier ?? 1)) releaseAll();

@@ -179,14 +179,16 @@ public class InstallLockTests : IDisposable
     }
 
     [Fact]
-    public async Task A_failed_install_leaves_no_lock_or_temp_files()
+    public async Task A_failed_install_leaves_nothing_behind()
     {
+        // The browser binary fails its own hash check, after the archive was extracted: no lock, no temp
+        // files, and no unverified tree at browser/ for anything to pick up.
         if (OperatingSystem.IsMacOS()) return;
         var cache = Cache();
-        await using var srv = new FakeBuildServer(sha: new string('0', 64));
+        await using var srv = new FakeBuildServer(exeSha: new string('0', 64));
         var err = await Assert.ThrowsAnyAsync<Exception>(() =>
             Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true }));
-        Assert.Contains("SHA-256 mismatch", err.Message);
+        Assert.Contains($"{FakeBuildServer.Binary} SHA-256 mismatch", err.Message);
         Assert.Empty(FakeBuildServer.Entries(Path.Combine(cache, FakeBuildServer.Tag)));
     }
 

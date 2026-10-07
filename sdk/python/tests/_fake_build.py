@@ -43,7 +43,7 @@ def verified_tree(base):
 
 
 class FakeBuildServer:
-    def __init__(self, meta_barrier=1, archive_delay=0.0):
+    def __init__(self, meta_barrier=1, archive_delay=0.0, exe_sha256=None):
         self.archive = fake_archive()
         self.sha = hashlib.sha256(self.archive).hexdigest()
         self.archive_hits = 0
@@ -65,8 +65,8 @@ class FakeBuildServer:
                         except threading.BrokenBarrierError:
                             pass
                     body = json.dumps({"tag": TAG, "version": "0.0.0", "url": f"{server.url}/fake.zip",
-                                       "sha256": server.sha, "asset": "fake.zip", "archive": "zip",
-                                       "binary": BINARY, "size": len(server.archive)}).encode()
+                                       "sha256": server.sha, "exe_sha256": exe_sha256, "asset": "fake.zip",
+                                       "archive": "zip", "binary": BINARY, "size": len(server.archive)}).encode()
                     ctype = "application/json"
                 elif self.path == "/fake.zip":
                     with server._count:
