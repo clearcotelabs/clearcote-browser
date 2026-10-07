@@ -32,6 +32,7 @@ import { makeRecoveredCopy, recoveredExe, removeFailedLaunchDirs } from "./winla
 import { checkInstall, ensureBinary, ensureVersion, proEnsureBinary, resolvedEngineVersion, resolveReleaseChannel, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
 import { resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
+import { defaultColorScheme, engineDecidesColorScheme, installColorSchemeDefault } from "./colorscheme.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeOptions } from "./humanize.js";
 import { agentArgs, splitAgentOptions, type AgentOptions } from "./agent.js";
 import { resolveProfileOptions, Profile } from "./profile.js";
@@ -1081,6 +1082,8 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   if (lease) browser.on("disconnected", () => { void lease.stop(); launchToken?.release(); });
   if (headed) installHeadedViewport(browser); // launch() takes no viewport option -> wrap newPage/newContext
   else if (geom) installHeadlessGeometry(browser, engineArgs);
+  // r32+: the persona's colour scheme reaches the page instead of Playwright's emulated light.
+  if (engineDecidesColorScheme(exe)) installColorSchemeDefault(browser);
   installHumanize(browser, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   await egressDrift;
   return browser;
@@ -1198,7 +1201,8 @@ async function launchLocalPersistentContext(
     // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
     const { args: finalArgs, env } = applyPersonaEnv(exe, launchArgs, runtimeEnv(), personaEnv);
     return chromium.launchPersistentContext(userDataDir, {
-      ...opts,
+      // r32+: the persona's colour scheme reaches the page instead of Playwright's emulated light.
+      ...(engineDecidesColorScheme(exe) ? defaultColorScheme(opts) : opts),
       ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
       executablePath: exePath,
       ...(env ? { env } : {}),

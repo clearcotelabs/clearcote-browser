@@ -122,6 +122,12 @@ public class LaunchOptions : FingerprintOptions
     /// Emulated screen size (CDP screenWidth/screenHeight) for the context. See
     /// <see cref="ViewportSize"/> for how it interacts with the SDK default.
     public ScreenSize? ScreenSize { get; set; }
+    /// The <c>prefers-color-scheme</c> Playwright emulates in the context. Leave unset to take the
+    /// SDK's default: no emulation (<see cref="Microsoft.Playwright.ColorScheme.Null"/>) on an engine
+    /// that picks the colour scheme from the persona (r32+), so the page, <c>matchMedia</c> and the
+    /// <c>Sec-CH-Prefers-Color-Scheme</c> header agree; Playwright's own default (light) on an older
+    /// engine. Applies to the persistent and ephemeral-profile launches.
+    public ColorScheme? ColorScheme { get; set; }
 
     // ── macOS: the Clearcote Docker image ────────────────────────────────────
     // There is no native macOS build, so on macOS LaunchAsync runs the Clearcote Docker image and

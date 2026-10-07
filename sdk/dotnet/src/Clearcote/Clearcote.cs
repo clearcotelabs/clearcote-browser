@@ -83,6 +83,10 @@ public static class Clearcote
     /// var page = await browser.NewPageAsync(new() { ViewportSize = ViewportSize.NoViewport });
     /// await Geometry.FitWindowToWorkAreaAsync(page);
     /// </code>
+    /// The same holds for the colour scheme: on an r32+ engine the persona decides
+    /// <c>prefers-color-scheme</c>, and a context created with default options emulates light over
+    /// it. Pass <c>ColorScheme = ColorScheme.Null</c> to <c>NewPageAsync</c>/<c>NewContextAsync</c>
+    /// (the persistent and ephemeral-profile launches do this for you).
     /// <para>
     /// CLOUD. With <c>Cloud = true</c> (or CLEARCOTE_CLOUD=1) the browser runs on Clearcote's servers
     /// instead and this returns the same Playwright <see cref="IBrowser"/>, connected over CDP; its
@@ -270,6 +274,8 @@ public static class Clearcote
                         ? ViewportSize.NoViewport
                         : null),
                 ScreenSize = options.ScreenSize,
+                // r32+: the persona's colour scheme reaches the page instead of Playwright's light.
+                ColorScheme = ColorSchemeDefault.Resolve(options.ColorScheme, exe),
             }), exe)), launchToken).ConfigureAwait(false);
 
         // Release the concurrency slot + remove the run-token file when the context closes.

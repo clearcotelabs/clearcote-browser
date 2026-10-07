@@ -42,6 +42,8 @@ from ._license import inject_run_token
 from ._fonts import apply_font_env
 from ._shaderdialect import apply_shader_dialect
 from . import _personaenv
+from ._colorscheme import (default_color_scheme, engine_decides_color_scheme,
+                           install_color_scheme_default_async)
 from ._humanize_async import install_humanize, install_humanize_on_context
 from ._profile import Profile, list_profiles, load_profile
 from ._render_async import check_render_coherence
@@ -301,6 +303,8 @@ async def launch(cloud=None, **kwargs):
         _install_headed_viewport(browser)
     elif geom:
         _install_headless_geometry(browser, args)
+    if await asyncio.to_thread(engine_decides_color_scheme, exe):  # r32+ (mirror sync)
+        install_color_scheme_default_async(browser)
     await install_humanize(browser, humanize, show_cursor, seed=seed)
     return browser
 
@@ -342,6 +346,8 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
         pw_kwargs["no_viewport"] = True
     else:  # headless: persona owns screen -> fit the window; no persona -> set the display too
         geom = apply_headless_geometry(pw_kwargs, seed, args)
+    if await asyncio.to_thread(engine_decides_color_scheme, exe):  # r32+ (mirror sync)
+        default_color_scheme(pw_kwargs)
     launch_args = _with_geometry_args(args, geom)
     if widevine:
         from ._widevine import widevine_cdm_args

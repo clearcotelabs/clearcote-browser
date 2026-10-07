@@ -41,6 +41,8 @@ from ._fonts import apply_font_env
 from ._shaderdialect import apply_shader_dialect
 from . import _personaenv
 from ._geometry import apply_headless_geometry, fit_window_to_work_area
+from ._colorscheme import (default_color_scheme, engine_decides_color_scheme,
+                           install_color_scheme_default)
 from ._humanize import install_humanize, install_humanize_on_context
 from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
     DEFAULT_IGNORED_ARGS,
@@ -1101,6 +1103,8 @@ def launch(cloud=None, **kwargs):
         _install_headed_viewport(browser)
     elif geom:
         _install_headless_geometry(browser, args)
+    if engine_decides_color_scheme(exe):  # r32+: the persona's colour scheme, not Playwright's light
+        install_color_scheme_default(browser)
     install_humanize(browser, humanize, show_cursor, seed=seed)
     return browser
 
@@ -1150,6 +1154,8 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
         pw_kwargs["no_viewport"] = True
     else:  # headless: persona owns screen -> fit the window; no persona -> set the display too
         geom = apply_headless_geometry(pw_kwargs, seed, args)
+    if engine_decides_color_scheme(exe):  # r32+: the persona's colour scheme, not Playwright's light
+        default_color_scheme(pw_kwargs)
     launch_args = _with_geometry_args(args, geom)
     if widevine:
         launch_args = launch_args + widevine_cdm_args(exe, quiet=wv_quiet)
