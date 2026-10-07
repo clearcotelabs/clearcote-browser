@@ -47,7 +47,9 @@ class FakeDocker:
         self.running = True
         self.info_error = None
         self.create_error = None
-        self.create_errors = []  # one error per `docker create`, before create_error applies
+        self.create_errors = []  # one per `docker create` (None: it works), before create_error applies
+        self.start_errors = []  # one per `docker start` (None: it works)
+        self.arch = "x86_64"  # the daemon's, as `docker info` reports it
         self.pull_error = None
         self.labels = dict(PROTOCOL)  # the image's labels; None: not here until pulled
         self.logs = ""
@@ -63,7 +65,8 @@ class FakeDocker:
         self.calls.append({"argv": list(argv), "env": dict(env or {}), "input": input})
         cmd = argv[1]
         if cmd == "info":
-            return (1, "", self.info_error) if self.info_error else (0, "29.1.3\n", "")
+            answer = self.arch if "{{.Architecture}}" in argv else "29.1.3"
+            return (1, "", self.info_error) if self.info_error else (0, answer + "\n", "")
         if cmd == "ps" and any(a.startswith("id=") for a in argv):
             if self.ps_error:
                 return 1, "", self.ps_error
@@ -87,9 +90,11 @@ class FakeDocker:
             self.labels = self.labels if self.labels is not None else dict(PROTOCOL)
             return 0, "", ""
         if cmd == "create":
-            if self.create_errors:
-                return 125, "", self.create_errors.pop(0)
-            return (125, "", self.create_error) if self.create_error else (0, "c0ffee1234\n", "")
+            error = self.create_errors.pop(0) if self.create_errors else self.create_error
+            return (125, "", error) if error else (0, "c0ffee1234\n", "")
+        if cmd == "start" and self.start_errors:
+            error = self.start_errors.pop(0)
+            return (1, "", error) if error else (0, "c0ffee1234\n", "")
         if cmd == "port":
             return 0, f"127.0.0.1:{self.cdp_port}\n[::1]:{self.cdp_port}\n", ""
         if cmd == "inspect":
@@ -796,16 +801,75 @@ def test_a_docker_that_refuses_the_profile_gets_the_container_without_it(mac, do
     creates = [c["argv"] for c in docker.calls if c["argv"][1] == "create"]
     assert len(creates) == 2 and "--security-opt" in creates[0] and "--security-opt" not in creates[1]
     assert [a for a in creates[0] if a != "--security-opt" and not a.startswith("seccomp=")] == creates[1]
-    assert "Docker refused the seccomp profile" in capsys.readouterr().err
+    assert capsys.readouterr().err.count("Docker refused the seccomp profile") == 1
     _docker._remove("docker", container["id"])
 
 
-def test_any_other_create_failure_is_not_retried_without_the_profile(mac, docker):
+# What Docker 29 does with a profile its runtime cannot apply: `docker create` succeeds, `docker start` fails.
+START_REFUSED = ("Error response from daemon: failed to create task for container: failed to create shim task: OCI "
+                 "runtime create failed: runc create failed: unable to start container process: error during container "
+                 "init: error loading seccomp filter into kernel: invalid argument: unknown\n")
+
+
+def test_a_profile_refused_at_start_gets_the_container_again_without_it(mac, docker, cdp, capsys):
     docker.labels = dict(SANDBOX_IMAGE)
-    docker.create_error = "docker: Error response from daemon: Conflict. The container name is already in use.\n"
-    with pytest.raises(RuntimeError, match="docker create"):
+    docker.marks = [serve_state("licensed", "http://proxy.example:8080", secrets=True, proxy_auth="engine")]
+    docker.start_errors = [START_REFUSED]
+    container = _docker.start_container(dict(KEYED))
+    cmds = docker.commands()
+    first = cmds.index("start")
+    # the refused container is removed, then created again without the profile (secrets copied in again)
+    assert cmds[first:first + 6] == ["start", "stop", "rm", "create", "cp", "start"]
+    creates = [c["argv"] for c in docker.calls if c["argv"][1] == "create"]
+    assert "--security-opt" in creates[0] and "--security-opt" not in creates[1]
+    assert [a for a in creates[0] if a != "--security-opt" and not a.startswith("seccomp=")] == creates[1]
+    err = capsys.readouterr().err
+    assert err.count("Docker refused the seccomp profile") == 1 and "error loading seccomp filter" in err
+    assert container["id"] == "c0ffee1234" and _docker._LIVE == {"c0ffee1234": "docker"}
+    _docker._remove("docker", container["id"])
+
+
+def test_the_container_again_without_the_profile_waits_out_the_volume_race_too(mac, docker, cdp, monkeypatch):
+    monkeypatch.setattr(_docker.time, "sleep", lambda s: None)
+    docker.labels = dict(SANDBOX_IMAGE)
+    docker.start_errors = [START_REFUSED]
+    race = "Error response from daemon: failed to mkdir /var/lib/docker/volumes/clearcote-cache/_data/x: file exists"
+    docker.create_errors = [None, race]  # the first create works; the one without the profile meets the race once
+    docker.marks = [serve_state("licensed", "http://proxy.example:8080", secrets=True, proxy_auth="engine")]
+    container = _docker.start_container(dict(KEYED), quiet=True)
+    assert docker.commands().count("create") == 3
+    assert [c["argv"] for c in docker.calls if c["argv"][1] == "create"][2].count("--security-opt") == 0
+    _docker._remove("docker", container["id"])
+
+
+@pytest.mark.parametrize("cmd", ["create", "start"])
+def test_any_other_failure_is_not_retried_without_the_profile(mac, docker, cmd):
+    docker.labels = dict(SANDBOX_IMAGE)
+    error = "docker: Error response from daemon: Conflict. The container name is already in use.\n"
+    if cmd == "create":
+        docker.create_error = error
+    else:
+        docker.start_errors = [error]
+    with pytest.raises(RuntimeError, match=f"docker {cmd}"):
         _docker.start_container({}, quiet=True)
-    assert docker.commands().count("create") == 1
+    assert docker.commands().count("create") == 1 and _docker._LIVE == {}
+
+
+@pytest.mark.parametrize("arch", ["aarch64", "arm64", ""])
+def test_a_docker_on_another_cpu_runs_the_image_emulated_and_without_the_profile(mac, docker, cdp, arch):
+    # Rosetta may let the namespace calls through and then trip over Chrome's x86_64 seccomp-bpf filter: untested
+    docker.labels = dict(SANDBOX_IMAGE)
+    docker.arch = arch
+    container = _docker.start_container({}, quiet=True)
+    assert "--security-opt" not in docker.call("create")["argv"]
+    assert ["docker", "info", "--format", "{{.Architecture}}"] in [c["argv"] for c in docker.calls]
+    _docker._remove("docker", container["id"])
+
+
+def test_seccomp_args():
+    opt = ["--security-opt", f"seccomp={_docker.SECCOMP_PROFILE}"]
+    assert _docker.seccomp_args(3, "x86_64") == opt and _docker.seccomp_args(3, "amd64") == opt
+    assert _docker.seccomp_args(3, "aarch64") == [] and _docker.seccomp_args(2, "x86_64") == []
 
 
 @pytest.mark.skipif(not os.path.exists(REPO_PROFILE), reason="no docker/seccomp.json in this tree")

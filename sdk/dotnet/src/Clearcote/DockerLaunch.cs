@@ -59,8 +59,10 @@ public sealed record DockerContainer(string Id, string Image, string Endpoint, i
 /// Chrome's sandbox: an image of serve protocol 3 runs Chrome with its sandbox when the container allows the user,
 /// PID and network namespaces the sandbox makes, and Docker's default seccomp profile does not. Such an image is
 /// started with --security-opt seccomp=&lt;profile&gt; (embedded in this assembly and written once to
-/// ~/.clearcote/: Docker's default profile plus those two calls; docker/seccomp.json in the repository). An older
-/// image is not: its Chrome runs with --no-sandbox whatever it gets.
+/// ~/.clearcote/: Docker's default profile of moby/profiles seccomp v0.2.3 plus those two calls; docker/seccomp.json in
+/// the repository) on an x86_64 Docker. An older image is not, since its Chrome runs with --no-sandbox whatever it
+/// gets, and neither is a Docker on another CPU, where the image runs emulated (SeccompArgs). A Docker that refuses the
+/// profile, at create or at start, gets the container again without it.
 /// Mirrors _docker.py (Python) and docker.ts (Node).
 internal static class DockerLaunch
 {
@@ -89,6 +91,7 @@ internal static class DockerLaunch
     internal const int SandboxProtocol = 3;
     internal const string SeccompResource = "Clearcote.docker-seccomp.json";
     private static readonly System.Text.RegularExpressions.Regex SeccompRefused = new("seccomp", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    private static readonly string[] X86_64 = { "x86_64", "amd64" };   // the daemon architectures that run the linux/amd64 image natively
     private static readonly string[] Truthy = { "1", "true", "yes", "on" };
     private static readonly string[] Falsy = { "0", "false", "no", "off" };
     private const int ReadyTimeoutMs = 180_000;
@@ -824,17 +827,26 @@ internal static class DockerLaunch
         return ms.ToArray();
     }
 
+    private static int _profileWarned;
+
     /// The embedded profile as a file, which is what the docker CLI reads: ~/.clearcote/docker-seccomp-&lt;hash&gt;.json,
-    /// written once for each version of the profile. Null when it cannot be written.
-    internal static string? SeccompProfilePath()
+    /// written once for each version of the profile. One already there with the right content is used as it is. Null,
+    /// after one warning per process (unless quiet), when it can be neither found nor written: the container then runs
+    /// Chrome without its sandbox.
+    internal static string? SeccompProfilePath(bool quiet = true)
     {
         var data = SeccompProfile();
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data))[..12].ToLowerInvariant();
         var path = Path.Combine(Native.ClearcoteDir, $"docker-seccomp-{hash}.json");
+        bool Written()
+        {
+            try { return File.Exists(path) && File.ReadAllBytes(path).AsSpan().SequenceEqual(data); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+        }
+        if (Written()) return path;
         var tmp = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {
-            if (File.Exists(path) && File.ReadAllBytes(path).AsSpan().SequenceEqual(data)) return path;
             Directory.CreateDirectory(Native.ClearcoteDir);
             File.WriteAllBytes(tmp, data);
             File.Move(tmp, path, overwrite: true);   // whole or not at all, for a launch reading it at the same time
@@ -843,15 +855,81 @@ internal static class DockerLaunch
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             try { File.Delete(tmp); } catch (Exception) { }
+            if (Written()) return path;   // another launch wrote it meanwhile (a Windows File.Move race)
+            if (!quiet && Interlocked.Exchange(ref _profileWarned, 1) == 0)
+                Console.Error.WriteLine($"[clearcote] warning: could not write the seccomp profile to {path} ({e.Message}); the container runs Chrome without its sandbox.");
             return null;
         }
     }
 
-    /// The docker create options that let Chrome's sandbox run in an image of <paramref name="protocol"/>: the seccomp
-    /// profile for an image that uses it (SandboxProtocol), nothing for an older one, whose Chrome runs with
-    /// --no-sandbox anyway and so keeps Docker's stricter default.
-    internal static IReadOnlyList<string> SeccompArgs(int protocol) =>
-        protocol >= SandboxProtocol && SeccompProfilePath() is { } path ? new[] { "--security-opt", $"seccomp={path}" } : Array.Empty<string>();
+    /// The docker create options that let Chrome's sandbox run in an image of <paramref name="protocol"/> on a daemon of
+    /// CPU <paramref name="arch"/>: the seccomp profile for an image that uses it (SandboxProtocol), nothing for an older
+    /// one, whose Chrome runs with --no-sandbox anyway and so keeps Docker's stricter default.
+    ///
+    /// Nothing either on a daemon that is not x86_64. The image is linux/amd64, so there it runs emulated (Docker Desktop
+    /// on Apple silicon: aarch64). Under qemu the namespace calls fail and the container falls back; under Rosetta they
+    /// may succeed while Chrome's x86_64 seccomp-bpf filter meets the emulator's own syscalls, and tabs could crash
+    /// instead. Untested: run the live sandbox tests on Apple silicon with Rosetta on and with it off before passing the
+    /// profile there.
+    internal static IReadOnlyList<string> SeccompArgs(int protocol, string arch, bool quiet = true) =>
+        protocol >= SandboxProtocol && X86_64.Contains(arch) && SeccompProfilePath(quiet) is { } path
+            ? new[] { "--security-opt", $"seccomp={path}" } : Array.Empty<string>();
+
+    /// The Docker daemon's CPU architecture as `docker info` reports it ("x86_64", "aarch64"), or "".
+    internal static async Task<string> DaemonArchAsync(string exe)
+    {
+        var r = await Run(new[] { exe, "info", "--format", "{{.Architecture}}" }, null, 30_000, null).ConfigureAwait(false);
+        return r.Code == 0 ? r.Stdout.Trim() : "";
+    }
+
+    /// Docker would not run the container with the seccomp profile: at `docker create`, or at `docker start`, which is
+    /// where Docker 29 first loads it (a profile its runtime cannot apply, a kernel without seccomp).
+    private sealed class ProfileRefusedException : Exception
+    {
+        public ProfileRefusedException(string message) : base(message) { }
+    }
+
+    /// `docker create` (again while Docker's own volume initialisation races), the secrets copied in, `docker start` ->
+    /// the running container's id. Leaves nothing behind when it throws; throws ProfileRefusedException when the seccomp
+    /// options <paramref name="profile"/> (in <paramref name="argv"/>) are what Docker refused, at create or at start.
+    private static async Task<string> CreateStartedAsync(string exe, IReadOnlyList<string> argv, IDictionary<string, string> env,
+        IReadOnlyDictionary<string, string> secrets, string image, IReadOnlyList<string> profile)
+    {
+        var r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
+        // Two launches creating their first container on a NEW shared volume at once collide in Docker's own
+        // volume initialisation ("failed to mkdir .../volumes/<name>/_data/...: file exists"); the loser
+        // succeeds a moment later, once the volume has been filled.
+        for (var attempt = 1; attempt < 4 && r.Code != 0 && VolumeInitRace.IsMatch(r.Stderr); attempt++)
+        {
+            await Task.Delay(1000 * attempt).ConfigureAwait(false);
+            r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
+        }
+        var id = r.Stdout.Trim().Split('\n').LastOrDefault()?.Trim() ?? "";
+        if (r.Code != 0 || id.Length == 0)
+        {
+            if (profile.Count > 0 && SeccompRefused.IsMatch(r.Stderr)) throw new ProfileRefusedException(FirstLine(r.Stderr));
+            throw ImageFailed(image, r.Code, r.Stderr, "docker create");
+        }
+        lock (Live) Live[id] = exe;
+        InstallSweep();
+        try
+        {
+            if (secrets.Count > 0)
+            {
+                var cp = await Run(new[] { exe, "cp", "-", $"{id}:{SecretsFile[..SecretsFile.LastIndexOf('/')]}" }, null, 60_000, SecretsTar(secrets)).ConfigureAwait(false);
+                if (cp.Code != 0) throw new InvalidOperationException($"could not copy the licence/proxy settings into the container: {FirstLine(cp.Stderr)}");
+            }
+            var st = await Run(new[] { exe, "start", id }, null, 120_000, null).ConfigureAwait(false);
+            if (st.Code != 0 && profile.Count > 0 && SeccompRefused.IsMatch(st.Stderr)) throw new ProfileRefusedException(FirstLine(st.Stderr));
+            if (st.Code != 0) throw new InvalidOperationException($"`docker start` failed: {(st.Stderr.Trim() is { Length: > 0 } e ? e : $"exit {st.Code}")}");
+        }
+        catch
+        {
+            await RemoveAsync(exe, id).ConfigureAwait(false);
+            throw;
+        }
+        return id;
+    }
 
     /// Start the image and wait for its CDP endpoint. Nothing is left running when this throws.
     ///
@@ -899,43 +977,27 @@ internal static class DockerLaunch
             exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
             "--label", Label, "--label", $"{OwnerHostLabel}={System.Net.Dns.GetHostName()}", "--label", $"{OwnerTokenLabel}={OwnerToken()}",
         };
-        var seccomp = SeccompArgs(protocol);
+        var seccomp = protocol >= SandboxProtocol ? SeccompArgs(protocol, await DaemonArchAsync(exe).ConfigureAwait(false), o.Quiet) : Array.Empty<string>();
         argv.AddRange(seccomp);
         foreach (var name in env.Keys.OrderBy(k => k, StringComparer.Ordinal)) argv.AddRange(new[] { "-e", name });   // value via the CLI's environment
         if (licensed) argv.AddRange(new[] { "-v", $"{CacheVolume()}:/opt/xdg-cache" });   // the licensed engine downloads once
         argv.Add(image);
         if (!o.Quiet) Console.Error.WriteLine($"[clearcote] no native macOS build: starting the Clearcote Docker image {image}");
-        var r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
-        // Two launches creating their first container on a NEW shared volume at once collide in Docker's own
-        // volume initialisation ("failed to mkdir .../volumes/<name>/_data/...: file exists"); the loser
-        // succeeds a moment later, once the volume has been filled.
-        for (var attempt = 1; attempt < 4 && r.Code != 0 && VolumeInitRace.IsMatch(r.Stderr); attempt++)
+        string id;
+        try
         {
-            await Task.Delay(1000 * attempt).ConfigureAwait(false);
-            r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
+            id = await CreateStartedAsync(exe, argv, env, secrets, image, seccomp).ConfigureAwait(false);
         }
-        if (r.Code != 0 && seccomp.Count > 0 && SeccompRefused.IsMatch(r.Stderr))
+        catch (ProfileRefusedException refused)
         {
-            // A Docker that will not take a seccomp profile: start the container without it. It then runs Chrome with
+            // A Docker that cannot use the seccomp profile: the container again, without it. Its Chrome then runs with
             // --no-sandbox, as it did before the profile existed.
-            if (!o.Quiet) Console.Error.WriteLine($"[clearcote] warning: Docker refused the seccomp profile ({FirstLine(r.Stderr)}); the container runs Chrome without its sandbox.");
-            argv.RemoveAll(a => seccomp.Contains(a));
-            r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
+            if (!o.Quiet) Console.Error.WriteLine($"[clearcote] warning: Docker refused the seccomp profile ({refused.Message}); the container runs Chrome without its sandbox.");
+            id = await CreateStartedAsync(exe, argv.Where(a => !seccomp.Contains(a)).ToList(), env, secrets, image, Array.Empty<string>()).ConfigureAwait(false);
         }
-        var id = r.Stdout.Trim().Split('\n').LastOrDefault()?.Trim() ?? "";
-        if (r.Code != 0 || id.Length == 0) throw ImageFailed(image, r.Code, r.Stderr, "docker create");
-        lock (Live) Live[id] = exe;
-        InstallSweep();
         ILogTail? logs = null;
         try
         {
-            if (secrets.Count > 0)
-            {
-                var cp = await Run(new[] { exe, "cp", "-", $"{id}:{SecretsFile[..SecretsFile.LastIndexOf('/')]}" }, null, 60_000, SecretsTar(secrets)).ConfigureAwait(false);
-                if (cp.Code != 0) throw new InvalidOperationException($"could not copy the licence/proxy settings into the container: {FirstLine(cp.Stderr)}");
-            }
-            var st = await Run(new[] { exe, "start", id }, null, 120_000, null).ConfigureAwait(false);
-            if (st.Code != 0) throw new InvalidOperationException($"`docker start` failed: {(st.Stderr.Trim() is { Length: > 0 } e ? e : $"exit {st.Code}")}");
             logs = FollowLogs(exe, id);
             var port = await PublishedPortAsync(exe, id).ConfigureAwait(false);
             await WaitReadyAsync(exe, id, port, o.Timeout is float ms && ms > 0 ? (int)Math.Max(ms, 1000) : ReadyTimeoutMs, logs).ConfigureAwait(false);

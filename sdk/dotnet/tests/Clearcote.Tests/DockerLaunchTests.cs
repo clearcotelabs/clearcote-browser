@@ -31,7 +31,9 @@ public sealed class DockerLaunchTests : IDisposable
         public bool Running = true;
         public string InfoError = "";
         public string CreateError = "";
-        public Queue<string> CreateErrors = new();                   // one error per `docker create`, before CreateError applies
+        public Queue<string?> CreateErrors = new();                  // one per `docker create` (null: it works), before CreateError applies
+        public Queue<string?> StartErrors = new();                   // one per `docker start` (null: it works)
+        public string Arch = "x86_64";                               // the daemon's, as `docker info` reports it
         public string PullError = "";
         public Dictionary<string, string>? Labels = new(Protocol);   // null: not here until pulled
         public string Logs = "";
@@ -52,7 +54,7 @@ public sealed class DockerLaunchTests : IDisposable
             DockerLaunch.CliResult r;
             switch (argv[1])
             {
-                case "info": r = InfoError.Length > 0 ? new(1, "", InfoError) : new(0, "29.1.3\n", ""); break;
+                case "info": r = InfoError.Length > 0 ? new(1, "", InfoError) : new(0, (argv.Contains("{{.Architecture}}") ? Arch : "29.1.3") + "\n", ""); break;
                 case "ps" when argv.Any(a => a.StartsWith("id=", StringComparison.Ordinal)):
                     if (PsError.Length > 0) { r = new(1, "", PsError); break; }
                     r = new(0, Listed ? "c0ffee1234\n" : "", "");
@@ -72,8 +74,12 @@ public sealed class DockerLaunchTests : IDisposable
                     r = new(0, "", "");
                     break;
                 case "create":
-                    r = CreateErrors.Count > 0 ? new(125, "", CreateErrors.Dequeue())
-                        : CreateError.Length > 0 ? new(125, "", CreateError) : new(0, "c0ffee1234\n", "");
+                    var createError = CreateErrors.Count > 0 ? CreateErrors.Dequeue() : CreateError;
+                    r = string.IsNullOrEmpty(createError) ? new(0, "c0ffee1234\n", "") : new(125, "", createError);
+                    break;
+                case "start" when StartErrors.Count > 0:
+                    var startError = StartErrors.Dequeue();
+                    r = string.IsNullOrEmpty(startError) ? new(0, "c0ffee1234\n", "") : new(1, "", startError);
                     break;
                 case "port": r = new(0, $"127.0.0.1:{CdpPort}\n[::1]:{CdpPort}\n", ""); break;
                 case "inspect": r = Running ? new(0, "true\n", "") : new(1, "", "Error: No such object: c0ffee1234"); break;
@@ -843,27 +849,132 @@ public sealed class DockerLaunchTests : IDisposable
         Assert.Contains("--security-opt", creates[0]);
         Assert.DoesNotContain("--security-opt", creates[1]);
         Assert.Equal(creates[0].Where(a => a != "--security-opt" && !a.StartsWith("seccomp=", StringComparison.Ordinal)), creates[1]);
-        Assert.Contains("Docker refused the seccomp profile", err.Text);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(err.Text, "Docker refused the seccomp profile"));
+        await DockerLaunch.RemoveAsync(exe, container.Id);
+    }
+
+    // What Docker 29 does with a profile its runtime cannot apply: `docker create` succeeds, `docker start` fails.
+    private const string StartRefused = "Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: "
+        + "runc create failed: unable to start container process: error during container init: error loading seccomp filter into kernel: invalid argument: unknown\n";
+
+    [Fact]
+    public async Task A_profile_refused_at_start_gets_the_container_again_without_it()
+    {
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Labels = new(SandboxImage);
+        _docker.StartErrors.Enqueue(StartRefused);
+        _docker.Marks = new() { ServeState("licensed", "http://proxy.example:8080", 30, true, "engine") };
+        using var err = new StderrCapture();
+        var (container, exe) = await DockerLaunch.StartContainerAsync(Keyed());
+        var cmds = _docker.Commands;
+        var first = Array.IndexOf(cmds, "start");
+        // the refused container is removed, then created again without the profile (secrets copied in again)
+        Assert.Equal(new[] { "start", "stop", "rm", "create", "cp", "start" }, cmds[first..(first + 6)]);
+        var creates = _docker.Calls.Where(c => c.Argv[1] == "create").Select(c => c.Argv).ToArray();
+        Assert.Contains("--security-opt", creates[0]);
+        Assert.DoesNotContain("--security-opt", creates[1]);
+        Assert.Equal(creates[0].Where(a => a != "--security-opt" && !a.StartsWith("seccomp=", StringComparison.Ordinal)), creates[1]);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(err.Text, "Docker refused the seccomp profile"));
+        Assert.Contains("error loading seccomp filter", err.Text);
         await DockerLaunch.RemoveAsync(exe, container.Id);
     }
 
     [Fact]
-    public async Task Any_other_create_failure_is_not_retried_without_the_profile()
+    public async Task The_container_again_without_the_profile_waits_out_the_volume_race_too()
+    {
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Labels = new(SandboxImage);
+        _docker.StartErrors.Enqueue(StartRefused);
+        _docker.Marks = new() { ServeState("licensed", "http://proxy.example:8080", 30, true, "engine") };
+        // the first create works; the one without the profile meets the race once
+        _docker.CreateErrors.Enqueue(null);
+        _docker.CreateErrors.Enqueue("Error response from daemon: failed to mkdir /var/lib/docker/volumes/clearcote-cache/_data/x: file exists");
+        var (container, exe) = await DockerLaunch.StartContainerAsync(Keyed(new LaunchOptions { Quiet = true }));
+        var creates = _docker.Calls.Where(c => c.Argv[1] == "create").Select(c => c.Argv).ToArray();
+        Assert.Equal(3, creates.Length);
+        Assert.DoesNotContain("--security-opt", creates[2]);
+        await DockerLaunch.RemoveAsync(exe, container.Id);
+    }
+
+    [Theory]
+    [InlineData("create")]
+    [InlineData("start")]
+    public async Task Any_other_failure_is_not_retried_without_the_profile(string cmd)
     {
         _docker.Labels = new(SandboxImage);
-        _docker.CreateError = "docker: Error response from daemon: Conflict. The container name is already in use.\n";
+        const string error = "docker: Error response from daemon: Conflict. The container name is already in use.\n";
+        if (cmd == "create") _docker.CreateError = error; else _docker.StartErrors.Enqueue(error);
         var e = await Assert.ThrowsAsync<InvalidOperationException>(() => DockerLaunch.StartContainerAsync(new LaunchOptions { Quiet = true }));
-        Assert.Contains("docker create", e.Message);
+        Assert.Contains($"docker {cmd}", e.Message);
         Assert.Single(_docker.Commands, c => c == "create");
     }
 
-    /// The embedded profile is docker/seccomp.json, byte for byte. Skipped when the tree has no docker/ next to sdk/.
+    [Theory]
+    [InlineData("aarch64")]
+    [InlineData("arm64")]
+    [InlineData("")]
+    public async Task A_docker_on_another_cpu_runs_the_image_emulated_and_without_the_profile(string arch)
+    {
+        // Rosetta may let the namespace calls through and then trip over Chrome's x86_64 seccomp-bpf filter: untested
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Labels = new(SandboxImage);
+        _docker.Arch = arch;
+        var (container, exe) = await DockerLaunch.StartContainerAsync(new LaunchOptions { Quiet = true });
+        Assert.DoesNotContain("--security-opt", _docker.Call("create").Argv);
+        Assert.Contains("docker info --format {{.Architecture}}", _docker.Calls.Select(c => string.Join(' ', c.Argv)));
+        await DockerLaunch.RemoveAsync(exe, container.Id);
+    }
+
     [Fact]
-    public void The_embedded_profile_is_docker_seccomp_json()
+    public void SeccompArgs_follows_the_protocol_and_the_daemons_cpu()
+    {
+        Assert.Equal("--security-opt", DockerLaunch.SeccompArgs(3, "x86_64")[0]);
+        Assert.Equal("--security-opt", DockerLaunch.SeccompArgs(3, "amd64")[0]);
+        Assert.Empty(DockerLaunch.SeccompArgs(3, "aarch64"));
+        Assert.Empty(DockerLaunch.SeccompArgs(2, "x86_64"));
+    }
+
+    [Fact]
+    public async Task A_profile_that_cannot_be_written_is_said_once_and_the_launch_goes_on_without_it()
+    {
+        // ~/.clearcote is a file here, so nothing can be written under it (whoever runs this, root included)
+        File.WriteAllText(Path.Combine(_home, ".clearcote"), "");
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Labels = new(SandboxImage);
+        using var err = new StderrCapture();
+        for (var i = 0; i < 2; i++)
+        {
+            var (container, exe) = await DockerLaunch.StartContainerAsync(new LaunchOptions());
+            await DockerLaunch.RemoveAsync(exe, container.Id);
+        }
+        Assert.All(_docker.Calls.Where(c => c.Argv[1] == "create"), c => Assert.DoesNotContain("--security-opt", c.Argv));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(err.Text, "could not write the seccomp profile"));
+        Assert.Contains("the container runs Chrome without its sandbox", err.Text);
+    }
+
+    /// docker/seccomp.json of the tree these tests run in, or null when it has none next to sdk/.
+    internal static string? RepoProfile()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "docker", "seccomp.json"))) dir = dir.Parent;
-        if (dir is null) return;
-        Assert.Equal(File.ReadAllBytes(Path.Combine(dir.FullName, "docker", "seccomp.json")), DockerLaunch.SeccompProfile());
+        return dir is null ? null : Path.Combine(dir.FullName, "docker", "seccomp.json");
+    }
+
+    /// The embedded profile is docker/seccomp.json, byte for byte. Reported as skipped where the tree has no docker/.
+    [FactWithRepoProfile]
+    public void The_embedded_profile_is_docker_seccomp_json() =>
+        Assert.Equal(File.ReadAllBytes(RepoProfile()!), DockerLaunch.SeccompProfile());
+}
+
+/// A [Fact] that is reported as skipped, not passed, when the tree has no docker/seccomp.json next to sdk/.
+public sealed class FactWithRepoProfileAttribute : FactAttribute
+{
+    public FactWithRepoProfileAttribute()
+    {
+        if (DockerLaunchTests.RepoProfile() is null) Skip = "no docker/seccomp.json next to sdk/ in this tree";
     }
 }

@@ -20,7 +20,7 @@ import {
 } from "../src/docker.js";
 import { LocalChromium, findChromium } from "./helpers/chromium.js";
 import { tempDir } from "./helpers/temp.js";
-import { SECCOMP_PROFILE } from "../src/docker.js";
+import { SECCOMP_PROFILE, seccompArgs } from "../src/docker.js";
 import { fileURLToPath } from "node:url";
 
 // installHumanize, made to fail on demand: a setup step after the connect (ESM exports cannot be spied on).
@@ -57,7 +57,9 @@ class FakeDocker {
   running = true;
   infoError = "";
   createError = "";
-  createErrors: string[] = []; // one error per `docker create`, before createError applies
+  createErrors: Array<string | null> = []; // one per `docker create` (null: it works), before createError applies
+  startErrors: Array<string | null> = []; // one per `docker start` (null: it works)
+  arch = "x86_64"; // the daemon's, as `docker info` reports it
   pullError = "";
   labels: Record<string, string> | null = { ...PROTOCOL }; // null: not here until pulled
   logs = "";
@@ -71,7 +73,8 @@ class FakeDocker {
   run = async (argv: string[], env?: Record<string, string>, _t?: number, input?: Buffer): Promise<CliResult> => {
     this.calls.push({ argv: [...argv], env: { ...(env ?? {}) }, input });
     switch (argv[1]) {
-      case "info": return this.infoError ? { code: 1, stdout: "", stderr: this.infoError } : { code: 0, stdout: "29.1.3\n", stderr: "" };
+      case "info": return this.infoError ? { code: 1, stdout: "", stderr: this.infoError }
+        : { code: 0, stdout: (argv.includes("{{.Architecture}}") ? this.arch : "29.1.3") + "\n", stderr: "" };
       case "ps": {
         if (argv.some((a) => a.startsWith("id="))) {
           if (this.psError) return { code: 1, stdout: "", stderr: this.psError };
@@ -89,9 +92,14 @@ class FakeDocker {
         if (this.pullError) return { code: 1, stdout: "", stderr: this.pullError };
         this.labels ??= { ...PROTOCOL };
         return { code: 0, stdout: "", stderr: "" };
-      case "create":
-        if (this.createErrors.length) return { code: 125, stdout: "", stderr: this.createErrors.shift()! };
-        return this.createError ? { code: 125, stdout: "", stderr: this.createError } : { code: 0, stdout: "c0ffee1234\n", stderr: "" };
+      case "create": {
+        const error = this.createErrors.length ? this.createErrors.shift() : this.createError;
+        return error ? { code: 125, stdout: "", stderr: error } : { code: 0, stdout: "c0ffee1234\n", stderr: "" };
+      }
+      case "start": {
+        const error = this.startErrors.shift();
+        return error ? { code: 1, stdout: "", stderr: error } : { code: 0, stdout: "c0ffee1234\n", stderr: "" };
+      }
       case "port": return { code: 0, stdout: `127.0.0.1:${this.cdpPort}\n[::1]:${this.cdpPort}\n`, stderr: "" };
       case "inspect": return this.running ? { code: 0, stdout: "true\n", stderr: "" } : { code: 1, stdout: "", stderr: "Error: No such object: c0ffee1234" };
       default: return { code: 0, stdout: "", stderr: "" }; // cp, start, stop, rm
@@ -717,14 +725,72 @@ describe("Chrome's sandbox: the seccomp profile", () => {
     expect(creates[1]).not.toContain("--security-opt");
     expect(creates[0].filter((a) => a !== "--security-opt" && !a.startsWith("seccomp="))).toEqual(creates[1]);
     const warned = vi.mocked(process.stderr.write).mock.calls.map((c) => String(c[0])).join("");
-    expect(warned).toContain("Docker refused the seccomp profile");
+    expect(warned.split("Docker refused the seccomp profile")).toHaveLength(2);
   });
 
-  it("any other create failure is not retried without the profile", async () => {
+  // What Docker 29 does with a profile its runtime cannot apply: `docker create` succeeds, `docker start` fails.
+  const START_REFUSED = "Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: "
+    + "runc create failed: unable to start container process: error during container init: error loading seccomp filter into kernel: invalid argument: unknown\n";
+  const KEYED_STATE = serveState("licensed", "http://proxy.example:8080", 30, true, "engine");
+
+  it("a profile refused at start gets the container again without it", async () => {
     docker.labels = { ...SANDBOX_IMAGE };
-    docker.createError = "docker: Error response from daemon: Conflict. The container name is already in use.\n";
-    await expect(startContainer({ quiet: true })).rejects.toThrow(/docker create/);
-    expect(docker.commands().filter((c) => c === "create")).toHaveLength(1);
+    docker.startErrors = [START_REFUSED];
+    docker.marks = [KEYED_STATE];
+    const c = await withStub(() => startContainer({ ...KEYED }));
+    const cmds = docker.commands();
+    const first = cmds.indexOf("start");
+    // the refused container is removed, then created again without the profile (secrets copied in again)
+    expect(cmds.slice(first, first + 6)).toEqual(["start", "stop", "rm", "create", "cp", "start"]);
+    const creates = docker.calls.filter((x) => x.argv[1] === "create").map((x) => x.argv);
+    expect(creates[0]).toContain("--security-opt");
+    expect(creates[1]).not.toContain("--security-opt");
+    expect(creates[0].filter((a) => a !== "--security-opt" && !a.startsWith("seccomp="))).toEqual(creates[1]);
+    const warned = vi.mocked(process.stderr.write).mock.calls.map((x) => String(x[0])).join("");
+    expect(warned.split("Docker refused the seccomp profile")).toHaveLength(2);
+    expect(warned).toContain("error loading seccomp filter");
+    expect(c.id).toBe("c0ffee1234");
+  });
+
+  it("the container again without the profile waits out the volume race too", async () => {
+    docker.labels = { ...SANDBOX_IMAGE };
+    docker.startErrors = [START_REFUSED];
+    docker.marks = [KEYED_STATE];
+    // the first create works; the one without the profile meets the race once
+    docker.createErrors = [null, "Error response from daemon: failed to mkdir /var/lib/docker/volumes/clearcote-cache/_data/x: file exists"];
+    await withStub(() => startContainer({ ...KEYED, quiet: true }));
+    const creates = docker.calls.filter((x) => x.argv[1] === "create").map((x) => x.argv);
+    expect(creates).toHaveLength(3);
+    expect(creates[2]).not.toContain("--security-opt");
+  }, 30_000);
+
+  for (const cmd of ["create", "start"]) {
+    it(`any other ${cmd} failure is not retried without the profile`, async () => {
+      docker.labels = { ...SANDBOX_IMAGE };
+      const error = "docker: Error response from daemon: Conflict. The container name is already in use.\n";
+      if (cmd === "create") docker.createError = error; else docker.startErrors = [error];
+      await expect(startContainer({ quiet: true })).rejects.toThrow(new RegExp(`docker ${cmd}`));
+      expect(docker.commands().filter((c) => c === "create")).toHaveLength(1);
+    });
+  }
+
+  for (const arch of ["aarch64", "arm64", ""]) {
+    it(`a Docker on another CPU (${JSON.stringify(arch)}) runs the image emulated and without the profile`, async () => {
+      // Rosetta may let the namespace calls through and then trip over Chrome's x86_64 seccomp-bpf filter: untested
+      docker.labels = { ...SANDBOX_IMAGE };
+      docker.arch = arch;
+      await withStub(() => startContainer({ quiet: true }));
+      expect(docker.call("create").argv).not.toContain("--security-opt");
+      expect(docker.calls.map((x) => x.argv.join(" "))).toContain("docker info --format {{.Architecture}}");
+    });
+  }
+
+  it("seccompArgs", () => {
+    const opt = ["--security-opt", `seccomp=${SECCOMP_PROFILE}`];
+    expect(seccompArgs(3, "x86_64")).toEqual(opt);
+    expect(seccompArgs(3, "amd64")).toEqual(opt);
+    expect(seccompArgs(3, "aarch64")).toEqual([]);
+    expect(seccompArgs(2, "x86_64")).toEqual([]);
   });
 
   it.skipIf(!existsSync(REPO_PROFILE))("the packaged profile is docker/seccomp.json", () => {

@@ -35,8 +35,10 @@ has removed it (waiting up to 15 s for that).
 Chrome's sandbox: an image of serve protocol 3 runs Chrome with its sandbox when the container allows the
 user, PID and network namespaces the sandbox makes, and Docker's default seccomp profile does not. Such an
 image is started with --security-opt seccomp=docker-seccomp.json (shipped in this package: Docker's default
-profile plus those two calls; docker/seccomp.json in the repository). An older image is not: its Chrome runs
-with --no-sandbox whatever it gets.
+profile of moby/profiles seccomp v0.2.3 plus those two calls; docker/seccomp.json in the repository) on an
+x86_64 Docker. An older image is not, since its Chrome runs with --no-sandbox whatever it gets, and neither is
+a Docker on another CPU, where the image runs emulated (seccomp_args). A Docker that refuses the profile, at
+create or at start, gets the container again without it.
 """
 from __future__ import annotations
 
@@ -85,6 +87,7 @@ IMAGE_UID = 10001  # the image's user (cc)
 SANDBOX_PROTOCOL = 3
 SECCOMP_PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker-seccomp.json")
 _SECCOMP_REFUSED = re.compile(r"seccomp", re.I)
+_X86_64 = ("x86_64", "amd64")  # the daemon architectures that run the linux/amd64 image natively
 _TRUTHY = ("1", "true", "yes", "on")
 _FALSY = ("0", "false", "no", "off")
 # The image starts a virtual display, Chromium and (with a licence) fetches the licensed engine on its
@@ -780,13 +783,66 @@ def secrets_tar(secrets: dict) -> bytes:
     return buf.getvalue()
 
 
-def seccomp_args(protocol) -> list:
-    """The docker create options that let Chrome's sandbox run in an image of ``protocol``: the seccomp profile
-    for an image that uses it (SANDBOX_PROTOCOL), nothing for an older one, whose Chrome runs with --no-sandbox
-    anyway and so keeps Docker's stricter default."""
-    if protocol >= SANDBOX_PROTOCOL and os.path.isfile(SECCOMP_PROFILE):
+class _ProfileRefused(Exception):
+    """Docker would not run the container with the seccomp profile: at `docker create`, or at `docker start`,
+    which is where Docker 29 first loads it (a profile its runtime cannot apply, a kernel without seccomp)."""
+
+
+def daemon_arch(exe) -> str:
+    """The Docker daemon's CPU architecture as `docker info` reports it ("x86_64", "aarch64"), or ""."""
+    code, out, _err = _run([exe, "info", "--format", "{{.Architecture}}"], timeout=30)
+    return (out or "").strip() if code == 0 else ""
+
+
+def seccomp_args(protocol, arch) -> list:
+    """The docker create options that let Chrome's sandbox run in an image of ``protocol`` on a daemon of CPU
+    ``arch``: the seccomp profile for an image that uses it (SANDBOX_PROTOCOL), nothing for an older one, whose
+    Chrome runs with --no-sandbox anyway and so keeps Docker's stricter default.
+
+    Nothing either on a daemon that is not x86_64. The image is linux/amd64, so there it runs emulated (Docker
+    Desktop on Apple silicon: aarch64). Under qemu the namespace calls fail and the container falls back; under
+    Rosetta they may succeed while Chrome's x86_64 seccomp-bpf filter meets the emulator's own syscalls, and tabs
+    could crash instead. Untested: run the live sandbox tests on Apple silicon with Rosetta on and with it off
+    before passing the profile there."""
+    if protocol >= SANDBOX_PROTOCOL and arch in _X86_64 and os.path.isfile(SECCOMP_PROFILE):
         return ["--security-opt", f"seccomp={SECCOMP_PROFILE}"]
     return []
+
+
+def _create_started(exe, argv, env, secrets, image, profile):
+    """`docker create` (again while Docker's own volume initialisation races), the secrets copied in, `docker
+    start` -> the running container's id. Leaves nothing behind when it raises; raises _ProfileRefused when the
+    seccomp options ``profile`` (in ``argv``) are what Docker refused, at create or at start."""
+    for attempt in range(4):
+        code, out, err = _run(argv, env=env, timeout=1800)
+        # Two launches creating their first container on a NEW shared volume at once collide in Docker's
+        # own volume initialisation ("failed to mkdir .../volumes/<name>/_data/...: file exists"); the
+        # loser succeeds a moment later, once the volume has been filled.
+        if code == 0 or attempt == 3 or not _VOLUME_INIT_RACE.search(err or ""):
+            break
+        time.sleep(1.0 + attempt)
+    cid = (out or "").strip().splitlines()[-1] if (out or "").strip() else ""
+    if code != 0 or not cid:
+        if profile and _SECCOMP_REFUSED.search(err or ""):
+            raise _ProfileRefused(_first_line(err))
+        raise _image_failed(image, code, err, "docker create")
+    with _LIVE_LOCK:
+        _LIVE[cid] = exe
+    try:
+        if secrets:
+            code, _o, err = _run([exe, "cp", "-", f"{cid}:{os.path.dirname(SECRETS_FILE)}"], timeout=60,
+                                 input=secrets_tar(secrets))
+            if code != 0:
+                raise RuntimeError(f"could not copy the licence/proxy settings into the container: {_first_line(err)}")
+        code, _o, err = _run([exe, "start", cid], timeout=120)
+        if code != 0 and profile and _SECCOMP_REFUSED.search(err or ""):
+            raise _ProfileRefused(_first_line(err))
+        if code != 0:
+            raise RuntimeError(f"`docker start` failed: {(err or '').strip() or f'exit {code}'}")
+    except BaseException:
+        _remove(exe, cid)
+        raise
+    return cid
 
 
 def start_container(kwargs: dict, quiet=False) -> dict:
@@ -834,7 +890,7 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     argv = [exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
             "--label", LABEL, "--label", f"{OWNER_HOST_LABEL}={socket.gethostname()}",
             "--label", f"{OWNER_TOKEN_LABEL}={owner_token()}"]
-    seccomp = seccomp_args(protocol)
+    seccomp = seccomp_args(protocol, daemon_arch(exe)) if protocol >= SANDBOX_PROTOCOL else []
     argv += seccomp
     for name in sorted(env):
         argv += ["-e", name]  # the value comes from the CLI's environment, never its command line
@@ -844,38 +900,18 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     if not quiet:
         sys.stderr.write(f"[clearcote] no native macOS build: starting the Clearcote Docker image {image}\n")
         sys.stderr.flush()
-    for attempt in range(4):
-        code, out, err = _run(argv, env=env, timeout=1800)
-        # Two launches creating their first container on a NEW shared volume at once collide in Docker's
-        # own volume initialisation ("failed to mkdir .../volumes/<name>/_data/...: file exists"); the
-        # loser succeeds a moment later, once the volume has been filled.
-        if code == 0 or attempt == 3 or not _VOLUME_INIT_RACE.search(err or ""):
-            break
-        time.sleep(1.0 + attempt)
-    if code != 0 and seccomp and _SECCOMP_REFUSED.search(err or ""):
-        # A Docker that will not take a seccomp profile: start the container without it. It then runs Chrome
-        # with --no-sandbox, as it did before the profile existed.
+    try:
+        cid = _create_started(exe, argv, env, secrets, image, seccomp)
+    except _ProfileRefused as refused:
+        # A Docker that cannot use the seccomp profile: the container again, without it. Its Chrome then runs with
+        # --no-sandbox, as it did before the profile existed.
         if not quiet:
-            sys.stderr.write(f"[clearcote] warning: Docker refused the seccomp profile ({_first_line(err)}); the "
-                             "container runs Chrome without its sandbox.\n")
+            sys.stderr.write(f"[clearcote] warning: Docker refused the seccomp profile ({refused}); the container "
+                             "runs Chrome without its sandbox.\n")
             sys.stderr.flush()
-        argv = [a for a in argv if a not in seccomp]
-        code, out, err = _run(argv, env=env, timeout=1800)
-    cid = (out or "").strip().splitlines()[-1] if (out or "").strip() else ""
-    if code != 0 or not cid:
-        raise _image_failed(image, code, err, "docker create")
-    with _LIVE_LOCK:
-        _LIVE[cid] = exe
+        cid = _create_started(exe, [a for a in argv if a not in seccomp], env, secrets, image, [])
     logs = None
     try:
-        if secrets:
-            code, _o, err = _run([exe, "cp", "-", f"{cid}:{os.path.dirname(SECRETS_FILE)}"], timeout=60,
-                                 input=secrets_tar(secrets))
-            if code != 0:
-                raise RuntimeError(f"could not copy the licence/proxy settings into the container: {_first_line(err)}")
-        code, _o, err = _run([exe, "start", cid], timeout=120)
-        if code != 0:
-            raise RuntimeError(f"`docker start` failed: {(err or '').strip() or f'exit {code}'}")
         logs = _follow_logs(exe, cid)
         port = _published_port(exe, cid)
         timeout_ms = kwargs.get("timeout")

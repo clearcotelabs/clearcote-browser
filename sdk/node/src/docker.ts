@@ -34,8 +34,10 @@
 // Chrome's sandbox: an image of serve protocol 3 runs Chrome with its sandbox when the container allows the
 // user, PID and network namespaces the sandbox makes, and Docker's default seccomp profile does not. Such an
 // image is started with --security-opt seccomp=docker-seccomp.json (shipped in this package: Docker's default
-// profile plus those two calls; docker/seccomp.json in the repository). An older image is not: its Chrome runs
-// with --no-sandbox whatever it gets.
+// profile of moby/profiles seccomp v0.2.3 plus those two calls; docker/seccomp.json in the repository) on an x86_64
+// Docker. An older image is not, since its Chrome runs with --no-sandbox whatever it gets, and neither is a Docker
+// on another CPU, where the image runs emulated (seccompArgs). A Docker that refuses the profile, at create or at
+// start, gets the container again without it.
 // Mirrors _docker.py in the Python SDK.
 
 import { execFile, spawn, spawnSync } from "node:child_process";
@@ -78,6 +80,7 @@ const IMAGE_UID = 10001; // the image's user (cc)
 export const SANDBOX_PROTOCOL = 3;
 export const SECCOMP_PROFILE = fileURLToPath(new URL("../docker-seccomp.json", import.meta.url));
 const SECCOMP_REFUSED = /seccomp/i;
+const X86_64 = ["x86_64", "amd64"]; // the daemon architectures that run the linux/amd64 image natively
 const TRUTHY = ["1", "true", "yes", "on"];
 const FALSY = ["0", "false", "no", "off"];
 // The image starts a virtual display, Chromium and (with a licence) fetches the licensed engine on its
@@ -693,8 +696,60 @@ export interface DockerContainer { id: string; image: string; endpoint: string; 
 /** The docker create options that let Chrome's sandbox run in an image of `protocol`: the seccomp profile for an
  * image that uses it (SANDBOX_PROTOCOL), nothing for an older one, whose Chrome runs with --no-sandbox anyway and
  * so keeps Docker's stricter default. */
-export function seccompArgs(protocol: number): string[] {
-  return protocol >= SANDBOX_PROTOCOL && existsSync(SECCOMP_PROFILE) ? ["--security-opt", `seccomp=${SECCOMP_PROFILE}`] : [];
+export function seccompArgs(protocol: number, arch: string): string[] {
+  // Nothing either on a daemon that is not x86_64. The image is linux/amd64, so there it runs emulated (Docker Desktop
+  // on Apple silicon: aarch64). Under qemu the namespace calls fail and the container falls back; under Rosetta they
+  // may succeed while Chrome's x86_64 seccomp-bpf filter meets the emulator's own syscalls, and tabs could crash
+  // instead. Untested: run the live sandbox tests on Apple silicon with Rosetta on and with it off before passing the
+  // profile there.
+  return protocol >= SANDBOX_PROTOCOL && X86_64.includes(arch) && existsSync(SECCOMP_PROFILE)
+    ? ["--security-opt", `seccomp=${SECCOMP_PROFILE}`] : [];
+}
+
+/** The Docker daemon's CPU architecture as `docker info` reports it ("x86_64", "aarch64"), or "". */
+export async function daemonArch(exe: string): Promise<string> {
+  const r = await dockerCli.run([exe, "info", "--format", "{{.Architecture}}"], undefined, 30_000);
+  return r.code === 0 ? r.stdout.trim() : "";
+}
+
+/** Docker would not run the container with the seccomp profile: at `docker create`, or at `docker start`, which is
+ * where Docker 29 first loads it (a profile its runtime cannot apply, a kernel without seccomp). */
+class ProfileRefused extends Error {}
+
+/** `docker create` (again while Docker's own volume initialisation races), the secrets copied in, `docker start` ->
+ * the running container's id. Leaves nothing behind when it rejects; rejects with ProfileRefused when the seccomp
+ * options `profile` (in `argv`) are what Docker refused, at create or at start. */
+async function createStarted(exe: string, argv: string[], env: Record<string, string>, secrets: Record<string, string>,
+  image: string, profile: string[]): Promise<string> {
+  let r = await dockerCli.run(argv, env, 1_800_000);
+  // Two launches creating their first container on a NEW shared volume at once collide in Docker's own volume
+  // initialisation ("failed to mkdir .../volumes/<name>/_data/...: file exists"); the loser succeeds a moment
+  // later, once the volume has been filled.
+  for (let attempt = 1; attempt < 4 && r.code !== 0 && VOLUME_INIT_RACE.test(r.stderr); attempt++) {
+    await new Promise((res) => setTimeout(res, 1000 * attempt));
+    r = await dockerCli.run(argv, env, 1_800_000);
+  }
+  const id = r.stdout.trim().split(/\r?\n/).pop()?.trim() ?? "";
+  if (r.code !== 0 || !id) {
+    if (profile.length && SECCOMP_REFUSED.test(r.stderr)) throw new ProfileRefused(firstLine(r.stderr));
+    throw imageFailed(image, r.code, r.stderr, "docker create");
+  }
+  live.set(id, exe);
+  installSweep();
+  try {
+    if (Object.keys(secrets).length) {
+      const tar = tarOneFile(SECRETS_FILE.split("/").pop()!, Buffer.from(JSON.stringify(secrets), "utf8"), { uid: IMAGE_UID, gid: IMAGE_UID, mode: 0o600 });
+      const cp = await dockerCli.run([exe, "cp", "-", `${id}:${SECRETS_FILE.slice(0, SECRETS_FILE.lastIndexOf("/"))}`], undefined, 60_000, tar);
+      if (cp.code !== 0) throw new Error(`could not copy the licence/proxy settings into the container: ${firstLine(cp.stderr)}`);
+    }
+    const st = await dockerCli.run([exe, "start", id], undefined, 120_000);
+    if (st.code !== 0 && profile.length && SECCOMP_REFUSED.test(st.stderr)) throw new ProfileRefused(firstLine(st.stderr));
+    if (st.code !== 0) throw new Error(`\`docker start\` failed: ${st.stderr.trim() || `exit ${st.code}`}`);
+  } catch (e) {
+    await removeContainer(exe, id);
+    throw e;
+  }
+  return id;
 }
 
 /**
@@ -734,42 +789,26 @@ export async function startContainer(options: Record<string, unknown>): Promise<
     Object.assign(env, secrets); // plain variables: names on the command line, values in the CLI's environment
     for (const k of Object.keys(secrets)) delete secrets[k];
   }
-  let argv = [exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
+  const argv = [exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
     "--label", LABEL, "--label", `${OWNER_HOST_LABEL}=${hostname()}`, "--label", `${OWNER_TOKEN_LABEL}=${ownerToken()}`];
-  const seccomp = seccompArgs(protocol);
+  const seccomp = protocol >= SANDBOX_PROTOCOL ? seccompArgs(protocol, await daemonArch(exe)) : [];
   argv.push(...seccomp);
   for (const name of Object.keys(env).sort()) argv.push("-e", name); // the value comes from the CLI's environment
   if (expect.licensed) argv.push("-v", `${cacheVolume()}:/opt/xdg-cache`); // the licensed engine downloads once
   argv.push(image);
   if (!options.quiet) process.stderr.write(`[clearcote] no native macOS build: starting the Clearcote Docker image ${image}\n`);
-  let r = await dockerCli.run(argv, env, 1_800_000);
-  // Two launches creating their first container on a NEW shared volume at once collide in Docker's own volume
-  // initialisation ("failed to mkdir .../volumes/<name>/_data/...: file exists"); the loser succeeds a moment
-  // later, once the volume has been filled.
-  for (let attempt = 1; attempt < 4 && r.code !== 0 && VOLUME_INIT_RACE.test(r.stderr); attempt++) {
-    await new Promise((res) => setTimeout(res, 1000 * attempt));
-    r = await dockerCli.run(argv, env, 1_800_000);
-  }
-  if (r.code !== 0 && seccomp.length && SECCOMP_REFUSED.test(r.stderr)) {
-    // A Docker that will not take a seccomp profile: start the container without it. It then runs Chrome with
+  let id: string;
+  try {
+    id = await createStarted(exe, argv, env, secrets, image, seccomp);
+  } catch (e) {
+    if (!(e instanceof ProfileRefused)) throw e;
+    // A Docker that cannot use the seccomp profile: the container again, without it. Its Chrome then runs with
     // --no-sandbox, as it did before the profile existed.
-    if (!options.quiet) process.stderr.write(`[clearcote] warning: Docker refused the seccomp profile (${firstLine(r.stderr)}); the container runs Chrome without its sandbox.\n`);
-    argv = argv.filter((a) => !seccomp.includes(a));
-    r = await dockerCli.run(argv, env, 1_800_000);
+    if (!options.quiet) process.stderr.write(`[clearcote] warning: Docker refused the seccomp profile (${e.message}); the container runs Chrome without its sandbox.\n`);
+    id = await createStarted(exe, argv.filter((a) => !seccomp.includes(a)), env, secrets, image, []);
   }
-  const id = r.stdout.trim().split(/\r?\n/).pop()?.trim() ?? "";
-  if (r.code !== 0 || !id) throw imageFailed(image, r.code, r.stderr, "docker create");
-  live.set(id, exe);
-  installSweep();
   let logs: LogTail | null = null;
   try {
-    if (Object.keys(secrets).length) {
-      const tar = tarOneFile(SECRETS_FILE.split("/").pop()!, Buffer.from(JSON.stringify(secrets), "utf8"), { uid: IMAGE_UID, gid: IMAGE_UID, mode: 0o600 });
-      const cp = await dockerCli.run([exe, "cp", "-", `${id}:${SECRETS_FILE.slice(0, SECRETS_FILE.lastIndexOf("/"))}`], undefined, 60_000, tar);
-      if (cp.code !== 0) throw new Error(`could not copy the licence/proxy settings into the container: ${firstLine(cp.stderr)}`);
-    }
-    const st = await dockerCli.run([exe, "start", id], undefined, 120_000);
-    if (st.code !== 0) throw new Error(`\`docker start\` failed: ${st.stderr.trim() || `exit ${st.code}`}`);
     logs = dockerCli.followLogs(exe, id);
     const port = await publishedPort(exe, id);
     const timeout = options.timeout as number | undefined;
