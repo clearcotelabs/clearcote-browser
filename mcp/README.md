@@ -70,7 +70,7 @@ The **persona lives in the environment**, so the tool surface stays clean:
 
 Hardening knobs: `CLEARCOTE_MCP_TOOL_TIMEOUT` (s), `CLEARCOTE_MCP_RUN_TIMEOUT` (s, `run_task`; default 900), `CLEARCOTE_MCP_WRITE_DIR` (sandbox for file
 writes), `CLEARCOTE_MCP_ALLOW_ANY_PATH=1`, `CLEARCOTE_ALLOW_PRIVATE_EGRESS=1` (allow localhost /
-private targets and `file:` urls), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`, `CLEARCOTE_MCP_INLINE_IMAGE_MAX`
+private targets; still `http`/`https` only), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`, `CLEARCOTE_MCP_INLINE_IMAGE_MAX`
 (bytes; default 200000: the largest screenshot also returned inline).
 
 ## Tools
@@ -117,17 +117,20 @@ holds it, so `get_cdp_endpoint` has no endpoint to hand out; start your own host
 ## Guardrails (built in)
 
 - Every tool has a wall-clock timeout and returns a **structured error** instead of crashing the server.
-- **Private addresses are refused** — only `http`/`https` urls, read the way the browser reads them; this machine,
-  the local network and cloud metadata endpoints are refused, for the url a tool gets and for every request the
-  browser then makes (redirects, images, frames, script requests, popups), unless you opt in. Checking every request
+- **Private addresses are refused** — only `http`/`https` urls, read the way the browser reads them (`file:`,
+  `view-source:`, `chrome:` and every other scheme are always refused); this machine, the local network and cloud
+  metadata endpoints are refused, for the url a tool gets and for every request the browser then makes (redirects,
+  images, frames, script requests, popups), unless you opt in. Checking every request
   turns the browser's HTTP cache off. Not covered: WebSocket connections a page script opens, and a host name whose
   address changes between the check and the browser's own lookup (DNS rebinding).
 - File writes are **confined** to a sandbox dir (no path traversal).
 - Oversized text is **capped** so a response never floods the agent's context, with an explicit
   `<field>_truncated` flag.
-- Everything a page controls (text, Markdown, HTML, element lists, script results, titles) is **fenced** as
-  untrusted data (`<untrusted_page_content>`), and nothing in it can pass for a fence tag.
-- The shared browser is **rebuilt** automatically if it dies.
+- Everything a page controls (text, Markdown, HTML, element lists, script results and errors, titles, and the
+  browser's error messages, which can quote the page) is **fenced** as untrusted data (`<untrusted_page_content>`),
+  and nothing in it can pass for a fence tag.
+- The shared browser is **rebuilt** automatically if it dies, and **closed** whenever the server stops (its input
+  closed, Ctrl+C, Ctrl+Break, SIGTERM or SIGHUP), so no browser or temporary files outlive it.
 
 ## Just want the raw endpoint?
 

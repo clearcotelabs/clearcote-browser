@@ -148,11 +148,12 @@ async def test_read_tools_on_a_real_browser(site, tmp_path):
             assert json.loads(fenced_body(r["result"])) == "Links"
             assert r_title(await call("current_page")) == "Links"
 
-            # a local file has no HTTP response
+            # a local file is refused, even with private addresses allowed
             local = tmp_path / "local.html"
             local.write_text(page("Local file", NOTE), encoding="utf-8")
-            r, _ = await call("read_page", url=local.as_uri())
-            assert r["http_status"] is None and r["page_state"] == "ok"
+            res = await session.call_tool("read_page", {"url": local.as_uri()})
+            assert json.loads(res.content[0].text) == {
+                "status": "error", "error": "ValueError: refused url scheme 'file': only http and https urls are opened"}
 
             # caps and the fence
             r, _ = await call("read_page", url=f"{site}/huge", format="both")
@@ -305,3 +306,58 @@ async def test_every_request_a_page_makes_is_checked(recorder, monkeypatch):
                 await browser.close_tab(index)
     finally:
         await browser.close()
+
+
+# --- a stopped server leaves nothing behind --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("how", ["stdin closed", "stop signal"])
+def test_a_stopped_server_leaves_no_browser_behind(site, tmp_path, how):
+    """The browser serve() starts, its profile and Playwright's folder all live in the server's temp directory: once
+    the server has stopped, none of them is left there. On Windows the stop signal is Ctrl+Break, which also ends
+    Playwright's driver at once (it has no handler for it), so the driver's folder is the one thing that may stay."""
+    import queue
+    import signal
+    import subprocess
+
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    windows = sys.platform == "win32"
+    env = dict(os.environ, CLEARCOTE_ALLOW_PRIVATE_EGRESS="1", CLEARCOTE_HEADLESS="1", CLEARCOTE_MCP_PREWARM="0",
+               CLEARCOTE_MCP_WRITE_DIR=str(tmp_path / "out"), TEMP=str(temp), TMP=str(temp), TMPDIR=str(temp))
+    proc = subprocess.Popen([sys.executable, "-m", "clearcote_mcp"], env=env, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if windows else 0)
+    lines = queue.Queue()
+    threading.Thread(target=lambda: [lines.put(line) for line in proc.stdout], daemon=True).start()
+
+    def send(message):
+        proc.stdin.write((json.dumps({"jsonrpc": "2.0", **message}) + "\n").encode())
+        proc.stdin.flush()
+
+    def call(id_, method, params):
+        send({"id": id_, "method": method, "params": params})
+        while True:
+            answer = json.loads(lines.get(timeout=120))
+            if answer.get("id") == id_:
+                return answer["result"]
+    try:
+        call(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                               "clientInfo": {"name": "test", "version": "0"}})
+        send({"method": "notifications/initialized"})
+        read = call(2, "tools/call", {"name": "read_page", "arguments": {"url": f"{site}/article"}})
+        assert json.loads(read["content"][0]["text"])["status"] == "ok", read
+        running = sorted(os.listdir(temp))
+        assert any(n.startswith("clearcote-serve-") for n in running), running  # control: they are there now
+        assert any(n.startswith("playwright-artifacts-") for n in running), running
+        if how == "stdin closed":
+            proc.stdin.close()
+        else:
+            os.kill(proc.pid, signal.CTRL_BREAK_EVENT if windows else signal.SIGTERM)
+        proc.wait(60)
+        left = [n for n in sorted(os.listdir(temp))
+                if not (windows and how == "stop signal" and n.startswith("playwright-artifacts-"))]
+        assert left == [], left
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()

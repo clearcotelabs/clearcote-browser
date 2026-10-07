@@ -66,7 +66,7 @@ The **persona lives in the environment**, so the tool surface stays clean:
 
 Hardening knobs: `CLEARCOTE_MCP_TOOL_TIMEOUT` (s), `CLEARCOTE_MCP_WRITE_DIR` (sandbox for file
 writes), `CLEARCOTE_MCP_ALLOW_ANY_PATH=1`, `CLEARCOTE_ALLOW_PRIVATE_EGRESS=1` (allow localhost /
-private targets and `file:` urls), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`.
+private targets; still `http`/`https` only), `CLEARCOTE_MCP_PREWARM=0`, `CLEARCOTE_SERVE_PORT`.
 
 ## Tools
 

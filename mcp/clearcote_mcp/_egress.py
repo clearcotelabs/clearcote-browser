@@ -1,15 +1,24 @@
-"""Where the browser may go: not to this machine, the local network or a cloud metadata endpoint.
+"""Where the browser may go: only to web addresses (http and https), and not to this machine, the local network or a
+cloud metadata endpoint.
+
+The same guard as Clearcote Jet's MCP server (clearcote_jet/egress.py); keep the two in step.
 
 Two layers, one rule:
 
 * check_url() judges a url a tool is given, read the way the browser will read it (WHATWG URL rules: tabs and
   newlines dropped, backslashes and missing slashes after http:, userinfo, percent-encoded and full-width hosts, IPv4
   written as one number or in hex or octal or with parts left out, IPv6 with an IPv4 address inside). Only http and
-  https pass.
+  https pass, always: file:, view-source:, chrome:, devtools:, about:, data: and every other scheme are refused, with
+  or without the opt-in below.
 * guard_context() puts the same check on every request the browser makes in the context (navigations, images,
   frames, scripts' requests, popups), on the url as the browser itself has canonicalised it, and on every redirect
   a page follows (Playwright continues a redirect's next request without asking its routes, so each page also gets a
-  CDP session that holds 3xx answers until their Location is judged).
+  CDP session that holds 3xx answers until their Location is judged). Requests that never leave the browser pass:
+  data: and blob: urls, about:blank and about:srcdoc (pages are made of them, and every new tab starts on
+  about:blank). Every other scheme that is not http(s) is refused (file:, chrome:, chrome-extension:, devtools:,
+  filesystem:, ftp: ...); ws: and wss: are judged by their host. The browser itself already refuses to let a web
+  page load or open file:, chrome: and devtools: urls (and a redirect to one), so the tools' urls are the way there
+  that this guard closes.
 
 An address is refused when it is in a non-public range (BLOCKED_V4 / BLOCKED_V6, IPv4 inside IPv6 checked as IPv4),
 when its name is localhost or a metadata name, or when the name resolves to any such address.
@@ -27,7 +36,8 @@ What it cannot close:
 Routing every request also makes Playwright turn the browser's HTTP cache off for the context, and each response is
 held for a moment until it is judged.
 
-CLEARCOTE_ALLOW_PRIVATE_EGRESS=1 turns all of it off (local development, file: pages).
+CLEARCOTE_ALLOW_PRIVATE_EGRESS=1 allows private addresses (local development servers): the tools' urls are then
+checked for their scheme only, and the browser's requests are not routed (so its HTTP cache stays on).
 """
 from __future__ import annotations
 
@@ -42,8 +52,10 @@ from urllib.parse import unquote_to_bytes
 log = logging.getLogger("clearcote-mcp")
 OPT_IN = "CLEARCOTE_ALLOW_PRIVATE_EGRESS"
 ALLOWED_SCHEMES = ("http", "https")
-# Schemes of requests that never leave the browser.
-LOCAL_SCHEMES = ("data", "blob", "about", "chrome", "chrome-extension", "devtools", "filesystem")
+# Requests that never leave the browser, and that pages and new tabs are made of: inline data, in-memory blobs, and
+# about:blank / about:srcdoc (no other about: page).
+INTERNAL_SCHEMES = ("data", "blob")
+INTERNAL_ABOUT = ("blank", "srcdoc")
 
 BLOCKED_V4 = [ipaddress.ip_network(n) for n in (
     "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24",
@@ -171,28 +183,44 @@ async def host_refusal(host: str) -> str | None:
     return None
 
 
+def scheme_refusal(scheme: str) -> str:
+    return f"refused url scheme {scheme!r}: only http and https urls are opened"
+
+
 async def check_url(url: str | None) -> None:
-    """Refuse a url a tool was given that is not http(s) or points at a private address (see the module notes)."""
-    if url is None or private_allowed():
+    """Refuse a url a tool was given that is not http(s), or (unless private egress is allowed) that points at a
+    private address (see the module notes)."""
+    if url is None:
         return
     try:
         scheme, host = url_scheme_and_host(url)
     except ValueError as exc:
         raise ValueError(f"refused url: {exc}") from None
     if scheme not in ALLOWED_SCHEMES:
-        raise ValueError(f"refused url scheme {scheme!r}: only http and https (set {OPT_IN}=1 to allow others)")
+        raise ValueError(scheme_refusal(scheme))
+    if private_allowed():
+        return
     reason = await host_refusal(host)
     if reason:
         raise ValueError(reason)
 
 
+def stays_in_browser(url: str) -> bool:
+    """A data:, blob:, about:blank or about:srcdoc url: nothing to fetch from anywhere."""
+    scheme, _, rest = url.partition(":")
+    scheme = scheme.lower()
+    if scheme == "about":
+        return re.split(r"[?#]", rest, maxsplit=1)[0].lower() in INTERNAL_ABOUT
+    return scheme in INTERNAL_SCHEMES
+
+
 async def request_refusal(url: str) -> str | None:
     """Why the browser must not make this request (a url it has canonicalised itself), or None."""
-    scheme = url.split(":", 1)[0].lower()
-    if scheme in LOCAL_SCHEMES:
+    if stays_in_browser(url):
         return None
-    if scheme not in ALLOWED_SCHEMES + ("ws", "wss", "ftp"):
-        return f"refused url scheme {scheme!r}"
+    scheme = url.split(":", 1)[0].lower()
+    if scheme not in ALLOWED_SCHEMES + ("ws", "wss"):
+        return scheme_refusal(scheme)
     try:
         _, host = url_scheme_and_host("http" + url[len(scheme):] if scheme not in ALLOWED_SCHEMES else url)
     except ValueError as exc:

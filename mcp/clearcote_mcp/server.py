@@ -10,7 +10,8 @@ STRUCTURED error instead of crashing the server; URL args are SSRF-checked (no l
 cloud-metadata unless opted in); file writes are confined to a sandbox dir; oversized text fields
 are capped (with an explicit ``*_truncated`` flag) so a response never floods the agent's context;
 page-derived text is fenced as untrusted data (as Clearcote Jet does); the shared browser is guarded
-by an asyncio lock and rebuilt if it dies.
+by an asyncio lock and rebuilt if it dies, and closed whenever the server stops (stdin closed, Ctrl+C,
+Ctrl+Break, SIGTERM or SIGHUP, an error), so no browser or temp files outlive it.
 
 Cloud: ``CLEARCOTE_CLOUD=1`` (with ``CLEARCOTE_API_KEY``) makes the shared browser a hosted Clearcote
 session instead of a local one; the tools are unchanged. With an API key set there is also
@@ -19,13 +20,19 @@ session instead of a local one; the tools are unchanged. With an API key set the
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import functools
 import json
 import os
+import signal
 import sys
+import threading
+import time
 from contextlib import asynccontextmanager
 from typing import Literal
+
+import anyio
 
 try:  # mcp 2.x renamed FastMCP to MCPServer and removed mcp.server.fastmcp
     from mcp.server.mcpserver import MCPServer
@@ -72,9 +79,22 @@ def _safe(fn, timeout: float | None = None):
                     "error": f"tool timed out after {limit:.0f}s "
                              f"(raise CLEARCOTE_MCP_TOOL_TIMEOUT for slow pages)"}
         except Exception as exc:  # noqa: BLE001 — deliberate catch-all at the tool boundary
-            # page scripts can write error messages too (evaluate_js): no fence markers in them either
+            if _from_the_browser(exc):
+                # The browser's own errors can quote the page: what a script threw (evaluate_js), an element's
+                # markup or text (click, fill, wait_for). Their message is page content, fenced like the rest.
+                return {"status": "error",
+                        "error": f"{type(exc).__name__} from the browser:\n" + _untrusted.fence(str(exc))}
             return {"status": "error", "error": _untrusted.defuse(f"{type(exc).__name__}: {exc}")}
     return wrap
+
+
+def _from_the_browser(exc: BaseException) -> bool:
+    """An error Playwright raised for the browser (not one of this server's own, such as a refused url)."""
+    try:
+        from playwright.async_api import Error
+    except ImportError:
+        return False
+    return isinstance(exc, Error)
 
 
 # ── SSRF guard (see _egress.py) ──────────────────────────────────────────────
@@ -218,24 +238,36 @@ async def _b() -> ClearcoteBrowser:
     return _browser
 
 
+_CLOSE_SECONDS = 20  # the longest a stopping server waits for its browser to close
+_EXIT_GRACE = 2  # after a stop signal and the browser's close: seconds to finish on its own before it leaves anyway
+_closed_on_stop = threading.Event()  # set once a stopping server has closed its browser (see _lifespan and main)
+
+
 @asynccontextmanager
 async def _lifespan(_server):
-    """Pre-warm the browser so the agent's first tool call is warm, not a cold launch."""
-    if _env("MCP_PREWARM", "1") != "0":
-        try:
-            await _b()
-        except Exception:
-            pass
+    """Pre-warm the browser so the agent's first tool call is warm, not a cold launch. However the server ends (stdin
+    closed, a stop signal, an error), the browser is closed on the way out: its process, its profile and Playwright's
+    folders in temp, the licence seat."""
+    global _browser
     try:
-        yield
-    finally:
-        global _browser
-        if _browser is not None:
+        if _env("MCP_PREWARM", "1") != "0":
             try:
-                await _browser.close()
+                await _b()
             except Exception:
                 pass
-            _browser = None
+        yield
+    finally:
+        # shield: after a stop signal everything here is cancelled, and the close must still run to its end
+        with anyio.move_on_after(_CLOSE_SECONDS, shield=True):
+            lock = _lock or asyncio.Lock()
+            async with lock:  # a launch still under way finishes first, and is closed here too
+                browser, _browser = _browser, None
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+        _closed_on_stop.set()
 
 
 mcp = MCPServer("Clearcote Stealth Browser", lifespan=_lifespan,
@@ -479,12 +511,56 @@ if os.environ.get("CLEARCOTE_API_KEY"):
     mcp.tool(annotations=_WRITE)(_safe(run_task, timeout=_RUN_TIMEOUT + 60))
 
 
+def _stop_signals() -> list:
+    """Ctrl+C, SIGTERM, and Ctrl+Break on Windows or SIGHUP elsewhere; not one this process was started ignoring
+    (e.g. SIGHUP under nohup)."""
+    names = ("SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP")
+    return [getattr(signal, name) for name in names
+            if hasattr(signal, name) and signal.getsignal(getattr(signal, name)) is not signal.SIG_IGN]
+
+
+def _leave_once_closed(signum: int) -> None:
+    """After a stop signal: the stdio transport still waits for its stdin reader, a thread blocked on a read that may
+    never return (a client that keeps the pipe open). Once the browser is closed, give the server _EXIT_GRACE seconds
+    to finish on its own, then leave without that thread (the exit handlers still run)."""
+    _closed_on_stop.wait(_CLOSE_SECONDS + 10)
+    time.sleep(_EXIT_GRACE)
+    atexit._run_exitfuncs()
+    os._exit(128 + signum)
+
+
+async def _serve() -> int | None:
+    """The stdio server until its stdin closes or a stop signal arrives. A signal cancels it the way a closed stdin
+    ends it, so the browser closes on the way out (see _lifespan); a second one while it stops is ignored. Returns the
+    signal's number, or None."""
+    loop = asyncio.get_running_loop()
+    stopped: list[int] = []
+    with anyio.CancelScope() as scope:
+        def stop(signum, _frame):
+            if stopped:
+                return
+            stopped.append(signum)
+            print(f"[clearcote-mcp] stopping on {signal.Signals(signum).name}: closing the browser", file=sys.stderr)
+            loop.call_soon_threadsafe(scope.cancel)
+            threading.Thread(target=_leave_once_closed, args=(signum,), daemon=True).start()
+
+        previous = {sig: signal.signal(sig, stop) for sig in _stop_signals()}
+        try:
+            await mcp.run_stdio_async()
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+    return stopped[0] if stopped else None
+
+
 def main() -> None:
     """stdio MCP entry point (used by `clearcote-mcp` and `python -m clearcote_mcp`)."""
     try:
-        mcp.run()
-    except KeyboardInterrupt:
-        sys.exit(0)
+        signum = anyio.run(_serve)
+    except KeyboardInterrupt:  # Ctrl+C before the server was listening for it: no browser yet
+        signum = signal.SIGINT
+    if signum:
+        sys.exit(128 + signum)
 
 
 if __name__ == "__main__":

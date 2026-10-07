@@ -141,6 +141,59 @@ test("a Python older than the package needs is not used", { skip }, (t) => {
   assert.ok(none.stderr.includes("Python 3.10"), none.stderr);
 });
 
+// A stop signal must let the server close its browser. The launcher runs with child_process replaced in-process (a
+// preload), so it needs no stub commands and the Windows branch runs on any OS: an installed server is found, and the
+// server it starts records the signals the launcher sends it, then exits on its own.
+const PRELOAD = `
+const cp = require("node:child_process");
+const fs = require("node:fs");
+const { EventEmitter } = require("node:events");
+Object.defineProperty(process, "platform", { value: process.env.FAKE_PLATFORM });
+cp.spawnSync = (cmd, args) => {
+  const a = args.join(" ");
+  const out = a.includes("version_info") ? "3.12" : a.includes("import clearcote_mcp") ? process.env.FAKE_VERSION : "";
+  return { status: 0, stdout: out, stderr: "" };
+};
+const sent = [];
+const record = () => fs.writeFileSync(process.env.FAKE_RESULT, JSON.stringify(sent));
+cp.spawn = () => {
+  const server = new EventEmitter();
+  server.kill = (signal) => { sent.push(signal); record(); setImmediate(() => server.emit("exit", null, signal)); };
+  setTimeout(() => {
+    record();
+    process.emit(process.env.FAKE_SIGNAL);  // the launcher gets a stop signal
+    setTimeout(() => server.emit("exit", 0), 200);  // the server, stopped by its console, closes and exits
+  }, 50);
+  return server;
+};
+`;
+
+function stopLauncher(t, platform, signal) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ccmcp-cli-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const preload = path.join(dir, "preload.js");
+  const result = path.join(dir, "sent.json");
+  fs.writeFileSync(preload, PRELOAD);
+  const r = spawnSync(process.execPath, ["-r", preload, CLI], {
+    encoding: "utf8", input: "", timeout: 30000,
+    env: { ...process.env, FAKE_PLATFORM: platform, FAKE_SIGNAL: signal, FAKE_VERSION: VERSION, FAKE_RESULT: result },
+  });
+  return { status: r.status, stderr: r.stderr, sent: JSON.parse(fs.readFileSync(result, "utf8")) };
+}
+
+test("on Windows Ctrl+C is not passed on as a forced kill: the server stops by itself", (t) => {
+  const r = stopLauncher(t, "win32", "SIGINT");
+  assert.deepStrictEqual(r.sent, [], "child.kill() on Windows ends the server at once, its browser left running");
+  assert.strictEqual(r.status, 0, r.stderr);
+});
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  test(`elsewhere a ${signal} is passed on to the server`, (t) => {
+    const r = stopLauncher(t, "linux", signal);
+    assert.deepStrictEqual(r.sent, [signal]);
+  });
+}
+
 test("with no Python, uvx or pipx at all, it names all three", { skip }, (t) => {
   const r = launch(t, []);
   assert.strictEqual(r.status, 1);

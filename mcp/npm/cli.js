@@ -103,5 +103,11 @@ const [cmd, args] = route();
 const child = spawn(cmd, args, { stdio: "inherit", env: process.env });
 child.on("error", (err) => fail([`[clearcote-mcp] could not start ${cmd}: ${err.message}`]));
 child.on("exit", (code) => process.exit(code == null ? 0 : code));
-process.on("SIGINT", () => child.kill("SIGINT"));
-process.on("SIGTERM", () => child.kill("SIGTERM"));
+// A stopped server closes its browser before it exits. Elsewhere a stop signal is passed on to it. On Windows Node can
+// only end a process by force (child.kill), which would leave the browser running: Ctrl+C and Ctrl+Break reach the
+// server from the console it shares with this launcher, so the launcher waits for it to exit.
+if (process.platform === "win32") {
+  for (const signal of ["SIGINT", "SIGBREAK"]) process.on(signal, () => {});
+} else {
+  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => child.kill(signal));
+}

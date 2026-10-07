@@ -70,10 +70,39 @@ async def test_allowed(url):
 
 
 @pytest.mark.asyncio
-async def test_opting_in_turns_the_guard_off(monkeypatch):
+async def test_opting_in_allows_private_addresses(monkeypatch):
     monkeypatch.setenv("CLEARCOTE_ALLOW_PRIVATE_EGRESS", "1")
-    for url in (f"http://2130706433:{P}/", "file:///tmp/page.html", "http://localhost/"):
+    for url in (f"http://2130706433:{P}/", "http://localhost/", "http://inside.example/", "http://[::1]:8080/"):
         await S._check_url(url)
+
+
+NOT_WEB = ["file:///tmp/page.html", "file:///C:/Windows/win.ini", "FILE:///etc/passwd", " file:/etc/passwd",
+           "chrome://settings", "chrome://version", "chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html",
+           f"view-source:http://127.0.0.1:{P}/", "devtools://devtools/bundled/inspector.html",
+           f"filesystem:http://127.0.0.1:{P}/temporary/a.html", "javascript:alert(1)", "data:text/html,<p>hi",
+           "about:blank", "about:version", f"blob:http://127.0.0.1:{P}/0a1b", "ftp://127.0.0.1/"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", NOT_WEB)
+@pytest.mark.parametrize("opt_in", [False, True])
+async def test_only_web_urls_are_opened_even_with_private_addresses_allowed(monkeypatch, url, opt_in):
+    if opt_in:
+        monkeypatch.setenv("CLEARCOTE_ALLOW_PRIVATE_EGRESS", "1")
+    with pytest.raises(ValueError, match=r"^refused url scheme '[a-z-]+': only http and https urls are opened$"):
+        await S._check_url(url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", ["file:///etc/passwd", "chrome://settings", "view-source:http://127.0.0.1/"])
+async def test_a_tool_refuses_a_local_scheme_before_using_the_browser(monkeypatch, url):
+    monkeypatch.setenv("CLEARCOTE_ALLOW_PRIVATE_EGRESS", "1")
+
+    async def no_browser():
+        raise AssertionError("the browser was used")
+    monkeypatch.setattr(S, "_b", no_browser)
+    for answer in (await S.navigate(url), await S.read_page(url), await S.new_tab(url), await S.evaluate_js("1", url)):
+        assert answer["status"] == "error" and answer["error"].startswith("ValueError: refused url scheme '"), answer
 
 
 @pytest.mark.parametrize("ip,blocked", [
@@ -108,6 +137,23 @@ class Route:
     ("data:image/png;base64,AAAA", "fallback"), ("blob:https://example.com/1", "fallback")])
 async def test_every_request_goes_through_the_guard(url, verdict):
     assert _egress is not None
+    route = Route(url)
+    await _egress.guard_route(route)
+    assert route.done[0] == verdict
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url,verdict", [
+    ("file:///C:/Windows/win.ini", "abort"), ("file:///etc/passwd", "abort"), ("chrome://version/", "abort"),
+    ("chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html", "abort"),
+    ("devtools://devtools/bundled/inspector.html", "abort"), ("filesystem:https://example.com/temporary/a", "abort"),
+    ("view-source:https://example.com/", "abort"), ("about:version", "abort"), ("ftp://example.com/", "abort"),
+    ("chrome-error://chromewebdata/", "abort"),
+    # what pages and new tabs are made of, and never leaves the browser
+    ("about:blank", "fallback"), ("about:blank#top", "fallback"), ("about:srcdoc", "fallback"),
+    ("data:text/html,<p>hi", "fallback"), ("blob:https://example.com/0a1b-2c3d", "fallback"),
+    ("https://example.com/app.js", "fallback")])
+async def test_only_web_requests_leave_the_browser(url, verdict):
     route = Route(url)
     await _egress.guard_route(route)
     assert route.done[0] == verdict
@@ -156,6 +202,8 @@ async def test_the_guard_is_installed_on_the_whole_context():
     (302, f"http://127.0.0.1:{P}/landing", "Fetch.failRequest"), (301, f"http:127.0.0.1:{P}/", "Fetch.failRequest"),
     (307, "//169.254.169.254/latest", "Fetch.failRequest"), (302, "http://inside.example/", "Fetch.failRequest"),
     (302, "https://example.com/next", "Fetch.continueRequest"), (302, "/same/host", "Fetch.continueRequest"),
+    (302, "chrome://settings", "Fetch.failRequest"), (301, "devtools://devtools/x.html", "Fetch.failRequest"),
+    (307, "filesystem:https://example.com/temporary/a", "Fetch.failRequest"),
     (200, None, "Fetch.continueRequest"), (304, None, "Fetch.continueRequest")])
 async def test_a_redirect_to_a_private_address_is_failed(status, location, verdict):
     import asyncio
