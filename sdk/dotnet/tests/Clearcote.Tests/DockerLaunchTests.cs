@@ -16,6 +16,7 @@ public sealed class DockerLaunchTests : IDisposable
 {
     private const int DeadPid = (1 << 22) + 12345;   // above any pid_max: never a live process
     private static readonly Dictionary<string, string> Protocol = new() { ["com.clearcotelabs.serve-protocol"] = "2" };
+    private static readonly string[] GoneArgv = { "ps", "-a", "-q", "--no-trunc", "--filter", "id=c0ffee1234" };   // is the container still listed?
 
     private static string ServeState(string engine = "open", string? proxy = null, int idle = 30, bool secrets = false, string? proxyAuth = null) =>
         "[clearcote] serve-state " + JsonSerializer.Serialize(new Dictionary<string, object?>
@@ -36,6 +37,13 @@ public sealed class DockerLaunchTests : IDisposable
         public List<string> Marks = new() { ServeState() };          // what the entrypoint logged about what it applied
         public string Ps = "";                                       // `docker ps` rows: id \t owner-token
         public List<Dictionary<string, string>> Containers = new();  // or: containers {id, <label>: value}, rendered per --format
+        // How many more `docker ps -a --filter id=` looks still list the container once it was stopped, as the daemon's
+        // own --rm removal runs on after `docker stop` returns. -1: it never goes (a Dead container).
+        public int Lingering;
+        public string PsError = "";                                  // `docker ps --filter id=` fails (Docker stopped answering)
+
+        /// What `docker ps -a` would answer about the container right now (once it was stopped).
+        public bool Listed => Lingering != 0;
 
         public Task<DockerLaunch.CliResult> Run(IReadOnlyList<string> argv, IDictionary<string, string>? env, int _, byte[]? input)
         {
@@ -44,6 +52,11 @@ public sealed class DockerLaunchTests : IDisposable
             switch (argv[1])
             {
                 case "info": r = InfoError.Length > 0 ? new(1, "", InfoError) : new(0, "29.1.3\n", ""); break;
+                case "ps" when argv.Any(a => a.StartsWith("id=", StringComparison.Ordinal)):
+                    if (PsError.Length > 0) { r = new(1, "", PsError); break; }
+                    r = new(0, Listed ? "c0ffee1234\n" : "", "");
+                    if (Lingering > 0) Lingering--;
+                    break;
                 case "ps":
                     if (Containers.Count == 0) { r = new(0, Ps, ""); break; }
                     var names = System.Text.RegularExpressions.Regex.Matches(argv[argv.ToList().IndexOf("--format") + 1], "\\.Label \"([^\"]+)\"").Select(m => m.Groups[1].Value).ToList();
@@ -128,6 +141,8 @@ public sealed class DockerLaunchTests : IDisposable
     private readonly Func<string?> _realBoot = DockerLaunch.BootIdProbe;
     private readonly Func<string?> _realPidNs = DockerLaunch.PidNamespaceProbe;
     private readonly Func<System.Diagnostics.ProcessStartInfo, string?> _realPs = DockerLaunch.RunPs;
+    private readonly TimeSpan _realRemovalWait = DockerLaunch.RemovalWait;
+    private readonly TimeSpan _realRemovalPoll = DockerLaunch.RemovalPoll;
     private readonly string _home;
 
     public DockerLaunchTests()
@@ -141,6 +156,7 @@ public sealed class DockerLaunchTests : IDisposable
         DockerLaunch.Which = () => "docker";
         DockerLaunch.Run = _docker.Run;
         DockerLaunch.FollowLogs = (_, _) => new FakeLogs(_docker);
+        DockerLaunch.RemovalPoll = TimeSpan.FromMilliseconds(10);
     }
 
     public void Dispose()
@@ -154,6 +170,8 @@ public sealed class DockerLaunchTests : IDisposable
         DockerLaunch.BootIdProbe = _realBoot;
         DockerLaunch.PidNamespaceProbe = _realPidNs;
         DockerLaunch.RunPs = _realPs;
+        DockerLaunch.RemovalWait = _realRemovalWait;
+        DockerLaunch.RemovalPoll = _realRemovalPoll;
         DockerLaunch.ResetOwnerToken();
         _sb.Dispose();
     }
@@ -253,11 +271,14 @@ public sealed class DockerLaunchTests : IDisposable
         }
         finally
         {
+            _docker.Lingering = 2;   // still listed for two looks after `docker stop`, as under load
             await browser.CloseAsync();
         }
         Assert.False(browser.IsConnected);
         Assert.True(local.IsAlive);   // CloseAsync disconnects; ending the browser is the container's stop
-        Assert.Equal(new[] { "info", "ps", "image", "create", "cp", "start", "port", "stop", "rm" }, _docker.Commands);
+        Assert.False(_docker.Listed);   // CloseAsync returned once the container was gone
+        Assert.Equal(new[] { "info", "ps", "image", "create", "cp", "start", "port", "stop", "rm", "ps", "ps", "ps" }, _docker.Commands);
+        Assert.Equal(GoneArgv, _docker.Calls[^1].Argv[1..]);
         var (argv, env, _) = _docker.Call("create");
         Assert.Equal(new[] { "docker", "create", "--rm", "--platform", "linux/amd64", "--shm-size" }, argv[..6]);
         Assert.Equal("127.0.0.1::9222", argv[Array.IndexOf(argv, "-p") + 1]);   // loopback only
@@ -346,7 +367,7 @@ public sealed class DockerLaunchTests : IDisposable
         Assert.Contains(problem, e.Message);
         Assert.Contains("stopped and removed", e.Message);
         Assert.DoesNotContain("cc_lic_docker_test_key_1234", e.Message);
-        Assert.Equal(new[] { "stop", "rm" }, _docker.Commands[^2..]);
+        Assert.Equal(new[] { "stop", "rm", "ps" }, _docker.Commands[^3..]);
     }
 
     [Fact]
@@ -459,6 +480,60 @@ public sealed class DockerLaunchTests : IDisposable
         Assert.Contains("no such host", e.Message);
         Assert.DoesNotContain("not available", e.Message);
         Assert.DoesNotContain("published a few minutes", e.Message);
+    }
+
+    // ── CloseAsync: the container is gone when it returns ───────────────────────────────────────────
+
+    /// An IBrowser whose CloseAsync does nothing: what BrowserProxy closes besides the container.
+    public class NullBrowser : System.Reflection.DispatchProxy
+    {
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args) =>
+            targetMethod?.Name == "CloseAsync" ? Task.CompletedTask : throw new NotSupportedException(targetMethod?.Name);
+    }
+
+    [Fact]
+    public async Task CloseAsync_returns_once_the_container_is_gone()
+    {
+        // The daemon's own --rm removal runs on after `docker stop` returns, and `docker rm` meanwhile answers
+        // "removal ... already in progress" at once: `docker ps -a` still listed the container after CloseAsync.
+        var browser = DockerLaunch.BrowserProxy.Wrap(System.Reflection.DispatchProxy.Create<IBrowser, NullBrowser>(), new DockerLaunch.ContainerState("docker", "c0ffee1234"));
+        _docker.Lingering = 3;
+        await browser.CloseAsync();
+        Assert.False(_docker.Listed);
+        Assert.Equal(new[] { "stop", "rm", "ps", "ps", "ps", "ps" }, _docker.Commands);
+        Assert.Equal(new[] { "-f", "-v", "c0ffee1234" }, _docker.Calls[1].Argv[2..]);   // -v: the image's anonymous VOLUME too
+        Assert.Equal(GoneArgv, _docker.Calls[^1].Argv[1..]);
+        await browser.DisposeAsync();   // once: the container is stopped at most once
+        Assert.Equal(6, _docker.Calls.Count);
+    }
+
+    [Fact]
+    public async Task RemoveAsync_gives_up_after_its_wait_and_removes_a_container_that_stayed()
+    {
+        // A removal that failed leaves the container listed (Dead): CloseAsync does not hang or throw over it, and
+        // asks once more for it to go, with its anonymous volume.
+        DockerLaunch.RemovalWait = TimeSpan.FromMilliseconds(300);
+        _docker.Lingering = -1;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        await DockerLaunch.RemoveAsync("docker", "c0ffee1234");
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5), watch.Elapsed.ToString());
+        var cmds = _docker.Commands;
+        Assert.Equal(new[] { "stop", "rm" }, cmds[..2]);
+        Assert.Equal("rm", cmds[^1]);
+        Assert.Equal(new[] { "ps" }, cmds[2..^1].Distinct());
+        Assert.True(cmds.Length > 4);
+        Assert.Equal(new[] { "-f", "-v", "c0ffee1234" }, _docker.Calls[^1].Argv[2..]);
+    }
+
+    [Fact]
+    public async Task RemoveAsync_does_not_wait_on_a_Docker_that_stopped_answering()
+    {
+        _docker.Lingering = -1;
+        _docker.PsError = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n";
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        await DockerLaunch.RemoveAsync("docker", "c0ffee1234");
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5), watch.Elapsed.ToString());
+        Assert.Equal(new[] { "stop", "rm", "ps" }, _docker.Commands);
     }
 
     // ── who owns a container ────────────────────────────────────────────────────────────────────────
@@ -673,7 +748,7 @@ public sealed class DockerLaunchTests : IDisposable
         var e = await Assert.ThrowsAsync<InvalidOperationException>(() => Clearcote.LaunchAsync(new LaunchOptions { LicenseKey = "cc_lic_bad", Quiet = true }));
         Assert.Contains("stopped before its browser came up", e.Message);
         Assert.Contains("could not lease a run token", e.Message);
-        Assert.Equal(new[] { "stop", "rm" }, _docker.Commands[^2..]);
+        Assert.Equal(new[] { "stop", "rm", "ps" }, _docker.Commands[^3..]);
     }
 
     [Fact]
@@ -692,7 +767,7 @@ public sealed class DockerLaunchTests : IDisposable
         _docker.CdpPort = stub.Port;
         DockerLaunch.ConnectOverride = (_, _) => throw new PlaywrightException("connect failed");
         await Assert.ThrowsAsync<PlaywrightException>(() => Clearcote.LaunchAsync(new LaunchOptions { Quiet = true }));
-        Assert.Equal(new[] { "stop", "rm" }, _docker.Commands[^2..]);
+        Assert.Equal(new[] { "stop", "rm", "ps" }, _docker.Commands[^3..]);
         Assert.Equal(new[] { new[] { "--time", "10", "c0ffee1234" }, new[] { "-f", "-v", "c0ffee1234" } }, _docker.StopsAndRms);
     }
 

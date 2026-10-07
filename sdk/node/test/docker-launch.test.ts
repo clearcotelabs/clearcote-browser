@@ -15,7 +15,8 @@ import { chromium } from "playwright-core";
 import { DockerUnavailableError, launch } from "../src/index.js";
 import {
   containerEnv, dockerCli, dockerRequested, hostProbe, legacyProxyRefusal, ownerAlive, ownerHere, ownerToken, pidAlive,
-  processStart, resetOwnerToken, startContainer, sweepStale, TEST_ONLY_ASSUME_MACOS, verifyApplied, type CliResult,
+  processStart, removal, removeContainer, resetOwnerToken, startContainer, sweepStale, TEST_ONLY_ASSUME_MACOS, verifyApplied,
+  type CliResult,
 } from "../src/docker.js";
 import { LocalChromium, findChromium } from "./helpers/chromium.js";
 import { tempDir } from "./helpers/temp.js";
@@ -40,6 +41,8 @@ const ENV = ["HOME", "USERPROFILE", "CLEARCOTE_DOCKER", "CLEARCOTE_BINARY", "CLE
 const CHROMIUM = findChromium();
 const DEAD_PID = 2 ** 22 + 12345; // above any pid_max: never a live process
 const PROTOCOL = { "com.clearcotelabs.serve-protocol": "2" };
+const GONE_ARGV = ["ps", "-a", "-q", "--no-trunc", "--filter", "id=c0ffee1234"]; // is the container still listed?
+const REMOVAL = { ...removal };
 const saved: Record<string, string | undefined> = {};
 
 const serveState = (engine = "open", proxy: string | null = null, idle = 30, secrets = false, proxyAuth: string | null = null) =>
@@ -58,11 +61,21 @@ class FakeDocker {
   marks: string[] = [serveState()]; // what the entrypoint logged about what it applied
   ps = ""; // `docker ps` rows: id \t owner-token
   containers: Array<Record<string, string>> = []; // or: containers as {id, <label>: value}, rendered per --format
+  // How many more `docker ps -a --filter id=` looks still list the container once it was stopped, as the daemon's
+  // own --rm removal runs on after `docker stop` returns. -1: it never goes (a Dead container).
+  lingering = 0;
+  psError = ""; // `docker ps --filter id=` fails (Docker stopped answering)
   run = async (argv: string[], env?: Record<string, string>, _t?: number, input?: Buffer): Promise<CliResult> => {
     this.calls.push({ argv: [...argv], env: { ...(env ?? {}) }, input });
     switch (argv[1]) {
       case "info": return this.infoError ? { code: 1, stdout: "", stderr: this.infoError } : { code: 0, stdout: "29.1.3\n", stderr: "" };
       case "ps": {
+        if (argv.some((a) => a.startsWith("id="))) {
+          if (this.psError) return { code: 1, stdout: "", stderr: this.psError };
+          const listed = this.listed();
+          if (this.lingering > 0) this.lingering--;
+          return { code: 0, stdout: listed ? "c0ffee1234\n" : "", stderr: "" };
+        }
         if (!this.containers.length) return { code: 0, stdout: this.ps, stderr: "" };
         const names = [...argv[argv.indexOf("--format") + 1].matchAll(/\.Label "([^"]+)"/g)].map((m) => m[1]);
         return { code: 0, stdout: this.containers.map((c) => [c.id, ...names.map((n) => c[n] ?? "")].join("\t") + "\n").join(""), stderr: "" };
@@ -79,6 +92,8 @@ class FakeDocker {
       default: return { code: 0, stdout: "", stderr: "" }; // cp, start, stop, rm
     }
   };
+  /** What `docker ps -a` would answer about the container right now (once it was stopped). */
+  listed = () => this.lingering !== 0;
   commands = () => this.calls.map((c) => c.argv[1]);
   call = (cmd: string) => this.calls.find((c) => c.argv[1] === cmd)!;
   stopsAndRms = () => this.calls.filter((c) => ["stop", "rm"].includes(c.argv[1])).map((c) => c.argv.slice(2));
@@ -93,6 +108,7 @@ beforeEach(() => {
   process.env.HOME = home;
   process.env.USERPROFILE = home;
   resetOwnerToken();
+  removal.pollMs = 10;
   docker = new FakeDocker();
   vi.spyOn(dockerCli, "which").mockReturnValue("docker");
   vi.spyOn(dockerCli, "run").mockImplementation(docker.run);
@@ -101,6 +117,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   hoisted.failHumanize = false;
+  Object.assign(removal, REMOVAL);
   resetOwnerToken();
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   vi.restoreAllMocks();
@@ -195,14 +212,17 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
         expect(await page.title()).toBe("in docker");
         expect(page.viewportSize()).toBeNull(); // no emulated viewport over the container's real window
       } finally {
+        docker.lingering = 2; // still listed for two looks after `docker stop`, as under load
         await browser.close();
       }
       expect(browser.isConnected()).toBe(false);
       expect(local.alive()).toBe(true); // close() disconnects; ending the browser is the container's stop
+      expect(docker.listed()).toBe(false); // close() resolved once the container was gone
     } finally {
       await local.stop();
     }
-    expect(docker.commands()).toEqual(["info", "ps", "image", "create", "cp", "start", "port", "stop", "rm"]);
+    expect(docker.commands()).toEqual(["info", "ps", "image", "create", "cp", "start", "port", "stop", "rm", "ps", "ps", "ps"]);
+    expect(docker.calls.at(-1)!.argv.slice(1)).toEqual(GONE_ARGV);
     const { argv, env } = docker.call("create");
     // --rm: a stopped container (and its anonymous engine volume) goes away by itself
     expect(argv.slice(0, 6)).toEqual(["docker", "create", "--rm", "--platform", "linux/amd64", "--shm-size"]);
@@ -241,7 +261,9 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
     try {
       docker.cdpPort = Number(/:(\d+)$/.exec(local.httpUrl)![1]);
       const browser = await onMac(() => launch({ dockerImage: "example/clearcote:test" }));
+      docker.lingering = 2;
       await browser.close();
+      expect(docker.listed()).toBe(false);
     } finally {
       await local.stop();
     }
@@ -304,7 +326,7 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
       } finally {
         await stub.close();
       }
-      expect(docker.commands().slice(-2)).toEqual(["stop", "rm"]);
+      expect(docker.commands().slice(-3)).toEqual(["stop", "rm", "ps"]);
     });
   }
 
@@ -410,6 +432,42 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
       await expect(onMac(() => launch())).rejects.toThrow(/is not available/);
     });
   }
+
+  // ── close(): the container is gone when it resolves ─────────────────────────────────────────────
+
+  it("removeContainer waits until the container is gone", async () => {
+    // The daemon's own --rm removal runs on after `docker stop` returns, and `docker rm` meanwhile answers
+    // "removal ... already in progress" at once: `docker ps -a` still listed the container after close().
+    docker.lingering = 3;
+    await removeContainer("docker", "c0ffee1234");
+    expect(docker.listed()).toBe(false);
+    expect(docker.commands()).toEqual(["stop", "rm", "ps", "ps", "ps", "ps"]);
+    expect(docker.calls[1].argv.slice(2)).toEqual(["-f", "-v", "c0ffee1234"]); // -v: the image's anonymous VOLUME too
+    expect(docker.calls.at(-1)!.argv.slice(1)).toEqual(GONE_ARGV);
+  });
+
+  it("removeContainer gives up after its wait and removes a container that stayed", async () => {
+    // A removal that failed leaves the container listed (Dead): close() does not hang or throw over it, and asks
+    // once more for it to go, with its anonymous volume.
+    removal.waitMs = 300;
+    docker.lingering = -1;
+    const started = Date.now();
+    await removeContainer("docker", "c0ffee1234");
+    expect(Date.now() - started).toBeLessThan(5000);
+    const cmds = docker.commands();
+    expect([cmds.slice(0, 2), cmds.at(-1), [...new Set(cmds.slice(2, -1))]]).toEqual([["stop", "rm"], "rm", ["ps"]]);
+    expect(cmds.length).toBeGreaterThan(4);
+    expect(docker.calls.at(-1)!.argv.slice(2)).toEqual(["-f", "-v", "c0ffee1234"]);
+  });
+
+  it("removeContainer does not wait on a Docker that stopped answering", async () => {
+    docker.lingering = -1;
+    docker.psError = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n";
+    const started = Date.now();
+    await removeContainer("docker", "c0ffee1234");
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(docker.commands()).toEqual(["stop", "rm", "ps"]);
+  });
 
   // ── who owns a container ────────────────────────────────────────────────────────────────────────
 
@@ -576,7 +634,7 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
     const err = await onMac(() => launch({ licenseKey: "cc_lic_bad" }).then(() => null, (e) => e as Error));
     expect(err!.message).toContain("stopped before its browser came up");
     expect(err!.message).toContain("could not lease a run token");
-    expect(docker.commands().slice(-2)).toEqual(["stop", "rm"]);
+    expect(docker.commands().slice(-3)).toEqual(["stop", "rm", "ps"]);
   });
 
   it("a failed create names the image", async () => {
@@ -593,7 +651,7 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
     } finally {
       await stub.close();
     }
-    expect(docker.commands().slice(-2)).toEqual(["stop", "rm"]);
+    expect(docker.commands().slice(-3)).toEqual(["stop", "rm", "ps"]);
     expect(docker.calls.filter((c) => ["stop", "rm"].includes(c.argv[1])).map((c) => c.argv.at(-1))).toEqual(["c0ffee1234", "c0ffee1234"]);
   }, 60_000);
 
@@ -607,6 +665,6 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
     } finally {
       await local.stop();
     }
-    expect(docker.commands().slice(-2)).toEqual(["stop", "rm"]);
+    expect(docker.commands().slice(-3)).toEqual(["stop", "rm", "ps"]);
   }, 60_000);
 });

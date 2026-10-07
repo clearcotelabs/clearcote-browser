@@ -52,7 +52,8 @@ public sealed record DockerContainer(string Id, string Image, string Endpoint, i
 ///
 /// Nothing outlives its owner: the container is created with --rm, stops itself once no CDP client has been
 /// connected for 30 s after its CDP first answers (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch removes any
-/// whose owner process is certainly gone (SweepStaleAsync). CloseAsync stops it at once.
+/// whose owner process is certainly gone (SweepStaleAsync). CloseAsync stops it at once and returns once Docker has
+/// removed it (waiting up to 15 s for that).
 /// Mirrors _docker.py (Python) and docker.ts (Node).
 internal static class DockerLaunch
 {
@@ -498,6 +499,25 @@ internal static class DockerLaunch
         };
     }
 
+    /// How long RemoveAsync waits for the container to be gone, and how often it looks. Seams: tests shorten them.
+    internal static TimeSpan RemovalWait { get; set; } = TimeSpan.FromSeconds(15);
+    internal static TimeSpan RemovalPoll { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /// Waits, for up to RemovalWait, until `docker ps -a` no longer lists the container. False only when it is still
+    /// listed once the wait is up; a docker CLI that does not answer ends the wait. Never throws.
+    private static async Task<bool> WaitGoneAsync(string exe, string id)
+    {
+        var deadline = DateTime.UtcNow + RemovalWait;
+        while (true)
+        {
+            var left = (int)Math.Max((deadline - DateTime.UtcNow).TotalMilliseconds, 1000);
+            var r = await Run(new[] { exe, "ps", "-a", "-q", "--no-trunc", "--filter", $"id={id}" }, null, left, null).ConfigureAwait(false);
+            if (r.Code != 0 || r.Stdout.Trim().Length == 0) return true;
+            if (DateTime.UtcNow >= deadline) return false;
+            await Task.Delay(RemovalPoll).ConfigureAwait(false);
+        }
+    }
+
     internal static async Task RemoveAsync(string exe, string id)
     {
         // stop first: SIGTERM lets the image release a licence seat. The container was created with --rm, so
@@ -505,6 +525,12 @@ internal static class DockerLaunch
         // rm -f -v is for a container that did not go away. A named volume is never removed.
         await Run(new[] { exe, "stop", "--time", "10", id }, null, 60_000, null).ConfigureAwait(false);
         await Run(new[] { exe, "rm", "-f", "-v", id }, null, 60_000, null).ConfigureAwait(false);
+        // The daemon's own --rm removal starts once the container has stopped and runs on after `docker stop`
+        // returns; `docker rm` meanwhile answers "removal ... already in progress" at once. Wait for it to finish,
+        // so that CloseAsync returning means the container is gone. A container still there after the wait (its
+        // removal failed: Docker marks it Dead) gets one more rm -f -v, which takes the volume too.
+        if (!await WaitGoneAsync(exe, id).ConfigureAwait(false))
+            await Run(new[] { exe, "rm", "-f", "-v", id }, null, 60_000, null).ConfigureAwait(false);
         lock (Live) Live.Remove(id);
     }
 

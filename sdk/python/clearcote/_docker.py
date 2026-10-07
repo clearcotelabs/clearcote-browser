@@ -29,7 +29,8 @@ the container -- unless it runs the licensed engine when a key was given and the
 
 Nothing outlives its owner: the container is created with --rm, stops itself once no CDP client has been
 connected for 30 s after its CDP first answers (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch removes
-any whose owner process is certainly gone (sweep_stale). close() stops it at once.
+any whose owner process is certainly gone (sweep_stale). close() stops it at once and returns once Docker
+has removed it (waiting up to 15 s for that).
 """
 from __future__ import annotations
 
@@ -483,14 +484,37 @@ def sweep_stale(exe) -> list:
 
 _LIVE: dict = {}  # container id -> docker executable, for the exit-time sweep
 _LIVE_LOCK = threading.Lock()
+# How long _remove waits for the container to be gone, and how often it looks.
+_GONE_WAIT_S = 15.0
+_GONE_POLL_S = 0.25
 
 
-def _remove(exe, cid):
+def _wait_gone(exe, cid):
+    """Wait, for up to _GONE_WAIT_S, until `docker ps -a` no longer lists the container. False only when it
+    is still listed once the wait is up; a docker CLI that does not answer ends the wait. Never raises."""
+    deadline = time.monotonic() + _GONE_WAIT_S
+    while True:
+        code, out, _err = _run([exe, "ps", "-a", "-q", "--no-trunc", "--filter", f"id={cid}"],
+                               timeout=max(deadline - time.monotonic(), 1.0))
+        if code != 0 or not out.strip():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_GONE_POLL_S)
+
+
+def _remove(exe, cid, wait=True):
     # stop first: SIGTERM lets the image release a licence seat. The container was created with --rm, so
     # stopping it removes it and its anonymous volume (the image declares VOLUME /opt/xdg-cache: ~0.5 GB);
     # rm -f -v is for a container that did not go away. A named volume is never removed.
     _run([exe, "stop", "--time", "10", cid], timeout=60)
     _run([exe, "rm", "-f", "-v", cid], timeout=60)
+    # The daemon's own --rm removal starts once the container has stopped and runs on after `docker stop`
+    # returns; `docker rm` meanwhile answers "removal ... already in progress" at once. Wait for it to
+    # finish, so that close() returning means the container is gone. A container still there after the
+    # wait (its removal failed: Docker marks it Dead) gets one more rm -f -v, which takes the volume too.
+    if wait and not _wait_gone(exe, cid):
+        _run([exe, "rm", "-f", "-v", cid], timeout=60)
     with _LIVE_LOCK:
         _LIVE.pop(cid, None)
 
@@ -500,7 +524,7 @@ def _sweep():
     with _LIVE_LOCK:
         live = list(_LIVE.items())
     for cid, exe in live:
-        _remove(exe, cid)
+        _remove(exe, cid, wait=False)  # exiting: the daemon finishes the removal without us
 
 
 _MARK = re.compile(r"\[clearcote\] (serve-state |engine: |proxy: )")

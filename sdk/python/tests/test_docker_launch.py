@@ -13,6 +13,7 @@ import re
 import socket
 import tarfile
 import threading
+import time
 import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -28,6 +29,7 @@ needs_chromium = pytest.mark.skipif(not CHROMIUM, reason="no Chromium (set CLEAR
 IMAGE = f"teamflatearth/clearcote:sdk-{clearcote.__version__}"
 DEAD_PID = 2 ** 22 + 12345  # above any pid_max: never a live process
 PROTOCOL = {"com.clearcotelabs.serve-protocol": "2"}
+GONE_ARGV = ["ps", "-a", "-q", "--no-trunc", "--filter", "id=c0ffee1234"]  # is the container still listed?
 
 
 def serve_state(engine="open", proxy=None, idle=30, secrets=False, proxy_auth=None):
@@ -51,12 +53,23 @@ class FakeDocker:
         self.marks = [serve_state()]  # what the entrypoint logged about what it applied
         self.ps = ""  # `docker ps` rows: id \t owner-token
         self.containers = []  # or: containers as {"id", <label>: value}, rendered in the format asked for
+        # How many more `docker ps -a --filter id=` looks still list the container once it was stopped, as the
+        # daemon's own --rm removal runs on after `docker stop` returns. -1: it never goes (a Dead container).
+        self.lingering = 0
+        self.ps_error = None  # `docker ps --filter id=` fails (Docker stopped answering)
 
     def __call__(self, argv, env=None, timeout=120.0, input=None):
         self.calls.append({"argv": list(argv), "env": dict(env or {}), "input": input})
         cmd = argv[1]
         if cmd == "info":
             return (1, "", self.info_error) if self.info_error else (0, "29.1.3\n", "")
+        if cmd == "ps" and any(a.startswith("id=") for a in argv):
+            if self.ps_error:
+                return 1, "", self.ps_error
+            listed = self.listed()
+            if self.lingering > 0:
+                self.lingering -= 1
+            return 0, "c0ffee1234\n" if listed else "", ""
         if cmd == "ps":
             if not self.containers:
                 return 0, self.ps, ""
@@ -79,6 +92,10 @@ class FakeDocker:
         if cmd == "inspect":
             return (0, "true\n", "") if self.running else (1, "", "Error: No such object: c0ffee1234")
         return 0, "", ""  # cp, start, stop, rm
+
+    def listed(self):
+        """What `docker ps -a` would answer about the container right now (once it was stopped)."""
+        return self.lingering != 0
 
     def commands(self):
         return [c["argv"][1] for c in self.calls]
@@ -159,6 +176,7 @@ def docker(monkeypatch):
     monkeypatch.setattr(_docker, "_docker_cli", lambda: "docker")
     monkeypatch.setattr(_docker, "_run", fake)
     monkeypatch.setattr(_docker, "_follow_logs", lambda exe, cid: FakeLogs(fake), raising=False)
+    monkeypatch.setattr(_docker, "_GONE_POLL_S", 0.01)
     return fake
 
 
@@ -238,10 +256,13 @@ def test_macos_launch_runs_the_image_and_returns_a_working_browser(mac, docker):
             assert page.title() == "in docker"
             assert page.viewport_size is None  # no emulated viewport over the container's real window
         finally:
+            docker.lingering = 2  # still listed for two looks after `docker stop`, as under load
             browser.close()
         assert not browser.is_connected()
         assert chromium.alive()  # close() disconnects; ending the browser is the container's stop
-    assert docker.commands() == ["info", "ps", "image", "create", "cp", "start", "port", "stop", "rm"]
+        assert not docker.listed()  # close() returned once the container was gone
+    assert docker.commands() == ["info", "ps", "image", "create", "cp", "start", "port", "stop", "rm", "ps", "ps", "ps"]
+    assert docker.calls[-1]["argv"][1:] == GONE_ARGV
     create = docker.call("create")
     argv = create["argv"]
     # --rm: a stopped container (and its anonymous engine volume) goes away by itself
@@ -292,15 +313,17 @@ def test_async_launch_on_macos(mac, docker, monkeypatch):
                 await page.set_content("<title>async</title>")
                 assert await page.title() == "async"
             finally:
+                docker.lingering = 2
                 await browser.close()
             assert not browser.is_connected()
+            assert not docker.listed()
 
     asyncio.run(go())
     assert docker.call("create")["argv"][-1] == "example/clearcote:test"
     assert docker.call("create")["env"] == {}  # nothing asked for: the image's own defaults
     assert "-v" not in docker.call("create")["argv"]  # no licence, no engine cache volume
     assert "cp" not in docker.commands()  # no secrets, no file
-    assert docker.commands()[-2:] == ["stop", "rm"]
+    assert docker.commands()[-5:] == ["stop", "rm", "ps", "ps", "ps"]
 
 
 # ── what an image understands, and what it applied ─────────────────────────────────────────────────
@@ -343,7 +366,7 @@ def test_a_container_that_did_not_apply_the_key_or_proxy_is_refused_and_removed(
     with pytest.raises(RuntimeError, match="did not apply what launch\\(\\) asked for") as e:
         _docker.start_container(dict(KEYED if protocol else KEYED_SOCKS), quiet=True)
     assert problem in str(e.value) and "stopped and removed" in str(e.value)
-    assert docker.commands()[-2:] == ["stop", "rm"]
+    assert docker.commands()[-3:] == ["stop", "rm", "ps"]
     assert not any(s in str(e.value) for s in ("cc_lic_docker_test_key_1234", "p%20w", "pw-plain"))
     assert _docker._LIVE == {}
 
@@ -447,6 +470,61 @@ def test_older_docker_wordings_for_a_missing_image(mac, docker, err):
     docker.pull_error = err
     with pytest.raises(RuntimeError, match="is not available"):
         clearcote.launch()
+
+
+# ── close(): the container is gone when it returns ─────────────────────────────────────────────────
+
+def test_remove_waits_until_the_container_is_gone(mac, docker, cdp):
+    # The daemon's own --rm removal runs on after `docker stop` returns, and `docker rm` meanwhile answers
+    # "removal ... already in progress" at once: `docker ps -a` still listed the container after close().
+    container = _docker.start_container({}, quiet=True)
+    docker.calls.clear()
+    docker.lingering = 3
+    _docker._remove("docker", container["id"])
+    assert not docker.listed()
+    assert docker.commands() == ["stop", "rm", "ps", "ps", "ps", "ps"]
+    assert docker.calls[1]["argv"][2:] == ["-f", "-v", "c0ffee1234"]  # -v: the image's anonymous VOLUME too
+    assert docker.calls[-1]["argv"][1:] == GONE_ARGV
+    assert _docker._LIVE == {}
+
+
+def test_remove_gives_up_after_its_wait_and_removes_a_container_that_stayed(mac, docker, cdp, monkeypatch):
+    # A removal that failed leaves the container listed (Dead): close() does not hang or raise over it, and asks
+    # once more for it to go, with its anonymous volume.
+    monkeypatch.setattr(_docker, "_GONE_WAIT_S", 0.3)
+    container = _docker.start_container({}, quiet=True)
+    docker.calls.clear()
+    docker.lingering = -1
+    started = time.monotonic()
+    _docker._remove("docker", container["id"])
+    assert time.monotonic() - started < 5
+    cmds = docker.commands()
+    assert cmds[:2] == ["stop", "rm"] and cmds[-1] == "rm" and set(cmds[2:-1]) == {"ps"} and len(cmds) > 4
+    assert docker.calls[-1]["argv"][2:] == ["-f", "-v", "c0ffee1234"]
+    assert _docker._LIVE == {}
+
+
+def test_remove_does_not_wait_on_a_docker_that_stopped_answering(mac, docker, cdp):
+    container = _docker.start_container({}, quiet=True)
+    docker.calls.clear()
+    docker.lingering = -1
+    docker.ps_error = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n"
+    started = time.monotonic()
+    _docker._remove("docker", container["id"])
+    assert time.monotonic() - started < 5
+    assert docker.commands() == ["stop", "rm", "ps"]
+    assert _docker._LIVE == {}
+
+
+def test_the_exit_time_sweep_does_not_wait(mac, docker, cdp):
+    # A container the program never closed is stopped at exit; the daemon finishes removing it without us.
+    container = _docker.start_container({}, quiet=True)
+    docker.calls.clear()
+    docker.lingering = -1
+    assert container["id"] in _docker._LIVE
+    _docker._sweep()
+    assert docker.commands() == ["stop", "rm"]
+    assert _docker._LIVE == {}
 
 
 # ── who owns a container ────────────────────────────────────────────────────────────────────────────
@@ -635,7 +713,7 @@ def test_container_that_stops_early_reports_its_logs_and_is_removed(mac, docker)
     with pytest.raises(RuntimeError, match="stopped before its browser came up") as e:
         clearcote.launch(license_key="cc_lic_bad")
     assert "could not lease a run token" in str(e.value)
-    assert docker.commands()[-2:] == ["stop", "rm"]
+    assert docker.commands()[-3:] == ["stop", "rm", "ps"]
     assert _docker._LIVE == {}
 
 
@@ -649,7 +727,7 @@ def test_create_failure_names_the_image(mac, docker, monkeypatch):
 def test_a_failed_connect_after_the_container_started_removes_it(mac, docker, cdp):
     with pytest.raises(Exception):  # noqa: B017 -- Playwright's own connect error
         clearcote.launch(timeout=5000)
-    assert docker.commands()[-2:] == ["stop", "rm"]
+    assert docker.commands()[-3:] == ["stop", "rm", "ps"]
     assert [c["argv"][-1] for c in docker.calls if c["argv"][1] in ("stop", "rm")] == ["c0ffee1234", "c0ffee1234"]
     assert _docker._LIVE == {}
 
@@ -667,7 +745,7 @@ def test_a_failure_after_the_connect_disconnects_and_removes_it(mac, docker, mon
         with pytest.raises(RuntimeError, match="humanize setup failed"):
             clearcote.launch()
         assert chromium.alive()
-    assert docker.commands()[-2:] == ["stop", "rm"]
+    assert docker.commands()[-3:] == ["stop", "rm", "ps"]
     assert _docker._LIVE == {}
 
 

@@ -28,7 +28,8 @@
 //
 // Nothing outlives its owner: the container is created with --rm, stops itself once no CDP client has been
 // connected for 30 s after its CDP first answers (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch removes
-// any whose owner process is certainly gone (sweepStale). close() stops it at once.
+// any whose owner process is certainly gone (sweepStale). close() stops it at once and resolves once Docker
+// has removed it (waiting up to 15 s for that).
 // Mirrors _docker.py in the Python SDK.
 
 import { execFile, spawn, spawnSync } from "node:child_process";
@@ -460,12 +461,32 @@ export async function sweepStale(exe: string): Promise<string[]> {
 const live = new Map<string, string>(); // container id -> docker executable, for the exit-time sweep
 let sweepInstalled = false;
 
-async function removeContainer(exe: string, id: string): Promise<void> {
+/** How long removeContainer waits for the container to be gone, and how often it looks. A seam: tests shorten it. */
+export const removal = { waitMs: 15_000, pollMs: 250 };
+
+/** Waits, for up to `removal.waitMs`, until `docker ps -a` no longer lists the container. False only when it is
+ * still listed once the wait is up; a docker CLI that does not answer ends the wait. Never throws. */
+async function waitGone(exe: string, id: string): Promise<boolean> {
+  const deadline = Date.now() + removal.waitMs;
+  for (;;) {
+    const r = await dockerCli.run([exe, "ps", "-a", "-q", "--no-trunc", "--filter", `id=${id}`], undefined, Math.max(deadline - Date.now(), 1000));
+    if (r.code !== 0 || !r.stdout.trim()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((res) => setTimeout(res, removal.pollMs));
+  }
+}
+
+export async function removeContainer(exe: string, id: string): Promise<void> {
   // stop first: SIGTERM lets the image release a licence seat. The container was created with --rm, so
   // stopping it removes it and its anonymous volume (the image declares VOLUME /opt/xdg-cache: ~0.5 GB);
   // rm -f -v is for a container that did not go away. A named volume is never removed.
   await dockerCli.run([exe, "stop", "--time", "10", id], undefined, 60_000);
   await dockerCli.run([exe, "rm", "-f", "-v", id], undefined, 60_000);
+  // The daemon's own --rm removal starts once the container has stopped and runs on after `docker stop`
+  // returns; `docker rm` meanwhile answers "removal ... already in progress" at once. Wait for it to finish,
+  // so that close() resolving means the container is gone. A container still there after the wait (its
+  // removal failed: Docker marks it Dead) gets one more rm -f -v, which takes the volume too.
+  if (!(await waitGone(exe, id))) await dockerCli.run([exe, "rm", "-f", "-v", id], undefined, 60_000);
   live.delete(id);
 }
 
