@@ -11,6 +11,9 @@ public class FontsTests : IDisposable
     private readonly string _root = TestTemp.Create("ccfonts-");
     private readonly string? _savedDirs = Environment.GetEnvironmentVariable(Fonts.FontDirsEnv);
     private readonly string? _savedFallback = Environment.GetEnvironmentVariable(Fonts.FallbackFontDirsEnv);
+    // LinuxFontConfig points fontconfig at <tmp>/cc-fc-cache, shared by every launch on the machine: remove
+    // it afterwards only when this test created it, never a real one already in use.
+    private readonly bool _cacheExisted = Directory.Exists(Cache);
 
     public FontsTests()
     {
@@ -23,6 +26,7 @@ public class FontsTests : IDisposable
         Environment.SetEnvironmentVariable(Fonts.FontDirsEnv, _savedDirs);
         Environment.SetEnvironmentVariable(Fonts.FallbackFontDirsEnv, _savedFallback);
         TestTemp.Remove(_root);
+        if (!_cacheExisted) TestTemp.Remove(Cache);
     }
 
     private static readonly string Assets = FindAssets();
