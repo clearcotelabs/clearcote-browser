@@ -13,8 +13,13 @@ is a pure function (no I/O) so it is trivially unit-testable.
 import os
 import sys
 
+from ._fingerprint import is_fingerprint_passthrough
+
 _SOFTWARE_GPU = ("swiftshader", "llvmpipe", "microsoft basic render", "software adapter", "software")
 _seen_notes = set()  # fire-once per process for low-severity NOTE codes
+# WARN codes about the HOST rather than one launch's options: said once per process, like a note, so a
+# program that launches in a loop is told once.
+_ONCE_PER_PROCESS = frozenset({"linux-persona-windows-host"})
 
 
 def _proxy_server(proxy):
@@ -87,6 +92,16 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
              "fonts/metrics - font, canvas and font-list hashes will be host-native and won't match a "
              "real %s Chrome. Use a fingerprint_profile captured on %s, or set platform=%r."
              % (platform, fam, platform, platform, fam))
+    # On a Windows host the GPU runs through Direct3D 11, which clamps the WebGL and WebGPU limits (vertex
+    # uniform vectors, a 16384 maximum texture size, ...). A persona can lower a limit, never lift one past the
+    # driver's, so a Linux claim here reports limits no real Linux machine has. Pass-through claims nothing.
+    # Only a local launch gets here: a Docker launch runs on Linux in its container, a cloud one remotely.
+    if (fam == "windows" and str(platform or "").strip().lower() == "linux"
+            and not is_fingerprint_passthrough(opts.get("fingerprint"))):
+        warn("linux-persona-windows-host",
+             "a Linux persona on a Windows host reports Windows GPU limits (Direct3D caps WebGL), which no "
+             "real Linux machine has. Use platform='windows' on Windows, or run Linux personas on Linux or in "
+             "Docker (docker=True).")
     if gpu_r and platform:
         why = _gpu_incoherent(gpu_r, platform)
         if why:
@@ -252,11 +267,12 @@ _ENGINE_NOTES = (
 
 def emit_coherence_warnings(opts, quiet=False, host_platform=None, build_major=None):
     """Print coherence warnings to stderr (unless quiet=True or CLEARCOTE_NO_WARN is set).
-    NOTE-level lines fire at most once per process; WARN-level fire every launch."""
+    NOTE-level lines (and the host warnings in _ONCE_PER_PROCESS) fire at most once per process; the
+    other WARN-level lines fire every launch."""
     if quiet or os.environ.get("CLEARCOTE_NO_WARN"):
         return
     for w in coherence_warnings(opts, host_platform=host_platform, build_major=build_major):
-        if w["severity"] == "note":
+        if w["severity"] == "note" or w["code"] in _ONCE_PER_PROCESS:
             if w["code"] in _seen_notes:
                 continue
             _seen_notes.add(w["code"])

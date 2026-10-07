@@ -115,6 +115,7 @@ public static class Clearcote
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
             Extras(options, exe, headed: options.Headless == false));
         LaunchWarnings.Emit(LaunchWarnings.ForArgs(options.Args), options.Quiet);
+        LaunchWarnings.EmitOnce(LaunchWarnings.ForPersonaHost(options), options.Quiet);   // a Linux persona on Windows
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         var licKey = License.ResolveLicenseKey(options.LicenseKey);
@@ -223,6 +224,7 @@ public static class Clearcote
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
             Extras(options, exe, headed: options.Headless == false));
         LaunchWarnings.Emit(LaunchWarnings.ForArgs(options.Args), options.Quiet);
+        LaunchWarnings.EmitOnce(LaunchWarnings.ForPersonaHost(options), options.Quiet);   // a Linux persona on Windows
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         var licKey = License.ResolveLicenseKey(options.LicenseKey);
@@ -317,6 +319,7 @@ public static class Clearcote
         var origins = options.AllowOrigins ?? $"http://{host}:{port},http://localhost:{port}";
         // A non-loopback bind or a "*" origin list hands the browser to whoever can reach the port.
         LaunchWarnings.Emit(LaunchWarnings.ForServe(host, origins).Concat(LaunchWarnings.ForArgs(options.Args)), options.Quiet);
+        LaunchWarnings.EmitOnce(LaunchWarnings.ForPersonaHost(options), options.Quiet);   // a Linux persona on Windows
         var cdpArgs = new List<string>
         {
             $"--remote-debugging-port={port}",

@@ -6,8 +6,13 @@
 // launch() and emitCoherenceWarnings() prints an actionable line to stderr. Never blocks the
 // launch; suppressible with quiet:true or CLEARCOTE_NO_WARN=1. coherenceWarnings() is pure (no I/O).
 
+import { isFingerprintPassthrough } from "./fingerprint.js";
+
 const SOFTWARE_GPU = ["swiftshader", "llvmpipe", "microsoft basic render", "software adapter", "software"];
 const seenNotes = new Set<string>(); // fire-once per process for NOTE codes
+// WARN codes about the HOST rather than one launch's options: said once per process, like a note, so a
+// program that launches in a loop is told once.
+const ONCE_PER_PROCESS = new Set(["linux-persona-windows-host"]);
 
 export interface CoherenceWarning {
   severity: "warn" | "note";
@@ -73,6 +78,15 @@ export function coherenceWarnings(
       `platform='${platform}' but this host is ${fam} and no fingerprintProfile supplies that OS's ` +
       `fonts/metrics - font, canvas and font-list hashes will be host-native and won't match a real ` +
       `${platform} Chrome. Use a fingerprintProfile captured on ${platform}, or set platform='${fam}'.`);
+  // On a Windows host the GPU runs through Direct3D 11, which clamps the WebGL and WebGPU limits (vertex
+  // uniform vectors, a 16384 maximum texture size, ...). A persona can lower a limit, never lift one past the
+  // driver's, so a Linux claim here reports limits no real Linux machine has. Pass-through claims nothing.
+  // Only a local launch gets here: a Docker launch runs on Linux in its container, a cloud one remotely.
+  if (fam === "windows" && String(platform ?? "").trim().toLowerCase() === "linux" && !isFingerprintPassthrough(opts.fingerprint))
+    warn("linux-persona-windows-host",
+      "a Linux persona on a Windows host reports Windows GPU limits (Direct3D caps WebGL), which no real " +
+      "Linux machine has. Use platform: \"windows\" on Windows, or run Linux personas on Linux or in Docker " +
+      "(docker: true).");
   if (gpuR && platform) {
     const why = gpuIncoherent(gpuR, platform);
     if (why) warn("gpu-platform", `gpuRenderer is incoherent with platform='${platform}' (${why}): '${gpuR}'.`);
@@ -175,7 +189,13 @@ const ENGINE_NOTES: ReadonlyArray<readonly [string, string]> = [
     "and read it back with page.evaluate()."],
 ];
 
-/** Print coherence warnings to stderr unless quiet or CLEARCOTE_NO_WARN. NOTE lines fire once/process. */
+/** Tests: forget which once-per-process lines were already said. */
+export function resetSeenWarnings(): void {
+  seenNotes.clear();
+}
+
+/** Print coherence warnings to stderr unless quiet or CLEARCOTE_NO_WARN. NOTE lines (and the host warnings in
+ *  ONCE_PER_PROCESS) fire once per process; the other WARN lines fire every launch. */
 export function emitCoherenceWarnings(
   opts: Record<string, unknown>,
   quiet?: boolean,
@@ -184,7 +204,7 @@ export function emitCoherenceWarnings(
 ): void {
   if (quiet || process.env.CLEARCOTE_NO_WARN) return;
   for (const w of coherenceWarnings(opts, hostPlatform, buildMajor)) {
-    if (w.severity === "note") {
+    if (w.severity === "note" || ONCE_PER_PROCESS.has(w.code)) {
       if (seenNotes.has(w.code)) continue;
       seenNotes.add(w.code);
     }
