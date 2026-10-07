@@ -17,6 +17,8 @@ public class InstallLockTests : IDisposable
     {
         (Download.LockStaleAfter, Download.LockUnreadableAfter, Download.LockHeartbeat, Download.LockBreakerStaleAfter) = _timing;
         Download.BeforeVerifiedHook = null;
+        Download.BeforeMoveDirHook = null;
+        Download.InUsePoll = TimeSpan.FromSeconds(1);
         foreach (var dir in _temp) TestTemp.Remove(dir);
     }
 
@@ -354,6 +356,7 @@ public class InstallLockTests : IDisposable
     [Fact]
     public async Task A_lock_written_before_this_machine_started_is_taken_over_at_once()
     {
+        if (Download.BootId() is not null) return; // with a boot id (Linux) the boot id tells the boot
         // Its process number may belong to an unrelated program since the restart.
         var @base = Base();
         WriteLock(@base, created: 0); // our pid, alive -- but the record is older than this boot
@@ -424,5 +427,111 @@ public class InstallLockTests : IDisposable
         });
         await Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true });
         Assert.True(File.Exists(breaker));
+    }
+
+    [Fact]
+    public async Task A_live_holder_from_this_boot_is_kept_even_when_its_lock_looks_older_than_the_boot()
+    {
+        // A forward clock step (a VM resumed, a Docker Desktop VM after sleep) can make a live holder's lock look
+        // written before the boot. The boot id already tells the boot, so only the process check counts.
+        if (Download.BootId() is null) return; // needs a boot id (Linux)
+        var @base = Base();
+        WriteLock(@base, created: 0); // our pid, this boot, our start time
+        var err = await Assert.ThrowsAsync<TimeoutException>(() => Download.AcquireInstallLockAsync(@base, TimeSpan.FromMilliseconds(1500)));
+        Assert.Contains("which is still running", err.Message);
+    }
+
+    private static IOException InUse(string path) =>
+        new($"The process cannot access the file '{path}' because it is being used by another process.");
+
+    [Fact]
+    public async Task A_damaged_build_in_use_is_left_marked_and_reported_at_once()
+    {
+        // A tree marked verified but damaged, whose files a running browser still holds (Windows will not move
+        // them): stop at once with "close it", without downloading and without unmarking it, so that the launch
+        // after the browser is closed repairs it.
+        if (OperatingSystem.IsMacOS()) return;
+        var cache = Cache();
+        var @base = Path.Combine(cache, FakeBuildServer.Tag);
+        var exe = FakeBuildServer.VerifiedTree(@base);
+        File.Delete(Path.Combine(Path.GetDirectoryName(exe)!, "icudtl.dat")); // damaged
+        var inUse = true;
+        Download.BeforeMoveDirHook = (src, dst) =>
+        {
+            if (inUse && Path.GetFileName(src) == "browser" && Path.GetFileName(dst).StartsWith(".trash-")) throw InUse(src);
+        };
+        await using var srv = new FakeBuildServer();
+        for (var i = 0; i < 2; i++) // this launch and the next, while it is still in use
+        {
+            var err = await Assert.ThrowsAnyAsync<Exception>(() =>
+                Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true }));
+            Assert.Contains("still using them", err.Message);
+            Assert.Equal(0, srv.ArchiveHits); // nothing downloaded
+            Assert.True(File.Exists(Path.Combine(@base, ".verified"))); // nor unmarked
+            Assert.True(File.Exists(Path.Combine(@base, Download.Manifest)));
+        }
+        inUse = false; // the browser was closed
+        var got = await Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true });
+        Assert.True(File.Exists(got));
+        Assert.Equal(1, srv.ArchiveHits);
+        Assert.Equal(new[] { ".manifest.json", ".verified", "browser" }, FakeBuildServer.Entries(@base));
+    }
+
+    [Fact]
+    public async Task A_holder_that_lost_the_lock_writes_no_manifest()
+    {
+        // Once its tree is in place it checks the lock before writing .manifest.json too: a late manifest could
+        // overwrite the new holder's, or describe a tree that the new holder is replacing.
+        if (OperatingSystem.IsMacOS()) return;
+        var cache = Cache();
+        var @base = Path.Combine(cache, FakeBuildServer.Tag);
+        var taken = 0;
+        Download.BeforeMoveDirHook = (_, dst) => // its tree goes in place; another process takes over
+        {
+            if (Path.GetFileName(dst) == "browser" && Interlocked.Exchange(ref taken, 1) == 0) WriteLock(@base, nonce: new string('e', 32));
+        };
+        await using var srv = new FakeBuildServer();
+        var install = Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true });
+        for (var i = 0; i < 300 && Volatile.Read(ref taken) == 0; i++) await Task.Delay(50);
+        Assert.Equal(1, Volatile.Read(ref taken));
+        await Task.Delay(700);
+        var manifestWhileLost = File.Exists(Path.Combine(@base, Download.Manifest));
+        var verifiedWhileLost = File.Exists(Path.Combine(@base, ".verified"));
+        File.Delete(LockPath(@base)); // the other process lets go without installing
+        var exe = await install.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.False(manifestWhileLost);
+        Assert.False(verifiedWhileLost);
+        Assert.True(File.Exists(exe));
+        Assert.Equal(2, srv.ArchiveHits);
+        Assert.Equal(new[] { ".manifest.json", ".verified", "browser" }, FakeBuildServer.Entries(@base));
+    }
+
+    [Fact]
+    public async Task After_taking_over_an_unconfirmed_holder_it_waits_for_its_tree_to_be_free()
+    {
+        // A holder that was suspended can still hold its half-installed tree when the lock is taken over; it lets
+        // go when it resumes and finds the lock gone. Wait for that instead of failing.
+        if (OperatingSystem.IsMacOS()) return;
+        Download.LockStaleAfter = TimeSpan.FromMilliseconds(500);
+        Download.InUsePoll = TimeSpan.FromMilliseconds(200);
+        var cache = Cache();
+        var @base = Path.Combine(cache, FakeBuildServer.Tag);
+        Directory.CreateDirectory(Path.Combine(@base, "browser", "half")); // its tree, moved in but not verified
+        WriteLock(@base, pid: 1, host: "another-machine"); // cannot be confirmed dead: taken over once it stops changing
+        var busy = 15; // more than the quick retries of a single move on Windows
+        Download.BeforeMoveDirHook = (src, dst) =>
+        {
+            if (busy > 0 && Path.GetFileName(src) == "browser" && Path.GetFileName(dst).StartsWith(".trash-"))
+            {
+                busy--;
+                throw InUse(src);
+            }
+        };
+        await using var srv = new FakeBuildServer();
+        var exe = await Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true });
+        Assert.True(File.Exists(exe));
+        Assert.Equal(1, srv.ArchiveHits);
+        Assert.Equal(0, busy); // it did wait for the files
+        Assert.Equal(new[] { ".manifest.json", ".verified", "browser" }, FakeBuildServer.Entries(@base));
     }
 }

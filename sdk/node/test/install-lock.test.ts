@@ -42,6 +42,7 @@ afterEach(() => {
   if (installTestHooks) {
     delete installTestHooks.beforeVerified;
     delete (installTestHooks as Record<string, unknown>).heartbeatWorkerSource;
+    delete (installTestHooks as Record<string, unknown>).beforeRename;
   }
 });
 
@@ -210,7 +211,7 @@ describe("install lock", () => {
 });
 
 describe("install lock: process numbers, restarts, breakers and the heartbeat", () => {
-  it("takes over at once a lock written before this machine started", async () => {
+  it.runIf(process.platform !== "linux")("takes over at once a lock written before this machine started (no boot id)", async () => {
     // Its process number may belong to an unrelated program since the restart.
     const base = path.join(tempDir("cc-lock-"), TAG);
     writeLock(base, { created: 0 }); // our pid, alive -- but the record is older than this boot
@@ -423,4 +424,106 @@ describe.runIf(proPlatform)("installs under the install lock", () => {
       await srv.close();
     }
   }, 30_000);
+
+  it("leaves a damaged build that is in use marked, and says so at once", async () => {
+    // A tree marked verified but damaged, whose files a running browser still holds (Windows will not move
+    // them): stop at once with "close it", without downloading and without unmarking it, so that the launch
+    // after the browser is closed repairs it.
+    const cache = tempDir("cc-lock-");
+    const base = path.join(cache, TAG);
+    const exe = verifiedTree(base);
+    rmSync(path.join(path.dirname(exe), "icudtl.dat")); // damaged
+    let inUse = true;
+    (installTestHooks as Record<string, unknown>).beforeRename = (src: string, dst: string) => {
+      if (inUse && path.basename(src) === "browser" && path.basename(dst).startsWith(".trash-")) {
+        throw Object.assign(new Error(`EBUSY: resource busy or locked, rename '${src}'`), { code: "EBUSY" });
+      }
+    };
+    const srv = await startFakeBuild();
+    try {
+      for (let i = 0; i < 2; i++) { // this launch and the next, while it is still in use
+        await expect(proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true })).rejects.toThrow("still using them");
+        expect(srv.archiveHits).toBe(0); // nothing downloaded
+        expect(existsSync(path.join(base, ".verified"))).toBe(true); // nor unmarked
+        expect(existsSync(path.join(base, ".manifest.json"))).toBe(true);
+      }
+      inUse = false; // the browser was closed
+      const got = await proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
+      expect(existsSync(got)).toBe(true);
+      expect(srv.archiveHits).toBe(1);
+      expect(readdirSync(base).sort()).toEqual([".manifest.json", ".verified", "browser"]);
+    } finally {
+      await srv.close();
+    }
+  }, 60_000);
+
+  it("writes no manifest once it lost the lock", async () => {
+    // Once its tree is in place it checks the lock before writing .manifest.json too: a late manifest could
+    // overwrite the new holder's, or describe a tree that the new holder is replacing.
+    const cache = tempDir("cc-lock-");
+    const base = path.join(cache, TAG);
+    let taken = false;
+    (installTestHooks as Record<string, unknown>).beforeRename = (_src: string, dst: string) => {
+      if (!taken && path.basename(dst) === "browser") { // its tree goes in place; another process takes over
+        writeLock(base, { nonce: "e".repeat(32), sdk: "node" });
+        taken = true;
+      }
+    };
+    const srv = await startFakeBuild();
+    try {
+      const install = proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
+      for (let i = 0; i < 300 && !taken; i++) await sleep(50);
+      expect(taken).toBe(true);
+      await sleep(700);
+      const manifestWhileLost = existsSync(path.join(base, ".manifest.json"));
+      const verifiedWhileLost = existsSync(path.join(base, ".verified"));
+      rmSync(lockPath(base), { force: true }); // the other process lets go without installing
+      const exe = await install;
+      expect(manifestWhileLost).toBe(false);
+      expect(verifiedWhileLost).toBe(false);
+      expect(existsSync(exe)).toBe(true);
+      expect(srv.archiveHits).toBe(2);
+      expect(readdirSync(base).sort()).toEqual([".manifest.json", ".verified", "browser"]);
+    } finally {
+      await srv.close();
+    }
+  }, 60_000);
+
+  it("waits, after taking over a holder not confirmed dead, for its tree to be free", async () => {
+    // A holder that was suspended can still hold its half-installed tree when the lock is taken over; it lets
+    // go when it resumes and finds the lock gone. Wait for that instead of failing.
+    installLockTiming.staleMs = 500;
+    (installLockTiming as Record<string, number>).inUsePollMs = 200;
+    const cache = tempDir("cc-lock-");
+    const base = path.join(cache, TAG);
+    mkdirSync(path.join(base, "browser", "half"), { recursive: true }); // its tree, moved in but not verified
+    writeLock(base, { host: "another-machine", pid: 1 }); // cannot be confirmed dead: taken over once it stops changing
+    let busy = 15; // more than the quick retries of a single move on Windows
+    (installTestHooks as Record<string, unknown>).beforeRename = (src: string, dst: string) => {
+      if (busy > 0 && path.basename(src) === "browser" && path.basename(dst).startsWith(".trash-")) {
+        busy--;
+        throw Object.assign(new Error(`EBUSY: resource busy or locked, rename '${src}'`), { code: "EBUSY" });
+      }
+    };
+    const srv = await startFakeBuild();
+    try {
+      const exe = await proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
+      expect(existsSync(exe)).toBe(true);
+      expect(srv.archiveHits).toBe(1);
+      expect(busy).toBe(0); // it did wait for the files
+      expect(readdirSync(base).sort()).toEqual([".manifest.json", ".verified", "browser"]);
+    } finally {
+      await srv.close();
+    }
+  }, 60_000);
+});
+
+describe.runIf(process.platform === "linux")("install lock with a boot id", () => {
+  it("keeps a live holder from this boot even when its lock looks older than the boot", async () => {
+    // A forward clock step (a VM resumed, a Docker Desktop VM after sleep) can make a live holder's lock look
+    // written before the boot. The boot id already tells the boot, so only the process check counts.
+    const base = path.join(tempDir("cc-lock-"), TAG);
+    writeLock(base, { created: 0 }); // our pid, this boot, our start time
+    await expect(acquireInstallLock(base, { timeoutMs: 1500 })).rejects.toThrow("which is still running");
+  });
 });

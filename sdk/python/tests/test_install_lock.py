@@ -443,6 +443,7 @@ def test_a_verified_build_whose_browser_is_gone_is_installed_again(tmp_path, dam
     assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]
 
 
+@pytest.mark.skipif(download._boot_id() is not None, reason="with a boot id (Linux) the boot id tells the boot")
 def test_a_lock_written_before_this_machine_started_is_taken_over_at_once(tmp_path):
     """Its process number may belong to an unrelated program since the restart."""
     base = str(tmp_path / TAG)
@@ -479,3 +480,126 @@ def test_a_live_pid_that_cannot_be_checked_is_named_with_care(tmp_path):
     assert "that process number may now belong to another program" in msg
     assert "If no Clearcote program is installing this build, delete this file" in msg
 
+
+
+@pytest.mark.skipif(download._boot_id() is None, reason="needs a boot id (Linux)")
+def test_a_live_holder_from_this_boot_is_kept_even_when_its_lock_looks_older_than_the_boot(tmp_path):
+    """A forward clock step (a VM resumed, a Docker Desktop VM after sleep) can make a live holder's lock look
+    written before the boot. The boot id already tells the boot, so only the process check counts."""
+    base = str(tmp_path / TAG)
+    _write_lock(base, created=0)  # our pid, this boot, our start time
+    with pytest.raises(RuntimeError, match="which is still running"):
+        download._acquire_install_lock(base, timeout=1.5)
+
+
+def _rename_in_use(monkeypatch, times=None):
+    """Moving browser/ aside fails as if a program had its files open (``times`` times; None: until undone)."""
+    real = download._rename_dir
+    state = {"left": times, "on": True}
+
+    def rename(src, dst):
+        if (state["on"] and os.path.basename(src) == "browser" and os.path.basename(dst).startswith(".trash-")
+                and (state["left"] is None or state["left"] > 0)):
+            if state["left"] is not None:
+                state["left"] -= 1
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process", src)
+        real(src, dst)
+
+    monkeypatch.setattr(download, "_rename_dir", rename)
+    return state
+
+
+@needs_pro_platform
+def test_a_damaged_build_in_use_is_left_marked_and_reported_at_once(tmp_path, monkeypatch):
+    """A tree marked verified but damaged, whose files a running browser still holds (Windows will not move
+    them): stop at once with "close it", without downloading and without unmarking it, so that the launch after
+    the browser is closed repairs it."""
+    cache = str(tmp_path / "cache")
+    base = os.path.join(cache, TAG)
+    exe = verified_tree(base)
+    os.remove(os.path.join(os.path.dirname(exe), "icudtl.dat"))  # damaged
+    state = _rename_in_use(monkeypatch)
+    with FakeBuildServer() as srv:
+        for _ in range(2):  # this launch and the next, while it is still in use
+            with pytest.raises(RuntimeError, match="still using them"):
+                download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
+            assert srv.archive_hits == 0  # nothing downloaded
+            assert os.path.exists(os.path.join(base, ".verified"))  # nor unmarked
+            assert os.path.exists(os.path.join(base, download.MANIFEST))
+        state["on"] = False  # the browser was closed
+        path = download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
+        assert os.path.isfile(path) and srv.archive_hits == 1
+    assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a file held open blocks moving its folder on Windows only")
+def test_a_damaged_build_really_in_use_is_left_marked_and_reported_at_once(tmp_path):
+    cache = str(tmp_path / "cache")
+    base = os.path.join(cache, TAG)
+    exe = verified_tree(base)
+    os.remove(os.path.join(os.path.dirname(exe), "icudtl.dat"))  # damaged
+    with FakeBuildServer() as srv:
+        with open(os.path.join(os.path.dirname(exe), "chrome.dll"), "rb"):  # a running browser holds its files
+            with pytest.raises(RuntimeError, match="still using them"):
+                download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
+            assert srv.archive_hits == 0
+            assert os.path.exists(os.path.join(base, ".verified"))
+        path = download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
+        assert os.path.isfile(path) and srv.archive_hits == 1
+
+
+@needs_pro_platform
+def test_a_holder_that_lost_the_lock_writes_no_manifest(tmp_path, monkeypatch):
+    """Once its tree is in place it checks the lock before writing .manifest.json too: a late manifest could
+    overwrite the new holder's, or describe a tree that the new holder is replacing."""
+    cache = str(tmp_path / "cache")
+    base = os.path.join(cache, TAG)
+    taken = threading.Event()
+    real = download._rename_dir
+
+    def rename(src, dst):
+        real(src, dst)
+        if os.path.basename(dst) == "browser" and not taken.is_set():  # its tree is in place; another takes over
+            _write_lock(base, nonce="e" * 32)
+            taken.set()
+
+    monkeypatch.setattr(download, "_rename_dir", rename)
+    out, errors = [], []
+    with FakeBuildServer() as srv:
+        def install():
+            try:
+                out.append(download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True))
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        t = threading.Thread(target=install)
+        t.start()
+        assert taken.wait(30)
+        time.sleep(0.7)
+        manifest_while_lost = os.path.exists(os.path.join(base, download.MANIFEST))
+        verified_while_lost = os.path.exists(os.path.join(base, ".verified"))
+        with contextlib.suppress(OSError):
+            os.remove(_lock_path(base))  # the other process lets go without installing
+        t.join(30)
+    assert not manifest_while_lost and not verified_while_lost
+    assert errors == [] and os.path.isfile(out[0])
+    assert srv.archive_hits == 2
+    assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]
+
+
+@needs_pro_platform
+def test_after_taking_over_an_unconfirmed_holder_it_waits_for_its_tree_to_be_free(tmp_path, monkeypatch):
+    """A holder taken over without proof that it died (it was suspended) can still hold its half-installed tree;
+    it lets go when it resumes and finds the lock gone. Wait for that, instead of failing."""
+    monkeypatch.setattr(download, "_LOCK_STALE", 0.5)
+    monkeypatch.setattr(download, "_IN_USE_POLL", 0.2, raising=False)
+    cache = str(tmp_path / "cache")
+    base = os.path.join(cache, TAG)
+    os.makedirs(os.path.join(base, "browser", "half"))  # its tree, moved in but not verified
+    _write_lock(base, host="another-machine", pid=1)  # cannot be confirmed dead: taken over once it stops changing
+    state = _rename_in_use(monkeypatch, times=3)
+    with FakeBuildServer() as srv:
+        path = download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
+    assert os.path.isfile(path) and srv.archive_hits == 1
+    assert state["left"] == 0  # it did wait for the files
+    assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]

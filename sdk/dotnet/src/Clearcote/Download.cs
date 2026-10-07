@@ -110,7 +110,21 @@ public static class Download
                 }
                 catch { /* best-effort */ }
             }
-            File.WriteAllText(Path.Combine(@base, Manifest), JsonSerializer.Serialize(new { files }));
+            // Written to a temporary file and renamed into place, so no reader ever sees half a manifest.
+            var tmp = Path.Combine(@base, $"{Manifest}.tmp-{Convert.ToHexString(RandomNumberGenerator.GetBytes(4)).ToLowerInvariant()}");
+            try
+            {
+                File.WriteAllText(tmp, JsonSerializer.Serialize(new { files }));
+                for (var attempt = 0; ; attempt++)
+                {
+                    try { File.Move(tmp, Path.Combine(@base, Manifest), overwrite: true); return; }
+                    catch (Exception e) when (OperatingSystem.IsWindows() && attempt < 9 && e is IOException or UnauthorizedAccessException)
+                    {
+                        Thread.Sleep(50); // Windows: a reader has the old one open this instant
+                    }
+                }
+            }
+            catch { TryDelete(tmp); throw; }
         }
         catch { /* a manifest is an optimisation, never a reason to fail an install */ }
     }
@@ -233,9 +247,11 @@ public static class Download
         if (!repair) return null;
 
         Log(quiet, $"cached browser is damaged ({problems[0]}) — re-downloading");
+        // Moved aside first: if a running browser still holds its files, this stops here with "close it", with
+        // the tree still marked, instead of leaving an unmarked tree that no later install can move.
+        MoveAside(@base, browserDir);
         TryDelete(Path.Combine(@base, ".verified"));
         TryDelete(Path.Combine(@base, Manifest));
-        MoveAside(@base, browserDir);
         lock (Scanned) Scanned.Remove(Path.GetFullPath(browserDir));
         return null;
     }
@@ -416,21 +432,24 @@ public static class Download
     //     the creation time, Python and .NET), else null; "created" is when the lock was written (ms, Unix).
     //  2. The holder touches the file (mtime) every 5 s while it works, from a thread of its own.
     //  3. Waiters poll every 0.25 s. A record from this machine (same host, boot id and PID namespace) is stale
-    //     when it was written before the machine last started, when its pid is dead, or when that pid now
-    //     belongs to a newer process (another start time; on Windows created after the lock). A pid confirmed
-    //     to be the holder is never stale, however old its heartbeat. When that cannot be confirmed, and for
-    //     any other lock: stale once it (mtime + content) has not changed for 120 s by the waiter's own clock
-    //     -- 10 s when not valid JSON or its mtime is over 15 min old -- so clocks that disagree do not matter.
-    //     A stale lock is broken while holding <tag>/.install-lock.break (also O_EXCL; a breaker unchanged for
-    //     30 s by the waiter's own clock is removed): if the lock is still exactly what was judged stale,
-    //     delete it; then delete the breaker.
+    //     when its pid is dead, when that pid now belongs to a newer process (another start time; on Windows
+    //     created after the lock), or -- only without a boot id (Windows, macOS) -- when it was written before
+    //     the machine last started. A pid confirmed to be the holder is never stale, however old its heartbeat.
+    //     When that cannot be confirmed, and for any other lock: stale once it (mtime + content) has not changed
+    //     for 120 s by the waiter's own clock -- 10 s when not valid JSON or its mtime is over 15 min old -- so
+    //     clocks that disagree do not matter. A stale lock is broken while holding <tag>/.install-lock.break
+    //     (also O_EXCL; a breaker unchanged for 30 s by the waiter's own clock is removed): if the lock is still
+    //     exactly what was judged stale, delete it; then delete the breaker.
     //  4. The holder re-checks the cache and uses a verified build if one is there now; a tree marked
-    //     .verified that fails the check (files or the binary gone) is moved aside by the holder. Otherwise it
-    //     downloads and extracts into <tag>/.tmp-<nonce>/. Then, only while the lock is still its own: it uses a
-    //     tree that appeared meanwhile and passes the full check, else moves browser/ aside (<tag>/.trash-*),
-    //     moves its tree to <tag>/browser and writes .manifest.json; it checks the lock once more and only then
-    //     writes .verified. A tree that passes the check is never moved or written over by an install.
-    //     Leftovers (.tmp-*, .trash-*, a breaker unchanged throughout the install) are swept.
+    //     .verified that fails the check (files or the binary gone) is moved aside by the holder and only then
+    //     unmarked -- if its files are in use, the install stops at once ("close it and try again"). Otherwise
+    //     it downloads and extracts into <tag>/.tmp-<nonce>/. Then, only while the lock is still its own: it
+    //     uses a tree that appeared meanwhile and passes the full check, else moves browser/ aside
+    //     (<tag>/.trash-*; after taking over a holder not confirmed dead, it waits within the install wait while
+    //     that tree is still in use), moves its tree to <tag>/browser, checks the lock and writes .manifest.json
+    //     (temporary file, then rename), checks the lock once more and only then writes .verified. A tree that
+    //     passes the check is never moved or written over by an install. Leftovers (.tmp-*, .trash-*, a breaker
+    //     unchanged throughout the install) are swept.
     //  5. Release deletes the lock only while it still holds our nonce. Waiting gives up after 30 min with an
     //     error that names the holder (pid, host) and the lock file.
 
@@ -444,12 +463,16 @@ public static class Download
     internal static TimeSpan LockUnreadableAfter = TimeSpan.FromSeconds(10);
     internal static readonly TimeSpan LockAncientAfter = TimeSpan.FromMinutes(15);
     internal static TimeSpan LockBreakerStaleAfter = TimeSpan.FromSeconds(30);
+    internal static TimeSpan InUsePoll = TimeSpan.FromSeconds(1);
     private const long BootMarginMs = 5 * 60_000; // the clock can still be corrected in the first minutes after a start
     private const long ReuseMarginMs = 2_000;
     internal static readonly TimeSpan InstallWait = TimeSpan.FromMinutes(30);
 
     /// Test seam: called right before an install writes .verified. Left null in production.
     internal static Action? BeforeVerifiedHook;
+
+    /// Test seam: called before each move of a browser tree; may throw, as a move of a tree in use does.
+    internal static Action<string, string>? BeforeMoveDirHook;
 
     private enum LockState { Gone, Busy, Ok, Invalid }
 
@@ -560,7 +583,8 @@ public static class Download
     /// For a record from this machine: gone, alive (certainly still the holder) or unknown.
     private static Owner OwnerState(LockRecord rec)
     {
-        if (rec.Created is { } created && BootTimeMs() is { } boot && created < boot - BootMarginMs)
+        // written before this machine last started (a boot id, where there is one, tells that already)
+        if (rec.Boot is null && rec.Created is { } created && BootTimeMs() is { } boot && created < boot - BootMarginMs)
             return Owner.Gone; // written before this machine last started
         var pid = rec.Pid!.Value;
         if (!PidAlive(pid)) return Owner.Gone;
@@ -679,10 +703,14 @@ public static class Download
         private volatile bool _lost;
         private readonly Timer _timer;
 
-        internal InstallLock(string lockPath, string nonce)
+        /// Taken over from a holder that was not confirmed dead (it may still hold its files for a while).
+        public bool TookOver { get; }
+
+        internal InstallLock(string lockPath, string nonce, bool tookOver = false)
         {
             LockPath = lockPath;
             Nonce = nonce;
+            TookOver = tookOver;
             _timer = new Timer(_ => Beat(), null, LockHeartbeat, LockHeartbeat);
         }
 
@@ -737,6 +765,7 @@ public static class Download
         (LockState, DateTime, string?) seen = default; // the lock as last read, and since when it has looked like that
         var seenAt = TimeSpan.Zero;
         var breakerWatch = new BreakerWatch();
+        var tookOver = false;
         while (true)
         {
             FileStream? fs = null;
@@ -750,8 +779,9 @@ public static class Download
             {
                 try { using (fs) fs.Write(body); }
                 catch { TryDelete(path); throw; }
-                return new InstallLock(path, nonce);
+                return new InstallLock(path, nonce, tookOver);
             }
+            tookOver = false;
             var (state, rec, mtime, raw) = ReadLock(path);
             if (state != LockState.Gone) refused = 0;
             else if (++refused > 40) throw refusal!; // no lock file, yet we may not create one: not a race, a real error
@@ -764,6 +794,7 @@ public static class Download
             if ((state is LockState.Ok or LockState.Invalid) && LockStale(rec, mtime, now - seenAt) && BreakStaleLock(path, seen, breakerWatch))
             {
                 Log(quiet, $"removed an abandoned install lock ({LockHolder(rec)})");
+                tookOver = !(rec is not null && FromHere(rec) && OwnerState(rec) == Owner.Gone);
                 continue;
             }
             if (now >= wait)
@@ -792,7 +823,12 @@ public static class Download
     {
         for (var attempt = 0; ; attempt++)
         {
-            try { Directory.Move(src, dst); return; }
+            try
+            {
+                BeforeMoveDirHook?.Invoke(src, dst);
+                Directory.Move(src, dst);
+                return;
+            }
             catch (Exception e) when (OperatingSystem.IsWindows() && attempt < 9
                                       && (e is UnauthorizedAccessException || (e is IOException && e is not DirectoryNotFoundException)))
             {
@@ -802,6 +838,12 @@ public static class Download
     }
 
     /// Move a tree that must be replaced out of the way, then delete it if nothing is using it.
+    /// A tree that must be moved aside is in use (Windows will not move a folder whose files are open).
+    private sealed class InUseException : IOException
+    {
+        public InUseException(string message, Exception inner) : base(message, inner) { }
+    }
+
     private static void MoveAside(string @base, string browserDir)
     {
         var trash = Path.Combine(@base, ".trash-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant());
@@ -809,11 +851,38 @@ public static class Download
         catch (DirectoryNotFoundException) { return; }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            throw new IOException(
+            throw new InUseException(
                 $"Clearcote cannot replace the browser files in\n    {browserDir}\nbecause another program is still using them ({e.Message}).\n" +
                 "Close every program that uses this Clearcote browser, then try again.", e);
         }
         try { Directory.Delete(trash, recursive: true); } catch { /* what is still in use stays until the next install sweeps it */ }
+    }
+
+    /// Move an unverified browser/ aside. After taking over a holder that was not confirmed dead (it was
+    /// suspended), its half-installed tree can stay in use until it resumes and finds the lock gone: wait for
+    /// that, within the install wait, instead of failing. In any other case an in-use tree fails at once.
+    private static async Task MoveAsideWhenFreeAsync(string @base, string browserDir, InstallLock held, bool quiet)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var told = false;
+        while (true)
+        {
+            try
+            {
+                MoveAside(@base, browserDir);
+                return;
+            }
+            catch (InUseException) when (held.TookOver && Stopwatch.GetElapsedTime(started) < InstallWait)
+            {
+                if (!held.Held()) throw new LockLostException();
+                if (!told)
+                {
+                    Log(quiet, $"waiting for the installer that lost the lock to let go of {browserDir}");
+                    told = true;
+                }
+            }
+            await Task.Delay(InUsePoll).ConfigureAwait(false);
+        }
     }
 
     /// Remove what an install that stopped part-way left behind. Only called by the lock holder.
@@ -832,6 +901,11 @@ public static class Download
                 if (name == ".incoming" || name.StartsWith(".tmp-", StringComparison.Ordinal) || name.StartsWith(".trash-", StringComparison.Ordinal))
                     try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
             }
+        }
+        catch { /* best-effort */ }
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(@base, Manifest + ".tmp-*")) TryDelete(file);
         }
         catch { /* best-effort */ }
         if (breakerSeen is not null && seen.Key is not null && seen.Key == breakerSeen.Key
@@ -943,7 +1017,8 @@ public static class Download
         }
         if (File.Exists(Path.Combine(@base, ".verified"))) throw new LockLostException(); // marked verified meanwhile by another process: start over
         TryDelete(Path.Combine(@base, Manifest));
-        if (Directory.Exists(browserDir) || File.Exists(browserDir)) MoveAside(@base, browserDir); // not verified: an install that stopped part-way
+        if (Directory.Exists(browserDir) || File.Exists(browserDir))
+            await MoveAsideWhenFreeAsync(@base, browserDir, held, quiet).ConfigureAwait(false); // not verified: an install that stopped part-way
         MoveDir(incoming, browserDir);
         exe = Path.Combine(browserDir, Path.GetRelativePath(incoming, exe));
 
@@ -951,7 +1026,9 @@ public static class Download
             WinLaunch.WarmFiles(browserDir); // close the chrome_elf.dll first-launch AV race
 
         // Record the finished tree BEFORE the .verified marker, so a launch never sees "verified"
-        // with no manifest to check it against.
+        // with no manifest to check it against -- and only while the lock is still ours, so a late manifest
+        // never lands on a tree the new holder is putting in place.
+        if (!held.Held()) throw new LockLostException();
         WriteManifest(@base, browserDir);
         // Mark it verified only while the lock is still ours: a process that took the lock over meanwhile then
         // finds an unverified tree it may replace, not a verified one it must leave alone.

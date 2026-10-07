@@ -372,10 +372,23 @@ export function writeManifest(base: string, browserDir: string): void {
     }
   };
   walk(browserDir);
+  // Written to a temporary file and renamed into place, so no reader ever sees half a manifest.
+  const final = path.join(base, MANIFEST);
+  const tmp = `${final}.tmp-${randomBytes(4).toString("hex")}`;
   try {
-    writeFileSync(path.join(base, MANIFEST), JSON.stringify({ files }));
+    writeFileSync(tmp, JSON.stringify({ files }));
+    for (let attempt = 0; ; attempt++) {
+      try {
+        renameSync(tmp, final);
+        return;
+      } catch (e) {
+        // Windows: a reader has the old one open this instant
+        if (process.platform !== "win32" || attempt >= 9 || errCode(e) !== "EPERM") throw e;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
+    }
   } catch {
-    /* a manifest is an optimisation, never a reason to fail an install */
+    rmSync(tmp, { force: true }); // a manifest is an optimisation, never a reason to fail an install
   }
 }
 
@@ -481,8 +494,10 @@ export function cachedBinary(base: string, binary: string, quiet?: boolean, repa
   // only the process that will re-install touches it.
   if (!repair) return null;
   log(quiet, `cached browser is damaged (${problems[0]}) — re-downloading`);
-  for (const marker of [".verified", MANIFEST]) rmSync(path.join(base, marker), { force: true });
+  // Moved aside first: if a running browser still holds its files, this stops here with "close it", with the
+  // tree still marked, instead of leaving an unmarked tree that no later install can move.
   moveAside(base, browserDir);
+  for (const marker of [".verified", MANIFEST]) rmSync(path.join(base, marker), { force: true });
   return null;
 }
 
@@ -495,21 +510,24 @@ export function cachedBinary(base: string, binary: string, quiet?: boolean, repa
 //     the creation time, Python and .NET), else null; "created" is when the lock was written (ms, Unix).
 //  2. The holder touches the file (mtime) every 5 s while it works, from a thread of its own.
 //  3. Waiters poll every 0.25 s. A record from this machine (same host, boot id and PID namespace) is stale
-//     when it was written before the machine last started, when its pid is dead, or when that pid now
-//     belongs to a newer process (another start time; on Windows created after the lock). A pid confirmed
-//     to be the holder is never stale, however old its heartbeat. When that cannot be confirmed, and for
-//     any other lock: stale once it (mtime + content) has not changed for 120 s by the waiter's own clock
-//     -- 10 s when not valid JSON or its mtime is over 15 min old -- so clocks that disagree do not matter.
-//     A stale lock is broken while holding <tag>/.install-lock.break (also O_EXCL; a breaker unchanged for
-//     30 s by the waiter's own clock is removed): if the lock is still exactly what was judged stale,
-//     delete it; then delete the breaker.
+//     when its pid is dead, when that pid now belongs to a newer process (another start time; on Windows
+//     created after the lock), or -- only without a boot id (Windows, macOS) -- when it was written before
+//     the machine last started. A pid confirmed to be the holder is never stale, however old its heartbeat.
+//     When that cannot be confirmed, and for any other lock: stale once it (mtime + content) has not changed
+//     for 120 s by the waiter's own clock -- 10 s when not valid JSON or its mtime is over 15 min old -- so
+//     clocks that disagree do not matter. A stale lock is broken while holding <tag>/.install-lock.break
+//     (also O_EXCL; a breaker unchanged for 30 s by the waiter's own clock is removed): if the lock is still
+//     exactly what was judged stale, delete it; then delete the breaker.
 //  4. The holder re-checks the cache and uses a verified build if one is there now; a tree marked
-//     .verified that fails the check (files or the binary gone) is moved aside by the holder. Otherwise it
-//     downloads and extracts into <tag>/.tmp-<nonce>/. Then, only while the lock is still its own: it uses a
-//     tree that appeared meanwhile and passes the full check, else moves browser/ aside (<tag>/.trash-*),
-//     moves its tree to <tag>/browser and writes .manifest.json; it checks the lock once more and only then
-//     writes .verified. A tree that passes the check is never moved or written over by an install.
-//     Leftovers (.tmp-*, .trash-*, a breaker unchanged throughout the install) are swept.
+//     .verified that fails the check (files or the binary gone) is moved aside by the holder and only then
+//     unmarked -- if its files are in use, the install stops at once ("close it and try again"). Otherwise
+//     it downloads and extracts into <tag>/.tmp-<nonce>/. Then, only while the lock is still its own: it
+//     uses a tree that appeared meanwhile and passes the full check, else moves browser/ aside
+//     (<tag>/.trash-*; after taking over a holder not confirmed dead, it waits within the install wait while
+//     that tree is still in use), moves its tree to <tag>/browser, checks the lock and writes .manifest.json
+//     (temporary file, then rename), checks the lock once more and only then writes .verified. A tree that
+//     passes the check is never moved or written over by an install. Leftovers (.tmp-*, .trash-*, a breaker
+//     unchanged throughout the install) are swept.
 //  5. Release deletes the lock only while it still holds our nonce. Waiting gives up after 30 min with an
 //     error that names the holder (pid, host) and the lock file.
 export const INSTALL_LOCK = ".install-lock";
@@ -517,10 +535,16 @@ export const INSTALL_LOCK = ".install-lock";
 /** Install-lock timings in ms (see the protocol above). Tests may shorten them. */
 export const installLockTiming = {
   pollMs: 250, heartbeatMs: 5_000, staleMs: 120_000, unreadableMs: 10_000, ancientMs: 15 * 60_000, breakerStaleMs: 30_000, waitMs: 30 * 60_000,
+  inUsePollMs: 1_000,
 };
 
 /** Test seam: called right before an install writes .verified. Left empty in production. */
-export const installTestHooks: { beforeVerified?: () => void; heartbeatWorkerSource?: string } = {};
+export const installTestHooks: {
+  beforeVerified?: () => void;
+  heartbeatWorkerSource?: string;
+  /** Called before each rename of a browser tree; may throw, as a rename of a tree in use does. */
+  beforeRename?: (src: string, dst: string) => void;
+} = {};
 
 const BOOT_MARGIN_MS = 5 * 60_000; // the clock can still be corrected in the first minutes after a start
 
@@ -615,7 +639,8 @@ function fromHere(rec: LockRecord): rec is LockRecord & { pid: number } {
 function ownerState(rec: LockRecord & { pid: number }): "gone" | "alive" | "unknown" {
   const created = typeof rec.created === "number" ? rec.created : null;
   const boot = bootTimeMs();
-  if (created !== null && boot !== null && created < boot - BOOT_MARGIN_MS) return "gone"; // written before this machine last started
+  // written before this machine last started (a boot id, where there is one, tells that already)
+  if ((rec.boot ?? null) === null && created !== null && boot !== null && created < boot - BOOT_MARGIN_MS) return "gone";
   if (!pidAlive(rec.pid)) return "gone";
   const now = processStart(rec.pid);
   if (now?.startsWith("linux:")) {
@@ -708,6 +733,8 @@ export interface InstallLock {
   held(): boolean;
   /** Touch the lock file now (the heartbeat does this every few seconds too). */
   beat(): void;
+  /** Taken over from a holder that was not confirmed dead (it may still hold its files for a while). */
+  readonly tookOver: boolean;
   release(): Promise<void>;
 }
 
@@ -753,7 +780,7 @@ function startHeartbeat(p: string, nonce: string, beat: () => void): () => Promi
   };
 }
 
-function holdLock(p: string, nonce: string): InstallLock {
+function holdLock(p: string, nonce: string, tookOver: boolean): InstallLock {
   let lost = false;
   const held = (): boolean => {
     if (lost) return false;
@@ -776,6 +803,7 @@ function holdLock(p: string, nonce: string): InstallLock {
     nonce,
     held,
     beat,
+    tookOver,
     async release(): Promise<void> {
       await stopHeartbeat();
       for (let i = 0; i < 40; i++) { // another process may be reading the file this instant (Windows refuses the delete)
@@ -810,6 +838,7 @@ export async function acquireInstallLock(base: string, opts: { timeoutMs?: numbe
   let seen = ""; // the lock as last read, and since when (our clock) it has looked like that
   let seenAt = 0;
   const breakerWatch: BreakerWatch = { key: null, at: 0 };
+  let tookOver = false;
   for (;;) {
     let fd: number | null = null;
     try {
@@ -829,8 +858,9 @@ export async function acquireInstallLock(base: string, opts: { timeoutMs?: numbe
         throw e;
       }
       closeSync(fd);
-      return holdLock(p, nonce);
+      return holdLock(p, nonce, tookOver);
     }
+    tookOver = false;
     const s = readLock(p);
     if (s.state !== "gone") refused = 0;
     else if (refused > 40) throw new Error(`Clearcote cannot create ${p}: permission denied`); // not a race: a real error
@@ -842,6 +872,7 @@ export async function acquireInstallLock(base: string, opts: { timeoutMs?: numbe
     }
     if ((s.state === "ok" || s.state === "invalid") && lockStale(s.rec, s.mtimeMs, now - seenAt) && breakStaleLock(p, key, breakerWatch)) {
       log(opts.quiet ?? true, `removed an abandoned install lock (${lockHolder(s.rec)})`);
+      tookOver = !(s.rec && fromHere(s.rec) && ownerState(s.rec) === "gone");
       continue;
     }
     if (now >= deadline) {
@@ -871,6 +902,7 @@ const pause = (ms: number): void => {
 function renameDir(src: string, dst: string): void {
   for (let attempt = 0; ; attempt++) {
     try {
+      installTestHooks.beforeRename?.(src, dst);
       renameSync(src, dst);
       return;
     } catch (e) {
@@ -883,13 +915,16 @@ function renameDir(src: string, dst: string): void {
 }
 
 /** Move a tree that must be replaced out of the way, then delete it if nothing is using it. */
+/** A tree that must be moved aside is in use (Windows will not move a folder whose files are open). */
+class InUseError extends Error {}
+
 function moveAside(base: string, browserDir: string): void {
   const trash = path.join(base, `.trash-${randomBytes(6).toString("hex")}`);
   try {
     renameDir(browserDir, trash);
   } catch (e) {
     if (errCode(e) === "ENOENT") return;
-    throw new Error(
+    throw new InUseError(
       `Clearcote cannot replace the browser files in\n    ${browserDir}\nbecause another program is still using them (${(e as Error).message}).\n` +
         "Close every program that uses this Clearcote browser, then try again.",
     );
@@ -898,6 +933,30 @@ function moveAside(base: string, browserDir: string): void {
     rmSync(trash, { recursive: true, force: true });
   } catch {
     /* what is still in use stays until the next install sweeps it */
+  }
+}
+
+/**
+ * Move an unverified browser/ aside. After taking over a holder that was not confirmed dead (it was suspended),
+ * its half-installed tree can stay in use until it resumes and finds the lock gone: wait for that, within the
+ * install wait, instead of failing. In any other case an in-use tree fails at once.
+ */
+async function moveAsideWhenFree(base: string, browserDir: string, lock: InstallLock, quiet?: boolean): Promise<void> {
+  const deadline = performance.now() + installLockTiming.waitMs;
+  let told = false;
+  for (;;) {
+    try {
+      moveAside(base, browserDir);
+      return;
+    } catch (e) {
+      if (!(e instanceof InUseError) || !lock.tookOver || performance.now() >= deadline) throw e;
+      if (!lock.held()) throw new LockLost();
+      if (!told) {
+        log(quiet, `waiting for the installer that lost the lock to let go of ${browserDir}`);
+        told = true;
+      }
+      await sleep(installLockTiming.inUsePollMs);
+    }
   }
 }
 
@@ -917,7 +976,7 @@ function sweepLeftovers(base: string, asset?: string, breakerSeen?: BreakerWatch
     return seen;
   }
   for (const name of names) {
-    if (name === ".incoming" || name.startsWith(".tmp-") || name.startsWith(".trash-")) {
+    if (name === ".incoming" || name.startsWith(".tmp-") || name.startsWith(".trash-") || name.startsWith(`${MANIFEST}.tmp-`)) {
       try {
         rmSync(path.join(base, name), { recursive: true, force: true });
       } catch {
@@ -1074,7 +1133,7 @@ async function installInto(
   }
   if (existsSync(path.join(base, ".verified"))) throw new LockLost(); // marked verified meanwhile by another process: start over
   rmSync(path.join(base, MANIFEST), { force: true });
-  if (existsSync(browserDir)) moveAside(base, browserDir); // not verified: an install that stopped part-way
+  if (existsSync(browserDir)) await moveAsideWhenFree(base, browserDir, lock, opts.quiet); // not verified: an install that stopped part-way
   renameDir(incoming, browserDir);
   exe = path.join(browserDir, path.relative(incoming, exe));
 
@@ -1084,7 +1143,9 @@ async function installInto(
     warmFiles(browserDir);
   }
   // Record the finished tree BEFORE the .verified marker, so a launch never sees "verified" with
-  // no manifest to check it against.
+  // no manifest to check it against -- and only while the lock is still ours, so a late manifest never
+  // lands on a tree the new holder is putting in place.
+  if (!lock.held()) throw new LockLost();
   writeManifest(base, browserDir);
   // Mark it verified only while the lock is still ours: a process that took the lock over meanwhile then
   // finds an unverified tree it may replace, not a verified one it must leave alone.
