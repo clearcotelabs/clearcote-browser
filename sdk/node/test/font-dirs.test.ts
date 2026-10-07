@@ -6,7 +6,7 @@ import { basename, delimiter, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
-  FALLBACK_FONT_DIRS_ENV, FONT_DIRS_ENV, SCRIPT_SAMPLES, buildConf, checkFontDirs, fontFiles, fontLaunchEnv, fontLines,
+  FALLBACK_FONT_DIRS_ENV, FONT_DIRS_ENV, GENUINE_FACES_SWITCH, SCRIPT_SAMPLES, buildConf, checkFontDirs, fontFiles, fontLaunchEnv, fontLines,
   genuineRules, linuxFontEnv, linuxFontReport, readFont, resolveFontDirs,
 } from "../src/fonts.js";
 import { makeCollection, makeFont } from "./helpers/fontfiles.js";
@@ -41,11 +41,15 @@ afterEach(() => {
   }
 });
 
-function bundle() {
+/** A release directory: fonts/ with the real template, and a stand-in engine binary that carries the
+ * genuine-faces marker switch only when asked to (PRO r32+ does; older engines do not). */
+function bundle(genuineFaces = false) {
   const dir = tempDir("ccfontdirs-");
   const fonts = join(dir, "bin", "fonts");
   mkdirSync(fonts, { recursive: true });
   writeFileSync(join(fonts, "fonts.conf.template"), TEMPLATE);
+  const marker = genuineFaces ? `\0${GENUINE_FACES_SWITCH}\0` : "";
+  writeFileSync(join(dir, "bin", "chrome"), Buffer.from(`ELF\0proxy-auth\0${marker}`, "latin1"));
   return { dir, exe: join(dir, "bin", "chrome"), fonts };
 }
 
@@ -178,7 +182,7 @@ describe("the generated fontconfig file", () => {
 
   it("with your Windows fonts: listed first, their lookalikes dropped, one file per set of directories", () => {
     withPlatform("linux", () => {
-      const { dir, exe, fonts } = bundle();
+      const { dir, exe, fonts } = bundle(true);
       const win = sub(dir, "winfonts");
       makeFont(join(win, "arial.ttf"), ["Arial"], [0x41]);
       process.env[FONT_DIRS_ENV] = win;
@@ -197,6 +201,21 @@ describe("the generated fontconfig file", () => {
       expect(conf2.indexOf(`<dir>${other}</dir>`)).toBeLessThan(conf2.indexOf(`<dir>${win}</dir>`));
       expect(conf2.indexOf(`<dir>${win}</dir>`)).toBeLessThan(conf2.indexOf(`<dir>${fonts}</dir>`));
       expect(linuxFontEnv(exe).FONTCONFIG_FILE).toBe(path);
+    });
+  });
+
+  it("an engine without genuine faces keeps the rules (the directory is still listed first)", () => {
+    // Measured on such an engine: "Arial" still renders through its substitute, so retargeting
+    // Helvetica to the genuine Arial would give the two different widths.
+    withPlatform("linux", () => {
+      const { dir, exe, fonts } = bundle(false);
+      const win = sub(dir, "winfonts");
+      makeFont(join(win, "arial.ttf"), ["Arial"], [0x41]);
+      const conf = readFileSync(linuxFontEnv(exe, [win]).FONTCONFIG_FILE, "utf8");
+      expect(conf.indexOf(`<dir>${win}</dir>`)).toBeLessThan(conf.indexOf(`<dir>${fonts}</dir>`));
+      expect(conf).toContain("<string>Arial</string></test>");
+      expect(conf).toContain("<alias><family>sans-serif</family><prefer><family>Arimo</family></prefer></alias>");
+      expect(conf).toContain('<test name="family"><string>Helvetica</string></test><edit name="family" mode="assign" binding="strong"><string>Arimo</string></edit>');
     });
   });
 
@@ -263,6 +282,9 @@ describe("clearcote info", () => {
     expect(r.genuineWindowsFamilies).toEqual(["Arial", "Segoe UI"]);
     expect(r.lookalikeWindowsFamilies).toContain("Calibri");
     expect(r.lookalikeWindowsFamilies).not.toContain("Arial");
+    expect(r.genuineFacesSupported).toBe(false); // the stand-in engine has no marker
+    const r32 = bundle(true);
+    expect(withPlatform("linux", () => linuxFontReport(r32.exe, [win], env))!.genuineFacesSupported).toBe(true);
   });
 
   it("no report without a bundle", () => {
@@ -274,13 +296,14 @@ describe("clearcote info", () => {
       bundled: true, note: "metric-compatible Windows font clones are bundled with this build",
       scripts: { covered: ["Latin", "Greek"], missing: ["Khmer", "Ethiopic"] },
       fontDirs: ["/srv/winfonts"], fallbackFontDirs: ["/usr/local/share/clearcote/fonts"], ignoredFontDirs: ["/nope"],
-      genuineWindowsFamilies: ["Arial", "Segoe UI"], lookalikeWindowsFamilies: ["Calibri"],
+      genuineWindowsFamilies: ["Arial", "Segoe UI"], lookalikeWindowsFamilies: ["Calibri"], genuineFacesSupported: false,
     })).toEqual([
       "Fonts           metric-compatible Windows font clones are bundled with this build",
       "Scripts         2 of 4 render; no font for Khmer, Ethiopic (they draw as empty boxes)",
       "Your fonts      /srv/winfonts",
       "                real: Arial, Segoe UI",
       "                lookalike: Calibri",
+      "                this engine still draws its lookalikes for them (real faces need PRO r32 or newer)",
       "Fallback fonts  /usr/local/share/clearcote/fonts",
       "Ignored         /nope (not a directory)",
     ]);

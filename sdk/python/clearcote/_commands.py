@@ -348,6 +348,8 @@ def font_lines(f):
         lines.append("                real: " + (", ".join(genuine) if genuine else "none of the key Windows families"))
         if lookalike:
             lines.append("                lookalike: " + ", ".join(lookalike))
+        if genuine and f.get("genuineFacesSupported") is False:
+            lines.append("                this engine still draws its lookalikes for them (real faces need PRO r32 or newer)")
     for d in f.get("fallbackFontDirs") or []:
         lines.append(f"Fallback fonts  {d}")
     for d in f.get("ignoredFontDirs") or []:

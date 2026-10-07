@@ -14,9 +14,13 @@
 // browser. Two settings add directories to it (the same as the Python SDK's _fonts.py):
 //
 // * `fontDirs` / CLEARCOTE_FONT_DIRS — your own fonts, typically a copy of a Windows machine's
-//   Fonts folder. Listed ahead of the bundle, and every family they provide is used as itself:
-//   its lookalike rule (Arial->Arimo, Segoe UI->Selawik, …) is dropped, and the CSS generics that
-//   resolve to it on Windows (sans-serif->Arial, system-ui->Segoe UI, …) point at it.
+//   Fonts folder. Listed ahead of the bundle. On an engine that lets a genuine face win over its
+//   substitute (it carries GENUINE_FACES_SWITCH; PRO r32+), every family they provide is also used as
+//   itself: its lookalike rule (Arial->Arimo, Segoe UI->Selawik, …) is dropped, and the names and CSS
+//   generics that resolve to it on Windows (Helvetica->Arial, sans-serif->Arial, system-ui->Segoe UI,
+//   …) point at it. An older engine still draws every family a persona lists through its own
+//   substitute, so the rules stay there: changing them would split Helvetica from Arial. The
+//   directories still serve the characters the bundle cannot draw.
 // * CLEARCOTE_FALLBACK_FONT_DIRS — fonts used only for characters nothing else covers (CJK, Indic,
 //   emoji, …). Listed after the bundle and change no rules. The Docker image sets it to the script
 //   fonts it installs.
@@ -28,11 +32,23 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, rea
 import { createHash } from "node:crypto";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
+import { engineSupportsSwitch } from "./launchopts.js";
 
 export const FONT_DIRS_ENV = "CLEARCOTE_FONT_DIRS";
 export const FALLBACK_FONT_DIRS_ENV = "CLEARCOTE_FALLBACK_FONT_DIRS";
 
 const FONT_EXTS = [".ttf", ".otf", ".ttc", ".otc"];
+
+/** Carried by an engine that lets a genuine Windows face installed here win over its substitute (PRO
+ * r32+). The SDK never passes it: its presence in the binary is the marker. Measured on an engine without
+ * it: with a genuine Arial in CLEARCOTE_FONT_DIRS and the rules changed, "Helvetica" reached the genuine
+ * file while "Arial" stayed on the engine's Arimo -- two widths no Windows machine has. */
+export const GENUINE_FACES_SWITCH = "disable-genuine-font-faces";
+
+/** Whether the engine at `exePath` lets a genuine face from your own fonts win (see GENUINE_FACES_SWITCH). */
+export function engineHonoursGenuineFaces(exePath: string): boolean {
+  return engineSupportsSwitch(exePath, GENUINE_FACES_SWITCH);
+}
 
 /** The Windows family each non-Windows name in the template stands for (the Windows registry's
  * FontSubstitutes): when the genuine family is present, the rule points at it instead of a clone. */
@@ -391,7 +407,8 @@ export function linuxFontEnv(exePath: string, fontDirs?: unknown): Record<string
   try {
     const cacheDir = join(tmpdir(), "cc-fc-cache");
     mkdirSync(cacheDir, { recursive: true });
-    const genuine = user.length ? dirFamilies(user) : new Set<string>();
+    // The rules follow your fonts only on an engine that draws them (GENUINE_FACES_SWITCH).
+    const genuine = user.length && engineHonoursGenuineFaces(exePath) ? dirFamilies(user) : new Set<string>();
     const conf = buildConf(readFileSync(template, "utf8"), fontsDir, cacheDir, user, fallback, genuine);
     const name = user.length || fallback.length
       ? `fonts.generated-${createHash("sha256").update(conf, "utf8").digest("hex").slice(0, 12)}.conf`
@@ -413,6 +430,7 @@ export interface FontReport {
   ignoredFontDirs?: string[];
   genuineWindowsFamilies?: string[];
   lookalikeWindowsFamilies?: string[];
+  genuineFacesSupported?: boolean;
 }
 
 /** What `clearcote info` says about fonts on Linux (the `fonts` key of its JSON): whether the build
@@ -446,6 +464,7 @@ export function linuxFontReport(exePath: string, fontDirs?: unknown,
     const genuine = dirFamilies(user);
     report.genuineWindowsFamilies = KEY_WINDOWS_FAMILIES.filter((f) => genuine.has(f.toLowerCase()));
     report.lookalikeWindowsFamilies = KEY_WINDOWS_FAMILIES.filter((f) => !genuine.has(f.toLowerCase()));
+    report.genuineFacesSupported = engineHonoursGenuineFaces(exePath);
   }
   return report;
 }
@@ -464,6 +483,9 @@ export function fontLines(f: FontReport): string[] {
     const genuine = f.genuineWindowsFamilies ?? [], lookalike = f.lookalikeWindowsFamilies ?? [];
     lines.push(`                real: ${genuine.length ? genuine.join(", ") : "none of the key Windows families"}`);
     if (lookalike.length) lines.push(`                lookalike: ${lookalike.join(", ")}`);
+    if (genuine.length && f.genuineFacesSupported === false) {
+      lines.push("                this engine still draws its lookalikes for them (real faces need PRO r32 or newer)");
+    }
   }
   for (const d of f.fallbackFontDirs ?? []) lines.push(`Fallback fonts  ${d}`);
   for (const d of f.ignoredFontDirs ?? []) lines.push(`Ignored         ${d} (not a directory)`);

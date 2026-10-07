@@ -42,11 +42,16 @@ public class FontsTests : IDisposable
 
     private string Sub(string name) => Directory.CreateDirectory(Path.Join(_root, name)).FullName;
 
-    private (string Exe, string Fonts) Bundle()
+    /// A release directory: fonts/ with the real template, and a stand-in engine binary that carries the
+    /// genuine-faces marker switch only when asked to (PRO r32+ does; older engines do not).
+    private (string Exe, string Fonts) Bundle(bool genuineFaces = false, string name = "bin")
     {
-        var fonts = Directory.CreateDirectory(Path.Join(_root, "bin", "fonts")).FullName;
+        var fonts = Directory.CreateDirectory(Path.Join(_root, name, "fonts")).FullName;
         File.WriteAllText(Path.Join(fonts, "fonts.conf.template"), Template);
-        return (Path.Join(_root, "bin", "chrome"), fonts);
+        var exe = Path.Join(_root, name, "chrome");
+        var marker = genuineFaces ? $"\0{Fonts.GenuineFacesSwitch}\0" : "";
+        File.WriteAllBytes(exe, Encoding.Latin1.GetBytes($"ELF\0proxy-auth\0{marker}"));
+        return (exe, fonts);
     }
 
     // --- tiny synthetic fonts: a name table, a cmap (format 4 + 12) and optionally a colour table -------
@@ -299,7 +304,7 @@ public class FontsTests : IDisposable
     [Fact]
     public void Your_windows_fonts_are_listed_first_and_lose_their_lookalike()
     {
-        var (exe, fonts) = Bundle();
+        var (exe, fonts) = Bundle(genuineFaces: true);
         var win = Sub("winfonts");
         MakeFont(Path.Join(win, "arial.ttf"), new[] { "Arial" }, new[] { 0x41 });
         Environment.SetEnvironmentVariable(Fonts.FontDirsEnv, win);
@@ -317,6 +322,23 @@ public class FontsTests : IDisposable
         var conf2 = File.ReadAllText(path2);
         Assert.True(conf2.IndexOf($"<dir>{other}</dir>", StringComparison.Ordinal) < conf2.IndexOf($"<dir>{win}</dir>", StringComparison.Ordinal));
         Assert.Equal(path, Fonts.LinuxFontConfig(exe, null, isLinux: true));
+    }
+
+    [Fact]
+    public void An_engine_without_genuine_faces_keeps_the_rules()
+    {
+        // Measured on such an engine: "Arial" still renders through its substitute, so retargeting Helvetica
+        // to the genuine Arial would give the two different widths. The directory is still listed first.
+        var (exe, fonts) = Bundle(genuineFaces: false);
+        var win = Sub("winfonts");
+        MakeFont(Path.Join(win, "arial.ttf"), new[] { "Arial" }, new[] { 0x41 });
+        var conf = File.ReadAllText(Fonts.LinuxFontConfig(exe, new[] { win }, isLinux: true)!);
+        Assert.True(conf.IndexOf($"<dir>{win}</dir>", StringComparison.Ordinal) < conf.IndexOf($"<dir>{fonts}</dir>", StringComparison.Ordinal));
+        Assert.Contains("<string>Arial</string></test>", conf);
+        Assert.Contains("<alias><family>sans-serif</family><prefer><family>Arimo</family></prefer></alias>", conf);
+        Assert.Contains("<test name=\"family\"><string>Helvetica</string></test><edit name=\"family\" mode=\"assign\" binding=\"strong\"><string>Arimo</string></edit>", conf);
+        Assert.False(Fonts.EngineHonoursGenuineFaces(exe));
+        Assert.True(Fonts.EngineHonoursGenuineFaces(Bundle(genuineFaces: true, name: "r32").Exe));
     }
 
     [Fact]

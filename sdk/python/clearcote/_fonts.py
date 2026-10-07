@@ -14,10 +14,13 @@ Because the template is self-contained, fonts installed on the host are invisibl
 browser. Two settings add directories to it:
 
 * ``font_dirs`` / ``CLEARCOTE_FONT_DIRS`` -- your own fonts, typically a copy of a Windows
-  machine's ``C:\\Windows\\Fonts``. Listed ahead of the bundle, and every family they provide
-  is used as itself: its lookalike rule (Arial->Arimo, Segoe UI->Selawik, ...) is dropped, and
-  the CSS generics that resolve to it on Windows (sans-serif->Arial, system-ui->Segoe UI, ...)
-  point at it.
+  machine's ``C:\\Windows\\Fonts``. Listed ahead of the bundle. On an engine that lets a genuine
+  face win over its substitute (it carries GENUINE_FACES_SWITCH; PRO r32+), every family they
+  provide is also used as itself: its lookalike rule (Arial->Arimo, Segoe UI->Selawik, ...) is
+  dropped, and the names and CSS generics that resolve to it on Windows (Helvetica->Arial,
+  sans-serif->Arial, system-ui->Segoe UI, ...) point at it. An older engine still draws every family
+  a persona lists through its own substitute, so the rules stay there: changing them would split
+  Helvetica from Arial. The directories still serve the characters the bundle cannot draw.
 * ``CLEARCOTE_FALLBACK_FONT_DIRS`` -- fonts used only for characters nothing else covers
   (CJK, Indic, emoji, ...). Listed after the bundle and change no rules. The Docker image sets
   it to the script fonts it installs.
@@ -37,6 +40,12 @@ FONT_DIRS_ENV = "CLEARCOTE_FONT_DIRS"
 FALLBACK_FONT_DIRS_ENV = "CLEARCOTE_FALLBACK_FONT_DIRS"
 
 _FONT_EXTS = (".ttf", ".otf", ".ttc", ".otc")
+
+#: Carried by an engine that lets a genuine Windows face installed here win over its substitute (PRO
+#: r32+). The SDK never passes it: its presence in the binary is the marker. Measured on an engine
+#: without it: with a genuine Arial in CLEARCOTE_FONT_DIRS and the rules changed, "Helvetica" reached
+#: the genuine file while "Arial" stayed on the engine's Arimo -- two widths no Windows machine has.
+GENUINE_FACES_SWITCH = "disable-genuine-font-faces"
 
 #: The Windows family each non-Windows name in the template stands for (the Windows registry's
 #: FontSubstitutes): when the genuine family is present, the rule points at it instead of a clone.
@@ -361,6 +370,13 @@ def _write_atomic(path, text):
     os.replace(tmp, path)
 
 
+def engine_honours_genuine_faces(exe_path):
+    """Whether the engine at ``exe_path`` lets a genuine face from your own fonts win (see
+    GENUINE_FACES_SWITCH)."""
+    from ._launchopts import engine_supports_switch
+    return engine_supports_switch(exe_path, GENUINE_FACES_SWITCH)
+
+
 def linux_font_env(exe_path, font_dirs=None):
     """Return ``{"FONTCONFIG_FILE": ...}`` on Linux when the font bundle is present, else ``{}``.
 
@@ -380,7 +396,8 @@ def linux_font_env(exe_path, font_dirs=None):
         os.makedirs(cache_dir, exist_ok=True)
         with open(template, "r", encoding="utf-8") as fh:
             text = fh.read()
-        genuine = dir_families(user_dirs) if user_dirs else frozenset()
+        # The rules follow your fonts only on an engine that draws them (GENUINE_FACES_SWITCH).
+        genuine = dir_families(user_dirs) if user_dirs and engine_honours_genuine_faces(exe_path) else frozenset()
         conf = build_conf(text, fonts_dir, cache_dir, user_dirs, fallback_dirs, genuine)
         name = "fonts.generated.conf"
         if user_dirs or fallback_dirs:
@@ -422,6 +439,7 @@ def linux_font_report(exe_path, font_dirs=None, environ=None):
         genuine = dir_families(user_dirs)
         report["genuineWindowsFamilies"] = [f for f in KEY_WINDOWS_FAMILIES if f.lower() in genuine]
         report["lookalikeWindowsFamilies"] = [f for f in KEY_WINDOWS_FAMILIES if f.lower() not in genuine]
+        report["genuineFacesSupported"] = engine_honours_genuine_faces(exe_path)
     return report
 
 

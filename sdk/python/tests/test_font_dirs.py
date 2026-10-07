@@ -37,10 +37,14 @@ def _template():
         return fh.read()
 
 
-def _bundle(tmp_path):
+def _bundle(tmp_path, genuine_faces=False):
+    """A release directory: fonts/ with the real template, and a stand-in engine binary that carries the
+    genuine-faces marker switch only when asked to (PRO r32+ does; older engines do not)."""
     fonts = tmp_path / "bin" / "fonts"
     fonts.mkdir(parents=True)
     (fonts / "fonts.conf.template").write_text(_template(), encoding="utf-8")
+    marker = b"\0" + _fonts.GENUINE_FACES_SWITCH.encode() + b"\0" if genuine_faces else b""
+    (tmp_path / "bin" / "chrome").write_bytes(b"ELF\0proxy-auth\0" + marker)
     return str(tmp_path / "bin" / "chrome"), fonts
 
 
@@ -185,7 +189,7 @@ def test_linux_font_env_without_extra_dirs_is_unchanged(linux, tmp_path):
 
 
 def test_linux_font_env_with_your_windows_fonts(linux, monkeypatch, tmp_path):
-    exe, fonts = _bundle(tmp_path)
+    exe, fonts = _bundle(tmp_path, genuine_faces=True)
     win = tmp_path / "winfonts"
     win.mkdir()
     make_font(win / "arial.ttf", ["Arial"], [0x41])
@@ -204,6 +208,22 @@ def test_linux_font_env_with_your_windows_fonts(linux, monkeypatch, tmp_path):
     conf2 = _read(path2)
     assert conf2.index(f"<dir>{other}</dir>") < conf2.index(f"<dir>{win}</dir>") < conf2.index(f"<dir>{fonts}</dir>")
     assert _fonts.linux_font_env(exe)["FONTCONFIG_FILE"] == path  # same directories, same file
+
+
+def test_an_engine_without_genuine_faces_keeps_the_rules(linux, monkeypatch, tmp_path):
+    # Measured on such an engine: "Arial" still renders through its substitute, so retargeting Helvetica
+    # to the genuine Arial would give the two different widths. The directory is still listed first.
+    exe, fonts = _bundle(tmp_path, genuine_faces=False)
+    win = tmp_path / "winfonts"
+    win.mkdir()
+    make_font(win / "arial.ttf", ["Arial"], [0x41])
+    conf = _read(_fonts.linux_font_env(exe, [str(win)])["FONTCONFIG_FILE"])
+    assert conf.index(f"<dir>{win}</dir>") < conf.index(f"<dir>{fonts}</dir>")
+    assert _fonts.genuine_rules(conf, set()) == conf  # every rule as the template has it
+    assert "<string>Arial</string></test>" in conf
+    assert "<alias><family>sans-serif</family><prefer><family>Arimo</family></prefer></alias>" in conf
+    assert ('<test name="family"><string>Helvetica</string></test><edit name="family" mode="assign" '
+            'binding="strong"><string>Arimo</string></edit>') in conf
 
 
 def test_linux_font_env_with_fallback_fonts(linux, monkeypatch, tmp_path):
@@ -266,6 +286,9 @@ def test_font_report_with_your_fonts_and_fallback(linux, tmp_path):
     assert {"Bengali", "Tamil", "Emoji"} <= set(r["scripts"]["covered"])
     assert r["genuineWindowsFamilies"] == ["Arial", "Segoe UI"]
     assert "Calibri" in r["lookalikeWindowsFamilies"] and "Arial" not in r["lookalikeWindowsFamilies"]
+    assert r["genuineFacesSupported"] is False  # the stand-in engine has no marker
+    exe2, _f = _bundle(tmp_path / "r32", genuine_faces=True)
+    assert _fonts.linux_font_report(exe2, [str(win)], environ)["genuineFacesSupported"] is True
 
 
 def test_font_report_without_a_bundle(tmp_path):
@@ -278,13 +301,15 @@ def test_info_font_lines():
         "scripts": {"covered": ["Latin", "Greek"], "missing": ["Khmer", "Ethiopic"]},
         "fontDirs": ["/srv/winfonts"], "fallbackFontDirs": ["/usr/local/share/clearcote/fonts"],
         "ignoredFontDirs": ["/nope"],
-        "genuineWindowsFamilies": ["Arial", "Segoe UI"], "lookalikeWindowsFamilies": ["Calibri"]})
+        "genuineWindowsFamilies": ["Arial", "Segoe UI"], "lookalikeWindowsFamilies": ["Calibri"],
+        "genuineFacesSupported": False})
     assert lines == [
         "Fonts           metric-compatible Windows font clones are bundled with this build",
         "Scripts         2 of 4 render; no font for Khmer, Ethiopic (they draw as empty boxes)",
         "Your fonts      /srv/winfonts",
         "                real: Arial, Segoe UI",
         "                lookalike: Calibri",
+        "                this engine still draws its lookalikes for them (real faces need PRO r32 or newer)",
         "Fallback fonts  /usr/local/share/clearcote/fonts",
         "Ignored         /nope (not a directory)",
     ]

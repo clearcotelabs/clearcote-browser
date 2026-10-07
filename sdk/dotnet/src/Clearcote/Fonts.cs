@@ -18,8 +18,11 @@ namespace Clearcote;
 /// <c>fonts/</c>.</para>
 /// <para>Because the template is self-contained, fonts installed on the host are invisible to the browser.
 /// Two settings add directories to it: <see cref="LaunchOptions.FontDirs"/> / CLEARCOTE_FONT_DIRS (your own
-/// fonts, typically a copy of a Windows machine's Fonts folder: listed ahead of the bundle, and every family
-/// they provide is used as itself instead of its lookalike, with the CSS generics following), and
+/// fonts, typically a copy of a Windows machine's Fonts folder: listed ahead of the bundle; on an engine that
+/// lets a genuine face win over its substitute, <see cref="GenuineFacesSwitch"/>, PRO r32+, every family
+/// they provide is also used as itself instead of its lookalike, with Helvetica/Times/Courier and the CSS
+/// generics following; an older engine keeps the rules, since it still draws listed families through its
+/// own substitute), and
 /// CLEARCOTE_FALLBACK_FONT_DIRS (fonts used only for characters nothing else covers: listed after the bundle,
 /// no rule changes; the Docker image sets it). Both are lists separated by the path separator. Never point
 /// either at all of /usr/share/fonts: the host's Latin families then compete with the clones.</para>
@@ -28,6 +31,15 @@ internal static class Fonts
 {
     internal const string FontDirsEnv = "CLEARCOTE_FONT_DIRS";
     internal const string FallbackFontDirsEnv = "CLEARCOTE_FALLBACK_FONT_DIRS";
+
+    /// Carried by an engine that lets a genuine Windows face installed here win over its substitute (PRO
+    /// r32+). The SDK never passes it: its presence in the binary is the marker. Measured on an engine
+    /// without it: with a genuine Arial in CLEARCOTE_FONT_DIRS and the rules changed, "Helvetica" reached
+    /// the genuine file while "Arial" stayed on the engine's Arimo -- two widths no Windows machine has.
+    internal const string GenuineFacesSwitch = "disable-genuine-font-faces";
+
+    /// Whether the engine at <paramref name="exePath"/> lets a genuine face from your own fonts win.
+    internal static bool EngineHonoursGenuineFaces(string exePath) => LaunchOpts.EngineSupportsSwitch(exePath, GenuineFacesSwitch);
 
     private static readonly string[] FontExts = { ".ttf", ".otf", ".ttc", ".otc" };
 
@@ -381,7 +393,8 @@ internal static class Fonts
         {
             var cacheDir = Path.Join(Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar), "cc-fc-cache");
             Directory.CreateDirectory(cacheDir);
-            var genuine = user.Count > 0 ? DirFamilies(user) : new HashSet<string>();
+            // The rules follow your fonts only on an engine that draws them (GenuineFacesSwitch).
+            var genuine = user.Count > 0 && EngineHonoursGenuineFaces(exePath) ? DirFamilies(user) : new HashSet<string>();
             var conf = BuildConf(File.ReadAllText(template), fontsDir, cacheDir, user, fallback, genuine);
             var name = user.Count > 0 || fallback.Count > 0
                 ? $"fonts.generated-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(conf)))[..12].ToLowerInvariant()}.conf"
