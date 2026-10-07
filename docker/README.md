@@ -52,6 +52,8 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | `CC_PROXY` | `http://user:pass@host:8080` \| `socks5://…` | send the browser's traffic through this proxy (http, https, socks4, socks5; the container refuses to start rather than go direct if it cannot apply it). A password is answered by the engine when it can (the licensed builds), otherwise by a relay on the container's own loopback. Pass it through `CC_SECRETS_FILE` to keep the password out of `docker inspect` |
 | `CC_IDLE_EXIT_SECONDS` | `30` | stop once no CDP client has been connected for this long, counted from when the CDP endpoint first answers (default: never). Pair it with `--rm` so an abandoned container also disappears |
 | `CC_SECRETS_FILE` | `/tmp/clearcote-secrets.json` | a JSON file holding `CLEARCOTE_LICENSE_KEY` and/or `CC_PROXY`, read once at start and deleted — see [Secrets](#secrets-and-docker-inspect) |
+| `CLEARCOTE_FONT_DIRS` | `/fonts` | your own fonts, mounted into the container (e.g. a copy of a Windows machine's Fonts folder) — see [Fonts](#fonts) |
+| `CLEARCOTE_FALLBACK_FONT_DIRS` | `/usr/local/share/clearcote/fonts` (set by the image) | fonts used only for characters nothing else covers — see [Fonts](#fonts) |
 
 ```bash
 docker run -d -p 9222:9222 \
@@ -74,6 +76,31 @@ Neither applies to a Linux persona, so the default container is unchanged. Overr
 `CC_WIDEVINE=0` / `CC_SHADER_DIALECT=0`. Rendering is unaffected by the dialect setting — only the
 debug-extension query changes — and engines older than **151 r15** ignore it. See
 [/docs/shader-dialect](https://www.clearcotelabs.com/docs/shader-dialect).
+
+### Fonts
+
+The browser sees only the fonts the SDK points it at: the release's bundled Windows metric-compatible
+clones, then the directories below. Nothing else under `/usr/share/fonts` reaches it, so a host font can
+never change the widths a Windows persona reports.
+
+* **Script fonts (built in).** The image puts colour emoji, CJK (WenQuanYi Zen Hei, IPA Gothic) and Noto
+  fonts for the other scripts a Windows machine draws out of the box (Arabic, Armenian, Bengali, Cherokee,
+  Devanagari, Ethiopic, Georgian, Gujarati, Gurmukhi, Kannada, Khmer, Lao, Malayalam, Myanmar, Sinhala,
+  Tamil, Telugu, Thai, Tibetan, …) in `/usr/local/share/clearcote/fonts`, and `CLEARCOTE_FALLBACK_FONT_DIRS`
+  lists it after the bundle. They are used only for characters the bundle cannot draw, so those characters
+  render instead of showing as empty boxes. No Latin family is added.
+* **Your own fonts.** Mount a directory of fonts, typically a copy of a Windows machine's
+  `C:\Windows\Fonts`, and name it in `CLEARCOTE_FONT_DIRS`. It is listed ahead of the bundle. On an engine
+  that lets a genuine face win over its lookalike (the licensed build from r32), every family it provides
+  renders as itself, and Helvetica, Times, Courier and the CSS generics follow. Older engines keep drawing
+  the lookalikes and use the directory only for characters nothing else covers. Only use fonts you are
+  licensed to use.
+
+```bash
+docker run -d -p 9222:9222 -v /srv/windows-fonts:/fonts:ro -e CLEARCOTE_FONT_DIRS=/fonts \
+  -e CC_PLATFORM=windows teamflatearth/clearcote
+docker exec <container> clearcote info --quick   # which scripts render, which families are genuine
+```
 
 ## Licensed engine (Free with GitHub or Pro)
 
