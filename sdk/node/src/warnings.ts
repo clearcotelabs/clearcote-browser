@@ -186,7 +186,8 @@ const ENGINE_NOTES: ReadonlyArray<readonly [string, string]> = [
     "page.on('console') and page.on('pageerror') receive nothing, by design, as part of the " +
     "protection against automation-presence probes. In-page window.onerror and " +
     "unhandledrejection handlers fire normally. To capture console output, collect it in-page " +
-    "and read it back with page.evaluate()."],
+    "and read it back with page.evaluate(). An engine from r32 on forwards them with " +
+    "stockRuntime: true (off by default: pages can observe part of what it restores)."],
 ];
 
 /** Tests: forget which once-per-process lines were already said. */
@@ -194,8 +195,18 @@ export function resetSeenWarnings(): void {
   seenNotes.clear();
 }
 
+/** Print `clearcote: warning: <message>` to stderr at most once per process for `code`: for warnings about the
+ *  engine or the launch mode rather than one launch's options, so a program that launches in a loop is told once.
+ *  quiet and CLEARCOTE_NO_WARN silence it like every other warning, without using it up. */
+export function warnOnce(code: string, message: string, quiet?: boolean): void {
+  if (quiet || process.env.CLEARCOTE_NO_WARN || seenNotes.has(code)) return;
+  seenNotes.add(code);
+  process.stderr.write(`clearcote: warning: ${message}\n`);
+}
+
 /** Print coherence warnings to stderr unless quiet or CLEARCOTE_NO_WARN. NOTE lines (and the host warnings in
- *  ONCE_PER_PROCESS) fire once per process; the other WARN lines fire every launch. */
+ *  ONCE_PER_PROCESS) fire once per process; the other WARN lines fire every launch. `opts._stockRuntime`: this
+ *  launch's browser has --disable-runtime-suppression, so the note that it forwards no console events is left out. */
 export function emitCoherenceWarnings(
   opts: Record<string, unknown>,
   quiet?: boolean,
@@ -211,7 +222,7 @@ export function emitCoherenceWarnings(
     process.stderr.write(`clearcote: ${w.severity === "warn" ? "warning" : "note"}: ${w.message}\n`);
   }
   for (const [code, message] of ENGINE_NOTES) {
-    if (seenNotes.has(code)) continue;
+    if (seenNotes.has(code) || (code === "cdp-console-events" && opts._stockRuntime)) continue;
     seenNotes.add(code);
     process.stderr.write(`clearcote: note: ${message}\n`);
   }

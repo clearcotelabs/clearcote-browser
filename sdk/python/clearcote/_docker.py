@@ -126,7 +126,7 @@ _BOOL_ENV = {
 }
 # Handled specially below, or on this side of the connection.
 _SPECIAL = ("location", "fingerprint_profile", "headless", "proxy", "args", "license_key", "license_api_base",
-            "persona_env")
+            "persona_env", "stock_runtime")
 SDK_SIDE = ("timeout", "slow_mo", "humanize", "show_cursor", "quiet", "docker", "docker_image",
             "ephemeral_profile")
 ACCEPTED = tuple(_STR_ENV) + tuple(_INT_ENV) + tuple(_FLOAT_ENV) + tuple(_BOOL_ENV) + _SPECIAL + SDK_SIDE
@@ -215,11 +215,17 @@ def container_env(kwargs: dict) -> dict:
         env["CC_HEADLESS"] = "1"
     if kwargs.get("proxy"):
         env["CC_PROXY"] = _proxy_url(kwargs["proxy"])
-    args = kwargs.get("args")
+    args = list(kwargs.get("args") or [])
     if args:
         bad = [a for a in args if not str(a) or any(c.isspace() for c in str(a))]
         if bad:
             raise ValueError(f"args {bad[0]!r}: an argument with whitespace cannot be passed to the Docker image")
+    # stock_runtime (engine r32+) goes in with the other engine switches; the image's entrypoint keeps it only on
+    # an engine that has it, as a launch here does (docker/serve.py).
+    from ._launchopts import STOCK_RUNTIME_SWITCH, stock_runtime_wanted
+    if stock_runtime_wanted(kwargs.get("stock_runtime")) and STOCK_RUNTIME_SWITCH not in [str(a) for a in args]:
+        args.append(STOCK_RUNTIME_SWITCH)
+    if args:
         env["CC_EXTRA_ARGS"] = " ".join(str(a) for a in args)
     from ._license import resolve_license_key
     key = resolve_license_key(kwargs.get("license_key"))  # as a local launch: option > env > saved key

@@ -3,6 +3,7 @@
 // the Python SDK exactly.
 
 import { hostPersonaPlatform } from "./fingerprint.js";
+import { warnOnce } from "./warnings.js";
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -602,4 +603,53 @@ export function engineExtrasArgs(
     else if (!quiet) console.warn("clearcote: transparentProxy has no effect without a proxy; ignored.");
   }
   return args;
+}
+
+// ── stock DevTools Runtime behaviour (engine r32+) ─────────────────────────────────────────────────
+
+/** The engine holds back part of what V8 reports to a DevTools client (patch 110), so with Playwright
+ * setContent() times out, page.on("console") / page.on("pageerror") receive nothing, and exposeFunction() /
+ * exposeBinding() stop working after a navigation. Engine r32 (patch 1043) restores stock Chromium for these
+ * with this switch. Off by default: pages can observe some of the restored Runtime behaviour. */
+export const STOCK_RUNTIME_SWITCH = "--disable-runtime-suppression";
+export const STOCK_RUNTIME_ENV = "CLEARCOTE_STOCK_RUNTIME";
+const STOCK_RUNTIME_ON = ["1", "true", "yes", "on"];
+
+/** The `stockRuntime` option: an explicit value wins; unset follows CLEARCOTE_STOCK_RUNTIME (on for
+ * 1/true/yes/on, off otherwise). */
+export function stockRuntimeWanted(value?: unknown): boolean {
+  if (value === undefined || value === null) return STOCK_RUNTIME_ON.includes((process.env[STOCK_RUNTIME_ENV] ?? "").trim().toLowerCase());
+  if (typeof value === "string") return STOCK_RUNTIME_ON.includes(value.trim().toLowerCase()); // "0" from a config file is off
+  return !!value;
+}
+
+/**
+ * `[--disable-runtime-suppression]` when `stockRuntime` is on and the engine that will run has the switch; else
+ * nothing. It is a normal browser argument, not a persona switch (personaenv.ts leaves it on the command line). An
+ * engine without it (r31, open builds) would ignore it without a word, so it is not passed and the SDK says so once
+ * per process (quiet and CLEARCOTE_NO_WARN silence it without using it up). A caller who already put it in `args`
+ * gets it once.
+ */
+export function stockRuntimeArgs(exe: string | undefined, enabled: unknown, userArgs: readonly string[], quiet?: boolean): string[] {
+  if (!stockRuntimeWanted(enabled)) return [];
+  if (!engineSupportsSwitch(exe, STOCK_RUNTIME_SWITCH.slice(2))) {
+    warnOnce("stock-runtime-unsupported",
+      "stockRuntime (CLEARCOTE_STOCK_RUNTIME) is on, but this engine does not support it (it needs an engine from " +
+      "r32 on), so the browser starts without it.", quiet);
+    return [];
+  }
+  return userArgs.includes(STOCK_RUNTIME_SWITCH) ? [] : [STOCK_RUNTIME_SWITCH];
+}
+
+/** Whether a browser launched from `exe` with `args` has the switch in effect (the console note is left out then). */
+export function stockRuntimeOn(exe: string | undefined, args: readonly string[]): boolean {
+  return args.includes(STOCK_RUNTIME_SWITCH) && engineSupportsSwitch(exe, STOCK_RUNTIME_SWITCH.slice(2));
+}
+
+/** A cloud browser does not take `stockRuntime`: say so once per process when it is on. */
+export function warnStockRuntimeCloud(enabled: unknown, quiet?: boolean): void {
+  if (!stockRuntimeWanted(enabled)) return;
+  warnOnce("stock-runtime-cloud",
+    "stockRuntime (CLEARCOTE_STOCK_RUNTIME) only applies to local and Docker launches; a cloud browser does not " +
+    "take it, so it was not applied.", quiet);
 }

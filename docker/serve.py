@@ -235,6 +235,22 @@ screen_w, screen_h, screen_depth = _parse_screen(os.environ.get("CC_SCREEN", "19
 xvfb_screen = "%dx%dx%d" % (screen_w, screen_h, screen_depth)
 extra = os.environ.get("CC_EXTRA_ARGS", "").split()
 
+# --disable-runtime-suppression (engine r32+; the SDKs' stock_runtime option, which they pass in CC_EXTRA_ARGS)
+# gives automation clients Chromium's own DevTools Runtime behaviour back. As in a launch on a host, it stays only
+# on an engine that has it: an older engine would ignore it without a word.
+_STOCK_RUNTIME = "--disable-runtime-suppression"
+_stock_runtime = _STOCK_RUNTIME in extra
+if _stock_runtime:
+    try:
+        from clearcote._launchopts import engine_supports_switch as _has_switch
+    except ImportError:  # an image built with an SDK older than this entrypoint: the same probe
+        from proxy_relay import engine_supports_switch as _has_switch
+    if not _has_switch(exe, _STOCK_RUNTIME[2:]):
+        extra = [a for a in extra if a != _STOCK_RUNTIME]
+        _stock_runtime = False
+        print("[clearcote] WARNING: stock_runtime (--disable-runtime-suppression) needs an engine from r32 on; "
+              "this engine does not support it, so chrome starts without it.", flush=True)
+
 # Same discipline as the SDK's _geometry.caller_sized_the_window: ANY window/screen switch the
 # caller wrote themselves means hands off the entire block. Half-honouring it -- their window inside
 # our claimed screen, or our window inside their claimed screen -- rebuilds the very contradiction
@@ -591,6 +607,7 @@ _applied = {
     "secrets_file": bool(_secrets_file),
     "sandbox": sandbox,
     "persona_env": _persona_env,  # 1021: the persona travels in the environment, not on chrome's command line
+    "stock_runtime": _stock_runtime,  # r32: --disable-runtime-suppression is on chrome's command line
 }
 print("[clearcote] serve-state %s" % json.dumps(_applied, sort_keys=True), flush=True)
 

@@ -43,6 +43,11 @@ public static class LaunchWarnings
     /// The code of the warning <see cref="ForPersonaHost"/> gives a Linux persona on a Windows host.
     public const string LinuxPersonaWindowsHost = "linux-persona-windows-host";
 
+    /// The codes of the once-per-process warnings <see cref="LaunchOptions.StockRuntime"/> gives: on an engine
+    /// without the switch, and on a cloud launch (see <see cref="LaunchOpts.StockRuntimeArgs"/>).
+    public const string StockRuntimeUnsupported = "stock-runtime-unsupported";
+    public const string StockRuntimeCloud = "stock-runtime-cloud";
+
     /// Warnings for a local launch of persona <paramref name="o"/> on host <paramref name="hostOs"/>
     /// ("windows", "linux", "macos"; default: this machine).
     /// <para>On a Windows host the GPU runs through Direct3D 11, which clamps the WebGL and WebGPU limits

@@ -662,6 +662,53 @@ def engine_extras_args(allow_third_party_cookies=None, transparent_proxy=None, p
     return args
 
 
+# -- stock DevTools Runtime behaviour (engine r32+) -----------------------------------------------
+
+# The engine holds back part of what V8 reports to a DevTools client (patch 110), so with Playwright
+# set_content() times out, page.on("console") / page.on("pageerror") receive nothing, and expose_function() /
+# expose_binding() stop working after a navigation. Engine r32 (patch 1043) restores stock Chromium for these
+# with this switch. Off by default: pages can observe some of the restored Runtime behaviour.
+STOCK_RUNTIME_SWITCH = "--disable-runtime-suppression"
+STOCK_RUNTIME_ENV = "CLEARCOTE_STOCK_RUNTIME"
+_STOCK_RUNTIME_ON = ("1", "true", "yes", "on")
+
+
+def stock_runtime_wanted(value=None):
+    """The ``stock_runtime`` option: an explicit value wins; None follows ``CLEARCOTE_STOCK_RUNTIME`` (on for
+    1/true/yes/on, off otherwise)."""
+    if value is None:
+        return os.environ.get(STOCK_RUNTIME_ENV, "").strip().lower() in _STOCK_RUNTIME_ON
+    if isinstance(value, str):  # "0"/"false" from a config file must not mean on
+        return value.strip().lower() in _STOCK_RUNTIME_ON
+    return bool(value)
+
+
+def stock_runtime_args(exe, enabled=None, user_args=(), quiet=False):
+    """``[--disable-runtime-suppression]`` when ``stock_runtime`` is on and the engine that will run has the
+    switch; else nothing. It is a normal browser argument, not a persona switch (_personaenv leaves it on the
+    command line). An engine without it (r31, open builds) would ignore it without a word, so it is not passed
+    and the SDK says so once per process (quiet and CLEARCOTE_NO_WARN silence it without using it up). A caller
+    who already put it in ``args`` gets it once."""
+    if not stock_runtime_wanted(enabled):
+        return []
+    if not engine_supports_switch(exe, STOCK_RUNTIME_SWITCH[2:]):
+        from ._warnings import warn_once
+        warn_once("stock-runtime-unsupported",
+                  "stock_runtime (CLEARCOTE_STOCK_RUNTIME) is on, but this engine does not support it (it needs an "
+                  "engine from r32 on), so the browser starts without it.", quiet)
+        return []
+    return [] if STOCK_RUNTIME_SWITCH in (user_args or ()) else [STOCK_RUNTIME_SWITCH]
+
+
+def warn_stock_runtime_cloud(enabled=None, quiet=False):
+    """A cloud browser does not take ``stock_runtime``: say so once per process when it is on."""
+    if stock_runtime_wanted(enabled):
+        from ._warnings import warn_once
+        warn_once("stock-runtime-cloud",
+                  "stock_runtime (CLEARCOTE_STOCK_RUNTIME) only applies to local and Docker launches; a cloud "
+                  "browser does not take it, so it was not applied.", quiet)
+
+
 def serve_needs_no_sandbox(platform=None, uid=None, args=()):
     """serve() as root on Linux needs --no-sandbox (unless the caller already passed it).
 

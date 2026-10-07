@@ -255,6 +255,12 @@ Also available (0.29.0): `Geoip = true` (through the proxy, incl. SOCKS5; one
 `AllowThirdPartyCookies = true`, `TransparentProxy = true` (engine 152 r22+; skipped with a warning on older
 engines), `LicenseThroughProxy`, `ReleaseChannel`, and `License.GetSessionSeatsAsync()`.
 
+`StockRuntime = true` (or `CLEARCOTE_STOCK_RUNTIME=1`) gives Playwright the browser's stock DevTools behaviour
+back: the page's `Console` and `PageError` events fire, `SetContentAsync` works, and `ExposeFunctionAsync` /
+`ExposeBindingAsync` keep working after a navigation. It is off by default because pages can observe some of what
+it restores. It needs an engine from r32 on; an older engine launches without it and the SDK warns once. It applies
+to local and Docker launches, not to cloud browsers.
+
 ## License
 
 BSD-3-Clause. See [LICENSE](https://github.com/clearcotelabs/clearcote-browser/blob/main/LICENSE).

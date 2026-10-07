@@ -533,6 +533,49 @@ public static class LaunchOpts
         return args;
     }
 
+    // ── stock DevTools Runtime behaviour (engine r32+) ───────────────────────
+
+    /// The engine holds back part of what V8 reports to a DevTools client (patch 110), so with Playwright
+    /// SetContentAsync times out, the Console / PageError events receive nothing, and ExposeFunctionAsync /
+    /// ExposeBindingAsync stop working after a navigation. Engine r32 (patch 1043) restores stock Chromium for
+    /// these with this switch. Off by default: pages can observe some of the restored Runtime behaviour.
+    public const string StockRuntimeSwitch = "--disable-runtime-suppression";
+    /// The environment variable <see cref="LaunchOptions.StockRuntime"/> = null follows.
+    public const string StockRuntimeEnv = "CLEARCOTE_STOCK_RUNTIME";
+    private static readonly string[] StockRuntimeOn = { "1", "true", "yes", "on" };
+
+    /// <see cref="LaunchOptions.StockRuntime"/>: an explicit value wins; null follows CLEARCOTE_STOCK_RUNTIME
+    /// (on for 1/true/yes/on, off otherwise).
+    public static bool StockRuntimeWanted(bool? value)
+        => value ?? StockRuntimeOn.Contains((Environment.GetEnvironmentVariable(StockRuntimeEnv) ?? "").Trim().ToLowerInvariant());
+
+    /// <c>[--disable-runtime-suppression]</c> when StockRuntime is on and the engine that will run has the switch;
+    /// else nothing. A normal browser argument, not a persona switch (<see cref="PersonaEnv"/> leaves it on the
+    /// command line). An engine without it (r31, open builds) would ignore it without a word, so it is not passed
+    /// and the SDK says so once per process (Quiet and CLEARCOTE_NO_WARN silence it without using it up). Args
+    /// that already carry it get it once.
+    public static List<string> StockRuntimeArgs(string? exe, bool? enabled, IEnumerable<string> userArgs, bool quiet = false)
+    {
+        if (!StockRuntimeWanted(enabled)) return new();
+        if (!EngineSupportsSwitch(exe, StockRuntimeSwitch[2..]))
+        {
+            LaunchWarnings.EmitOnce(new[] { new LaunchWarnings.Warning(LaunchWarnings.StockRuntimeUnsupported,
+                "StockRuntime (CLEARCOTE_STOCK_RUNTIME) is on, but this engine does not support it (it needs an engine " +
+                "from r32 on), so the browser starts without it.") }, quiet);
+            return new();
+        }
+        return userArgs.Contains(StockRuntimeSwitch) ? new() : new() { StockRuntimeSwitch };
+    }
+
+    /// A cloud browser does not take StockRuntime: say so once per process when it is on.
+    public static void WarnStockRuntimeCloud(bool? enabled, bool quiet = false)
+    {
+        if (!StockRuntimeWanted(enabled)) return;
+        LaunchWarnings.EmitOnce(new[] { new LaunchWarnings.Warning(LaunchWarnings.StockRuntimeCloud,
+            "StockRuntime (CLEARCOTE_STOCK_RUNTIME) only applies to local and Docker launches; a cloud browser does " +
+            "not take it, so it was not applied.") }, quiet);
+    }
+
     /// Serve as root on Linux needs --no-sandbox (unless the caller already passed it): serve spawns
     /// the binary itself, so Playwright's own --no-sandbox is missing and Chromium refuses to start.
     public static bool ServeNeedsNoSandbox(string osTag, uint? uid, IEnumerable<string> args)

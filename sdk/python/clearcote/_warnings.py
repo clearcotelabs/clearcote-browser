@@ -261,14 +261,26 @@ _ENGINE_NOTES = (
      "page.on('console') and page.on('pageerror') receive nothing, by design, as part of the "
      "protection against automation-presence probes. In-page window.onerror and "
      "unhandledrejection handlers fire normally. To capture console output, collect it in-page "
-     "and read it back with page.evaluate()."),
+     "and read it back with page.evaluate(). An engine from r32 on forwards them with "
+     "stock_runtime=True (off by default: pages can observe part of what it restores)."),
 )
+
+
+def warn_once(code, message, quiet=False):
+    """Print ``clearcote: warning: <message>`` to stderr at most once per process for ``code``: for warnings
+    about the engine or the launch mode rather than one launch's options, so a program that launches in a loop
+    is told once. quiet and CLEARCOTE_NO_WARN silence it like every other warning, without using it up."""
+    if quiet or os.environ.get("CLEARCOTE_NO_WARN") or code in _seen_notes:
+        return
+    _seen_notes.add(code)
+    print("clearcote: warning: %s" % message, file=sys.stderr, flush=True)
 
 
 def emit_coherence_warnings(opts, quiet=False, host_platform=None, build_major=None):
     """Print coherence warnings to stderr (unless quiet=True or CLEARCOTE_NO_WARN is set).
     NOTE-level lines (and the host warnings in _ONCE_PER_PROCESS) fire at most once per process; the
-    other WARN-level lines fire every launch."""
+    other WARN-level lines fire every launch. ``opts["_stock_runtime"]``: this launch's browser has
+    --disable-runtime-suppression, so the note that it forwards no console events is not said for it."""
     if quiet or os.environ.get("CLEARCOTE_NO_WARN"):
         return
     for w in coherence_warnings(opts, host_platform=host_platform, build_major=build_major):
@@ -279,7 +291,7 @@ def emit_coherence_warnings(opts, quiet=False, host_platform=None, build_major=N
         label = "warning" if w["severity"] == "warn" else "note"
         print("clearcote: %s: %s" % (label, w["message"]), file=sys.stderr, flush=True)
     for code, message in _ENGINE_NOTES:
-        if code in _seen_notes:
+        if code in _seen_notes or (code == "cdp-console-events" and opts.get("_stock_runtime")):
             continue
         _seen_notes.add(code)
         print("clearcote: note: %s" % message, file=sys.stderr, flush=True)

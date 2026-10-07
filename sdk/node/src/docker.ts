@@ -50,6 +50,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
 import { installHumanize, installHumanizeOnContext } from "./humanize.js";
+import { STOCK_RUNTIME_SWITCH, stockRuntimeWanted } from "./launchopts.js";
 import { resolveLicenseKey } from "./license.js";
 
 export const DEFAULT_REPOSITORY = "teamflatearth/clearcote";
@@ -132,7 +133,7 @@ const BOOL_ENV: Record<string, string> = {
   lightStealth: "CC_LIGHT_STEALTH", disableGpuFingerprint: "CC_DISABLE_GPU_FINGERPRINT",
   fingerprintNoise: "CC_FINGERPRINT_NOISE", canvasNoise: "CC_CANVAS_NOISE", gpuStringSpoof: "CC_GPU_STRING_SPOOF",
 };
-const SPECIAL = ["location", "fingerprintProfile", "headless", "proxy", "args", "licenseKey", "licenseApiBase", "personaEnv"];
+const SPECIAL = ["location", "fingerprintProfile", "headless", "proxy", "args", "licenseKey", "licenseApiBase", "personaEnv", "stockRuntime"];
 const SDK_SIDE = ["timeout", "slowMo", "humanize", "showCursor", "quiet", "docker", "dockerImage", "ephemeralProfile"];
 export const DOCKER_ACCEPTED: readonly string[] = [
   ...Object.keys(STR_ENV), ...Object.keys(INT_ENV), ...Object.keys(FLOAT_ENV), ...Object.keys(BOOL_ENV), ...SPECIAL, ...SDK_SIDE,
@@ -202,12 +203,13 @@ export function containerEnv(options: Record<string, unknown>): Record<string, s
   }
   if (options.headless === true) env.CC_HEADLESS = "1"; // unset or false: the image's default, headed on its own display
   if (options.proxy) env.CC_PROXY = proxyUrl(options.proxy);
-  const args = options.args as string[] | undefined;
-  if (args?.length) {
-    const bad = args.find((a) => !String(a) || /\s/.test(String(a)));
-    if (bad !== undefined) throw new TypeError(`args ${JSON.stringify(bad)}: an argument with whitespace cannot be passed to the Docker image`);
-    env.CC_EXTRA_ARGS = args.join(" ");
-  }
+  const args = [...((options.args as string[] | undefined) ?? [])];
+  const bad = args.find((a) => !String(a) || /\s/.test(String(a)));
+  if (bad !== undefined) throw new TypeError(`args ${JSON.stringify(bad)}: an argument with whitespace cannot be passed to the Docker image`);
+  // stockRuntime (engine r32+) goes in with the other engine switches; the image's entrypoint keeps it only on an
+  // engine that has it, as a launch here does (docker/serve.py).
+  if (stockRuntimeWanted(options.stockRuntime) && !args.map(String).includes(STOCK_RUNTIME_SWITCH)) args.push(STOCK_RUNTIME_SWITCH);
+  if (args.length) env.CC_EXTRA_ARGS = args.join(" ");
   const key = resolveLicenseKey(options.licenseKey as string | undefined); // as a local launch: option > env > saved key
   if (key) env.CLEARCOTE_LICENSE_KEY = key;
   if (options.licenseApiBase) env.CLEARCOTE_LICENSE_API = String(options.licenseApiBase);

@@ -129,7 +129,7 @@ internal static class DockerLaunch
         ["FingerprintNoise"] = "CC_FINGERPRINT_NOISE", ["CanvasNoise"] = "CC_CANVAS_NOISE", ["GpuStringSpoof"] = "CC_GPU_STRING_SPOOF",
     };
     private static readonly string[] Special =
-        { "DevicePixelRatio", "FingerprintProfile", "Headless", "Proxy", "Args", "LicenseKey", "LicenseApiBase", "PersonaEnv" };
+        { "DevicePixelRatio", "FingerprintProfile", "Headless", "Proxy", "Args", "LicenseKey", "LicenseApiBase", "PersonaEnv", "StockRuntime" };
     private static readonly string[] SdkSide = { "Timeout", "SlowMo", "Quiet", "Docker", "DockerImage" };
 
     /// Everything else LaunchOptions has is refused when set: a Docker launch takes the image's options,
@@ -205,12 +205,13 @@ internal static class DockerLaunch
         }
         if (o.Headless == true) env["CC_HEADLESS"] = "1";   // unset or false: the image's default, headed on its own display
         if (o.Proxy is { } proxy) env["CC_PROXY"] = ProxyUrl(proxy);
-        if (o.Args is { Count: > 0 } args)
-        {
-            var bad = args.FirstOrDefault(a => string.IsNullOrEmpty(a) || a.Any(char.IsWhiteSpace));
-            if (bad is not null) throw new ArgumentException($"Args \"{bad}\": an argument with whitespace cannot be passed to the Docker image");
-            env["CC_EXTRA_ARGS"] = string.Join(' ', args);
-        }
+        var args = (o.Args ?? Array.Empty<string>()).ToList();
+        var bad = args.FirstOrDefault(a => string.IsNullOrEmpty(a) || a.Any(char.IsWhiteSpace));
+        if (bad is not null) throw new ArgumentException($"Args \"{bad}\": an argument with whitespace cannot be passed to the Docker image");
+        // StockRuntime (engine r32+) goes in with the other engine switches; the image's entrypoint keeps it only on an
+        // engine that has it, as a launch here does (docker/serve.py).
+        if (LaunchOpts.StockRuntimeWanted(o.StockRuntime) && !args.Contains(LaunchOpts.StockRuntimeSwitch)) args.Add(LaunchOpts.StockRuntimeSwitch);
+        if (args.Count > 0) env["CC_EXTRA_ARGS"] = string.Join(' ', args);
         if (License.ResolveLicenseKey(o.LicenseKey) is { } key) env["CLEARCOTE_LICENSE_KEY"] = key;   // as a local launch: option > env > saved key
         if (!string.IsNullOrEmpty(o.LicenseApiBase)) env["CLEARCOTE_LICENSE_API"] = o.LicenseApiBase;
         // Engine patch 1021 (PersonaEnv): the image's entrypoint takes the persona off its chrome's command line by

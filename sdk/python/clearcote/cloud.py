@@ -191,9 +191,10 @@ RUN_FIELDS = {
 
 # Options a cloud launch() handles on THIS side and never sends: input humanization runs in the SDK
 # exactly as it does for a local browser, timeout/slow_mo are Playwright's connect_over_cdp options
-# (in its units, milliseconds), and api_key/api_url pick the account and server.
+# (in its units, milliseconds), and api_key/api_url pick the account and server. stock_runtime (engine r32+) is
+# a local and Docker option: a cloud launch only says once that it was not applied.
 _CONNECT_OPTIONS = ("timeout", "slow_mo")
-SDK_SIDE_OPTIONS = ("humanize", "show_cursor", "quiet", "api_key", "api_url") + _CONNECT_OPTIONS
+SDK_SIDE_OPTIONS = ("humanize", "show_cursor", "quiet", "api_key", "api_url", "stock_runtime") + _CONNECT_OPTIONS
 # How long a cloud launch waits for the connect when the caller gives no timeout (Playwright's own
 # default is 30 s). The browser starts as the client connects, and a launch with a country can take
 # over 30 s; a launch that fails is answered at once, so the longer wait only covers one in progress.
@@ -1191,8 +1192,10 @@ def launch_cloud(cloud, kwargs, persistent=False, user_data_dir=None):
     session is stopped (DELETE), so a failed launch never keeps a billed browser running."""
     from . import _install_headed_viewport, _playwright
     from ._humanize import install_humanize, install_humanize_on_context
+    from ._launchopts import warn_stock_runtime_cloud
 
     sdk, body = _prepare_launch(kwargs, persistent, user_data_dir)
+    warn_stock_runtime_cloud(sdk.get("stock_runtime"), sdk.get("quiet", False))
     client = _client_for(cloud, sdk)
     created = client.browsers._create(body)
     connect = _connect_options(sdk)
@@ -1247,9 +1250,11 @@ async def launch_cloud_async(cloud, kwargs, persistent=False, user_data_dir=None
     owns its Playwright driver, stopped on ``close()``; a failed launch stops the driver and the
     session."""
     from ._humanize_async import install_humanize, install_humanize_on_context
+    from ._launchopts import warn_stock_runtime_cloud
     from .async_api import _bind_driver, _install_headed_viewport, _start_driver
 
     sdk, body = _prepare_launch(kwargs, persistent, user_data_dir)
+    warn_stock_runtime_cloud(sdk.get("stock_runtime"), sdk.get("quiet", False))
     client = _client_for(cloud, sdk)
     connect = _connect_options(sdk)
     # The driver first: when it cannot start (Playwright missing), no session has been created yet.

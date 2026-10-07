@@ -61,6 +61,8 @@ import {
   gpuBackendArgs,
   gateEngineSwitches,
   engineExtrasArgs,
+  stockRuntimeArgs,
+  stockRuntimeOn,
   type PwProxy,
 } from "./launchopts.js";
 import { RELEASE, platformRelease } from "./release.js";
@@ -268,6 +270,14 @@ interface EngineExtrasOption {
    * connection reports it (no proxy-shaped DNS/connect/TLS durations). Requires a proxy.
    */
   transparentProxy?: boolean;
+  /**
+   * Chromium's own DevTools Runtime behaviour (engine r32+, `--disable-runtime-suppression`): Playwright's
+   * `console` and `pageerror` events, `setContent()`, and `exposeFunction()` / `exposeBinding()` after a
+   * navigation work as in stock Chromium. Off by default, because pages can observe some of the restored
+   * behaviour. Unset follows CLEARCOTE_STOCK_RUNTIME (1/true/yes/on). An engine without the switch launches
+   * without it, with one warning per process. Local and Docker launches only; a cloud launch warns once.
+   */
+  stockRuntime?: boolean;
 }
 
 /** Opt-in SOCKS5 UDP relaying (see {@link socks5UdpArgs}). */
@@ -490,6 +500,8 @@ function assembleArgs(
   socks5Udp?: boolean,
   extra?: {
     exe?: string; headed?: boolean; quiet?: boolean; allowThirdPartyCookies?: boolean; transparentProxy?: boolean;
+    /** What {@link stockRuntimeArgs} gave this launch (computed before the warnings, which read it). */
+    stockRuntimeArgs?: string[];
     /** Set when Playwright starts this browser (launch / launchPersistentContext, not serve): the
      * caller's ignoreDefaultArgs, `null` when they passed none. See playwrightFeatureOverrideArgs. */
     playwrightIgnoreDefaultArgs?: string[] | boolean | null;
@@ -521,6 +533,8 @@ function assembleArgs(
   base.push(...webrtcDefaultDenyArgs([...base, ...userArgs], webrtcIp));
   if (extra) {
     base.push(...engineExtrasArgs(extra, proxyForQuic, extra.quiet));
+    // Opt-in, engine r32+: Chromium's own DevTools Runtime behaviour, only on an engine that has the switch.
+    base.push(...(extra.stockRuntimeArgs ?? []));
     base.push(...gpuBlocklistArgs(!!extra.headed, process.platform, userArgs));
     // On a Linux host, render WebGL through the backend whose limits match the CLAIMED platform
     // (read back from the built persona switch; absent = pass-through). See gpuBackendArgs.
@@ -1025,7 +1039,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // profile= a saved persona: its options are the base, explicit options override. ("auto" is
   // resolved later, once the executable is known.)
   const merged = mergeSavedProfile(options);
-  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
@@ -1047,10 +1061,11 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // carried the credentials (hand Playwright the fields it reads)
   if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
   else (pwOptions as PlaywrightLaunchOptions).proxy = proxy as PlaywrightLaunchOptions["proxy"];
+  const stockArgs = stockRuntimeArgs(exe, stockRuntime, args ?? [], quiet);  // engine r32+, opt-in
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless,
       devtools: (pwOptions as Record<string, unknown>).devtools, userAgent: (pwOptions as Record<string, unknown>).userAgent,
-      _userArgs: args ?? [] },
+      _userArgs: args ?? [], _stockRuntime: stockRuntimeOn(exe, [...stockArgs, ...(args ?? [])]) },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
   const headed = (pwOptions as PlaywrightLaunchOptions).headless === false;
   // License (opt-in): check out a concurrency slot and inject CLEARCOTE_RUN_TOKEN so the PRO
@@ -1061,7 +1076,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined, socks5Udp,
-    { exe, headed, quiet, allowThirdPartyCookies, transparentProxy,
+    { exe, headed, quiet, allowThirdPartyCookies, transparentProxy, stockRuntimeArgs: stockArgs,
       playwrightIgnoreDefaultArgs: ((pwOptions as PlaywrightLaunchOptions).ignoreDefaultArgs as string[] | boolean | undefined) ?? null });
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …)
   // and LANGUAGE at the persona's UI locale (after engineArgs: it reads their --lang).
@@ -1140,7 +1155,7 @@ async function launchLocalPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = mergeSavedProfile(options);
-  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
@@ -1155,10 +1170,11 @@ async function launchLocalPersistentContext(
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
   if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
   else (pwOptions as PlaywrightLaunchOptions).proxy = proxy as PlaywrightLaunchOptions["proxy"];
+  const stockArgs = stockRuntimeArgs(exe, stockRuntime, args ?? [], quiet);  // engine r32+, opt-in
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless,
       devtools: (pwOptions as Record<string, unknown>).devtools, userAgent: (pwOptions as Record<string, unknown>).userAgent,
-      _userArgs: args ?? [] },
+      _userArgs: args ?? [], _stockRuntime: stockRuntimeOn(exe, [...stockArgs, ...(args ?? [])]) },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
   const opts = pwOptions as PlaywrightLaunchOptions & BrowserContextOptions;
   // headed + no explicit viewport -> disable the emulated viewport (impossible-window tell)
@@ -1198,7 +1214,7 @@ async function launchLocalPersistentContext(
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined, socks5Udp,
-    { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy,
+    { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy, stockRuntimeArgs: stockArgs,
       playwrightIgnoreDefaultArgs: ignoreDefaultArgs ?? null });
   const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env, engineArgs, fontDirList), engineArgs);
   const launchToken = lease?.bindLaunch();
@@ -1438,7 +1454,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   const merged = mergeSavedProfile(launchOpts);
   const {
     profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
-    args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest
+    args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
@@ -1454,8 +1470,10 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // switches (undefined then — proxyArgs already carries --proxy-server).
   const { args: proxyArgs, proxy: passProxy } = resolveProxy(proxyOpt, engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt, quiet);
+  const stockArgs = stockRuntimeArgs(exe, stockRuntime, userArgs ?? [], quiet);  // engine r32+, opt-in
   emitCoherenceWarnings(
-    { ...fingerprint, proxy: proxyOpt, geoip, headless, _userArgs: userArgs ?? [] },
+    { ...fingerprint, proxy: proxyOpt, geoip, headless, _userArgs: userArgs ?? [],
+      _stockRuntime: stockRuntimeOn(exe, [...stockArgs, ...(userArgs ?? [])]) },
     quiet, process.platform, String(RELEASE.version).split(".")[0]);
   // A license key selects the PRO (gated) binary; no key -> the free binary (unchanged path).
   const engineArgs = assembleArgs(
@@ -1463,7 +1481,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs ?? [], proxyOpt, socks5Udp,
     // serve launches the binary directly, so Playwright's SwiftShader default is never added; the
     // blocklist rule still applies to a headed endpoint and on Windows.
-    { exe, headed: !headless, quiet, allowThirdPartyCookies, transparentProxy });
+    { exe, headed: !headless, quiet, allowThirdPartyCookies, transparentProxy, stockRuntimeArgs: stockArgs });
 
   const resolvedPort = port ?? (await freePort());
   const ownUdd = !uddOption;

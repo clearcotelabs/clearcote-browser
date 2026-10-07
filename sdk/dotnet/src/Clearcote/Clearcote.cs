@@ -435,11 +435,12 @@ public static class Clearcote
     // ViaPlaywright: Playwright starts this browser (Launch / LaunchPersistentContext, not Serve), so
     // its --disable-features list is on the line and is replaced with the caller's IgnoreDefaultArgs
     // taken into account; see LaunchOpts.PlaywrightFeatureOverrideArgs.
+    // StockRuntime: LaunchOptions.StockRuntime (engine r32+; null follows CLEARCOTE_STOCK_RUNTIME).
     internal sealed record EngineExtras(string? Exe, bool Headed, bool Quiet, bool? AllowThirdPartyCookies, bool? TransparentProxy,
-        bool ViaPlaywright = false, IReadOnlyList<string>? IgnoreDefaultArgs = null);
+        bool ViaPlaywright = false, IReadOnlyList<string>? IgnoreDefaultArgs = null, bool? StockRuntime = null);
 
     private static EngineExtras Extras(LaunchOptions o, string exe, bool headed, bool viaPlaywright = true)
-        => new(exe, headed, o.Quiet, o.AllowThirdPartyCookies, o.TransparentProxy, viaPlaywright, o.IgnoreDefaultArgs);
+        => new(exe, headed, o.Quiet, o.AllowThirdPartyCookies, o.TransparentProxy, viaPlaywright, o.IgnoreDefaultArgs, o.StockRuntime);
 
     /// fpArgs + extArgs + proxyArgs + quic + (privacy-sandbox unless disabled==false) + webrtc-deny
     /// (+ engine extras + GPU blocklist), then userArgs appended last, then feature-flags collapsed,
@@ -479,6 +480,8 @@ public static class Clearcote
         if (extra is not null)
         {
             baseList.AddRange(LaunchOpts.EngineExtrasArgs(extra.AllowThirdPartyCookies, extra.TransparentProxy, proxyForQuic, extra.Quiet));
+            // Opt-in, engine r32+: Chromium's own DevTools Runtime behaviour, only on an engine that has the switch.
+            baseList.AddRange(LaunchOpts.StockRuntimeArgs(extra.Exe, extra.StockRuntime, userArgs, extra.Quiet));
             baseList.AddRange(LaunchOpts.GpuBlocklistArgs(extra.Headed, null, userArgs));
             // On a Linux host, render WebGL through the backend whose limits match the CLAIMED
             // platform (read back from the built persona switch; absent = pass-through).

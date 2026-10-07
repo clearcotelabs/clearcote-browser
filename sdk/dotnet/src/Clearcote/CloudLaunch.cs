@@ -33,8 +33,9 @@ internal static class CloudLaunch
         "MaxGb", "Profile", "Url", "Adblock", "SolveSliders", "SolveCheckboxes", "ChallengeService", "KeepAlive", "Record", "Note", "Worker",
     };
 
-    // ... and those handled on THIS side: the switch, the account, and Playwright's connect options.
-    internal static readonly string[] SdkSideOptions = { "Cloud", "CloudClient", "ApiKey", "ApiUrl", "Quiet", "SlowMo", "Timeout" };
+    // ... and those handled on THIS side: the switch, the account, and Playwright's connect options. StockRuntime
+    // (engine r32+) is a local and Docker option: a cloud launch only says once that it was not applied.
+    internal static readonly string[] SdkSideOptions = { "Cloud", "CloudClient", "ApiKey", "ApiUrl", "Quiet", "SlowMo", "Timeout", "StockRuntime" };
 
     // How long the connect waits when the caller gives no Timeout (Playwright's own default is 30 s).
     // The browser starts as the client connects, and a launch with a country can take over 30 s; a
@@ -91,6 +92,7 @@ internal static class CloudLaunch
     internal static async Task<IBrowser> LaunchBrowserAsync(LaunchOptions o)
     {
         var body = Cloud.SessionBody(SessionOptionsOf(o), run: false);
+        LaunchOpts.WarnStockRuntimeCloud(o.StockRuntime, o.Quiet);
         var (browser, _) = await ConnectAsync(o, body, persistent: false).ConfigureAwait(false);
         return browser;
     }
@@ -102,6 +104,7 @@ internal static class CloudLaunch
     {
         if (userDataDir is not null) throw new ArgumentException(UserDataDirMsg);
         var session = SessionOptionsOf(o);
+        LaunchOpts.WarnStockRuntimeCloud(o.StockRuntime, o.Quiet);
         if (persistent)
         {
             if (session.Profile is null)

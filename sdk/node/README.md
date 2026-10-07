@@ -153,6 +153,8 @@ Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the 
 
 On an older engine each of these is skipped with a warning; the launch still works.
 
+`stockRuntime: true` (or `CLEARCOTE_STOCK_RUNTIME=1`) gives Playwright the browser's stock DevTools behaviour back: `page.on("console")` and `page.on("pageerror")` receive events, `page.setContent()` works, and `exposeFunction()` / `exposeBinding()` keep working after a navigation. It is off by default because pages can observe some of what it restores. It needs an engine from r32 on; an older engine launches without it and the SDK warns once. It applies to local and Docker launches, not to cloud browsers.
+
 Also: `licenseThroughProxy: true` (or `CLEARCOTE_LICENSE_THROUGH_PROXY=1`) sends the licence calls through the launch proxy; `releaseChannel: "preview"` (or `CLEARCOTE_RELEASE_CHANNEL`) picks up PRO preview builds; `getSessionSeats()` reports seats in use.
 
 ### Through a proxy (report the proxy's IP, not your host's)

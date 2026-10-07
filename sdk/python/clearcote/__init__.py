@@ -47,6 +47,7 @@ from ._humanize import install_humanize, install_humanize_on_context
 from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
     DEFAULT_IGNORED_ARGS,
     GATED_ENGINE_SWITCHES,
+    STOCK_RUNTIME_SWITCH,
     engine_extras_args,
     engine_supports_switch,
     gate_engine_switches,
@@ -64,6 +65,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     quic_args,
     socks5_udp_args,
     resolve_proxy,
+    stock_runtime_args,
     web_bluetooth_args,
     webrtc_default_deny_args,
 )
@@ -458,6 +460,7 @@ def _prepare(kwargs):
     # Engine behaviour switches that are not part of the persona (engine 152 r22+).
     allow_third_party_cookies = kwargs.pop("allow_third_party_cookies", None)
     transparent_proxy = kwargs.pop("transparent_proxy", None)
+    stock_runtime = kwargs.pop("stock_runtime", None)  # engine r32+, None follows CLEARCOTE_STOCK_RUNTIME
     kwargs.pop("license_through_proxy", None)  # consumed by _acquire_lease_from_kwargs
     # serve() drives headless itself and pops it from kwargs, so it tells us explicitly.
     headed_flag = kwargs.pop("_cc_headed", None)
@@ -525,6 +528,9 @@ def _prepare(kwargs):
     # default WebRTC to leak-proof unless the user wired a webrtc_ip / policy themselves
     base += webrtc_default_deny_args(base + user, fp.get("webrtc_ip"))
     base += engine_extras_args(allow_third_party_cookies, transparent_proxy, proxy_opt, quiet=quiet)
+    # Opt-in, engine r32+: Chromium's own DevTools Runtime behaviour (console/pageerror events, set_content(),
+    # expose_function() across navigations). Only on an engine that has the switch; see stock_runtime_args.
+    base += stock_runtime_args(exe, stock_runtime, user, quiet=quiet)
     # Pairs with stripping Playwright's --enable-unsafe-swiftshader (DEFAULT_IGNORED_ARGS).
     base += gpu_blocklist_args(headed, sys.platform, user)
     # On a Linux host, render WebGL through the backend whose limits match the CLAIMED platform:
@@ -551,7 +557,9 @@ def _prepare(kwargs):
     emit_coherence_warnings(
         {**fp, "proxy": proxy_opt, "geoip": geoip, "headless": kwargs.get("headless"),
          "devtools": kwargs.get("devtools"), "user_agent": kwargs.get("user_agent"),
-         "_user_args": user, "_font_reach": font_reachability(fp.get("fingerprint_profile"))},
+         "_user_args": user, "_font_reach": font_reachability(fp.get("fingerprint_profile")),
+         "_stock_runtime": (STOCK_RUNTIME_SWITCH in args
+                            and engine_supports_switch(exe, STOCK_RUNTIME_SWITCH[2:]))},
         quiet=quiet, build_major=str(RELEASE["version"]).split(".")[0])
     # The motor-persona seed is the EFFECTIVE fingerprint (after the profile= merge above), i.e. the
     # same value that becomes --fingerprint — not the raw pre-merge kwarg. A profile-based launch

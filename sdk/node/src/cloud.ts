@@ -34,6 +34,7 @@ import type { Browser, BrowserContext } from "playwright-core";
 import { AGENT_KEYS } from "./agent.js";
 import { FINGERPRINT_KEYS } from "./fingerprint.js";
 import { installHumanize, installHumanizeOnContext } from "./humanize.js";
+import { warnStockRuntimeCloud } from "./launchopts.js";
 import { toProxySpec } from "./net.js";
 
 export const DEFAULT_API_URL = "https://www.clearcotelabs.com";
@@ -184,7 +185,8 @@ const CONNECT_OPTIONS = ["timeout", "slowMo"] as const;
 // default is 30 s). The browser starts as the client connects, and a launch with a country can take
 // over 30 s; a launch that fails is answered at once, so the longer wait only covers one in progress.
 const CLOUD_CONNECT_TIMEOUT_MS = 120_000;
-export const SDK_SIDE_OPTIONS: readonly string[] = ["humanize", "showCursor", "quiet", "apiKey", "apiUrl", ...CONNECT_OPTIONS];
+// stockRuntime (engine r32+) is a local and Docker option: a cloud launch only says once that it was not applied.
+export const SDK_SIDE_OPTIONS: readonly string[] = ["humanize", "showCursor", "quiet", "apiKey", "apiUrl", "stockRuntime", ...CONNECT_OPTIONS];
 
 /** Everything launch() accepts that only makes sense for a browser on this machine: derived from
  * the local launch surface (persona switches, agent switches, binary, licence, profile directory and
@@ -1101,6 +1103,7 @@ function defaultNoViewport(browser: Browser): void {
 export async function launchCloud(options: Record<string, unknown>, persistent = false, userDataDir?: string | null): Promise<Browser | BrowserContext> {
   const cloud = options.cloud;
   const { sdk, body } = prepareLaunch(options, persistent, userDataDir);
+  warnStockRuntimeCloud(sdk.stockRuntime, sdk.quiet as boolean | undefined);
   const client = cloud instanceof Cloud ? cloud : new Cloud({ apiKey: sdk.apiKey as string | undefined, baseUrl: sdk.apiUrl as string | undefined });
   const created = await client.browsers._create(body);
   const connect: Record<string, unknown> = { timeout: CLOUD_CONNECT_TIMEOUT_MS };

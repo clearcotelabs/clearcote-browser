@@ -37,6 +37,15 @@ public class LaunchOptions : FingerprintOptions
     /// <c>Proxy-Connection</c> on plain-HTTP requests through an HTTP proxy, and report proxied
     /// connection timing like a reused connection. Requires <see cref="Proxy"/>.
     public bool? TransparentProxy { get; set; }
+    /// Chromium's own DevTools Runtime behaviour (engine r32+, <c>--disable-runtime-suppression</c>): Playwright's
+    /// Console and PageError events, SetContentAsync, and ExposeFunctionAsync / ExposeBindingAsync after a
+    /// navigation work as in stock Chromium.
+    ///
+    /// <para>Off by default, because pages can observe some of the restored behaviour. Null follows
+    /// CLEARCOTE_STOCK_RUNTIME (1/true/yes/on); an explicit value wins over it. An engine without the switch
+    /// launches without it, with one warning per process. Local and Docker launches only: a cloud launch says once
+    /// that it was not applied. A normal browser argument, never part of the persona payload.</para>
+    public bool? StockRuntime { get; set; }
 
     // ── binary resolution ────────────────────────────────────────────────────
     /// Explicit chrome binary path (wins over everything, incl. CLEARCOTE_BINARY and the auto-download).
