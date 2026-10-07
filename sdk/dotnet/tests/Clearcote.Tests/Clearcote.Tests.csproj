@@ -8,6 +8,8 @@
     <IsPackable>false</IsPackable>
     <AssemblyName>Clearcote.Tests</AssemblyName>
     <RootNamespace>Clearcote.Tests</RootNamespace>
+    <!-- Program.cs: an entry point for the child processes the install-lock tests start. -->
+    <GenerateProgramFile>false</GenerateProgramFile>
   </PropertyGroup>
 
   <ItemGroup>

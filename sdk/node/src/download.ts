@@ -12,14 +12,16 @@
 //                            to the pinned release if GitHub is unreachable.
 // A hash mismatch (either mode) is always a hard failure and the partial download is deleted.
 
-import { execFileSync, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFile, spawnSync } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
+import { chmodSync, closeSync, createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import extract from "extract-zip";
 import { RELEASE, REPO, SIGNING_KEY_FPR, platformRelease, CATALOG_URL, CATALOG_FALLBACK, type ReleaseInfo, type Catalog, type CatalogBuild } from "./release.js";
 
@@ -467,24 +469,359 @@ export function checkInstall(exe: string | undefined): void {
  * A damaged tree returns null (after wiping it) so the caller re-downloads: the `.verified` marker
  * only records that the archive hashed correctly AT INSTALL TIME, and files can be eaten later.
  */
-export function cachedBinary(base: string, binary: string, quiet?: boolean): string | null {
+export function cachedBinary(base: string, binary: string, quiet?: boolean, repair = true): string | null {
   if (!existsSync(path.join(base, ".verified"))) return null;
   const browserDir = path.join(base, "browser");
   const cached = findFile(browserDir, binary);
   if (!cached) return null;
   const problems = verifyInstall(browserDir, base);
   if (!problems.length) return cached;
+  // `repair` also moves the damaged tree out of the way; false when not holding the install lock, so
+  // only the process that will re-install touches it.
+  if (!repair) return null;
   log(quiet, `cached browser is damaged (${problems[0]}) — re-downloading`);
-  rmSync(browserDir, { recursive: true, force: true });
   for (const marker of [".verified", MANIFEST]) rmSync(path.join(base, marker), { force: true });
+  moveAside(base, browserDir);
   return null;
 }
 
-/** Download + verify a resolved release into `base`, returning the extracted browser-binary path. */
-async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: DownloadOptions): Promise<string> {
-  const browserDir = path.join(base, "browser");
+// Install lock. One protocol, the same in Python (download.py), Node (download.ts) and .NET
+// (Download.cs) -- change all three together. Any mix of processes installing one build into
+// <cache>/<tag> takes turns:
+//  1. The lock is the file <tag>/.install-lock, created with O_CREAT|O_EXCL (atomic on every OS and in
+//     all three languages; Node has no flock). It holds JSON: pid, host, boot, pidns, nonce, sdk, created.
+//  2. The holder touches the file (mtime) every 5 s while it works.
+//  3. Waiters poll every 0.25 s. The lock is stale when its record is from this machine (same host, boot
+//     id and PID namespace) and that pid is gone, when its mtime is over 120 s old, or when it is still
+//     not valid JSON 10 s after it was written. A stale lock is broken while holding
+//     <tag>/.install-lock.break (also O_EXCL; one older than 30 s is removed): re-check that it is still
+//     stale, delete it, delete the breaker.
+//  4. The holder re-checks the cache and uses a verified build if one is there now. Otherwise it downloads
+//     and extracts into <tag>/.tmp-<nonce>/, moves the tree to <tag>/browser, writes .manifest.json then
+//     .verified, and removes the temp dir. A verified tree is never deleted or written over; a damaged
+//     one is moved aside (<tag>/.trash-*) by the holder only.
+//  5. Release deletes the lock only while it still holds our nonce. Waiting gives up after 30 min with an
+//     error that names the holder and the lock file.
+export const INSTALL_LOCK = ".install-lock";
+
+/** Install-lock timings in ms (see the protocol above). Tests may shorten them. */
+export const installLockTiming = { pollMs: 250, heartbeatMs: 5_000, staleMs: 120_000, unreadableMs: 10_000, breakerStaleMs: 30_000, waitMs: 30 * 60_000 };
+
+type LockRecord = { pid?: unknown; host?: unknown; boot?: unknown; pidns?: unknown; nonce?: unknown; sdk?: unknown };
+type LockRead = { state: "gone" | "busy"; rec: null; mtimeMs: 0 } | { state: "ok" | "invalid"; rec: LockRecord | null; mtimeMs: number };
+
+const errCode = (e: unknown): string | undefined => (e as NodeJS.ErrnoException)?.code;
+
+function bootId(): string | null {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function pidNamespace(): string | null {
+  try {
+    return readlinkSync("/proc/self/ns/pid");
+  } catch {
+    return null;
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // signal 0: an existence check, also on Windows
+    return true;
+  } catch (e) {
+    return errCode(e) === "EPERM"; // exists, but not ours to signal
+  }
+}
+
+function readLock(p: string): LockRead {
+  let mtimeMs: number;
+  let raw: string;
+  try {
+    mtimeMs = statSync(p).mtimeMs;
+    raw = readFileSync(p, "utf8");
+  } catch (e) {
+    return { state: errCode(e) === "ENOENT" ? "gone" : "busy", rec: null, mtimeMs: 0 };
+  }
+  try {
+    const rec = JSON.parse(raw) as unknown;
+    if (rec && typeof rec === "object" && !Array.isArray(rec)) return { state: "ok", rec: rec as LockRecord, mtimeMs };
+  } catch {
+    /* not (yet) valid JSON */
+  }
+  return { state: "invalid", rec: null, mtimeMs };
+}
+
+function lockStale(rec: LockRecord | null, mtimeMs: number): boolean {
+  const age = Date.now() - mtimeMs;
+  if (!rec) return age > installLockTiming.unreadableMs;
+  const { pid, host } = rec;
+  if (
+    typeof host === "string" && host.toLowerCase() === os.hostname().toLowerCase() &&
+    (rec.boot ?? null) === bootId() && (rec.pidns ?? null) === pidNamespace() &&
+    typeof pid === "number" && Number.isInteger(pid) && pid > 0 && !pidAlive(pid)
+  ) return true;
+  return age > installLockTiming.staleMs;
+}
+
+/** Delete a stale lock, under the breaker file. True when the lock is gone afterwards. */
+function breakStaleLock(p: string): boolean {
+  const breaker = `${p}.break`;
+  try {
+    closeSync(openSync(breaker, "wx"));
+  } catch {
+    try {
+      if (Date.now() - statSync(breaker).mtimeMs > installLockTiming.breakerStaleMs) unlinkSync(breaker); // its owner died holding it
+    } catch {
+      /* gone meanwhile */
+    }
+    return false;
+  }
+  try {
+    const s = readLock(p);
+    if ((s.state === "ok" || s.state === "invalid") && lockStale(s.rec, s.mtimeMs)) {
+      unlinkSync(p);
+      return true;
+    }
+    return s.state === "gone";
+  } catch {
+    return false;
+  } finally {
+    rmSync(breaker, { force: true });
+  }
+}
+
+const SDK_NAMES: Record<string, string> = { python: "Python", node: "Node", dotnet: ".NET" };
+
+function lockHolder(rec: LockRecord | null): string {
+  if (!rec || !rec.pid) return "a process that left no details";
+  const sdk = SDK_NAMES[String(rec.sdk)] ?? String(rec.sdk ?? "unknown");
+  return `process ${String(rec.pid)} on ${typeof rec.host === "string" && rec.host ? rec.host : "an unknown machine"} (Clearcote ${sdk} SDK)`;
+}
+
+function waitWords(ms: number): string {
+  const [n, unit] = ms < 120_000 ? [Math.max(1, Math.round(ms / 1000)), "second"] : [Math.round(ms / 60_000), "minute"];
+  return `${n} ${unit}${n === 1 ? "" : "s"}`;
+}
+
+/** The install lock while this process holds it. */
+export interface InstallLock {
+  readonly path: string;
+  readonly nonce: string;
+  /** False once the lock file no longer carries our nonce (another process judged it stale). */
+  held(): boolean;
+  /** Touch the lock file now (the heartbeat timer does this every few seconds too). */
+  beat(): void;
+  release(): Promise<void>;
+}
+
+function holdLock(p: string, nonce: string): InstallLock {
+  let lost = false;
+  const held = (): boolean => {
+    if (lost) return false;
+    const s = readLock(p);
+    if (s.state !== "busy" && s.rec?.nonce !== nonce) lost = true;
+    return !lost;
+  };
+  const beat = (): void => {
+    if (!held()) return;
+    try {
+      const now = new Date();
+      utimesSync(p, now, now);
+    } catch {
+      /* next beat */
+    }
+  };
+  const timer = setInterval(beat, installLockTiming.heartbeatMs);
+  timer.unref();
+  return {
+    path: p,
+    nonce,
+    held,
+    beat,
+    async release(): Promise<void> {
+      clearInterval(timer);
+      for (let i = 0; i < 40; i++) { // another process may be reading the file this instant (Windows refuses the delete)
+        const s = readLock(p);
+        if (s.state === "gone" || (s.state !== "busy" && s.rec?.nonce !== nonce)) return;
+        if (s.state === "ok") {
+          try {
+            unlinkSync(p);
+            return;
+          } catch (e) {
+            if (errCode(e) === "ENOENT") return;
+          }
+        }
+        await sleep(50);
+      }
+    },
+  };
+}
+
+/** Wait for, then take, the install lock of build directory `base` (see the protocol above). */
+export async function acquireInstallLock(base: string, opts: { timeoutMs?: number; quiet?: boolean } = {}): Promise<InstallLock> {
   mkdirSync(base, { recursive: true });
-  const zipPath = path.join(base, rel.asset);
+  const p = path.join(base, INSTALL_LOCK);
+  const nonce = randomBytes(16).toString("hex");
+  const body = JSON.stringify({ pid: process.pid, host: os.hostname(), boot: bootId(), pidns: pidNamespace(), nonce, sdk: "node", created: Date.now() });
+  const wait = opts.timeoutMs ?? installLockTiming.waitMs;
+  const deadline = Date.now() + wait;
+  let told = false;
+  let refused = 0;
+  for (;;) {
+    let fd: number | null = null;
+    try {
+      fd = openSync(p, "wx");
+    } catch (e) {
+      const c = errCode(e);
+      // Windows: the previous lock file is still being deleted
+      if (c !== "EEXIST" && !(process.platform === "win32" && (c === "EPERM" || c === "EACCES" || c === "EBUSY"))) throw e;
+      if (c !== "EEXIST") refused++;
+    }
+    if (fd !== null) {
+      try {
+        writeSync(fd, body);
+      } catch (e) {
+        closeSync(fd);
+        rmSync(p, { force: true });
+        throw e;
+      }
+      closeSync(fd);
+      return holdLock(p, nonce);
+    }
+    const s = readLock(p);
+    if (s.state !== "gone") refused = 0;
+    else if (refused > 40) throw new Error(`Clearcote cannot create ${p}: permission denied`); // not a race: a real error
+    if ((s.state === "ok" || s.state === "invalid") && lockStale(s.rec, s.mtimeMs) && breakStaleLock(p)) {
+      log(opts.quiet ?? true, `removed an abandoned install lock (${lockHolder(s.rec)})`);
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Gave up after ${waitWords(wait)} waiting for another program to finish installing the Clearcote browser in\n    ${base}\n` +
+          `The other installer is ${lockHolder(s.rec)}. If nothing else is installing it, delete this file and try again:\n    ${p}`,
+      );
+    }
+    if (!told && s.state === "ok") {
+      log(opts.quiet ?? true, `another program is installing this browser build (${lockHolder(s.rec)}); waiting for it`);
+      told = true;
+    }
+    await sleep(installLockTiming.pollMs);
+  }
+}
+
+/** Synchronous sleep for the short Windows retries below. */
+const pause = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+function renameDir(src: string, dst: string): void {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      renameSync(src, dst);
+      return;
+    } catch (e) {
+      // Windows: a scanner can hold a file in the fresh tree for a moment
+      const c = errCode(e);
+      if (process.platform !== "win32" || attempt >= 9 || !(c === "EPERM" || c === "EACCES" || c === "EBUSY")) throw e;
+      pause(200);
+    }
+  }
+}
+
+/** Move a tree that must be replaced out of the way, then delete it if nothing is using it. */
+function moveAside(base: string, browserDir: string): void {
+  const trash = path.join(base, `.trash-${randomBytes(6).toString("hex")}`);
+  try {
+    renameDir(browserDir, trash);
+  } catch (e) {
+    if (errCode(e) === "ENOENT") return;
+    throw new Error(
+      `Clearcote cannot replace the browser files in\n    ${browserDir}\nbecause another program is still using them (${(e as Error).message}).\n` +
+        "Close every program that uses this Clearcote browser, then try again.",
+    );
+  }
+  try {
+    rmSync(trash, { recursive: true, force: true });
+  } catch {
+    /* what is still in use stays until the next install sweeps it */
+  }
+}
+
+/** Remove what an install that stopped part-way left behind. Only called by the lock holder. */
+function sweepLeftovers(base: string, asset: string): void {
+  let names: string[] = [];
+  try {
+    names = readdirSync(base);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (name === ".incoming" || name.startsWith(".tmp-") || name.startsWith(".trash-")) {
+      try {
+        rmSync(path.join(base, name), { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+  try {
+    rmSync(path.join(base, asset), { force: true }); // where earlier versions downloaded the archive
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Download + verify a resolved release into `base`, returning the extracted browser-binary path.
+ *
+ * Holds `base`'s install lock: a second process that missed the cache at the same moment waits, then uses
+ * the tree the first one finished instead of downloading over it.
+ */
+async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: DownloadOptions): Promise<string> {
+  const binary = rel.binary || "chrome.exe";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const lock = await acquireInstallLock(base, { quiet: opts.quiet ?? false });
+    try {
+      const cached = cachedBinary(base, binary, opts.quiet);
+      if (cached) {
+        log(opts.quiet, `installed by another process meanwhile: ${cached}`);
+        return cached;
+      }
+      try {
+        return await installLocked(rel, base, opts, lock);
+      } catch (e) {
+        if (lock.held()) throw e;
+      }
+      log(opts.quiet, "another process took over this install; waiting for it");
+    } finally {
+      await lock.release();
+    }
+  }
+  throw new Error(`Clearcote could not install ${rel.tag}: other processes kept taking over the install in ${base}`);
+}
+
+/**
+ * The install itself; the caller holds the install lock. Everything is written under `base/.tmp-<nonce>`
+ * first, and the finished tree is moved into place only while the lock is still ours.
+ */
+async function installLocked(rel: ResolvedRelease, base: string, opts: DownloadOptions, lock: InstallLock): Promise<string> {
+  sweepLeftovers(base, rel.asset);
+  const tmp = path.join(base, `.tmp-${lock.nonce}`);
+  mkdirSync(tmp, { recursive: true });
+  try {
+    return await installInto(rel, base, tmp, opts, lock);
+  } finally {
+    await rm(tmp, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function installInto(rel: ResolvedRelease, base: string, tmp: string, opts: DownloadOptions, lock: InstallLock): Promise<string> {
+  const browserDir = path.join(base, "browser");
+  const zipPath = path.join(tmp, rel.asset);
 
   log(opts.quiet, `fetching Clearcote ${rel.version} (${rel.tag}${rel.unpinned ? ", latest" : ""}, ~${(rel.size / 1e6).toFixed(0)} MB)`);
   await downloadTo(rel.url, zipPath, rel.size, opts.quiet);
@@ -500,7 +837,7 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
   if (rel.unpinned && rel.ascUrl) {
     const sumsBody = await fetchText(`https://github.com/${REPO}/releases/download/${rel.tag}/SHA256SUMS.txt`).catch(() => "");
     if (sumsBody) {
-      const verdict = await gpgVerifyAsync(rel, sumsBody, base, opts.quiet);
+      const verdict = await gpgVerifyAsync(rel, sumsBody, tmp, opts.quiet);
       if (verdict === "failed") {
         await rm(zipPath, { force: true });
         throw new Error(
@@ -512,24 +849,24 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
   }
 
   log(opts.quiet, "extracting");
-  await rm(browserDir, { recursive: true, force: true });
-  // Extract to a sibling temp dir, then atomically move it into place so `browser/` only ever
+  // Extract next to the target, then move the finished tree into place so `browser/` only ever
   // appears once fully written (no partial tree a launch could race), and — on Windows — we can
   // pre-scan the finished tree before any launch (below).
-  const incoming = path.join(base, ".incoming");
-  await rm(incoming, { recursive: true, force: true });
+  const incoming = path.join(tmp, "browser");
   mkdirSync(incoming, { recursive: true });
   if (rel.asset.endsWith(".tar.xz") || rel.archive === "tar.xz") {
-    // Node has no stdlib xz; the system `tar` (always present on Linux) auto-detects .xz.
-    execFileSync("tar", ["-xf", zipPath, "-C", incoming]);
+    // Node has no stdlib xz; the system `tar` (always present on Linux) auto-detects .xz. Async, so the
+    // lock's heartbeat keeps running during a long extraction.
+    await promisify(execFile)("tar", ["-xf", zipPath, "-C", incoming]);
   } else {
     await extract(zipPath, { dir: incoming });
   }
-  renameSync(incoming, browserDir);
+  await rm(zipPath, { force: true }); // reclaim ~250 MB; keep only the extracted tree
 
   const binaryName = rel.binary || "chrome.exe";
-  const exe = findFile(browserDir, binaryName);
-  if (!exe) throw new Error(`Clearcote archive verified but ${binaryName} was not found inside it.`);
+  const found = findFile(incoming, binaryName);
+  if (!found) throw new Error(`Clearcote archive verified but ${binaryName} was not found inside it.`);
+  let exe = found;
   if (rel.exeSha256) {
     const exeHash = await sha256File(exe);
     if (exeHash.toLowerCase() !== rel.exeSha256.toLowerCase()) {
@@ -556,16 +893,25 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
     }
   }
 
+  // Move the tree into place only while the lock is still ours. The caller found no verified tree
+  // under the lock, so whatever sits at browser/ is an install that stopped part-way.
+  lock.beat();
+  if (!lock.held()) throw new Error("Clearcote: another process took over this install");
+  for (const marker of [".verified", MANIFEST]) rmSync(path.join(base, marker), { force: true });
+  if (existsSync(browserDir)) moveAside(base, browserDir);
+  renameDir(incoming, browserDir);
+  exe = path.join(browserDir, path.relative(incoming, exe));
+
   if (process.platform === "win32") {
     // Pre-scan so real-time AV finishes with the freshly-extracted binaries before the first launch
     // — closes the chrome_elf.dll scan race that otherwise poisons the path (see warmFiles).
     warmFiles(browserDir);
+    lock.beat(); // the read above blocks the heartbeat timer
   }
   // Record the finished tree BEFORE the .verified marker, so a launch never sees "verified" with
   // no manifest to check it against.
   writeManifest(base, browserDir);
   writeFileSync(path.join(base, ".verified"), `${rel.sha256}\n`);
-  await rm(zipPath, { force: true }); // reclaim ~250 MB; keep only the extracted tree
   log(opts.quiet, `ready: ${exe}`);
   return exe;
 }
@@ -722,7 +1068,7 @@ export async function ensureVersion(
   }
   const base = path.join(opts.cacheDir || defaultCacheRoot(), plan.rel.tag);
   {
-    const cached = cachedBinary(base, plan.rel.binary || "chrome", opts.quiet);
+    const cached = cachedBinary(base, plan.rel.binary || "chrome", opts.quiet, false);
     if (cached) return cached;
   }
   return fetchAndVerify(plan.rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
@@ -824,7 +1170,7 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
 
   const base = path.join(opts.cacheDir || defaultCacheRoot(), rel.tag);
   {
-    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet);
+    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet, false);
     if (cached) return cached;
   }
   return fetchAndVerify(rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
@@ -852,7 +1198,7 @@ export async function ensureBinary(opts: DownloadOptions = {}): Promise<string> 
 
   const base = path.join(cacheRoot, rel.tag);
   {
-    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet);
+    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet, false);
     if (cached) return cached;
   }
   return fetchAndVerify(rel, base, opts);

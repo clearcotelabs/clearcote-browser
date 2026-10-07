@@ -261,7 +261,7 @@ def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_upda
                                      release_channel=channel)
         rel = payload  # free build resolved from the catalog
         base = os.path.join(cache_dir or _cache_root(), rel["tag"])
-        cached = _cached(base, rel["binary"], quiet)
+        cached = _cached(base, rel["binary"], quiet, repair=False)
         if cached:
             return cached
         return _fetch_and_verify(rel, base, quiet)

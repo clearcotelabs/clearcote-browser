@@ -22,11 +22,14 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess  # noqa: S404
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
+import uuid
 import zipfile
 
 from .release import RELEASE, REPO, SIGNING_KEY_FPR, platform_release
@@ -198,11 +201,13 @@ def check_install(exe):
         raise broken_install_error(browser_dir, problems, repairable=False)
 
 
-def _cached(base, binary, quiet=False):
+def _cached(base, binary, quiet=False, repair=True):
     """The cached chrome path for an install base, or None when absent or damaged.
 
     A damaged tree returns None so the caller re-downloads: the ``.verified`` marker only records
-    that the archive hashed correctly AT INSTALL TIME, and the files can be eaten afterwards."""
+    that the archive hashed correctly AT INSTALL TIME, and the files can be eaten afterwards.
+    ``repair`` also moves the damaged tree out of the way; pass False when not holding the install
+    lock, so only the process that will re-install touches it."""
     if not os.path.exists(os.path.join(base, ".verified")):
         return None
     browser_dir = os.path.join(base, "browser")
@@ -211,13 +216,15 @@ def _cached(base, binary, quiet=False):
         return None
     problems = verify_install(browser_dir, base)
     if problems:
+        if not repair:
+            return None
         _log(quiet, f"cached browser is damaged ({problems[0]}) — re-downloading")
-        shutil.rmtree(browser_dir, ignore_errors=True)
         for marker in (".verified", MANIFEST):
             try:
                 os.remove(os.path.join(base, marker))
             except OSError:
                 pass
+        _move_aside(base, browser_dir)
         return None
     return cached
 
@@ -408,40 +415,293 @@ def _gpg_verify(rel, sums_body, quiet):
         shutil.rmtree(home, ignore_errors=True)
 
 
-@contextlib.contextmanager
-def _install_lock(base):
-    """One installer per build directory at a time, across processes -- and across containers that share
-    an engine-cache volume (the macOS Docker launch mounts one named volume into every licensed container).
-    Without it two first launches both downloaded into ``base``, shared one ``.incoming`` directory, and the
-    loser failed with "Directory not empty" (measured: two parallel licensed containers on a fresh volume)."""
-    os.makedirs(base, exist_ok=True)
-    fh = open(os.path.join(base, ".install.lock"), "a+b")  # noqa: SIM115 -- held for the whole install
+# Install lock. One protocol, the same in Python (download.py), Node (download.ts) and .NET
+# (Download.cs) -- change all three together. Any mix of processes installing one build into
+# <cache>/<tag> takes turns:
+#  1. The lock is the file <tag>/.install-lock, created with O_CREAT|O_EXCL (atomic on every OS and in
+#     all three languages; Node has no flock). It holds JSON: pid, host, boot, pidns, nonce, sdk, created.
+#  2. The holder touches the file (mtime) every 5 s while it works.
+#  3. Waiters poll every 0.25 s. The lock is stale when its record is from this machine (same host, boot
+#     id and PID namespace) and that pid is gone, when its mtime is over 120 s old, or when it is still
+#     not valid JSON 10 s after it was written. A stale lock is broken while holding
+#     <tag>/.install-lock.break (also O_EXCL; one older than 30 s is removed): re-check that it is still
+#     stale, delete it, delete the breaker.
+#  4. The holder re-checks the cache and uses a verified build if one is there now. Otherwise it downloads
+#     and extracts into <tag>/.tmp-<nonce>/, moves the tree to <tag>/browser, writes .manifest.json then
+#     .verified, and removes the temp dir. A verified tree is never deleted or written over; a damaged
+#     one is moved aside (<tag>/.trash-*) by the holder only.
+#  5. Release deletes the lock only while it still holds our nonce. Waiting gives up after 30 min with an
+#     error that names the holder and the lock file.
+INSTALL_LOCK = ".install-lock"
+_LOCK_POLL = 0.25
+_LOCK_HEARTBEAT = 5.0
+_LOCK_STALE = 120.0
+_LOCK_UNREADABLE = 10.0
+_LOCK_BREAKER_STALE = 30.0
+INSTALL_WAIT = 30 * 60.0
+
+
+def _boot_id():
     try:
-        if os.name == "nt":
-            import msvcrt
-            while True:
-                try:
-                    fh.seek(0)
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except OSError:
-                    time.sleep(0.25)
-        else:
-            import fcntl
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
+        with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _pid_namespace():
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except (OSError, AttributeError, NotImplementedError, ValueError):
+        return None
+
+
+def _pid_alive(pid):
+    if not 0 < pid < 2**31:
+        return False
+    if os.name == "nt":  # os.kill(pid, 0) would TERMINATE the process on Windows
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists
         try:
-            if os.name == "nt":
-                import msvcrt
-                fh.seek(0)
-                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_lock(path):
+    """("gone" | "busy" | "ok" | "invalid", record or None, mtime). "busy": cannot be read right now."""
+    try:
+        mtime = os.stat(path).st_mtime
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return "gone", None, None
+    except OSError:
+        return "busy", None, None
+    try:
+        rec = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return "invalid", None, mtime
+    return ("ok", rec, mtime) if isinstance(rec, dict) else ("invalid", None, mtime)
+
+
+def _lock_stale(rec, mtime):
+    age = time.time() - mtime
+    if rec is None:
+        return age > _LOCK_UNREADABLE
+    pid = rec.get("pid")
+    host = rec.get("host")
+    if (isinstance(host, str) and host.lower() == socket.gethostname().lower()
+            and rec.get("boot") == _boot_id() and rec.get("pidns") == _pid_namespace()
+            and isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+            and not _pid_alive(pid)):
+        return True
+    return age > _LOCK_STALE
+
+
+def _break_stale_lock(path):
+    """Delete a stale lock, under the breaker file. True when the lock is gone afterwards."""
+    breaker = path + ".break"
+    try:
+        os.close(os.open(breaker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+    except OSError:
+        try:
+            if time.time() - os.stat(breaker).st_mtime > _LOCK_BREAKER_STALE:
+                os.remove(breaker)  # its owner died between taking and removing it
         except OSError:
             pass
-        fh.close()
+        return False
+    try:
+        state, rec, mtime = _read_lock(path)
+        if state in ("ok", "invalid") and _lock_stale(rec, mtime):
+            os.remove(path)
+            state = "gone"
+        return state == "gone"
+    except OSError:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(breaker)
+
+
+_SDK_NAMES = {"python": "Python", "node": "Node", "dotnet": ".NET"}
+
+
+def _lock_holder(rec):
+    if not rec or not rec.get("pid"):
+        return "a process that left no details"
+    sdk = _SDK_NAMES.get(rec.get("sdk"), str(rec.get("sdk") or "unknown"))
+    return f"process {rec.get('pid')} on {rec.get('host') or 'an unknown machine'} (Clearcote {sdk} SDK)"
+
+
+def _wait_words(seconds):
+    n, unit = (max(1, round(seconds)), "second") if seconds < 120 else (round(seconds / 60), "minute")
+    return f"{n} {unit}{'' if n == 1 else 's'}"
+
+
+class _HeldLock:
+    """The install lock while this process holds it: heartbeat thread, ownership check, release."""
+
+    def __init__(self, path, nonce):
+        self.path, self.nonce = path, nonce
+        self._lost = False
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._beat_loop, name="clearcote-install-lock", daemon=True)
+        self._thread.start()
+
+    def held(self):
+        """False once the lock file no longer carries our nonce (another process judged it stale)."""
+        if self._lost:
+            return False
+        state, rec, _ = _read_lock(self.path)
+        if state != "busy" and (rec or {}).get("nonce") != self.nonce:
+            self._lost = True
+        return not self._lost
+
+    def beat(self):
+        if self.held():
+            with contextlib.suppress(OSError):
+                os.utime(self.path, None)
+
+    def _beat_loop(self):
+        while not self._stop.wait(_LOCK_HEARTBEAT):
+            self.beat()
+
+    def release(self):
+        self._stop.set()
+        self._thread.join(5)
+        for _ in range(40):  # another process may be reading the file this instant (Windows refuses the delete)
+            state, rec, _ = _read_lock(self.path)
+            if state == "gone" or (state != "busy" and (rec or {}).get("nonce") != self.nonce):
+                return
+            if state == "ok":
+                try:
+                    os.remove(self.path)
+                    return
+                except FileNotFoundError:
+                    return
+                except OSError:
+                    pass
+            time.sleep(0.05)
+
+
+def _acquire_install_lock(base, timeout=None, quiet=True):
+    """Wait for, then take, the install lock of build directory ``base`` (see the protocol above)."""
+    os.makedirs(base, exist_ok=True)
+    path = os.path.join(base, INSTALL_LOCK)
+    nonce = uuid.uuid4().hex
+    body = json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "boot": _boot_id(),
+                       "pidns": _pid_namespace(), "nonce": nonce, "sdk": "python",
+                       "created": int(time.time() * 1000)}).encode("utf-8")
+    wait = INSTALL_WAIT if timeout is None else timeout
+    deadline = time.monotonic() + wait
+    told = False
+    refused = 0
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o644)
+        except FileExistsError:
+            fd = None
+        except PermissionError:  # Windows: the previous lock file is still being deleted
+            if os.name != "nt":
+                raise
+            fd = None
+            refused += 1
+        if fd is not None:
+            try:
+                os.write(fd, body)
+            except OSError:
+                os.close(fd)
+                with contextlib.suppress(OSError):
+                    os.remove(path)
+                raise
+            os.close(fd)
+            return _HeldLock(path, nonce)
+        state, rec, mtime = _read_lock(path)
+        if state != "gone":
+            refused = 0
+        elif refused > 40:  # no lock file, yet we may not create one: not a race, a real error
+            raise PermissionError(f"Clearcote cannot create {path}: permission denied")
+        if state in ("ok", "invalid") and _lock_stale(rec, mtime) and _break_stale_lock(path):
+            _log(quiet, f"removed an abandoned install lock ({_lock_holder(rec)})")
+            continue
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"Gave up after {_wait_words(wait)} waiting for another program to finish installing the "
+                f"Clearcote browser in\n    {base}\n"
+                f"The other installer is {_lock_holder(rec)}. If nothing else is installing it, delete this "
+                f"file and try again:\n    {path}")
+        if not told and state == "ok":
+            _log(quiet, f"another program is installing this browser build ({_lock_holder(rec)}); waiting for it")
+            told = True
+        time.sleep(_LOCK_POLL)
+
+
+@contextlib.contextmanager
+def _install_lock(base, quiet=True, timeout=None):
+    """One installer per build directory at a time, across processes, SDKs and containers that share a
+    cache volume (the macOS Docker launch mounts one named volume into every licensed container). Without
+    it, two first launches both downloaded into ``base`` and one deleted files the other was running."""
+    lock = _acquire_install_lock(base, timeout, quiet)
+    try:
+        yield lock
+    finally:
+        lock.release()
+
+
+class _LockLost(Exception):
+    """Another process judged our install lock stale and took over."""
+
+
+def _remove_tree(path):
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _rename_dir(src, dst):
+    for attempt in range(10):
+        try:
+            os.rename(src, dst)
+            return
+        except PermissionError:  # Windows: a scanner can hold a file in the fresh tree for a moment
+            if os.name != "nt" or attempt == 9:
+                raise
+            time.sleep(0.2)
+
+
+def _move_aside(base, browser_dir):
+    """Move a tree that must be replaced out of the way, then delete it if nothing is using it."""
+    trash = os.path.join(base, ".trash-" + uuid.uuid4().hex[:12])
+    try:
+        _rename_dir(browser_dir, trash)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        raise RuntimeError(
+            f"Clearcote cannot replace the browser files in\n    {browser_dir}\n"
+            f"because another program is still using them ({e}).\n"
+            "Close every program that uses this Clearcote browser, then try again.") from None
+    _remove_tree(trash)  # what is still in use stays until the next install sweeps it
+
+
+def _sweep_leftovers(base, asset):
+    """Remove what an install that stopped part-way left behind. Only called by the lock holder."""
+    with contextlib.suppress(OSError):
+        for name in os.listdir(base):
+            if name == ".incoming" or name.startswith((".tmp-", ".trash-")):
+                _remove_tree(os.path.join(base, name))
+    with contextlib.suppress(OSError):
+        os.remove(os.path.join(base, asset))  # where earlier versions downloaded the archive
 
 
 def _fetch_and_verify(rel, base, quiet):
@@ -449,19 +709,40 @@ def _fetch_and_verify(rel, base, quiet):
 
     Holds ``base``'s install lock: a second process that missed the cache at the same moment waits, then
     uses the tree the first one finished instead of downloading over it."""
-    with _install_lock(base):
-        cached = _cached(base, rel.get("binary", "chrome.exe"), quiet)
-        if cached:
-            _log(quiet, f"installed by another process meanwhile: {cached}")
-            return cached
-        return _fetch_and_verify_unlocked(rel, base, quiet)
+    binary = rel.get("binary", "chrome.exe")
+    for _ in range(3):
+        with _install_lock(base, quiet) as lock:
+            cached = _cached(base, binary, quiet)
+            if cached:
+                _log(quiet, f"installed by another process meanwhile: {cached}")
+                return cached
+            try:
+                return _fetch_and_verify_unlocked(rel, base, quiet, lock)
+            except Exception:
+                if lock.held():
+                    raise
+            _log(quiet, "another process took over this install; waiting for it")
+    raise RuntimeError(f"Clearcote could not install {rel['tag']}: other processes kept taking over the install in {base}")
 
 
-def _fetch_and_verify_unlocked(rel, base, quiet):
-    """Download + verify a resolved release into ``base``; return the extracted chrome.exe path."""
-    browser_dir = os.path.join(base, "browser")
+def _fetch_and_verify_unlocked(rel, base, quiet, lock=None):
+    """Download + verify a resolved release into ``base``; return the extracted chrome.exe path.
+
+    The caller holds the install lock (``lock``). Everything is written under ``base/.tmp-<nonce>``
+    first, and the finished tree is moved into place only while the lock is still ours."""
     os.makedirs(base, exist_ok=True)
-    zip_path = os.path.join(base, rel["asset"])
+    _sweep_leftovers(base, rel["asset"])
+    tmp = os.path.join(base, ".tmp-" + (lock.nonce if lock else uuid.uuid4().hex))
+    os.makedirs(tmp)
+    try:
+        return _install_into(rel, base, tmp, quiet, lock)
+    finally:
+        _remove_tree(tmp)
+
+
+def _install_into(rel, base, tmp, quiet, lock):
+    browser_dir = os.path.join(base, "browser")
+    zip_path = os.path.join(tmp, rel["asset"])
 
     tail = ", latest" if rel.get("unpinned") else ""
     _log(quiet, f"fetching Clearcote {rel['version']} ({rel['tag']}{tail}, "
@@ -502,14 +783,10 @@ def _fetch_and_verify_unlocked(rel, base, quiet):
                 _log(quiet, f"auto-update: GPG signature OK (key {SIGNING_KEY_FPR})")
 
     _log(quiet, "extracting")
-    if os.path.isdir(browser_dir):
-        shutil.rmtree(browser_dir, ignore_errors=True)
-    # Extract to a sibling temp dir, then atomically move it into place, so `browser/` only ever
+    # Extract next to the target, then move the finished tree into place, so `browser/` only ever
     # appears once fully written (no partial tree a concurrent launch could pick up), and — on
     # Windows — we can force an on-access AV scan of the finished tree before any launch (below).
-    incoming = os.path.join(base, ".incoming")
-    if os.path.isdir(incoming):
-        shutil.rmtree(incoming, ignore_errors=True)
+    incoming = os.path.join(tmp, "browser")
     if rel["asset"].endswith(".tar.xz") or rel.get("archive") == "tar.xz":
         import tarfile
         with tarfile.open(zip_path) as t:
@@ -517,10 +794,11 @@ def _fetch_and_verify_unlocked(rel, base, quiet):
     else:
         with zipfile.ZipFile(zip_path) as z:
             z.extractall(incoming)
-    os.replace(incoming, browser_dir)
+    with contextlib.suppress(OSError):
+        os.remove(zip_path)  # reclaim disk; keep only the extracted tree
 
     binary = rel.get("binary", "chrome.exe")
-    exe = _find(browser_dir, binary)
+    exe = _find(incoming, binary)
     if not exe:
         raise RuntimeError(f"Clearcote archive verified but {binary} was not found inside it.")
 
@@ -547,6 +825,20 @@ def _fetch_and_verify_unlocked(rel, base, quiet):
             except OSError:
                 pass
 
+    # Move the tree into place only while the lock is still ours. The caller found no verified tree
+    # under the lock, so whatever sits at browser/ is an install that stopped part-way.
+    if lock is not None:
+        lock.beat()
+        if not lock.held():
+            raise _LockLost()
+    for marker in (".verified", MANIFEST):
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(base, marker))
+    if os.path.lexists(browser_dir):
+        _move_aside(base, browser_dir)
+    _rename_dir(incoming, browser_dir)
+    exe = os.path.join(browser_dir, os.path.relpath(exe, incoming))
+
     if sys.platform == "win32":
         # Pre-scan the whole tree so real-time AV finishes with the freshly-extracted binaries
         # before the first launch — closes the chrome_elf.dll scan race that otherwise poisons the
@@ -558,10 +850,6 @@ def _fetch_and_verify_unlocked(rel, base, quiet):
     _write_manifest(base, browser_dir)
     with open(os.path.join(base, ".verified"), "w", encoding="utf-8") as f:
         f.write(rel["sha256"] + "\n")
-    try:
-        os.remove(zip_path)  # reclaim disk; keep only the extracted tree
-    except OSError:
-        pass
     _log(quiet, f"ready: {exe}")
     return exe
 
@@ -717,7 +1005,7 @@ def ensure_binary(cache_dir=None, quiet=False, auto_update=None):
         rel = dict(RELEASE, unpinned=False)
 
     base = os.path.join(cache_root, rel["tag"])
-    cached = _cached(base, rel.get("binary", "chrome.exe"), quiet)
+    cached = _cached(base, rel.get("binary", "chrome.exe"), quiet, repair=False)
     if cached:
         return cached
     return _fetch_and_verify(rel, base, quiet)
@@ -834,7 +1122,7 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
         "unpinned": False,  # pinned -> sha256-only verify (no GPG), like the free pin
     }
     dst = os.path.join(cache_dir or _cache_root(), rel["tag"])
-    cached = _cached(dst, rel["binary"], quiet)
+    cached = _cached(dst, rel["binary"], quiet, repair=False)
     if cached:
         return cached
     return _fetch_and_verify(rel, dst, quiet)

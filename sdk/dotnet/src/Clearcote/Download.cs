@@ -218,7 +218,11 @@ public static class Download
     /// A damaged tree returns null (after wiping it) so the caller re-downloads: the ".verified"
     /// marker only records that the archive hashed correctly AT INSTALL TIME, and files can be eaten
     /// afterwards.
-    public static string? CachedBinary(string @base, string binary, bool quiet = false)
+    public static string? CachedBinary(string @base, string binary, bool quiet = false) => Cached(@base, binary, quiet, repair: true);
+
+    /// <paramref name="repair"/> also moves a damaged tree out of the way; false when not holding the
+    /// install lock, so only the process that will re-install touches it.
+    private static string? Cached(string @base, string binary, bool quiet, bool repair)
     {
         if (!File.Exists(Path.Combine(@base, ".verified"))) return null;
         var browserDir = Path.Combine(@base, "browser");
@@ -226,12 +230,13 @@ public static class Download
         if (cached is null) return null;
         var problems = VerifyInstall(browserDir, @base);
         if (problems.Count == 0) return cached;
+        if (!repair) return null;
 
         Log(quiet, $"cached browser is damaged ({problems[0]}) — re-downloading");
-        try { Directory.Delete(browserDir, recursive: true); } catch { }
-        lock (Scanned) Scanned.Remove(Path.GetFullPath(browserDir));
         TryDelete(Path.Combine(@base, ".verified"));
         TryDelete(Path.Combine(@base, Manifest));
+        MoveAside(@base, browserDir);
+        lock (Scanned) Scanned.Remove(Path.GetFullPath(browserDir));
         return null;
     }
 
@@ -402,11 +407,332 @@ public static class Download
         finally { try { Directory.Delete(home, true); } catch { } }
     }
 
+    // Install lock. One protocol, the same in Python (download.py), Node (download.ts) and .NET
+    // (Download.cs) -- change all three together. Any mix of processes installing one build into
+    // <cache>/<tag> takes turns:
+    //  1. The lock is the file <tag>/.install-lock, created with O_CREAT|O_EXCL (atomic on every OS and in
+    //     all three languages; Node has no flock). It holds JSON: pid, host, boot, pidns, nonce, sdk, created.
+    //  2. The holder touches the file (mtime) every 5 s while it works.
+    //  3. Waiters poll every 0.25 s. The lock is stale when its record is from this machine (same host, boot
+    //     id and PID namespace) and that pid is gone, when its mtime is over 120 s old, or when it is still
+    //     not valid JSON 10 s after it was written. A stale lock is broken while holding
+    //     <tag>/.install-lock.break (also O_EXCL; one older than 30 s is removed): re-check that it is still
+    //     stale, delete it, delete the breaker.
+    //  4. The holder re-checks the cache and uses a verified build if one is there now. Otherwise it downloads
+    //     and extracts into <tag>/.tmp-<nonce>/, moves the tree to <tag>/browser, writes .manifest.json then
+    //     .verified, and removes the temp dir. A verified tree is never deleted or written over; a damaged
+    //     one is moved aside (<tag>/.trash-*) by the holder only.
+    //  5. Release deletes the lock only while it still holds our nonce. Waiting gives up after 30 min with an
+    //     error that names the holder and the lock file.
+
+    /// Name of the install-lock file inside a build directory.
+    public const string InstallLockFile = ".install-lock";
+
+    // Install-lock timings (see the protocol above).
+    internal static readonly TimeSpan LockPoll = TimeSpan.FromMilliseconds(250);
+    internal static readonly TimeSpan LockHeartbeat = TimeSpan.FromSeconds(5);
+    internal static readonly TimeSpan LockStaleAfter = TimeSpan.FromSeconds(120);
+    internal static readonly TimeSpan LockUnreadableAfter = TimeSpan.FromSeconds(10);
+    internal static readonly TimeSpan LockBreakerStaleAfter = TimeSpan.FromSeconds(30);
+    internal static readonly TimeSpan InstallWait = TimeSpan.FromMinutes(30);
+
+    private enum LockState { Gone, Busy, Ok, Invalid }
+
+    private sealed record LockRecord(long? Pid, string? Host, string? Boot, string? PidNs, string? Nonce, string? Sdk);
+
+    internal static string? BootId()
+    {
+        try
+        {
+            var s = File.ReadAllText("/proc/sys/kernel/random/boot_id").Trim();
+            return s.Length > 0 ? s : null;
+        }
+        catch { return null; }
+    }
+
+    internal static string? PidNamespace()
+    {
+        try { return new FileInfo("/proc/self/ns/pid").LinkTarget; }
+        catch { return null; }
+    }
+
+    private static bool PidAlive(long pid)
+    {
+        if (pid > int.MaxValue) return false;
+        try
+        {
+            using var p = Process.GetProcessById((int)pid);
+            return !p.HasExited;
+        }
+        catch (ArgumentException) { return false; } // no such process
+        catch { return true; }                       // it exists, but cannot be inspected
+    }
+
+    private static (LockState State, LockRecord? Rec, DateTime MtimeUtc) ReadLock(string path)
+    {
+        DateTime mtime;
+        string raw;
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists) return (LockState.Gone, null, default);
+            mtime = info.LastWriteTimeUtc;
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(fs);
+            raw = reader.ReadToEnd();
+        }
+        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return (LockState.Gone, null, default); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return (LockState.Busy, null, default); }
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            var r = doc.RootElement;
+            if (r.ValueKind != JsonValueKind.Object) return (LockState.Invalid, null, mtime);
+            string? Str(string k) => r.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            long? pid = r.TryGetProperty("pid", out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt64(out var pv) ? pv : null;
+            return (LockState.Ok, new LockRecord(pid, Str("host"), Str("boot"), Str("pidns"), Str("nonce"), Str("sdk")), mtime);
+        }
+        catch (JsonException) { return (LockState.Invalid, null, mtime); }
+    }
+
+    private static bool LockStale(LockRecord? rec, DateTime mtimeUtc)
+    {
+        var age = DateTime.UtcNow - mtimeUtc;
+        if (rec is null) return age > LockUnreadableAfter;
+        if (rec.Host is { } host && string.Equals(host, System.Net.Dns.GetHostName(), StringComparison.OrdinalIgnoreCase)
+            && rec.Boot == BootId() && rec.PidNs == PidNamespace()
+            && rec.Pid is long pid && pid > 0 && !PidAlive(pid))
+            return true;
+        return age > LockStaleAfter;
+    }
+
+    /// Delete a stale lock, under the breaker file. True when the lock is gone afterwards.
+    private static bool BreakStaleLock(string path)
+    {
+        var breaker = path + ".break";
+        try
+        {
+            using (new FileStream(breaker, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            try
+            {
+                var info = new FileInfo(breaker);
+                if (info.Exists && DateTime.UtcNow - info.LastWriteTimeUtc > LockBreakerStaleAfter) info.Delete(); // its owner died holding it
+            }
+            catch { }
+            return false;
+        }
+        try
+        {
+            var (state, rec, mtime) = ReadLock(path);
+            if ((state is LockState.Ok or LockState.Invalid) && LockStale(rec, mtime))
+            {
+                File.Delete(path);
+                return true;
+            }
+            return state == LockState.Gone;
+        }
+        catch { return false; }
+        finally { TryDelete(breaker); }
+    }
+
+    private static string LockHolder(LockRecord? rec)
+    {
+        if (rec?.Pid is null or 0) return "a process that left no details";
+        var sdk = rec.Sdk switch { "python" => "Python", "node" => "Node", "dotnet" => ".NET", null => "unknown", var s => s };
+        return $"process {rec.Pid} on {(string.IsNullOrEmpty(rec.Host) ? "an unknown machine" : rec.Host)} (Clearcote {sdk} SDK)";
+    }
+
+    private static string WaitWords(TimeSpan t)
+    {
+        var (n, unit) = t.TotalSeconds < 120
+            ? (Math.Max(1, (int)Math.Round(t.TotalSeconds)), "second")
+            : ((int)Math.Round(t.TotalMinutes), "minute");
+        return $"{n} {unit}{(n == 1 ? "" : "s")}";
+    }
+
+    /// The install lock while this process holds it: heartbeat timer, ownership check, release.
+    internal sealed class InstallLock : IDisposable
+    {
+        public string LockPath { get; }
+        public string Nonce { get; }
+        private volatile bool _lost;
+        private readonly Timer _timer;
+
+        internal InstallLock(string lockPath, string nonce)
+        {
+            LockPath = lockPath;
+            Nonce = nonce;
+            _timer = new Timer(_ => Beat(), null, LockHeartbeat, LockHeartbeat);
+        }
+
+        /// False once the lock file no longer carries our nonce (another process judged it stale).
+        public bool Held()
+        {
+            if (_lost) return false;
+            var (state, rec, _) = ReadLock(LockPath);
+            if (state != LockState.Busy && rec?.Nonce != Nonce) _lost = true;
+            return !_lost;
+        }
+
+        /// Touch the lock file now (the heartbeat timer does this every few seconds too).
+        public void Beat()
+        {
+            if (!Held()) return;
+            try { File.SetLastWriteTimeUtc(LockPath, DateTime.UtcNow); } catch { }
+        }
+
+        public void Dispose()
+        {
+            _timer.Dispose();
+            for (var i = 0; i < 40; i++) // another process may be reading the file this instant (Windows refuses the delete)
+            {
+                var (state, rec, _) = ReadLock(LockPath);
+                if (state == LockState.Gone || (state != LockState.Busy && rec?.Nonce != Nonce)) return;
+                if (state == LockState.Ok)
+                {
+                    try { File.Delete(LockPath); return; }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+                }
+                Thread.Sleep(50);
+            }
+        }
+    }
+
+    /// Wait for, then take, the install lock of build directory <paramref name="base"/> (see the protocol above).
+    internal static async Task<InstallLock> AcquireInstallLockAsync(string @base, TimeSpan? timeout = null, bool quiet = true)
+    {
+        Directory.CreateDirectory(@base);
+        var path = Path.Combine(@base, InstallLockFile);
+        var nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        var body = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            pid = Environment.ProcessId, host = System.Net.Dns.GetHostName(), boot = BootId(), pidns = PidNamespace(),
+            nonce, sdk = "dotnet", created = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        });
+        var wait = timeout ?? InstallWait;
+        var deadline = DateTime.UtcNow + wait;
+        var told = false;
+        var refused = 0;
+        while (true)
+        {
+            FileStream? fs = null;
+            Exception? refusal = null;
+            try { fs = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete); }
+            catch (Exception e) when ((e is IOException && e is not DirectoryNotFoundException) || e is UnauthorizedAccessException)
+            {
+                refusal = e; // it exists -- or, on Windows, the previous lock file is still being deleted
+            }
+            if (fs is not null)
+            {
+                try { using (fs) fs.Write(body); }
+                catch { TryDelete(path); throw; }
+                return new InstallLock(path, nonce);
+            }
+            var (state, rec, mtime) = ReadLock(path);
+            if (state != LockState.Gone) refused = 0;
+            else if (++refused > 40) throw refusal!; // no lock file, yet we may not create one: not a race, a real error
+            if ((state is LockState.Ok or LockState.Invalid) && LockStale(rec, mtime) && BreakStaleLock(path))
+            {
+                Log(quiet, $"removed an abandoned install lock ({LockHolder(rec)})");
+                continue;
+            }
+            if (DateTime.UtcNow >= deadline)
+                throw new TimeoutException(
+                    $"Gave up after {WaitWords(wait)} waiting for another program to finish installing the Clearcote browser in\n    {@base}\n" +
+                    $"The other installer is {LockHolder(rec)}. If nothing else is installing it, delete this file and try again:\n    {path}");
+            if (!told && state == LockState.Ok)
+            {
+                Log(quiet, $"another program is installing this browser build ({LockHolder(rec)}); waiting for it");
+                told = true;
+            }
+            await Task.Delay(LockPoll).ConfigureAwait(false);
+        }
+    }
+
+    private static void MoveDir(string src, string dst)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try { Directory.Move(src, dst); return; }
+            catch (Exception e) when (OperatingSystem.IsWindows() && attempt < 9
+                                      && (e is UnauthorizedAccessException || (e is IOException && e is not DirectoryNotFoundException)))
+            {
+                Thread.Sleep(200); // Windows: a scanner can hold a file in the fresh tree for a moment
+            }
+        }
+    }
+
+    /// Move a tree that must be replaced out of the way, then delete it if nothing is using it.
+    private static void MoveAside(string @base, string browserDir)
+    {
+        var trash = Path.Combine(@base, ".trash-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant());
+        try { MoveDir(browserDir, trash); }
+        catch (DirectoryNotFoundException) { return; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            throw new IOException(
+                $"Clearcote cannot replace the browser files in\n    {browserDir}\nbecause another program is still using them ({e.Message}).\n" +
+                "Close every program that uses this Clearcote browser, then try again.", e);
+        }
+        try { Directory.Delete(trash, recursive: true); } catch { /* what is still in use stays until the next install sweeps it */ }
+    }
+
+    /// Remove what an install that stopped part-way left behind. Only called by the lock holder.
+    private static void SweepLeftovers(string @base, string asset)
+    {
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories(@base))
+            {
+                var name = Path.GetFileName(dir);
+                if (name == ".incoming" || name.StartsWith(".tmp-", StringComparison.Ordinal) || name.StartsWith(".trash-", StringComparison.Ordinal))
+                    try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+            }
+        }
+        catch { /* best-effort */ }
+        TryDelete(Path.Combine(@base, asset)); // where earlier versions downloaded the archive
+    }
+
+    /// Download + verify a resolved release into <paramref name="base"/>; return the extracted browser path.
+    ///
+    /// Holds the build's install lock: a second process that missed the cache at the same moment waits, then
+    /// uses the tree the first one finished instead of downloading over it.
     private static async Task<string> FetchAndVerifyAsync(ReleaseInfo rel, string @base, bool quiet)
     {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            using var held = await AcquireInstallLockAsync(@base, null, quiet).ConfigureAwait(false);
+            var cached = CachedBinary(@base, rel.Binary, quiet); // holding the lock: may repair
+            if (cached is not null)
+            {
+                Log(quiet, $"installed by another process meanwhile: {cached}");
+                return cached;
+            }
+            try { return await InstallLockedAsync(rel, @base, quiet, held).ConfigureAwait(false); }
+            catch when (!held.Held()) { }
+            Log(quiet, "another process took over this install; waiting for it");
+        }
+        throw new Exception($"Clearcote could not install {rel.Tag}: other processes kept taking over the install in {@base}");
+    }
+
+    /// The install itself; the caller holds the install lock. Everything is written under base/.tmp-&lt;nonce&gt;
+    /// first, and the finished tree is moved into place only while the lock is still ours.
+    private static async Task<string> InstallLockedAsync(ReleaseInfo rel, string @base, bool quiet, InstallLock held)
+    {
+        SweepLeftovers(@base, rel.Asset);
+        var tmp = Path.Combine(@base, ".tmp-" + held.Nonce);
+        Directory.CreateDirectory(tmp);
+        try { return await InstallIntoAsync(rel, @base, tmp, quiet, held).ConfigureAwait(false); }
+        finally { try { Directory.Delete(tmp, recursive: true); } catch { /* best-effort */ } }
+    }
+
+    private static async Task<string> InstallIntoAsync(ReleaseInfo rel, string @base, string tmp, bool quiet, InstallLock held)
+    {
         var browserDir = Path.Combine(@base, "browser");
-        Directory.CreateDirectory(@base);
-        var zipPath = Path.Combine(@base, rel.Asset);
+        var zipPath = Path.Combine(tmp, rel.Asset);
 
         Log(quiet, $"fetching Clearcote {rel.Version} ({rel.Tag}{(rel.Unpinned ? ", latest" : "")}, ~{rel.Size / 1_000_000} MB)");
         await DownloadToAsync(rel.Url, zipPath, rel.Size, quiet).ConfigureAwait(false);
@@ -432,17 +758,17 @@ public static class Download
         }
 
         Log(quiet, "extracting");
-        if (Directory.Exists(browserDir)) Directory.Delete(browserDir, true);
-        var incoming = Path.Combine(@base, ".incoming");
-        if (Directory.Exists(incoming)) Directory.Delete(incoming, true);
+        // Extract next to the target, then move the finished tree into place, so browser/ only ever appears
+        // once fully written (no partial tree a concurrent launch could pick up).
+        var incoming = Path.Combine(tmp, "browser");
         Directory.CreateDirectory(incoming);
         if (rel.Asset.EndsWith(".tar.xz") || rel.Archive == "tar.xz")
             RunTar(zipPath, incoming);           // Node has no stdlib xz; the system tar auto-detects .xz
         else
             ZipFile.ExtractToDirectory(zipPath, incoming);
-        Directory.Move(incoming, browserDir);
+        TryDelete(zipPath); // reclaim disk; keep only the extracted tree
 
-        var exe = FindFile(browserDir, rel.Binary) ?? throw new Exception($"Clearcote archive verified but {rel.Binary} was not found inside it.");
+        var exe = FindFile(incoming, rel.Binary) ?? throw new Exception($"Clearcote archive verified but {rel.Binary} was not found inside it.");
         if (!string.IsNullOrEmpty(rel.ExeSha256))
         {
             var exeHash = await Sha256FileAsync(exe).ConfigureAwait(false);
@@ -456,16 +782,24 @@ public static class Download
             var sandbox = Path.Combine(Path.GetDirectoryName(exe)!, "chrome-sandbox");
             if (File.Exists(sandbox)) { try { File.SetUnixFileMode(sandbox, (UnixFileMode)0b100_111_101_101); } catch { } } // 4755
         }
-        else
-        {
+
+        // Move the tree into place only while the lock is still ours. The caller found no verified tree
+        // under the lock, so whatever sits at browser/ is an install that stopped part-way.
+        held.Beat();
+        if (!held.Held()) throw new IOException("Clearcote: another process took over this install");
+        TryDelete(Path.Combine(@base, ".verified"));
+        TryDelete(Path.Combine(@base, Manifest));
+        if (Directory.Exists(browserDir) || File.Exists(browserDir)) MoveAside(@base, browserDir);
+        MoveDir(incoming, browserDir);
+        exe = Path.Combine(browserDir, Path.GetRelativePath(incoming, exe));
+
+        if (OperatingSystem.IsWindows())
             WinLaunch.WarmFiles(browserDir); // close the chrome_elf.dll first-launch AV race
-        }
 
         // Record the finished tree BEFORE the .verified marker, so a launch never sees "verified"
         // with no manifest to check it against.
         WriteManifest(@base, browserDir);
         await File.WriteAllTextAsync(Path.Combine(@base, ".verified"), rel.Sha256 + "\n").ConfigureAwait(false);
-        TryDelete(zipPath);
         Log(quiet, $"ready: {exe}");
         return exe;
     }
@@ -565,7 +899,7 @@ public static class Download
 
         var @base = Path.Combine(opts.CacheDir ?? Native.CacheRoot(), rel.Tag);
         {
-            var cached = CachedBinary(@base, rel.Binary, opts.Quiet);
+            var cached = Cached(@base, rel.Binary, opts.Quiet, repair: false);
             if (cached is not null) return cached;
         }
         return await FetchAndVerifyAsync(rel, @base, opts.Quiet).ConfigureAwait(false);
@@ -722,7 +1056,7 @@ public static class Download
         var rel = plan.Rel!;
         var @base = Path.Combine(cacheDir ?? Native.CacheRoot(), rel.Tag);
         {
-            var cached = CachedBinary(@base, rel.Binary, quiet);
+            var cached = Cached(@base, rel.Binary, quiet, repair: false);
             if (cached is not null) return cached;
         }
         return await FetchAndVerifyAsync(rel, @base, quiet).ConfigureAwait(false);
@@ -749,7 +1083,7 @@ public static class Download
 
         var @base = Path.Combine(cacheRoot, rel.Tag);
         {
-            var cached = CachedBinary(@base, rel.Binary, opts.Quiet);
+            var cached = Cached(@base, rel.Binary, opts.Quiet, repair: false);
             if (cached is not null) return cached;
         }
         return await FetchAndVerifyAsync(rel, @base, opts.Quiet).ConfigureAwait(false);
