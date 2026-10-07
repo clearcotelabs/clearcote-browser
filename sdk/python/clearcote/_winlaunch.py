@@ -70,8 +70,8 @@ def recover_root():
 def recovery_key(exe):
     """``<build>-<hash>``: the cache build directory's name, and a hash of the source directory and
     the exe's size and modification time, so a rebuilt or re-downloaded build gets a fresh copy.
-    Node computes the same key (winlaunch.ts), so both SDKs share one copy. Raises OSError if the
-    exe is gone."""
+    Node (winlaunch.ts) and .NET (WinLaunch.cs) compute the same key, so the SDKs share one copy.
+    Raises OSError if the exe is gone."""
     src = os.path.dirname(os.path.abspath(exe))
     st = os.stat(exe)
     parent = os.path.dirname(src) if os.path.basename(src).lower() == "browser" else src

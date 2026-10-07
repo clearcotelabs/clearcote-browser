@@ -40,7 +40,8 @@ export function recoverRoot(): string {
 /**
  * `<build>-<hash>`: the cache build directory's name, and a hash of the source directory and the
  * exe's size and modification time, so a rebuilt or re-downloaded build gets a fresh copy. Must
- * match `recovery_key` in the Python SDK (_winlaunch.py). Throws if the exe is gone.
+ * match `recovery_key` in the Python SDK (_winlaunch.py) and `RecoveryKey` in the .NET SDK
+ * (WinLaunch.cs). Throws if the exe is gone.
  */
 export function recoveryKey(exe: string): string {
   const src = dirname(resolve(exe));

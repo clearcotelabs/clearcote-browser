@@ -186,6 +186,8 @@ var exe = await Clearcote.Clearcote.ExecutablePathAsync(new LaunchOptions { Lice
 var path = await Clearcote.Clearcote.DownloadAsync();
 ```
 
+Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the side-by-side configuration is incorrect"; this happens when the SDK runs inside an MSIX-packaged app, whose writes to `%LOCALAPPDATA%` Windows redirects), launches use one copy of that build in `~/.clearcote/recovered/` instead, made once and reused by every later launch from .NET, Python or Node. `WinLaunch.ClearRecovered()` removes those copies, as `clearcote clear-cache` does.
+
 ## Options (subset)
 
 | Option | Switch / effect |
