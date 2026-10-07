@@ -125,9 +125,10 @@ _BOOL_ENV = {
     "gpu_string_spoof": "CC_GPU_STRING_SPOOF",
 }
 # Handled specially below, or on this side of the connection.
-_SPECIAL = ("location", "fingerprint_profile", "headless", "proxy", "args", "license_key", "license_api_base")
+_SPECIAL = ("location", "fingerprint_profile", "headless", "proxy", "args", "license_key", "license_api_base",
+            "persona_env")
 SDK_SIDE = ("timeout", "slow_mo", "humanize", "show_cursor", "quiet", "docker", "docker_image",
-            "ephemeral_profile", "persona_env")  # persona_env: the image's own launch picks the transport
+            "ephemeral_profile")
 ACCEPTED = tuple(_STR_ENV) + tuple(_INT_ENV) + tuple(_FLOAT_ENV) + tuple(_BOOL_ENV) + _SPECIAL + SDK_SIDE
 
 
@@ -226,6 +227,10 @@ def container_env(kwargs: dict) -> dict:
         env["CLEARCOTE_LICENSE_KEY"] = key
     if kwargs.get("license_api_base"):
         env["CLEARCOTE_LICENSE_API"] = str(kwargs["license_api_base"])
+    if kwargs.get("persona_env") is not None:
+        # Engine patch 1021 (_personaenv.py): the image's entrypoint takes the persona off its chrome's command
+        # line by itself, on an engine that has the switch, and reads the same opt-out a launch here does.
+        env["CLEARCOTE_PERSONA_ENV"] = "1" if kwargs["persona_env"] else "0"
     return env
 
 

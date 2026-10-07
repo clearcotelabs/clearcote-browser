@@ -7,6 +7,10 @@ looks for.
 """
 import asyncio
 import base64
+import json
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -269,3 +273,58 @@ def test_persistent_widevine_launch_passes_the_cdm_path(driver, monkeypatch, tmp
     clearcote.launch_persistent_context(str(tmp_path / "udd"), executable_path=exe, headless=True, quiet=True,
                                         widevine=True)
     assert "--widevine-cdm-path=" + cdm in driver["args"]
+
+
+# -- the Docker path -----------------------------------------------------------------------------
+# The container's chrome is started by the image's entrypoint (docker/serve.py), which takes the same last
+# step a launch here does. persona_env reaches it as CLEARCOTE_PERSONA_ENV, the variable a launch here reads.
+
+SERVE_PY = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "docker",
+                                         "serve.py"))
+
+
+def test_the_docker_path_hands_persona_env_to_the_container():
+    from clearcote._docker import container_env
+    assert "CLEARCOTE_PERSONA_ENV" not in container_env({"fingerprint": "17"})
+    assert container_env({"fingerprint": "17", "persona_env": False})["CLEARCOTE_PERSONA_ENV"] == "0"
+    assert container_env({"fingerprint": "17", "persona_env": True})["CLEARCOTE_PERSONA_ENV"] == "1"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="runs the image's Linux entrypoint with a shell stand-in engine")
+@pytest.mark.skipif(not os.path.exists(SERVE_PY), reason="no docker/serve.py in this tree")
+@pytest.mark.parametrize("with_1021, opt_out, moved", [(True, None, True), (False, None, False), (True, "0", False)],
+                         ids=["1021-engine", "older-engine", "persona_env-false"])
+def test_the_images_entrypoint_takes_the_persona_off_chromes_command_line(tmp_path, with_1021, opt_out, moved):
+    # A stand-in engine writes down its arguments and CLEARCOTE_PERSONA_ARGS, then exits; the probe's literal
+    # sits after the exit, where the shell never reads. socat is a stand-in too; CC_HEADLESS skips Xvfb.
+    engine = tmp_path / "engine" / "chrome"
+    engine.parent.mkdir()
+    engine.write_bytes(b'#!/bin/sh\nd=$(dirname "$0")\nprintf \'%s\\n\' "$@" > "$d/argv"\n'
+                       b'printf \'%s\' "${CLEARCOTE_PERSONA_ARGS-unset}" > "$d/persona"\nexit 3\n'
+                       + (ENGINE_1021 if with_1021 else b"") + b"\n")
+    engine.chmod(0o755)
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    (stubs / "socat").write_text("#!/bin/sh\nexit 0\n")
+    (stubs / "socat").chmod(0o755)
+    sdk = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    env = {"PATH": str(stubs) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"), "PYTHONPATH": sdk,
+           "HOME": str(tmp_path / "home"), "TMPDIR": str(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "xdg"),
+           "CLEARCOTE_BINARY": str(engine), "CC_HEADLESS": "1", "CC_PROFILE_DIR": str(tmp_path / "profile"),
+           "CC_FINGERPRINT": "17", "CC_PLATFORM": "linux"}
+    if opt_out is not None:
+        env["CLEARCOTE_PERSONA_ENV"] = opt_out
+    run = subprocess.run([sys.executable, SERVE_PY], env=env, capture_output=True, text=True, timeout=180)
+    assert run.returncode == 3, run.stdout + run.stderr  # the stand-in's own exit code: it ran
+    argv = (engine.parent / "argv").read_text().splitlines()
+    persona = (engine.parent / "persona").read_text()
+    if moved:
+        assert "--persona-from-env" in argv
+        assert not [a for a in argv if a.startswith("--fingerprint")]
+        entries = P.decode(persona)
+        assert ("fingerprint", "17") in entries and ("fingerprint-platform", "linux") in entries
+    else:
+        assert "--fingerprint=17" in argv and "--persona-from-env" not in argv
+        assert persona == "unset"
+    state = json.loads(next(line for line in run.stdout.splitlines() if "serve-state " in line).split("serve-state ", 1)[1])
+    assert state["persona_env"] is moved  # what the entrypoint says it did

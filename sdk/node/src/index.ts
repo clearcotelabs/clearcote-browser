@@ -237,8 +237,8 @@ interface PersonaEnvOption {
    * browser's command line, which any local user can read: on an engine that implements
    * `--persona-from-env` they travel in the CLEARCOTE_PERSONA_ARGS environment variable instead.
    * Unset follows CLEARCOTE_PERSONA_ENV (on unless it says 0/false/off/no); `false` keeps them on the
-   * command line. An older engine gets them on its command line either way; a Docker launch ignores
-   * this (the image's own launch picks the transport). */
+   * command line. An older engine gets them on its command line either way. A Docker launch hands it
+   * to the image's entrypoint, which does the same for the container's browser. */
   personaEnv?: boolean;
 }
 

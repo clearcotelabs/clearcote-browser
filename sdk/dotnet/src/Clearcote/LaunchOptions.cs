@@ -100,8 +100,8 @@ public class LaunchOptions : FingerprintOptions
     /// <para>Null = on unless CLEARCOTE_PERSONA_ENV is 0/false/off/no; an explicit value wins over it.
     /// An engine without the switch, a persona too large for the variable, or Args that already carry
     /// <c>--persona-from-env</c> or <c>--disable-persona-env-transport</c> keep the command line as
-    /// before. An SDK option only: it never reaches Playwright, and a Docker launch accepts and ignores
-    /// it (the image's own launch picks the transport).</para>
+    /// before. An SDK option only: it never reaches Playwright. A Docker launch hands it to the image's
+    /// entrypoint, which does the same for the container's browser.</para>
     public bool? PersonaEnv { get; set; }
     /// Browser channel (e.g. "chrome") passed to Playwright, if any.
     public string? Channel { get; set; }

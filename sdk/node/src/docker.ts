@@ -132,9 +132,8 @@ const BOOL_ENV: Record<string, string> = {
   lightStealth: "CC_LIGHT_STEALTH", disableGpuFingerprint: "CC_DISABLE_GPU_FINGERPRINT",
   fingerprintNoise: "CC_FINGERPRINT_NOISE", canvasNoise: "CC_CANVAS_NOISE", gpuStringSpoof: "CC_GPU_STRING_SPOOF",
 };
-const SPECIAL = ["location", "fingerprintProfile", "headless", "proxy", "args", "licenseKey", "licenseApiBase"];
-const SDK_SIDE = ["timeout", "slowMo", "humanize", "showCursor", "quiet", "docker", "dockerImage", "ephemeralProfile",
-  "personaEnv"]; // personaEnv: the image's own launch picks the transport
+const SPECIAL = ["location", "fingerprintProfile", "headless", "proxy", "args", "licenseKey", "licenseApiBase", "personaEnv"];
+const SDK_SIDE = ["timeout", "slowMo", "humanize", "showCursor", "quiet", "docker", "dockerImage", "ephemeralProfile"];
 export const DOCKER_ACCEPTED: readonly string[] = [
   ...Object.keys(STR_ENV), ...Object.keys(INT_ENV), ...Object.keys(FLOAT_ENV), ...Object.keys(BOOL_ENV), ...SPECIAL, ...SDK_SIDE,
 ];
@@ -212,6 +211,9 @@ export function containerEnv(options: Record<string, unknown>): Record<string, s
   const key = resolveLicenseKey(options.licenseKey as string | undefined); // as a local launch: option > env > saved key
   if (key) env.CLEARCOTE_LICENSE_KEY = key;
   if (options.licenseApiBase) env.CLEARCOTE_LICENSE_API = String(options.licenseApiBase);
+  // Engine patch 1021 (personaenv.ts): the image's entrypoint takes the persona off its chrome's command line by
+  // itself, on an engine that has the switch, and reads the same opt-out a launch here does.
+  if (has("personaEnv")) env.CLEARCOTE_PERSONA_ENV = options.personaEnv ? "1" : "0";
   return env;
 }
 

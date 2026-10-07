@@ -550,6 +550,24 @@ except ValueError:
           % os.environ.get("CC_IDLE_EXIT_SECONDS"), flush=True)
     _idle_limit = 0
 
+# Engine patch 1021 ("env mode"), the same last step a launch on a host takes (clearcote._personaenv): on an
+# engine that implements --persona-from-env, the persona switches -- seed, overrides, proxy credentials --
+# leave chrome's command line and travel in CLEARCOTE_PERSONA_ARGS. A container's processes show up in the
+# Linux host's process table, where any user can read a command line. CLEARCOTE_PERSONA_ENV=0 (what the SDKs
+# pass for persona_env=False) keeps the command line, as does an older engine or an image built with an SDK
+# that predates the module.
+try:
+    from clearcote import _personaenv
+except ImportError:
+    _personaenv = None
+_persona_env = False
+if _personaenv is not None:
+    _argv, _env = _personaenv.apply(exe, cmd[1:], env)
+    _persona_env = _env is not env  # a new environment only when the switches moved
+    cmd, env = [exe] + _argv, _env
+    if _persona_env:
+        print("[clearcote] persona: in CLEARCOTE_PERSONA_ARGS, off chrome's command line", flush=True)
+
 # SERVE_PROTOCOL: what this entrypoint does with the SDK's settings. The image carries it as the label
 # com.clearcotelabs.serve-protocol, so the SDK knows before it starts a container whether the image takes
 # CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS (2), or only plain variables (no label: older images), and whether
@@ -568,6 +586,7 @@ _applied = {
     "idle_exit": _idle_limit if _idle_limit > 0 else 0,
     "secrets_file": bool(_secrets_file),
     "sandbox": sandbox,
+    "persona_env": _persona_env,  # 1021: the persona travels in the environment, not on chrome's command line
 }
 print("[clearcote] serve-state %s" % json.dumps(_applied, sort_keys=True), flush=True)
 

@@ -385,8 +385,11 @@ describe("the launch entry points", () => {
     }
   });
 
-  it("the Docker path accepts personaEnv and ignores it", () => {
-    expect(containerEnv({ fingerprint: "17", personaEnv: false })).toEqual({ CC_FINGERPRINT: "17" });
+  it("the Docker path hands personaEnv to the image's entrypoint, which reads CLEARCOTE_PERSONA_ENV", () => {
+    // The container's chrome is started by docker/serve.py, which takes the same last step a launch here does.
+    expect(containerEnv({ fingerprint: "17" })).toEqual({ CC_FINGERPRINT: "17" });
+    expect(containerEnv({ fingerprint: "17", personaEnv: false })).toEqual({ CC_FINGERPRINT: "17", CLEARCOTE_PERSONA_ENV: "0" });
+    expect(containerEnv({ fingerprint: "17", personaEnv: true })).toEqual({ CC_FINGERPRINT: "17", CLEARCOTE_PERSONA_ENV: "1" });
   });
 });
 

@@ -240,12 +240,14 @@ public class PersonaEnvTests : IDisposable
     // ── where the option goes ────────────────────────────────────────────────
 
     [Fact]
-    public void Docker_accepts_and_ignores_it_and_a_cloud_launch_refuses_it()
+    public void Docker_hands_it_to_the_images_entrypoint_and_a_cloud_launch_refuses_it()
     {
-        // The image's own launch picks the transport; as in Python, persona_env is not a cloud option.
+        // The container's browser is started by the image's entrypoint (docker/serve.py), which takes the same
+        // last step a launch here does and reads CLEARCOTE_PERSONA_ENV. As in Python, it is not a cloud option.
         Assert.DoesNotContain(DockerLaunch.RefusedOptions, p => p.Name == "PersonaEnv");
-        Assert.Equal(DockerLaunch.ContainerEnv(new LaunchOptions { Fingerprint = "17" }),
-            DockerLaunch.ContainerEnv(new LaunchOptions { Fingerprint = "17", PersonaEnv = false }));
+        Assert.False(DockerLaunch.ContainerEnv(new LaunchOptions { Fingerprint = "17" }).ContainsKey("CLEARCOTE_PERSONA_ENV"));
+        Assert.Equal("0", DockerLaunch.ContainerEnv(new LaunchOptions { Fingerprint = "17", PersonaEnv = false })["CLEARCOTE_PERSONA_ENV"]);
+        Assert.Equal("1", DockerLaunch.ContainerEnv(new LaunchOptions { Fingerprint = "17", PersonaEnv = true })["CLEARCOTE_PERSONA_ENV"]);
         Assert.Equal("PersonaEnv is not available for cloud browsers",
             Assert.Throws<ArgumentException>(() => CloudLaunch.SessionOptionsOf(new LaunchOptions { PersonaEnv = true })).Message);
     }

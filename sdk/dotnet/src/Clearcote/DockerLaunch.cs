@@ -129,9 +129,8 @@ internal static class DockerLaunch
         ["FingerprintNoise"] = "CC_FINGERPRINT_NOISE", ["CanvasNoise"] = "CC_CANVAS_NOISE", ["GpuStringSpoof"] = "CC_GPU_STRING_SPOOF",
     };
     private static readonly string[] Special =
-        { "DevicePixelRatio", "FingerprintProfile", "Headless", "Proxy", "Args", "LicenseKey", "LicenseApiBase" };
-    // PersonaEnv: accepted and ignored, the image's own launch picks the persona transport.
-    private static readonly string[] SdkSide = { "Timeout", "SlowMo", "Quiet", "Docker", "DockerImage", "PersonaEnv" };
+        { "DevicePixelRatio", "FingerprintProfile", "Headless", "Proxy", "Args", "LicenseKey", "LicenseApiBase", "PersonaEnv" };
+    private static readonly string[] SdkSide = { "Timeout", "SlowMo", "Quiet", "Docker", "DockerImage" };
 
     /// Everything else LaunchOptions has is refused when set: a Docker launch takes the image's options,
     /// and (like any local launch) ignores the cloud section. Derived from the type, so an option added to
@@ -214,6 +213,9 @@ internal static class DockerLaunch
         }
         if (License.ResolveLicenseKey(o.LicenseKey) is { } key) env["CLEARCOTE_LICENSE_KEY"] = key;   // as a local launch: option > env > saved key
         if (!string.IsNullOrEmpty(o.LicenseApiBase)) env["CLEARCOTE_LICENSE_API"] = o.LicenseApiBase;
+        // Engine patch 1021 (PersonaEnv): the image's entrypoint takes the persona off its chrome's command line by
+        // itself, on an engine that has the switch, and reads the same opt-out a launch here does.
+        if (o.PersonaEnv is bool personaEnv) env["CLEARCOTE_PERSONA_ENV"] = personaEnv ? "1" : "0";
         return env;
     }
 
