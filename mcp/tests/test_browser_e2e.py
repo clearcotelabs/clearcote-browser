@@ -361,3 +361,74 @@ def test_a_stopped_server_leaves_no_browser_behind(site, tmp_path, how):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+
+
+# --- a PDF renders with every request checked ------------------------------------------------------------------------
+
+def one_page_pdf(text):
+    """A one-page PDF that shows `text`."""
+    stream = f"BT /F1 36 Tf 72 700 Td ({text}) Tj ET".encode()
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+               b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+               b"/Resources << /Font << /F1 5 0 R >> >> >>",
+               b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+               b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return bytes(out)
+
+
+@pytest.mark.asyncio
+async def test_a_pdf_renders_with_every_request_checked(monkeypatch):
+    """The browser shows a PDF with its built-in viewer, an extension that loads its own chrome-extension: and
+    chrome: resources: the request guard must let those through, or every PDF comes out blank. The local server
+    plays a public one here (the address check lets 127.0.0.1 through for this test; the scheme rules are the real
+    ones)."""
+    from clearcote_mcp import _egress, _facade
+    document = one_page_pdf("Opening hours")
+
+    class Pdf(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(len(document)))
+            self.end_headers()
+            self.wfile.write(document)
+
+        def log_message(self, *_a):
+            pass
+
+    real = _egress.host_refusal
+
+    async def public_here(host):
+        return None if host == "127.0.0.1" else await real(host)
+    monkeypatch.setattr(_egress, "host_refusal", public_here)
+    monkeypatch.setattr(_egress, "refused", [])
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Pdf)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    browser = _facade.ClearcoteBrowser({"headless": True}, guard=True)
+    await browser.start()
+    try:
+        await browser.navigate(f"http://127.0.0.1:{srv.server_address[1]}/hours.pdf")
+        viewer = False
+        for _ in range(50):  # the viewer starts in a frame of its own
+            for frame in browser._page.frames:
+                if frame.url.startswith("chrome-extension://"):
+                    try:
+                        viewer = await frame.evaluate("() => !!customElements.get('pdf-viewer')")
+                    except Exception:
+                        pass
+            if viewer:
+                break
+            await asyncio.sleep(0.2)
+        assert _egress.refused == [], [url for url, _ in _egress.refused]
+        assert viewer, "the PDF viewer did not start"
+    finally:
+        await browser.close()
+        srv.shutdown()
+        srv.server_close()

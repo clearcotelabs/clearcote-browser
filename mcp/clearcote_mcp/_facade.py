@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import json
 import os
+import threading
 
 from . import _egress
 
@@ -83,6 +85,21 @@ _ELEMENTS_JS = r"""() => {
 }"""
 
 
+def _in_thread(fn) -> concurrent.futures.Future:
+    """fn() in a thread of its own. Its future stays readable when the caller stops waiting for it: a start cut short
+    by a stop signal still has to stop the browser serve() goes on to launch (see ClearcoteBrowser.close)."""
+    future: concurrent.futures.Future = concurrent.futures.Future()
+    future.set_running_or_notify_cancel()  # running: a caller that stops waiting cannot cancel it
+
+    def run():
+        try:
+            future.set_result(fn())
+        except BaseException as exc:  # noqa: BLE001 -- handed to whoever reads the future
+            future.set_exception(exc)
+    threading.Thread(target=run, name="clearcote-serve", daemon=True).start()
+    return future
+
+
 def cloud_launch():
     """``clearcote.async_api.launch``, checked to know ``cloud=`` (clearcote 0.34+). Older SDKs pass
     unknown options through to Playwright, so the version is checked instead of trusting a call."""
@@ -102,6 +119,7 @@ class ClearcoteBrowser:
         self._cloud = cloud
         self._guard = guard       # check every request the browser makes (see _egress.py)
         self._srv = None          # clearcote._serve.Server
+        self._launching = None    # serve() still running in its thread (a concurrent Future), until start() has it
         self._pw = None           # playwright async context manager
         self._browser = None      # playwright Browser (over CDP)
         self._ctx = None          # BrowserContext
@@ -135,9 +153,11 @@ class ClearcoteBrowser:
             return
         import clearcote
         from playwright.async_api import async_playwright
-        loop = asyncio.get_running_loop()
-        # serve() is a blocking subprocess launch — off the event loop.
-        self._srv = await loop.run_in_executor(None, lambda: clearcote.serve(quiet=True, **self._persona))
+        # serve() is a blocking subprocess launch — off the event loop, in a thread whose result close() can still
+        # collect when this start is cancelled while it runs.
+        self._launching = _in_thread(lambda: clearcote.serve(quiet=True, **self._persona))
+        self._srv = await asyncio.wrap_future(self._launching)
+        self._launching = None
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.connect_over_cdp(self._srv.cdp_url)
         self._ctx = self._browser.contexts[0] if self._browser.contexts else await self._browser.new_context()
@@ -201,6 +221,13 @@ class ClearcoteBrowser:
             return False
 
     async def close(self):
+        if self._launching is not None and self._srv is None:
+            # start() was cut short while serve() ran in its thread: wait for the browser it launches, to stop it too
+            try:
+                self._srv = await asyncio.wrap_future(self._launching)
+            except Exception:  # the launch failed: nothing to stop
+                pass
+        self._launching = None
         for step in (
             lambda: self._browser.close() if self._browser else None,
             lambda: self._pw.stop() if self._pw else None,
@@ -213,7 +240,9 @@ class ClearcoteBrowser:
                 pass
         try:
             if self._srv:
-                self._srv.close()
+                # Server.close() blocks (it waits up to 10 s for the browser to exit): off the event loop, so a caller's
+                # time limit still holds
+                await asyncio.to_thread(self._srv.close)
         except Exception:
             pass
         self._srv = self._pw = self._browser = self._ctx = self._page = None

@@ -144,15 +144,18 @@ async def test_every_request_goes_through_the_guard(url, verdict):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url,verdict", [
-    ("file:///C:/Windows/win.ini", "abort"), ("file:///etc/passwd", "abort"), ("chrome://version/", "abort"),
-    ("chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html", "abort"),
+    ("file:///C:/Windows/win.ini", "abort"), ("file:///etc/passwd", "abort"),
     ("devtools://devtools/bundled/inspector.html", "abort"), ("filesystem:https://example.com/temporary/a", "abort"),
     ("view-source:https://example.com/", "abort"), ("about:version", "abort"), ("ftp://example.com/", "abort"),
     ("chrome-error://chromewebdata/", "abort"),
     # what pages and new tabs are made of, and never leaves the browser
     ("about:blank", "fallback"), ("about:blank#top", "fallback"), ("about:srcdoc", "fallback"),
     ("data:text/html,<p>hi", "fallback"), ("blob:https://example.com/0a1b-2c3d", "fallback"),
-    ("https://example.com/app.js", "fallback")])
+    ("https://example.com/app.js", "fallback"),
+    # the browser's own resources: its PDF viewer is an extension that loads these (a web page cannot)
+    ("chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/main.js", "fallback"),
+    ("chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.css", "fallback"),
+    ("chrome://resources/css/text_defaults_md.css", "fallback"), ("chrome://version/", "fallback")])
 async def test_only_web_requests_leave_the_browser(url, verdict):
     route = Route(url)
     await _egress.guard_route(route)
@@ -204,6 +207,8 @@ async def test_the_guard_is_installed_on_the_whole_context():
     (302, "https://example.com/next", "Fetch.continueRequest"), (302, "/same/host", "Fetch.continueRequest"),
     (302, "chrome://settings", "Fetch.failRequest"), (301, "devtools://devtools/x.html", "Fetch.failRequest"),
     (307, "filesystem:https://example.com/temporary/a", "Fetch.failRequest"),
+    (302, "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html", "Fetch.failRequest"),
+    (302, "data:text/html,<p>hi", "Fetch.failRequest"),  # a web server's Location: web urls only
     (200, None, "Fetch.continueRequest"), (304, None, "Fetch.continueRequest")])
 async def test_a_redirect_to_a_private_address_is_failed(status, location, verdict):
     import asyncio

@@ -15,10 +15,12 @@ Two layers, one rule:
   a page follows (Playwright continues a redirect's next request without asking its routes, so each page also gets a
   CDP session that holds 3xx answers until their Location is judged). Requests that never leave the browser pass:
   data: and blob: urls, about:blank and about:srcdoc (pages are made of them, and every new tab starts on
-  about:blank). Every other scheme that is not http(s) is refused (file:, chrome:, chrome-extension:, devtools:,
-  filesystem:, ftp: ...); ws: and wss: are judged by their host. The browser itself already refuses to let a web
-  page load or open file:, chrome: and devtools: urls (and a redirect to one), so the tools' urls are the way there
-  that this guard closes.
+  about:blank), and the browser's own chrome: and chrome-extension: resources (its PDF viewer is an extension that
+  loads them; refusing them leaves every PDF blank). Every other scheme that is not http(s) is refused (file:,
+  devtools:, filesystem:, ftp: ...); ws: and wss: are judged by their host. The browser itself already refuses to let
+  a web page load or open file:, chrome:, chrome-extension: and devtools: urls (and a redirect to one), so at this
+  layer those only come from the browser; the tools' urls are the way there that check_url() closes. A redirect is
+  followed only to an http or https url (a Location comes from a web server).
 
 An address is refused when it is in a non-public range (BLOCKED_V4 / BLOCKED_V6, IPv4 inside IPv6 checked as IPv4),
 when its name is localhost or a metadata name, or when the name resolves to any such address.
@@ -52,9 +54,10 @@ from urllib.parse import unquote_to_bytes
 log = logging.getLogger("clearcote-mcp")
 OPT_IN = "CLEARCOTE_ALLOW_PRIVATE_EGRESS"
 ALLOWED_SCHEMES = ("http", "https")
-# Requests that never leave the browser, and that pages and new tabs are made of: inline data, in-memory blobs, and
-# about:blank / about:srcdoc (no other about: page).
-INTERNAL_SCHEMES = ("data", "blob")
+# Requests that never leave the browser: inline data, in-memory blobs and about:blank / about:srcdoc (no other about:
+# page), which pages and new tabs are made of, and the browser's own chrome: and chrome-extension: resources (its PDF
+# viewer). Tools never open these (check_url() takes http and https only); a web page cannot load them either.
+INTERNAL_SCHEMES = ("data", "blob", "chrome", "chrome-extension")
 INTERNAL_ABOUT = ("blank", "srcdoc")
 
 BLOCKED_V4 = [ipaddress.ip_network(n) for n in (
@@ -206,7 +209,7 @@ async def check_url(url: str | None) -> None:
 
 
 def stays_in_browser(url: str) -> bool:
-    """A data:, blob:, about:blank or about:srcdoc url: nothing to fetch from anywhere."""
+    """A data:, blob:, about:blank, about:srcdoc, chrome: or chrome-extension: url: nothing fetched from anywhere."""
     scheme, _, rest = url.partition(":")
     scheme = scheme.lower()
     if scheme == "about":
@@ -247,6 +250,15 @@ async def guard_route(route) -> None:
 refused: list[tuple[str, str]] = []  # the latest refusals, so a failed navigation can say why
 
 
+async def redirect_refusal(target: str) -> str | None:
+    """Why the browser must not follow a redirect to `target`. A Location comes from a web server: only web urls
+    pass (none of the browser's own schemes), and only to a public address."""
+    scheme = target.split(":", 1)[0].lower()
+    if scheme not in ALLOWED_SCHEMES:
+        return scheme_refusal(scheme)
+    return await request_refusal(target)
+
+
 def _redirect_target(base: str, location: str) -> str:
     """Where a Location header sends the browser, enough to judge its host (an absolute url as is, including the
     'http:host' forms the browser accepts; a path stays on the same host)."""
@@ -280,7 +292,7 @@ async def _hold_redirects(context, page) -> None:
                              if h["name"].lower() == "location"), None)
             if 300 <= status < 400 and location:
                 target = _redirect_target(event["request"]["url"], location)
-                reason = await request_refusal(target)
+                reason = await redirect_refusal(target)
         except Exception as exc:  # noqa: BLE001 -- fail closed
             reason = f"could not check a redirect: {exc}"
         try:

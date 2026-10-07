@@ -31,15 +31,19 @@ A client that reads the old fields needs updating.
   `chrome:`, `devtools:` and every other scheme are refused, always. Addresses on this machine, the local network
   and cloud metadata endpoints are refused, for the url a tool is given and for every request the browser then
   makes (redirects, images, frames, script requests, popups); of the browser's requests only `data:`, `blob:`,
-  `about:blank` and `about:srcdoc` pass without a check, since they never leave it. Checking every request turns
+  `about:blank` and `about:srcdoc` pass without a check, since they never leave it, and the browser's own
+  `chrome:` and `chrome-extension:` resources (its PDF viewer loads them; a web page cannot). A redirect is
+  followed only to an `http`/`https` url. Checking every request turns
   the browser's HTTP cache off. `CLEARCOTE_ALLOW_PRIVATE_EGRESS=1` allows private addresses (local servers) and
   turns the request check off; urls are still `http`/`https` only. Not covered: WebSocket connections opened by
   page scripts, and a name whose address changes between the check and the browser's own lookup.
 - The browser is closed whenever the server stops: its input closed, Ctrl+C, Ctrl+Break (Windows), SIGTERM or
-  SIGHUP, or an error. Before, a stop signal ended the server at once and left the browser running, with its
-  profile and Playwright's folders in the temp directory; Ctrl+C waited for the input to close. A stopped server
-  now exits with 128 + the signal's number. On Windows, `npx clearcote-mcp` no longer ends the server by force on
-  Ctrl+C (the server gets the Ctrl+C itself).
+  SIGHUP, or an error, also when the stop comes while the browser is still being launched. Before, a stop signal
+  ended the server at once and left the browser running, with its profile and Playwright's folders in the temp
+  directory; Ctrl+C waited for the input to close. A stopped server now exits with 128 + the signal's number. Left
+  behind still: Playwright's artifacts folder in temp after a Ctrl+Break on Windows (it ends Playwright's driver at
+  the same moment), and everything after a forced kill of the server. On Windows, `npx clearcote-mcp` no longer ends
+  the server by force on Ctrl+C (the server gets the Ctrl+C itself).
 - Needs `mcp` 1.19 or newer (earlier releases turn a returned image into text).
 - `npx clearcote-mcp` runs the server with `uvx`, then `pipx`, then `pip`, and only with Python 3.10 or newer;
   when `pip` is refused as an externally managed environment, it says how to fix that.

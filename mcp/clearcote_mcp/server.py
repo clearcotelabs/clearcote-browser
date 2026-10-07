@@ -11,7 +11,8 @@ cloud-metadata unless opted in); file writes are confined to a sandbox dir; over
 are capped (with an explicit ``*_truncated`` flag) so a response never floods the agent's context;
 page-derived text is fenced as untrusted data (as Clearcote Jet does); the shared browser is guarded
 by an asyncio lock and rebuilt if it dies, and closed whenever the server stops (stdin closed, Ctrl+C,
-Ctrl+Break, SIGTERM or SIGHUP, an error), so no browser or temp files outlive it.
+Ctrl+Break, SIGTERM or SIGHUP, an error). Not after a forced kill; and on Windows a Ctrl+Break also ends
+Playwright's driver at once, which leaves its artifacts folder in temp.
 
 Cloud: ``CLEARCOTE_CLOUD=1`` (with ``CLEARCOTE_API_KEY``) makes the shared browser a hosted Clearcote
 session instead of a local one; the tools are unchanged. With an API key set there is also
@@ -214,12 +215,13 @@ def _cloud_persona_from_env() -> dict:
 
 
 _browser: ClearcoteBrowser | None = None
+_starting: ClearcoteBrowser | None = None  # a browser whose start() a stop cut short: _lifespan still closes it
 _lock: asyncio.Lock | None = None
 
 
 async def _b() -> ClearcoteBrowser:
     """Shared stealth browser; started on first use, rebuilt if it dies. Concurrency-safe."""
-    global _browser, _lock
+    global _browser, _starting, _lock
     if _lock is None:
         _lock = asyncio.Lock()
     async with _lock:
@@ -233,22 +235,33 @@ async def _b() -> ClearcoteBrowser:
             cloud = _cloud_mode()
             inst = ClearcoteBrowser(_cloud_persona_from_env() if cloud else _persona_from_env(), cloud=cloud,
                                     guard=not _egress.private_allowed())
-            await inst.start()
+            _starting = inst
+            try:
+                await inst.start()
+            except Exception:
+                _starting = None
+                await inst.close()  # whatever the failed start had launched
+                raise
+            # cancelled (a stop signal): _starting stays, for the close on the way out
+            _starting = None
             _browser = inst
     return _browser
 
 
-_CLOSE_SECONDS = 20  # the longest a stopping server waits for its browser to close
+_CLOSE_SECONDS = 20  # the longest a stopping server waits for its browser to close (a launch under way included)
 _EXIT_GRACE = 2  # after a stop signal and the browser's close: seconds to finish on its own before it leaves anyway
-_closed_on_stop = threading.Event()  # set once a stopping server has closed its browser (see _lifespan and main)
+_closed_on_stop = threading.Event()  # set once this run of the server has closed its browser (see _lifespan, main)
+_exiting = threading.Lock()  # held by whichever exit goes first: the server's own, or _leave_once_closed's
 
 
 @asynccontextmanager
 async def _lifespan(_server):
     """Pre-warm the browser so the agent's first tool call is warm, not a cold launch. However the server ends (stdin
-    closed, a stop signal, an error), the browser is closed on the way out: its process, its profile and Playwright's
-    folders in temp, the licence seat."""
-    global _browser
+    closed, a stop signal, an error), the browser is closed on the way out: its process, its profile, the licence seat,
+    and Playwright's folder in temp (all but that folder after a Ctrl+Break on Windows, which also ends Playwright's
+    driver at once)."""
+    global _browser, _starting
+    _closed_on_stop.clear()
     try:
         if _env("MCP_PREWARM", "1") != "0":
             try:
@@ -257,12 +270,14 @@ async def _lifespan(_server):
                 pass
         yield
     finally:
-        # shield: after a stop signal everything here is cancelled, and the close must still run to its end
+        # shield: after a stop signal everything here is cancelled, and the close must still run to its end. A start
+        # that the stop cut short is closed too, once serve() (which a cancel cannot stop) has launched its browser.
         with anyio.move_on_after(_CLOSE_SECONDS, shield=True):
             lock = _lock or asyncio.Lock()
-            async with lock:  # a launch still under way finishes first, and is closed here too
-                browser, _browser = _browser, None
-            if browser is not None:
+            async with lock:
+                browsers = [b for b in (_browser, _starting) if b is not None]
+                _browser = _starting = None
+            for browser in browsers:
                 try:
                     await browser.close()
                 except Exception:
@@ -522,9 +537,12 @@ def _stop_signals() -> list:
 def _leave_once_closed(signum: int) -> None:
     """After a stop signal: the stdio transport still waits for its stdin reader, a thread blocked on a read that may
     never return (a client that keeps the pipe open). Once the browser is closed, give the server _EXIT_GRACE seconds
-    to finish on its own, then leave without that thread (the exit handlers still run)."""
+    to finish on its own, then leave without that thread (the exit handlers still run, once: not when the server's
+    own exit has begun)."""
     _closed_on_stop.wait(_CLOSE_SECONDS + 10)
     time.sleep(_EXIT_GRACE)
+    if not _exiting.acquire(blocking=False):
+        return  # the server is leaving by itself
     atexit._run_exitfuncs()
     os._exit(128 + signum)
 
@@ -540,9 +558,13 @@ async def _serve() -> int | None:
             if stopped:
                 return
             stopped.append(signum)
-            print(f"[clearcote-mcp] stopping on {signal.Signals(signum).name}: closing the browser", file=sys.stderr)
             loop.call_soon_threadsafe(scope.cancel)
             threading.Thread(target=_leave_once_closed, args=(signum,), daemon=True).start()
+            try:  # last: a signal that lands inside another write to stderr makes this one raise
+                print(f"[clearcote-mcp] stopping on {signal.Signals(signum).name}: closing the browser",
+                      file=sys.stderr)
+            except Exception:
+                pass
 
         previous = {sig: signal.signal(sig, stop) for sig in _stop_signals()}
         try:
@@ -559,6 +581,8 @@ def main() -> None:
         signum = anyio.run(_serve)
     except KeyboardInterrupt:  # Ctrl+C before the server was listening for it: no browser yet
         signum = signal.SIGINT
+    if not _exiting.acquire(blocking=False):  # _leave_once_closed is already leaving: let it
+        threading.Event().wait()
     if signum:
         sys.exit(128 + signum)
 
