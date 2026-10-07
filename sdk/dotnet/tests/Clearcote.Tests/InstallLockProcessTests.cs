@@ -83,7 +83,8 @@ public class InstallLockProcessTests : IDisposable
         File.WriteAllText(lockFile, JsonSerializer.Serialize(new // what the Python / Node SDK writes; this process plays it
         {
             pid = Environment.ProcessId, host = System.Net.Dns.GetHostName(), boot = BootId(), pidns = PidNamespace(),
-            nonce = new string('a', 32), sdk = "python", created = 0,
+            nonce = new string('a', 32), sdk = "python", created = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            start = Download.ProcessStart(Environment.ProcessId),
         }));
         await using var srv = new FakeBuildServer(archiveDelayMs: 500);
         var child = RunChildAsync(srv.Url, cache);

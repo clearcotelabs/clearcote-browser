@@ -222,14 +222,14 @@ public static class Download
 
     /// <paramref name="repair"/> also moves a damaged tree out of the way; false when not holding the
     /// install lock, so only the process that will re-install touches it.
-    private static string? Cached(string @base, string binary, bool quiet, bool repair)
+    private static string? Cached(string @base, string binary, bool quiet, bool repair, bool? full = null)
     {
         if (!File.Exists(Path.Combine(@base, ".verified"))) return null;
         var browserDir = Path.Combine(@base, "browser");
         var cached = FindFile(browserDir, binary);
-        if (cached is null) return null;
-        var problems = VerifyInstall(browserDir, @base);
-        if (problems.Count == 0) return cached;
+        // The binary itself can be gone too: antivirus quarantine, or browser/ deleted by hand.
+        var problems = cached is not null ? VerifyInstall(browserDir, @base, full) : new List<string> { $"{binary} — missing" };
+        if (cached is not null && problems.Count == 0) return cached;
         if (!repair) return null;
 
         Log(quiet, $"cached browser is damaged ({problems[0]}) — re-downloading");
@@ -412,21 +412,25 @@ public static class Download
     // <cache>/<tag> takes turns:
     //  1. The lock is the file <tag>/.install-lock, created with O_CREAT|O_EXCL (atomic on every OS and in
     //     all three languages; Node has no flock). It holds JSON: pid, start, host, boot, pidns, nonce, sdk,
-    //     created ("start" is the process start time from /proc on Linux, else null).
+    //     created. "start" is the process start time where the SDK can read it ("linux:" from /proc; "win:"
+    //     the creation time, Python and .NET), else null; "created" is when the lock was written (ms, Unix).
     //  2. The holder touches the file (mtime) every 5 s while it works, from a thread of its own.
-    //  3. Waiters poll every 0.25 s. A record from this machine (same host, boot id and PID namespace) is
-    //     stale exactly when its process is gone (pid dead, or reused: another start time); a live one is
-    //     never broken, however old its heartbeat. Any other lock is stale once it (mtime + content) has not
-    //     changed for 120 s by the waiter's own clock -- 10 s when it is not valid JSON or its mtime is over
-    //     15 min old -- so clocks that disagree across machines do not matter. A stale lock is broken while
-    //     holding <tag>/.install-lock.break (also O_EXCL; one older than 30 s is removed): if the lock is still
-    //     exactly what was judged stale, delete it; then delete the breaker.
-    //  4. The holder re-checks the cache and uses a verified build if one is there now. Otherwise it downloads
-    //     and extracts into <tag>/.tmp-<nonce>/. Then, only while the lock is still its own: it uses a
-    //     verified tree that appeared meanwhile, else moves an unverified browser/ aside (<tag>/.trash-*),
-    //     moves its tree to <tag>/browser and writes .manifest.json; it checks the lock once more and only
-    //     then writes .verified. A verified tree is never moved or written over by an install (a damaged one
-    //     is moved aside by the lock holder only). Leftovers (.tmp-*, .trash-*, an old breaker) are swept.
+    //  3. Waiters poll every 0.25 s. A record from this machine (same host, boot id and PID namespace) is stale
+    //     when it was written before the machine last started, when its pid is dead, or when that pid now
+    //     belongs to a newer process (another start time; on Windows created after the lock). A pid confirmed
+    //     to be the holder is never stale, however old its heartbeat. When that cannot be confirmed, and for
+    //     any other lock: stale once it (mtime + content) has not changed for 120 s by the waiter's own clock
+    //     -- 10 s when not valid JSON or its mtime is over 15 min old -- so clocks that disagree do not matter.
+    //     A stale lock is broken while holding <tag>/.install-lock.break (also O_EXCL; a breaker unchanged for
+    //     30 s by the waiter's own clock is removed): if the lock is still exactly what was judged stale,
+    //     delete it; then delete the breaker.
+    //  4. The holder re-checks the cache and uses a verified build if one is there now; a tree marked
+    //     .verified that fails the check (files or the binary gone) is moved aside by the holder. Otherwise it
+    //     downloads and extracts into <tag>/.tmp-<nonce>/. Then, only while the lock is still its own: it uses a
+    //     tree that appeared meanwhile and passes the full check, else moves browser/ aside (<tag>/.trash-*),
+    //     moves its tree to <tag>/browser and writes .manifest.json; it checks the lock once more and only then
+    //     writes .verified. A tree that passes the check is never moved or written over by an install.
+    //     Leftovers (.tmp-*, .trash-*, a breaker unchanged throughout the install) are swept.
     //  5. Release deletes the lock only while it still holds our nonce. Waiting gives up after 30 min with an
     //     error that names the holder (pid, host) and the lock file.
 
@@ -439,7 +443,9 @@ public static class Download
     internal static TimeSpan LockStaleAfter = TimeSpan.FromSeconds(120);
     internal static TimeSpan LockUnreadableAfter = TimeSpan.FromSeconds(10);
     internal static readonly TimeSpan LockAncientAfter = TimeSpan.FromMinutes(15);
-    internal static readonly TimeSpan LockBreakerStaleAfter = TimeSpan.FromSeconds(30);
+    internal static TimeSpan LockBreakerStaleAfter = TimeSpan.FromSeconds(30);
+    private const long BootMarginMs = 5 * 60_000; // the clock can still be corrected in the first minutes after a start
+    private const long ReuseMarginMs = 2_000;
     internal static readonly TimeSpan InstallWait = TimeSpan.FromMinutes(30);
 
     /// Test seam: called right before an install writes .verified. Left null in production.
@@ -447,7 +453,7 @@ public static class Download
 
     private enum LockState { Gone, Busy, Ok, Invalid }
 
-    private sealed record LockRecord(long? Pid, string? Start, string? Host, string? Boot, string? PidNs, string? Nonce, string? Sdk);
+    private sealed record LockRecord(long? Pid, string? Start, string? Host, string? Boot, string? PidNs, string? Nonce, string? Sdk, long? Created);
 
     /// Another process took the lock over, or changed the build meanwhile: check again under the lock.
     private sealed class LockLostException : Exception { }
@@ -468,10 +474,32 @@ public static class Download
         catch { return null; }
     }
 
-    /// A marker that differs once <paramref name="pid"/> belongs to another process: its start time from
-    /// /proc (Linux), else null.
+    /// When this machine last started (ms, Unix time), or null.
+    internal static long? BootTimeMs()
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows()) return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - Environment.TickCount64;
+            foreach (var line in File.ReadLines("/proc/stat"))
+                if (line.StartsWith("btime ", StringComparison.Ordinal)) return long.Parse(line[6..].Trim()) * 1000;
+        }
+        catch { }
+        return null;
+    }
+
+    /// A marker that differs once <paramref name="pid"/> belongs to another process: "linux:&lt;start ticks&gt;"
+    /// from /proc, or "win:&lt;creation time, ms Unix&gt;" on Windows; null when it cannot be read.
     internal static string? ProcessStart(long pid)
     {
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                using var p = Process.GetProcessById((int)pid);
+                return $"win:{new DateTimeOffset(p.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()}";
+            }
+            catch { return null; }
+        }
         try
         {
             var stat = File.ReadAllText($"/proc/{pid}/stat");
@@ -515,7 +543,8 @@ public static class Download
             if (r.ValueKind != JsonValueKind.Object) return (LockState.Invalid, null, mtime, raw);
             string? Str(string k) => r.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
             long? pid = r.TryGetProperty("pid", out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt64(out var pv) ? pv : null;
-            return (LockState.Ok, new LockRecord(pid, Str("start"), Str("host"), Str("boot"), Str("pidns"), Str("nonce"), Str("sdk")), mtime, raw);
+            long? created = r.TryGetProperty("created", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetInt64(out var cv) ? cv : null;
+            return (LockState.Ok, new LockRecord(pid, Str("start"), Str("host"), Str("boot"), Str("pidns"), Str("nonce"), Str("sdk"), created), mtime, raw);
         }
         catch (JsonException) { return (LockState.Invalid, null, mtime, raw); }
     }
@@ -526,20 +555,40 @@ public static class Download
         && rec.Boot == BootId() && rec.PidNs == PidNamespace() && rec.Pid is > 0 and < (1L << 31);
 
     /// For a record from this machine: its process still runs (and the pid was not reused).
-    private static bool OwnerAlive(LockRecord rec)
+    private enum Owner { Gone, Alive, Unknown }
+
+    /// For a record from this machine: gone, alive (certainly still the holder) or unknown.
+    private static Owner OwnerState(LockRecord rec)
     {
+        if (rec.Created is { } created && BootTimeMs() is { } boot && created < boot - BootMarginMs)
+            return Owner.Gone; // written before this machine last started
         var pid = rec.Pid!.Value;
-        if (!PidAlive(pid)) return false;
-        if (rec.Start is { } start && start.StartsWith("linux:", StringComparison.Ordinal)
-            && ProcessStart(pid) is { } now && now.StartsWith("linux:", StringComparison.Ordinal) && now != start)
-            return false;
-        return true;
+        if (!PidAlive(pid)) return Owner.Gone;
+        var now = ProcessStart(pid);
+        var start = rec.Start;
+        if (now is not null && now.StartsWith("linux:", StringComparison.Ordinal))
+        {
+            if (start is not null && start.StartsWith("linux:", StringComparison.Ordinal)) return now == start ? Owner.Alive : Owner.Gone;
+            return Owner.Unknown;
+        }
+        if (now is not null && now.StartsWith("win:", StringComparison.Ordinal) && long.TryParse(now[4..], out var createdNow))
+        {
+            long? reference = start is not null && start.StartsWith("win:", StringComparison.Ordinal) && long.TryParse(start[4..], out var s)
+                ? s : rec.Created;
+            if (reference is null) return Owner.Unknown;
+            return createdNow > reference + ReuseMarginMs ? Owner.Gone : Owner.Alive; // a newer process has the pid
+        }
+        return Owner.Unknown;
     }
 
     /// <paramref name="unchangedFor"/>: how long the lock has stayed exactly as it is, by this process's own clock.
     private static bool LockStale(LockRecord? rec, DateTime mtimeUtc, TimeSpan unchangedFor)
     {
-        if (rec is not null && FromHere(rec)) return !OwnerAlive(rec);
+        if (rec is not null && FromHere(rec))
+        {
+            var owner = OwnerState(rec);
+            if (owner != Owner.Unknown) return owner == Owner.Gone;
+        }
         var quick = rec is null || DateTime.UtcNow - mtimeUtc > LockAncientAfter;
         var needed = quick && LockUnreadableAfter < LockStaleAfter ? LockUnreadableAfter : LockStaleAfter;
         return unchangedFor >= needed;
@@ -547,7 +596,41 @@ public static class Download
 
     /// Delete the lock if it is still exactly what was judged stale, under the breaker file. True when the
     /// lock is gone afterwards.
-    private static bool BreakStaleLock(string path, (LockState, DateTime, string?) judged)
+    private static (DateTime, long)? FileKey(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            return info.Exists ? (info.LastWriteTimeUtc, info.Length) : null;
+        }
+        catch { return null; }
+    }
+
+    /// What a breaker file looked like, and since when (this process's own clock).
+    private sealed class BreakerWatch
+    {
+        public (DateTime, long)? Key;
+        public long At = Stopwatch.GetTimestamp();
+    }
+
+    /// A breaker is held for milliseconds: one that stays exactly the same for the breaker window, by this
+    /// process's own clock, was left by a process that died holding it. Its timestamp alone proves nothing.
+    private static void ClearStaleBreaker(string breaker, BreakerWatch watch)
+    {
+        var key = FileKey(breaker);
+        if (key is null || key != watch.Key)
+        {
+            watch.Key = key;
+            watch.At = Stopwatch.GetTimestamp();
+        }
+        else if (Stopwatch.GetElapsedTime(watch.At) >= LockBreakerStaleAfter)
+        {
+            TryDelete(breaker);
+            watch.Key = null;
+        }
+    }
+
+    private static bool BreakStaleLock(string path, (LockState, DateTime, string?) judged, BreakerWatch watch)
     {
         var breaker = path + ".break";
         try
@@ -556,12 +639,7 @@ public static class Download
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
-            try
-            {
-                var info = new FileInfo(breaker);
-                if (info.Exists && DateTime.UtcNow - info.LastWriteTimeUtc > LockBreakerStaleAfter) info.Delete(); // its owner died holding it
-            }
-            catch { }
+            ClearStaleBreaker(breaker, watch);
             return false;
         }
         try
@@ -658,6 +736,7 @@ public static class Download
         var refused = 0;
         (LockState, DateTime, string?) seen = default; // the lock as last read, and since when it has looked like that
         var seenAt = TimeSpan.Zero;
+        var breakerWatch = new BreakerWatch();
         while (true)
         {
             FileStream? fs = null;
@@ -682,17 +761,23 @@ public static class Download
                 seen = (state, mtime, raw);
                 seenAt = now;
             }
-            if ((state is LockState.Ok or LockState.Invalid) && LockStale(rec, mtime, now - seenAt) && BreakStaleLock(path, seen))
+            if ((state is LockState.Ok or LockState.Invalid) && LockStale(rec, mtime, now - seenAt) && BreakStaleLock(path, seen, breakerWatch))
             {
                 Log(quiet, $"removed an abandoned install lock ({LockHolder(rec)})");
                 continue;
             }
             if (now >= wait)
             {
-                var running = state == LockState.Ok && rec is not null && FromHere(rec) && OwnerAlive(rec) ? ", which is still running" : "";
+                Owner? here = state == LockState.Ok && rec is not null && FromHere(rec) ? OwnerState(rec) : null;
+                var note = here switch
+                {
+                    Owner.Alive => ", which is still running",
+                    Owner.Unknown => "; that process number may now belong to another program",
+                    _ => "",
+                };
                 throw new TimeoutException(
                     $"Gave up after {WaitWords(wait)} waiting for another program to finish installing the Clearcote browser in\n    {@base}\n" +
-                    $"The other installer is {LockHolder(rec)}{running}. If it is stuck, end it; if nothing else is installing, delete this file and try again:\n    {path}");
+                    $"The other installer is {LockHolder(rec)}{note}. If no Clearcote program is installing this build, delete this file and try again:\n    {path}");
             }
             if (!told && state == LockState.Ok)
             {
@@ -732,8 +817,13 @@ public static class Download
     }
 
     /// Remove what an install that stopped part-way left behind. Only called by the lock holder.
-    private static void SweepLeftovers(string @base, string? asset = null)
+    /// Returns the breaker file's state now (and when, by this process's clock). Given its state at the start of
+    /// the install, removes a breaker that has not changed since, once that is the breaker window or more: one
+    /// left by a process killed while it broke a stale lock.
+    private static BreakerWatch SweepLeftovers(string @base, string? asset = null, BreakerWatch? breakerSeen = null)
     {
+        var breaker = Path.Combine(@base, InstallLockFile + ".break");
+        var seen = new BreakerWatch { Key = FileKey(breaker) };
         try
         {
             foreach (var dir in Directory.EnumerateDirectories(@base))
@@ -744,14 +834,11 @@ public static class Download
             }
         }
         catch { /* best-effort */ }
-        try
-        {
-            var breaker = new FileInfo(Path.Combine(@base, InstallLockFile + ".break"));
-            if (breaker.Exists && DateTime.UtcNow - breaker.LastWriteTimeUtc > LockBreakerStaleAfter)
-                breaker.Delete(); // left by a process killed while it broke a stale lock
-        }
-        catch { /* best-effort */ }
+        if (breakerSeen is not null && seen.Key is not null && seen.Key == breakerSeen.Key
+            && Stopwatch.GetElapsedTime(breakerSeen.At, seen.At) >= LockBreakerStaleAfter)
+            TryDelete(breaker);
         if (asset is not null) TryDelete(Path.Combine(@base, asset)); // where earlier versions downloaded the archive
+        return seen;
     }
 
     /// Download + verify a resolved release into <paramref name="base"/>; return the extracted browser path.
@@ -781,14 +868,15 @@ public static class Download
     /// first, and the finished tree is moved into place only while the lock is still ours.
     private static async Task<string> InstallLockedAsync(ReleaseInfo rel, string @base, bool quiet, InstallLock held)
     {
-        SweepLeftovers(@base, rel.Asset);
+        var breakerSeen = SweepLeftovers(@base, rel.Asset);
         var tmp = Path.Combine(@base, ".tmp-" + held.Nonce);
         Directory.CreateDirectory(tmp);
-        try { return await InstallIntoAsync(rel, @base, tmp, quiet, held).ConfigureAwait(false); }
+        try { return await InstallIntoAsync(rel, @base, tmp, quiet, held, breakerSeen).ConfigureAwait(false); }
         finally { try { Directory.Delete(tmp, recursive: true); } catch { /* best-effort */ } }
     }
 
-    private static async Task<string> InstallIntoAsync(ReleaseInfo rel, string @base, string tmp, bool quiet, InstallLock held)
+    private static async Task<string> InstallIntoAsync(ReleaseInfo rel, string @base, string tmp, bool quiet, InstallLock held,
+                                                       BreakerWatch? breakerSeen = null)
     {
         var browserDir = Path.Combine(@base, "browser");
         var zipPath = Path.Combine(tmp, rel.Asset);
@@ -842,17 +930,18 @@ public static class Download
             if (File.Exists(sandbox)) { try { File.SetUnixFileMode(sandbox, (UnixFileMode)0b100_111_101_101); } catch { } } // 4755
         }
 
-        // Move the tree into place only while the lock is still ours, and never over a verified tree: one that
-        // appeared since the cache check (another installer finished it) may already be running, so use it.
+        // Move the tree into place only while the lock is still ours, and never over a tree that passes the full
+        // check: one that appeared since the cache check (another installer finished it) may already be running,
+        // so use it. One marked verified that fails the check is damaged, and moved aside (we hold the lock).
         held.Beat();
         if (!held.Held()) throw new LockLostException();
-        var done = Cached(@base, rel.Binary, quiet, repair: false);
+        var done = Cached(@base, rel.Binary, quiet, repair: true, full: true);
         if (done is not null)
         {
             Log(quiet, $"installed by another process meanwhile: {done}");
             return done;
         }
-        if (File.Exists(Path.Combine(@base, ".verified"))) throw new LockLostException(); // marked verified by another process, yet not usable: start over
+        if (File.Exists(Path.Combine(@base, ".verified"))) throw new LockLostException(); // marked verified meanwhile by another process: start over
         TryDelete(Path.Combine(@base, Manifest));
         if (Directory.Exists(browserDir) || File.Exists(browserDir)) MoveAside(@base, browserDir); // not verified: an install that stopped part-way
         MoveDir(incoming, browserDir);
@@ -869,7 +958,7 @@ public static class Download
         BeforeVerifiedHook?.Invoke();
         if (!held.Held()) throw new LockLostException();
         await File.WriteAllTextAsync(Path.Combine(@base, ".verified"), rel.Sha256 + "\n").ConfigureAwait(false);
-        SweepLeftovers(@base);
+        SweepLeftovers(@base, breakerSeen: breakerSeen);
         Log(quiet, $"ready: {exe}");
         return exe;
     }

@@ -17,6 +17,17 @@ import { tempDir } from "./helpers/temp.js";
 
 const proPlatform = process.platform === "win32" || process.platform === "linux"; // the PRO route serves these
 
+/** This process's start marker as the SDK records it (Linux), else null. */
+function startMarker(): string | null {
+  try {
+    const stat = readFileSync("/proc/self/stat", "utf8");
+    const f = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/);
+    return f[19] ? `linux:${f[19]}` : null;
+  } catch {
+    return null;
+  }
+}
+
 function bootId(): string | null {
   try { return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || null; } catch { return null; }
 }
@@ -47,7 +58,7 @@ describe.runIf(proPlatform)("install lock across processes", () => {
     mkdirSync(base, { recursive: true });
     const lock = path.join(base, ".install-lock");
     // what the Python / .NET SDK writes; this process plays it
-    writeFileSync(lock, JSON.stringify({ pid: process.pid, host: os.hostname(), boot: bootId(), pidns: pidNamespace(), nonce: "a".repeat(32), sdk: "python", created: 0 }));
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, start: startMarker(), host: os.hostname(), boot: bootId(), pidns: pidNamespace(), nonce: "a".repeat(32), sdk: "python", created: Date.now() }));
     const srv = await startFakeBuild({ archiveDelayMs: 500 });
     try {
       const child = startInstallChild(srv.url, cache);

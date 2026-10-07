@@ -11,6 +11,7 @@ import importlib
 import io
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -81,8 +82,9 @@ def _lock_path(base):
 
 def _write_lock(base, age=0.0, **fields):
     """A lock file as any of the three SDKs writes it; ``age`` back-dates its heartbeat."""
-    rec = {"pid": os.getpid(), "host": socket.gethostname(), "boot": download._boot_id(),
-           "pidns": download._pid_namespace(), "nonce": "f" * 32, "sdk": "node", "created": 0}
+    rec = {"pid": os.getpid(), "start": download._process_start(os.getpid()), "host": socket.gethostname(),
+           "boot": download._boot_id(), "pidns": download._pid_namespace(), "nonce": "f" * 32, "sdk": "node",
+           "created": int(time.time() * 1000)}
     rec.update(fields)
     os.makedirs(base, exist_ok=True)
     with open(_lock_path(base), "w", encoding="utf-8") as f:
@@ -230,6 +232,7 @@ def test_a_half_written_lock_is_taken_over_only_after_its_grace_period(tmp_path,
 
 def test_a_breaker_left_by_a_crashed_process_is_cleared(tmp_path, monkeypatch):
     monkeypatch.setattr(download, "_LOCK_STALE", 1.0)
+    monkeypatch.setattr(download, "_LOCK_BREAKER_STALE", 1.0)
     base = str(tmp_path / TAG)
     _write_lock(base, host="another-machine")
     breaker = _lock_path(base) + ".break"
@@ -368,7 +371,8 @@ def test_a_holder_that_lost_the_lock_never_marks_its_tree_verified(tmp_path, mon
 
 
 @needs_pro_platform
-def test_a_breaker_and_trash_left_by_a_hard_kill_are_cleared_by_the_next_install(tmp_path):
+def test_a_breaker_and_trash_left_by_a_hard_kill_are_cleared_by_the_next_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(download, "_LOCK_BREAKER_STALE", 0.3)  # the install below takes longer than this
     cache = str(tmp_path / "cache")
     base = os.path.join(cache, TAG)
     os.makedirs(os.path.join(base, ".trash-0123", "locales"))
@@ -376,6 +380,102 @@ def test_a_breaker_and_trash_left_by_a_hard_kill_are_cleared_by_the_next_install
     open(breaker, "w").close()  # killed between deleting a stale lock and deleting its breaker
     then = time.time() - 60
     os.utime(breaker, (then, then))
-    with FakeBuildServer() as srv:
+    with FakeBuildServer(archive_delay=0.6) as srv:
         download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
     assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]
+
+
+@needs_pro_platform
+def test_a_breaker_that_changes_during_the_install_is_left_alone(tmp_path):
+    """Its timestamp may come from a machine whose clock is far behind: only one that stayed exactly the same
+    for the breaker window, by this process's own clock, is removed."""
+    cache = str(tmp_path / "cache")
+    base = os.path.join(cache, TAG)
+    breaker = _lock_path(base) + ".break"
+    os.makedirs(base)
+    open(breaker, "w").close()
+    then = time.time() - 3600
+    os.utime(breaker, (then, then))
+
+    def another_waiter_takes_it():
+        later = time.time() - 7200
+        with contextlib.suppress(OSError):
+            os.utime(breaker, (later, later))
+
+    with FakeBuildServer(on_archive=another_waiter_takes_it) as srv:
+        download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
+    assert os.path.exists(breaker)
+
+
+def test_a_breaker_that_looks_old_is_removed_only_after_staying_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(download, "_LOCK_STALE", 0.5)
+    monkeypatch.setattr(download, "_LOCK_BREAKER_STALE", 1.5)
+    base = str(tmp_path / TAG)
+    _write_lock(base, host="another-machine", pid=1)
+    breaker = _lock_path(base) + ".break"
+    open(breaker, "w").close()
+    then = time.time() - 3600  # an hour old by its timestamp: that alone proves nothing
+    os.utime(breaker, (then, then))
+    started = time.monotonic()
+    download._acquire_install_lock(base, timeout=10).release()
+    assert time.monotonic() - started >= 1.4  # watched it stay unchanged for the breaker window first
+    assert os.listdir(base) == []
+
+
+@needs_pro_platform
+@pytest.mark.parametrize("damage", ["binary removed", "browser folder removed"])
+def test_a_verified_build_whose_browser_is_gone_is_installed_again(tmp_path, damage):
+    """Antivirus quarantined chrome.exe, or someone deleted browser/ by hand, and .verified stayed behind:
+    the next install repairs it with one download instead of giving up."""
+    cache = str(tmp_path / "cache")
+    base = os.path.join(cache, TAG)
+    exe = verified_tree(base)
+    if damage == "binary removed":
+        os.remove(exe)
+    else:
+        shutil.rmtree(os.path.dirname(exe))
+    with FakeBuildServer() as srv:
+        path = download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
+    assert os.path.isfile(path)
+    assert srv.archive_hits == 1
+    with open(os.path.join(base, ".verified"), encoding="utf-8") as f:
+        assert f.read() == srv.sha + "\n"
+    assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]
+
+
+def test_a_lock_written_before_this_machine_started_is_taken_over_at_once(tmp_path):
+    """Its process number may belong to an unrelated program since the restart."""
+    base = str(tmp_path / TAG)
+    _write_lock(base, created=0)  # our pid, alive -- but the record is older than this boot
+    started = time.monotonic()
+    download._acquire_install_lock(base, timeout=3).release()
+    assert time.monotonic() - started < 2
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process creation times")
+def test_a_pid_now_used_by_a_newer_process_is_taken_over_at_once(tmp_path):
+    """Windows reuses process numbers quickly: a live process created after the lock is not its holder."""
+    newer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        time.sleep(0.5)
+        base = str(tmp_path / TAG)
+        _write_lock(base, pid=newer.pid, start=None, created=int(time.time() * 1000) - 10_000)
+        started = time.monotonic()
+        download._acquire_install_lock(base, timeout=5).release()
+        assert time.monotonic() - started < 3
+    finally:
+        newer.kill()
+        newer.wait()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="a record without a start time, read on Linux")
+def test_a_live_pid_that_cannot_be_checked_is_named_with_care(tmp_path):
+    base = str(tmp_path / TAG)
+    _write_lock(base, start=None)  # alive, but nothing tells whether it is still the same process
+    with pytest.raises(RuntimeError) as err:
+        download._acquire_install_lock(base, timeout=1)
+    msg = str(err.value)
+    assert f"process {os.getpid()} on {socket.gethostname()} (Clearcote Node SDK)" in msg
+    assert "that process number may now belong to another program" in msg
+    assert "If no Clearcote program is installing this build, delete this file" in msg
+

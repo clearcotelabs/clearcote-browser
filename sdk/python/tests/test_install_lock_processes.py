@@ -5,6 +5,7 @@ same time; one removed the browser files the other was already running and died 
 
 The lock is shared with the Node and .NET SDKs, so the second test plays the other SDK's part by writing the
 lock file exactly as they do."""
+import importlib
 import json
 import os
 import subprocess
@@ -57,7 +58,8 @@ def test_waits_for_another_sdks_install_and_uses_it(tmp_path):
     lock = os.path.join(base, ".install-lock")
     with open(lock, "w", encoding="utf-8") as f:  # what the Node / .NET SDK writes; this process plays it
         json.dump({"pid": os.getpid(), "host": __import__("socket").gethostname(), "boot": _boot_id(),
-                   "pidns": _pid_namespace(), "nonce": "a" * 32, "sdk": "node", "created": 0}, f)
+                   "pidns": _pid_namespace(), "nonce": "a" * 32, "sdk": "node", "created": int(time.time() * 1000),
+                   "start": importlib.import_module("clearcote.download")._process_start(os.getpid())}, f)
     with FakeBuildServer(archive_delay=0.5) as srv:
         child = _start(srv.url, cache)
         assert srv.meta_seen.wait(30)

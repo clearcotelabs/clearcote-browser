@@ -21,18 +21,36 @@ function pidNamespace(): string | null {
   try { return readlinkSync("/proc/self/ns/pid"); } catch { return null; }
 }
 
+
+/** This process's start marker as the SDK records it (Linux), else null. */
+function startMarker(): string | null {
+  try {
+    const stat = readFileSync("/proc/self/stat", "utf8");
+    const f = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/);
+    return f[19] ? `linux:${f[19]}` : null;
+  } catch {
+    return null;
+  }
+}
+
 const lockPath = (base: string) => path.join(base, INSTALL_LOCK);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const timing = { ...installLockTiming };
 afterEach(() => {
   Object.assign(installLockTiming, timing);
-  if (installTestHooks) delete installTestHooks.beforeVerified;
+  if (installTestHooks) {
+    delete installTestHooks.beforeVerified;
+    delete (installTestHooks as Record<string, unknown>).heartbeatWorkerSource;
+  }
 });
 
 /** A lock file as any of the three SDKs writes it; `ageMs` back-dates its heartbeat. */
 function writeLock(base: string, fields: Record<string, unknown> = {}, ageMs = 0): void {
-  const rec = { pid: process.pid, host: os.hostname(), boot: bootId(), pidns: pidNamespace(), nonce: "f".repeat(32), sdk: "python", created: 0, ...fields };
+  const rec = {
+    pid: process.pid, start: startMarker(), host: os.hostname(), boot: bootId(), pidns: pidNamespace(), nonce: "f".repeat(32), sdk: "python",
+    created: Date.now(), ...fields,
+  };
   mkdirSync(base, { recursive: true });
   writeFileSync(lockPath(base), JSON.stringify(rec));
   if (ageMs) {
@@ -114,7 +132,7 @@ describe("install lock", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
   }, 30_000);
 
-  it("never takes over the lock of a live process here, however old its heartbeat", async () => {
+  it.runIf(process.platform === "linux")("never takes over the lock of a live process here, however old its heartbeat", async () => {
     // Its heartbeat can stop while it is alive: a debugger, a paused container, a laptop asleep.
     installLockTiming.staleMs = 1000;
     const base = path.join(tempDir("cc-lock-"), TAG);
@@ -170,6 +188,7 @@ describe("install lock", () => {
 
   it("clears a breaker left by a crashed process", async () => {
     installLockTiming.staleMs = 1000;
+    installLockTiming.breakerStaleMs = 1000;
     const base = path.join(tempDir("cc-lock-"), TAG);
     writeLock(base, { host: "another-machine" });
     const breaker = `${lockPath(base)}.break`;
@@ -187,6 +206,63 @@ describe("install lock", () => {
     expect(lock.held()).toBe(false);
     await lock.release();
     expect(JSON.parse(readFileSync(lockPath(base), "utf8")).nonce).toBe("e".repeat(32));
+  });
+});
+
+describe("install lock: process numbers, restarts, breakers and the heartbeat", () => {
+  it("takes over at once a lock written before this machine started", async () => {
+    // Its process number may belong to an unrelated program since the restart.
+    const base = path.join(tempDir("cc-lock-"), TAG);
+    writeLock(base, { created: 0 }); // our pid, alive -- but the record is older than this boot
+    const started = Date.now();
+    await (await acquireInstallLock(base, { timeoutMs: 3000 })).release();
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it("judges a live pid it cannot confirm by the waiter's own clock, and names it with care", async () => {
+    // Node cannot read another process's start time on Windows, and this record carries none: the pid may
+    // have been reused by an unrelated program, so the lock is taken over once it stops changing.
+    installLockTiming.staleMs = 1000;
+    const base = path.join(tempDir("cc-lock-"), TAG);
+    writeLock(base, { start: null }); // our pid, alive
+    const err = await acquireInstallLock(base, { timeoutMs: 600 }).then(() => null, (e: Error) => e);
+    expect(err?.message).toContain(`process ${process.pid} on ${os.hostname()} (Clearcote Python SDK); that process number may now belong to another program`);
+    expect(err?.message).toContain("If no Clearcote program is installing this build, delete this file");
+    const started = Date.now();
+    await (await acquireInstallLock(base, { timeoutMs: 10_000 })).release();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+  });
+
+  it("removes a breaker that looks old only after it stays unchanged for the breaker window", async () => {
+    installLockTiming.staleMs = 500;
+    installLockTiming.breakerStaleMs = 1500;
+    const base = path.join(tempDir("cc-lock-"), TAG);
+    writeLock(base, { host: "another-machine", pid: 1 });
+    const breaker = `${lockPath(base)}.break`;
+    writeFileSync(breaker, "");
+    const then = new Date(Date.now() - 3_600_000); // an hour old by its timestamp: that alone proves nothing
+    utimesSync(breaker, then, then);
+    const started = Date.now();
+    await (await acquireInstallLock(base, { timeoutMs: 10_000 })).release();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1400);
+    expect(readdirSync(base)).toEqual([]);
+  });
+
+  it("keeps beating from the main thread when the heartbeat worker dies", async () => {
+    installLockTiming.heartbeatMs = 100;
+    (installTestHooks as Record<string, unknown>).heartbeatWorkerSource =
+      'require("node:fs").writeFileSync(require("node:worker_threads").workerData.path + ".died", ""); throw new Error("heartbeat worker died");';
+    const base = path.join(tempDir("cc-lock-"), TAG);
+    const lock = await acquireInstallLock(base, { timeoutMs: 1000 });
+    try {
+      await sleep(400);
+      expect(existsSync(`${lockPath(base)}.died`)).toBe(true); // the worker ran and died
+      const before = statSync(lockPath(base)).mtimeMs;
+      await sleep(500);
+      expect(statSync(lockPath(base)).mtimeMs).toBeGreaterThan(before);
+    } finally {
+      await lock.release();
+    }
   });
 });
 
@@ -287,6 +363,7 @@ describe.runIf(proPlatform)("installs under the install lock", () => {
   }, 30_000);
 
   it("clears a breaker and trash a hard kill left behind", async () => {
+    installLockTiming.breakerStaleMs = 300; // the install below takes longer than this
     const cache = tempDir("cc-lock-");
     const base = path.join(cache, TAG);
     mkdirSync(path.join(base, ".trash-0123", "locales"), { recursive: true });
@@ -294,10 +371,54 @@ describe.runIf(proPlatform)("installs under the install lock", () => {
     writeFileSync(breaker, ""); // killed between deleting a stale lock and deleting its breaker
     const then = new Date(Date.now() - 60_000);
     utimesSync(breaker, then, then);
-    const srv = await startFakeBuild();
+    const srv = await startFakeBuild({ archiveDelayMs: 600 });
     try {
       await proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
       expect(readdirSync(base).sort()).toEqual([".manifest.json", ".verified", "browser"]);
+    } finally {
+      await srv.close();
+    }
+  }, 30_000);
+
+  it.each(["binary removed", "browser folder removed"])("installs again a verified build whose browser is gone (%s)", async (damage) => {
+    // Antivirus quarantined chrome.exe, or someone deleted browser/ by hand, and .verified stayed behind: the
+    // next install repairs it with one download instead of giving up.
+    const cache = tempDir("cc-lock-");
+    const base = path.join(cache, TAG);
+    const exe = verifiedTree(base);
+    if (damage === "binary removed") rmSync(exe);
+    else rmSync(path.dirname(exe), { recursive: true });
+    const srv = await startFakeBuild();
+    try {
+      const got = await proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
+      expect(existsSync(got)).toBe(true);
+      expect(srv.archiveHits).toBe(1);
+      expect(readFileSync(path.join(base, ".verified"), "utf8")).toBe(`${srv.sha}\n`);
+      expect(readdirSync(base).sort()).toEqual([".manifest.json", ".verified", "browser"]);
+    } finally {
+      await srv.close();
+    }
+  }, 30_000);
+
+  it("leaves alone a breaker that changes during the install", async () => {
+    // Its timestamp may come from a machine whose clock is far behind: only one that stayed exactly the same
+    // for the breaker window, by this process's own clock, is removed.
+    const cache = tempDir("cc-lock-");
+    const base = path.join(cache, TAG);
+    mkdirSync(base, { recursive: true });
+    const breaker = `${lockPath(base)}.break`;
+    writeFileSync(breaker, "");
+    const then = new Date(Date.now() - 3_600_000);
+    utimesSync(breaker, then, then);
+    const srv = await startFakeBuild({
+      onArchive: () => {
+        const later = new Date(Date.now() - 7_200_000);
+        try { utimesSync(breaker, later, later); } catch { /* removed already */ }
+      },
+    });
+    try {
+      await proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
+      expect(existsSync(breaker)).toBe(true);
     } finally {
       await srv.close();
     }
