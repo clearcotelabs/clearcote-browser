@@ -167,7 +167,8 @@ services:
 
 The SDKs' macOS `launch()` passes the profile itself to an image that uses it (serve protocol 3), on a
 Docker that runs on an x86_64 CPU. On another CPU (Docker Desktop on Apple silicon) the image runs
-emulated, and the sandbox has not been tried under that emulation yet, so it stays off there.
+emulated, and the sandbox has not been tried under that emulation yet, so it stays off there. When
+`docker info` does not say which CPU Docker runs on, it stays off too, with one warning.
 
 The sandbox also needs:
 
@@ -184,7 +185,8 @@ The sandbox also needs:
 
 To turn the sandbox off on purpose, pass `CC_EXTRA_ARGS=--no-sandbox`. These in `CC_EXTRA_ARGS` turn
 it off too, because Chrome cannot run its sandbox with them here: `--no-zygote`,
-`--disable-namespace-sandbox` (this image has no setuid sandbox to fall back on), and
+`--disable-namespace-sandbox` (this image has no setuid sandbox to fall back on),
+`--renderer-cmd-prefix=` (Chrome then starts renderers itself, outside the sandbox's namespaces), and
 `--canvas-bridge-url=` (the [canvas bridge](../docs/CANVAS-BRIDGE.md) opens its socket from the
 renderer, which the sandbox does not allow).
 

@@ -244,10 +244,11 @@ def test_chrome_runs_with_its_sandbox():
     assert not container_exists(cid)
 
 
-@pytest.mark.parametrize("switch", ["--no-zygote", "--disable-namespace-sandbox"])
+@pytest.mark.parametrize("switch", ["--no-zygote", "--disable-namespace-sandbox", "--renderer-cmd-prefix=env"])
 def test_a_switch_chrome_cannot_run_its_sandbox_with_turns_it_off_and_the_browser_comes_up(switch):
     # With the profile the probe passes, but Chrome refuses --no-zygote with its sandbox on (exit 1) and aborts on
     # the setuid helper the image does not have with --disable-namespace-sandbox: either way it must run without.
+    # --renderer-cmd-prefix starts renderers outside the sandbox's namespaces: it runs without, and says so.
     b = clearcote.launch(args=[switch], quiet=True)
     try:
         cid = b.docker_container["id"]

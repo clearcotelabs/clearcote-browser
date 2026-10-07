@@ -72,6 +72,11 @@ SANDBOX_OFF_SWITCHES = {
     "--disable-namespace-sandbox": "--disable-namespace-sandbox was asked for, and this image has no setuid sandbox",
     # the bridge opens its socket from the renderer, which the sandbox does not allow
     "--canvas-bridge-url": "the canvas bridge needs --no-sandbox",
+    # A debugging prefix (gdb, strace, valgrind) for renderers: Chrome then starts them itself, not from the zygote,
+    # in the browser's own user and PID namespaces (measured), so "on" would be untrue for the very processes the
+    # sandbox is for. Off says so, and the container runs as it did before the sandbox. --zygote-cmd-prefix and
+    # --utility-cmd-prefix leave the renderers in their own namespaces (measured too): the sandbox stays on.
+    "--renderer-cmd-prefix": "--renderer-cmd-prefix starts renderers outside the sandbox's namespaces",
 }
 
 
@@ -283,10 +288,15 @@ def explain(step, err, read=_read):
                     "(kernel.apparmor_restrict_unprivileged_userns=1), which no seccomp profile changes",
                     "let the container create them (kernel.apparmor_restrict_unprivileged_userns=0 on the host, "
                     "or an AppArmor profile for the container that allows userns), and " + _WITH_PROFILE)
-    if step.startswith("seccomp-"):
+    if step == "seccomp-arch":
         return (what + ": this container's syscalls are not this CPU's, as where an amd64 image runs emulated on "
                 "another CPU, and Chrome's sandbox filter would kill its renderers",
                 "run the image on an amd64 machine")
+    if step == "seccomp-bpf":
+        return (what + ": the kernel, or an emulator between it and this container, does not take the seccomp-bpf "
+                "filters Chrome's sandbox installs (a kernel built without CONFIG_SECCOMP_FILTER, for one)",
+                "run the container on a host whose kernel has seccomp-bpf filters (CONFIG_SECCOMP_FILTER), without "
+                "CPU emulation")
     if err == errno.EINVAL and step in _NAMESPACE_STEPS:
         return (what + ": namespace flags are refused here, as they are where an amd64 image runs emulated on "
                 "another CPU", "run the image on an amd64 machine")

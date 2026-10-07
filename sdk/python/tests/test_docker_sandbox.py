@@ -79,10 +79,19 @@ def test_the_canvas_bridge_keeps_no_sandbox():
     # Chrome falls back to the setuid helper, which the image does not install, and aborts
     (["--disable-namespace-sandbox"], "--disable-namespace-sandbox was asked for"),
     (["--lang=de", "--no-zygote=1"], "--no-zygote was asked for"),
+    # renderers wrapped in a debugging prefix start outside the zygote, in the browser's own namespaces
+    (["--renderer-cmd-prefix=gdb --args"], "--renderer-cmd-prefix starts renderers outside"),
 ])
 def test_switches_chrome_cannot_run_its_sandbox_with_turn_it_off_without_probing(args, why):
     on, line = _check().decide(args, 10001, run_probe=_no_probe)
     assert on is False and line.startswith("[clearcote] sandbox: off (" + why)
+
+
+@pytest.mark.parametrize("args", [["--zygote-cmd-prefix=env"], ["--utility-cmd-prefix=env"], ["--single-process"]])
+def test_switches_that_leave_the_renderers_in_their_namespaces_keep_the_sandbox(args):
+    # measured with the profile: renderers still in user namespaces of their own
+    on, line = _check().decide(args, 10001, run_probe=lambda: (True, None))
+    assert on is True and line.startswith("[clearcote] sandbox: on")
 
 
 def test_root_runs_without_the_sandbox_because_chrome_refuses_it_there():
@@ -115,10 +124,20 @@ def test_the_profile_is_saved_without_copying_the_engine_volume():
     (("probe", errno.EIO), {}, "the sandbox probe failed"),
     (("seccomp-arch", 0), {}, "runs emulated on another CPU"),
     (("seccomp-bpf", errno.EINVAL), {}, "installing a seccomp-bpf filter failed"),
+    (("seccomp-bpf", errno.EINVAL), {}, "CONFIG_SECCOMP_FILTER"),
 ])
 def test_each_reason_is_named(failure, files, said):
     on, line = _check().decide([], 10001, run_probe=lambda: (False, failure), read=files.get)
     assert on is False and said in line and "To turn the sandbox on, " in line
+
+
+def test_a_kernel_without_seccomp_filters_is_not_called_emulation():
+    # A filter that could not be installed at all is not the same as one whose syscalls came from another CPU.
+    sc = _check()
+    no_filters, _how = sc.explain("seccomp-bpf", errno.EINVAL, read={}.get)
+    other_cpu, _how = sc.explain("seccomp-arch", 0, read={}.get)
+    assert "CONFIG_SECCOMP_FILTER" in no_filters and "are not this CPU's" not in no_filters
+    assert "are not this CPU's" in other_cpu and "CONFIG_SECCOMP_FILTER" not in other_cpu
 
 
 @pytest.mark.parametrize("stdout,code,result", [
