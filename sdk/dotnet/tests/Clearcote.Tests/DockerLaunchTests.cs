@@ -402,6 +402,34 @@ public sealed class DockerLaunchTests : IDisposable
         Assert.DoesNotContain("create", _docker.Commands);
     }
 
+    // The same table is in the Python and Node tests: the three SDKs read a proxy's login alike. (server, username,
+    // password, licensed, whether it carries a login, whether an image from before sdk-0.40.0 is refused it)
+    public static IEnumerable<object[]> ProxyLogins() => new[]
+    {
+        new object[] { "socks5://u:p^w@proxy.example:1080", "", "", true, true, false },   // written unescaped: an old image passes it on as is
+        new object[] { "socks5://u:p w@proxy.example:1080", "", "", true, true, false },
+        new object[] { "socks5://u:p@ss@proxy.example:1080", "", "", true, true, false },  // an unescaped '@': the last one ends the login
+        new object[] { "socks5://u:p%40ss@proxy.example:1080", "", "", true, true, true },  // escaped: an old image would send "p%40ss"
+        new object[] { "socks5://proxy.example:1080", "u", "pa!s*s'()", true, true, true },
+        new object[] { "socks5://proxy.example:1080", "u", "p-._~ss", true, true, false },
+        new object[] { "socks5://u:p w@proxy.example:1080", "", "", false, true, true },    // the open engine cannot log in to SOCKS5
+        new object[] { "http://:@proxy.example:8080", "", "", false, false, false },        // neither a username nor a password
+        new object[] { "http://u:@proxy.example:8080", "", "", true, true, true },          // an old image drops an http(s) proxy's login
+    };
+
+    [Theory]
+    [MemberData(nameof(ProxyLogins))]
+    public void The_sdks_read_a_proxy_login_alike(string server, string user, string password, bool licensed, bool login, bool refused)
+    {
+        var proxy = new ProxyOptions { Server = server, Username = user.Length > 0 ? user : null, Password = password.Length > 0 ? password : null };
+        var url = DockerLaunch.ContainerEnv(new LaunchOptions { Proxy = proxy })["CC_PROXY"];
+        Assert.Equal(refused, DockerLaunch.LegacyProxyRefusal(Image, url, licensed) is not null);
+        var applied = url.StartsWith("socks5", StringComparison.Ordinal) ? "socks5://proxy.example:1080" : "http://proxy.example:8080";
+        var problems = DockerLaunch.VerifyApplied(new[] { ServeState(licensed ? "licensed" : "open", applied) }, 2, licensed, url);
+        Assert.Equal(login ? new[] { "the proxy needs a password, but it did not say it can log in to it (every request through it would fail)" }
+            : Array.Empty<string>(), problems);
+    }
+
     [Fact]
     public async Task A_proxy_password_is_accepted_when_the_container_logs_in_to_it()
     {
@@ -451,12 +479,15 @@ public sealed class DockerLaunchTests : IDisposable
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    [InlineData(-4242)]
-    public async Task A_record_whose_pid_is_not_a_positive_number_is_left_alone(int pid)
+    [InlineData(0L)]
+    [InlineData(-1L)]
+    [InlineData(-4242L)]
+    [InlineData(2147483648L)]
+    [InlineData(99999999999L)]
+    public async Task A_record_whose_pid_is_not_a_positive_number_is_left_alone(long pid)
     {
-        // pid 0 / negative pids name a process group or nothing at all: "not alive" proves nothing about the owner
+        // pid 0 / negative pids name a process group or nothing at all: "not alive" proves nothing about the owner. No
+        // process has a pid past 2**31-1 (the Python and Node SDKs failed or swept on one).
         Record(new string('a', 32), new { pid });
         _docker.Ps = $"aaaaaa\t{new string('a', 32)}\n";
         Assert.Null(DockerLaunch.OwnerAlive(Json(With(Here(), ("pid", pid)))));

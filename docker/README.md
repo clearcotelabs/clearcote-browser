@@ -121,6 +121,12 @@ The SDKs' macOS `launch()` (which runs this image because there is no native mac
 that. Anyone with access to the Docker daemon can still read a running container's memory and files, so
 treat daemon access as access to the key.
 
+A secrets file keeps a proxy's password out of the configuration, not out of the process list: the licensed
+engine logs in to the proxy itself, so its username and password are on the browser's command line
+(`--proxy-auth` for an http or https proxy, `--socks5-credentials` for SOCKS5). Anyone who can list the
+container's processes sees them: `docker top`, and `ps` on a Linux machine that runs the container. The open
+engine keeps the password in the entrypoint's relay instead, off the command line.
+
 ## Notes
 
 - Each image tag is built from one SDK release: `sdk-<version>` (e.g. `sdk-0.30.0`), `<browser>` (the

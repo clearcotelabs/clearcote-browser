@@ -389,6 +389,32 @@ def test_an_old_image_is_refused_a_proxy_it_cannot_log_in_to_before_it_starts(ma
     assert "p w" not in str(e.value) and "p%20w" not in str(e.value)
 
 
+# The same table is in the Node and .NET tests: the three SDKs read a proxy's login alike. (proxy, licensed, whether
+# it carries a login, whether an image from before sdk-0.40.0 is refused it)
+PROXY_LOGINS = [
+    ("socks5://u:p^w@proxy.example:1080", True, True, False),  # written unescaped: an old image passes it on as is
+    ("socks5://u:p w@proxy.example:1080", True, True, False),
+    ("socks5://u:p@ss@proxy.example:1080", True, True, False),  # an unescaped '@': the last one ends the login
+    ("socks5://u:p%40ss@proxy.example:1080", True, True, True),  # escaped: an old image would send "p%40ss"
+    ({"server": "socks5://proxy.example:1080", "username": "u", "password": "pa!s*s'()"}, True, True, True),
+    ({"server": "socks5://proxy.example:1080", "username": "u", "password": "p-._~ss"}, True, True, False),
+    ("socks5://u:p w@proxy.example:1080", False, True, True),  # the open engine cannot log in to SOCKS5
+    ("http://:@proxy.example:8080", False, False, False),  # neither a username nor a password
+    ("http://u:@proxy.example:8080", True, True, True),  # an old image drops an http(s) proxy's login
+]
+
+
+@pytest.mark.parametrize("proxy,licensed,login,refused", PROXY_LOGINS)
+def test_the_sdks_read_a_proxy_login_alike(mac, proxy, licensed, login, refused):
+    url = _docker.container_env({"proxy": proxy})["CC_PROXY"]
+    assert (_docker.legacy_proxy_refusal(IMAGE, url, licensed) is not None) == refused
+    applied = "socks5://proxy.example:1080" if url.startswith("socks5") else "http://proxy.example:8080"
+    problems = _docker.verify_applied([serve_state("licensed" if licensed else "open", applied)], 2,
+                                      {"licensed": licensed, "proxy": url})
+    assert problems == (["the proxy needs a password, but it did not say it can log in to it (every request "
+                         "through it would fail)"] if login else [])
+
+
 def test_a_proxy_password_is_accepted_when_the_container_logs_in(mac, docker, cdp):
     for how in ("engine", "relay"):
         docker.calls.clear()
@@ -483,9 +509,10 @@ def test_owner_record(mac):
     assert _docker.owner_alive(dict(rec, pid=DEAD_PID)) is False
 
 
-@pytest.mark.parametrize("pid", [0, -1, -4242])
+@pytest.mark.parametrize("pid", [0, -1, -4242, 2 ** 31, 99999999999])
 def test_a_record_whose_pid_is_not_a_positive_number_is_left_alone(mac, docker, pid):
-    # pid 0 / negative pids name a process group or nothing at all: "not alive" proves nothing about the owner
+    # pid 0 / negative pids name a process group or nothing at all: "not alive" proves nothing about the owner. No
+    # process has a pid past 2**31-1: os.kill() raised OverflowError out of the sweep, and every launch failed.
     docker.ps = f"aaaaaa\t{'a' * 32}\n"
     _record("a" * 32, pid=pid, start=None, **_here_fields())
     assert _docker.owner_alive(dict(_here_fields(), pid=pid)) is None

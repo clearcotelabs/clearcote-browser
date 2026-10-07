@@ -56,6 +56,9 @@ LABEL = "com.clearcotelabs.sdk-launch=1"
 # process is certainly gone. The host name is for people reading `docker ps`; the token decides.
 OWNER_HOST_LABEL = "com.clearcotelabs.owner-host"
 OWNER_TOKEN_LABEL = "com.clearcotelabs.owner-token"
+# The largest pid an owner record can name: no system has larger ones, and os.kill() raises OverflowError
+# (not an OSError) beyond it.
+PID_MAX = 2 ** 31 - 1
 # The image's serve protocol (docker/serve.py's SERVE_PROTOCOL, carried as this image label). 2: takes
 # CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS and logs a serve-state line. An image without the label is older.
 PROTOCOL_LABEL = "com.clearcotelabs.serve-protocol"
@@ -302,9 +305,9 @@ def _pid_alive(pid) -> bool:
 # it can verify completely: one in its own home, written on this host, from this boot and PID namespace --
 # every one of those fields as this process would write it, so a record written on another OS into a shared
 # home (no namespace or boot id), in a container given the Docker socket (another namespace), next to
-# Windows in WSL2, or on another machine is left alone, and so is a pid that is not a positive number. When
-# in doubt, nothing is removed: the container's idle exit still stops it. The record format is shared by
-# the Python, Node and .NET SDKs, so any of them can sweep any other's containers.
+# Windows in WSL2, or on another machine is left alone, and so is a pid that is not a positive 32-bit
+# number. When in doubt, nothing is removed: the container's idle exit still stops it. The record format is
+# shared by the Python, Node and .NET SDKs, so any of them can sweep any other's containers.
 
 def _read_text(path):
     try:
@@ -415,8 +418,9 @@ def _marker_kind(marker):
 def owner_alive(record):
     """True or False for the owner a record describes, or None when that cannot be told for certain here:
     a record whose host, boot id or PID namespace is not exactly what this process would record (missing
-    ones included), or whose pid is not a positive integer. A pid that is alive with a start marker of the
-    same kind but another value was reused (False); one whose marker cannot be compared counts as alive."""
+    ones included), or whose pid is not a positive 32-bit integer (PID_MAX at most). A pid that is alive with
+    a start marker of the same kind but another value was reused (False); one whose marker cannot be compared
+    counts as alive."""
     here = _here()
     host = record.get("host")
     if not here["host"] or not isinstance(host, str) or host.lower() != here["host"].lower():
@@ -424,7 +428,7 @@ def owner_alive(record):
     if record.get("boot") != here["boot"] or record.get("pidns") != here["pidns"]:
         return None
     pid = record.get("pid")
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    if not isinstance(pid, int) or isinstance(pid, bool) or not 0 < pid <= PID_MAX:
         return None
     if not _pid_alive(pid):
         return False

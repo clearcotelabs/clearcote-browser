@@ -14,8 +14,8 @@ import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { DockerUnavailableError, launch } from "../src/index.js";
 import {
-  dockerCli, dockerRequested, hostProbe, ownerAlive, ownerHere, ownerToken, pidAlive, processStart, resetOwnerToken,
-  startContainer, sweepStale, TEST_ONLY_ASSUME_MACOS, type CliResult,
+  containerEnv, dockerCli, dockerRequested, hostProbe, legacyProxyRefusal, ownerAlive, ownerHere, ownerToken, pidAlive,
+  processStart, resetOwnerToken, startContainer, sweepStale, TEST_ONLY_ASSUME_MACOS, verifyApplied, type CliResult,
 } from "../src/docker.js";
 import { LocalChromium, findChromium } from "./helpers/chromium.js";
 import { tempDir } from "./helpers/temp.js";
@@ -351,6 +351,28 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
     });
   }
 
+  // The same table is in the Python and .NET tests: the three SDKs read a proxy's login alike. [proxy, licensed,
+  // whether it carries a login, whether an image from before sdk-0.40.0 is refused it]
+  for (const [proxy, licensed, login, refused] of [
+    ["socks5://u:p^w@proxy.example:1080", true, true, false], // written unescaped: an old image passes it on as is
+    ["socks5://u:p w@proxy.example:1080", true, true, false],
+    ["socks5://u:p@ss@proxy.example:1080", true, true, false], // an unescaped '@': the last one ends the login
+    ["socks5://u:p%40ss@proxy.example:1080", true, true, true], // escaped: an old image would send "p%40ss"
+    [{ server: "socks5://proxy.example:1080", username: "u", password: "pa!s*s'()" }, true, true, true],
+    [{ server: "socks5://proxy.example:1080", username: "u", password: "p-._~ss" }, true, true, false],
+    ["socks5://u:p w@proxy.example:1080", false, true, true], // the open engine cannot log in to SOCKS5
+    ["http://:@proxy.example:8080", false, false, false], // neither a username nor a password
+    ["http://u:@proxy.example:8080", true, true, true], // an old image drops an http(s) proxy's login
+  ] as Array<[unknown, boolean, boolean, boolean]>) {
+    it(`the SDKs read a proxy login alike (${JSON.stringify(proxy)}, ${licensed ? "licensed" : "open"})`, () => {
+      const url = containerEnv({ proxy }).CC_PROXY;
+      expect(legacyProxyRefusal(IMAGE, url, licensed) !== null).toBe(refused);
+      const applied = url.startsWith("socks5") ? "socks5://proxy.example:1080" : "http://proxy.example:8080";
+      expect(verifyApplied([serveState(licensed ? "licensed" : "open", applied)], 2, { licensed, proxy: url })).toEqual(
+        login ? ["the proxy needs a password, but it did not say it can log in to it (every request through it would fail)"] : []);
+    });
+  }
+
   it("a proxy password is accepted when the container logs in to it", async () => {
     const stub = await cdpStub();
     try {
@@ -428,9 +450,10 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
     if (rec.start) expect(ownerAlive({ ...rec, start: `${rec.start.split(":")[0]}:1` })).toBe(false); // the same pid, another process
   });
 
-  for (const pid of [0, -1, -4242]) {
+  for (const pid of [0, -1, -4242, 2 ** 31, 99999999999]) {
     it(`a record whose pid is not a positive number is left alone (${pid})`, async () => {
-      // pid 0 / negative pids name a process group or nothing at all: "not alive" proves nothing about the owner
+      // pid 0 / negative pids name a process group or nothing at all: "not alive" proves nothing about the owner. No
+      // process has a pid past 2**31-1: process.kill() threw on it, which read as "gone", and the container was removed.
       record("a".repeat(32), { pid, start: null, ...here() });
       docker.ps = `aaaaaa\t${"a".repeat(32)}\n`;
       expect(ownerAlive({ pid, ...here() })).toBeNull();

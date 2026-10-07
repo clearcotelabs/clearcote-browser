@@ -48,6 +48,9 @@ const LABEL = "com.clearcotelabs.sdk-launch=1";
 // Who started a container: sweepStale() removes the ones whose owner process is gone.
 const OWNER_HOST_LABEL = "com.clearcotelabs.owner-host";
 const OWNER_TOKEN_LABEL = "com.clearcotelabs.owner-token";
+// The largest pid an owner record can name: no system has larger ones, and process.kill() throws
+// ERR_INVALID_ARG_TYPE beyond it (which pidAlive() would read as "gone").
+const PID_MAX = 2 ** 31 - 1;
 // The image's serve protocol (docker/serve.py's SERVE_PROTOCOL, carried as this image label). 2: takes
 // CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS and logs a serve-state line. An image without the label is older.
 const PROTOCOL_LABEL = "com.clearcotelabs.serve-protocol";
@@ -141,6 +144,10 @@ export function defaultImage(): string {
   return process.env.CLEARCOTE_DOCKER_IMAGE || `${DEFAULT_REPOSITORY}:sdk-${SDK_VERSION}`;
 }
 
+/** A proxy's username or password escaped for its URL as the Python and .NET SDKs do it (quote(safe="") and
+ * Uri.EscapeDataString): everything but A-Z a-z 0-9 - . _ ~. encodeURIComponent alone leaves ! ' ( ) * as they are. */
+const escapeLogin = (s: string) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+
 function proxyUrl(proxy: unknown): string {
   if (typeof proxy === "string") return proxy;
   const p = proxy as { server?: string; username?: string; password?: string } | null;
@@ -148,7 +155,7 @@ function proxyUrl(proxy: unknown): string {
   const i = p.server.indexOf("://");
   const scheme = i < 0 ? "http" : p.server.slice(0, i);
   let rest = i < 0 ? p.server : p.server.slice(i + 3);
-  if (p.username || p.password) rest = `${encodeURIComponent(p.username ?? "")}:${encodeURIComponent(p.password ?? "")}@${rest}`;
+  if (p.username || p.password) rest = `${escapeLogin(p.username ?? "")}:${escapeLogin(p.password ?? "")}@${rest}`;
   return `${scheme}://${rest}`;
 }
 
@@ -314,9 +321,9 @@ export function pidAlive(pid: number): boolean {
 // can verify completely: one in its own home, written on this host, from this boot and PID namespace -- every
 // one of those fields as this process would write it, so a record written on another OS into a shared home (no
 // namespace or boot id), in a container given the Docker socket (another namespace), next to Windows in WSL2,
-// or on another machine is left alone, and so is a pid that is not a positive number. When in doubt, nothing is
-// removed: the container's idle exit still stops it. The record format is shared by the Python, Node and .NET
-// SDKs, so any of them can sweep any other's containers.
+// or on another machine is left alone, and so is a pid that is not a positive 32-bit number. When in doubt,
+// nothing is removed: the container's idle exit still stops it. The record format is shared by the Python, Node
+// and .NET SDKs, so any of them can sweep any other's containers.
 
 const readText = (path: string): string | null => {
   try { return readFileSync(path, "utf8").trim(); } catch { return null; }
@@ -390,13 +397,13 @@ const markerKind = (m: unknown) => (typeof m === "string" && m.includes(":") ? m
 
 /** true or false for the owner a record describes, or null when that cannot be told for certain here: a record
  * whose host, boot id or PID namespace is not exactly what this process would record (missing ones included),
- * or whose pid is not a positive integer. A pid that is alive with a start marker of the same kind but another
- * value was reused (false); one whose marker cannot be compared counts as alive. */
+ * or whose pid is not a positive 32-bit integer (PID_MAX at most). A pid that is alive with a start marker of the
+ * same kind but another value was reused (false); one whose marker cannot be compared counts as alive. */
 export function ownerAlive(rec: OwnerRecord): boolean | null {
   const here = ownerHere();
   if (!here.host || typeof rec.host !== "string" || rec.host.toLowerCase() !== here.host.toLowerCase()) return null;
   if ((rec.boot ?? null) !== here.boot || (rec.pidns ?? null) !== here.pidns) return null;
-  if (typeof rec.pid !== "number" || !Number.isInteger(rec.pid) || rec.pid <= 0) return null;
+  if (typeof rec.pid !== "number" || !Number.isInteger(rec.pid) || rec.pid <= 0 || rec.pid > PID_MAX) return null;
   if (!pidAlive(rec.pid)) return false;
   if (rec.start) {
     const now = processStart(rec.pid);
@@ -562,14 +569,16 @@ function proxyHostPort(url: string | null | undefined): [string | null, number |
   }
 }
 
-/** [scheme, whether the proxy URL carries a username or password, whether they are percent-escaped]. */
+/** [scheme, whether the proxy URL carries a username or password, whether they are percent-escaped], read from the
+ * URL as written, as the Python SDK reads it: the userinfo is what comes before the last '@' of the authority. (The
+ * URL parser escapes a space, '^' or an inner '@' itself, which made a login written without escapes look escaped.) */
 function proxyLogin(url: string): [string, boolean, boolean] {
-  try {
-    const u = new URL(url.includes("://") ? url : `http://${url}`);
-    return [u.protocol.replace(/:$/, "").toLowerCase(), !!(u.username || u.password), `${u.username}:${u.password}`.includes("%")];
-  } catch {
-    return ["http", url.includes("@"), url.includes("%")];
-  }
+  const i = url.indexOf("://");
+  const rest = i < 0 ? url : url.slice(i + 3);
+  const authority = rest.split(/[/?#]/, 1)[0];
+  const at = authority.lastIndexOf("@");
+  const info = at < 0 ? "" : authority.slice(0, at);
+  return [i < 0 ? "http" : url.slice(0, i).toLowerCase(), info !== "" && info !== ":", info.includes("%")];
 }
 
 /** Why an image older than FIRST_PROTOCOL_TAG cannot take this proxy, or null. Its entrypoint drops the password

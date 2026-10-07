@@ -298,9 +298,9 @@ internal static class DockerLaunch
     // it can verify completely: one in its own home, written on this host, from this boot and PID namespace --
     // every one of those fields as this process would write it, so a record written on another OS into a shared
     // home (no namespace or boot id), in a container given the Docker socket (another namespace), next to Windows
-    // in WSL2, or on another machine is left alone, and so is a pid that is not a positive number. When in doubt,
-    // nothing is removed: the container's idle exit still stops it. The record format is shared by the Python,
-    // Node and .NET SDKs, so any of them can sweep any other's containers.
+    // in WSL2, or on another machine is left alone, and so is a pid that is not a positive 32-bit number. When in
+    // doubt, nothing is removed: the container's idle exit still stops it. The record format is shared by the
+    // Python, Node and .NET SDKs, so any of them can sweep any other's containers.
 
     private static string? ReadText(string path)
     {
@@ -418,8 +418,9 @@ internal static class DockerLaunch
 
     /// True or false for the owner a record describes, or null when that cannot be told for certain here: a record
     /// whose host, boot id or PID namespace is not exactly what this process would record (missing ones included),
-    /// or whose pid is not a positive integer. A pid that is alive with a start marker of the same kind but another
-    /// value was reused (false); one whose marker cannot be compared counts as alive.
+    /// or whose pid is not a positive 32-bit integer (int.MaxValue at most, as TryGetInt32 reads it). A pid that is
+    /// alive with a start marker of the same kind but another value was reused (false); one whose marker cannot be
+    /// compared counts as alive.
     internal static bool? OwnerAlive(JsonElement rec)
     {
         string? Str(string name) => rec.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
@@ -671,20 +672,34 @@ internal static class DockerLaunch
         return 0;
     }
 
+    /// A proxy URL split as written, the way the Python SDK splits it: the scheme ("http" without one), the userinfo
+    /// before the authority's LAST '@' ("" without one) and the host and port after it. (Uri ends the login at the
+    /// first '@' of a password written without escapes, and escapes some characters itself.)
+    private static (string Scheme, string Info, string HostPort) SplitProxy(string url)
+    {
+        var i = url.IndexOf("://", StringComparison.Ordinal);
+        var rest = i < 0 ? url : url[(i + 3)..];
+        var end = rest.IndexOfAny(new[] { '/', '?', '#' });
+        var authority = end < 0 ? rest : rest[..end];
+        var at = authority.LastIndexOf('@');
+        return (i < 0 ? "http" : url[..i].ToLowerInvariant(), at < 0 ? "" : authority[..at], authority[(at + 1)..]);
+    }
+
     private static (string? Host, int? Port) ProxyHostPort(string? url)
     {
         if (string.IsNullOrEmpty(url)) return (null, null);
-        return Uri.TryCreate(url.Contains("://") ? url : "http://" + url, UriKind.Absolute, out var u)
-            ? (u.Host.Trim('[', ']').ToLowerInvariant(), u.IsDefaultPort && !url.Contains($":{u.Port}") ? null : u.Port)
+        var (scheme, _, hostPort) = SplitProxy(url);
+        return Uri.TryCreate($"{scheme}://{hostPort}", UriKind.Absolute, out var u)
+            ? (u.Host.Trim('[', ']').ToLowerInvariant(), u.IsDefaultPort && !hostPort.Contains($":{u.Port}") ? null : u.Port)
             : (null, null);
     }
 
-    /// The scheme of a proxy URL, whether it carries a username or password, and whether they are percent-escaped.
+    /// The scheme of a proxy URL, whether it carries a username or password (http://:@host has neither, though
+    /// Uri.UserInfo is ":"), and whether they are percent-escaped.
     private static (string Scheme, bool Creds, bool Escaped) ProxyLogin(string url)
     {
-        return Uri.TryCreate(url.Contains("://") ? url : "http://" + url, UriKind.Absolute, out var u)
-            ? (u.Scheme.ToLowerInvariant(), u.UserInfo.Length > 0, u.UserInfo.Contains('%'))
-            : ("http", url.Contains('@'), url.Contains('%'));
+        var (scheme, info, _) = SplitProxy(url);
+        return (scheme, info.Length > 0 && info != ":", info.Contains('%'));
     }
 
     /// Why an image older than FirstProtocolTag cannot take this proxy, or null. Its entrypoint drops the password
