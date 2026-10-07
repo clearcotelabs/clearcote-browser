@@ -192,13 +192,19 @@ public class GeometryTests
     }
 
     [Fact]
-    public void RegimeOneLeavesScreenToThePersona()
+    public void RegimeOneSetsTheLinuxHeadlessDisplayToThePersona()
     {
         // Setting screen here would be a silent no-op: the persona's value beats the CDP override.
         var r = Geometry.ResolveHeadless(true, "seed", new[] { "--fingerprint=seed" }, callerSetGeometry: false);
         Assert.Equal(Geometry.Mode.Persona, r.Mode);
         Assert.Null(r.Display);
-        Assert.Empty(r.Args);
+        if (OperatingSystem.IsLinux())
+        {
+            Assert.Single(r.Args);
+            Assert.Equal("--screen-info={1920x1080}", r.Args[0]);
+        }
+        else
+            Assert.Empty(r.Args);
     }
 
     [Fact]
@@ -301,6 +307,13 @@ public class GeometryTests
         var r = Geometry.ResolveHeadless(true, "seed", new[] { arg, "--fingerprint=seed" }, callerSetGeometry: false);
         Assert.Equal(Geometry.Mode.Persona, r.Mode);
         Assert.Null(r.Display);
+        if (OperatingSystem.IsLinux())
+        {
+            Assert.Single(r.Args);
+            Assert.Equal("--screen-info={2560x1440}", r.Args[0]);
+        }
+        else
+            Assert.Empty(r.Args);
     }
 
     // ─────────────────────────────────────────────────────── the fit correction

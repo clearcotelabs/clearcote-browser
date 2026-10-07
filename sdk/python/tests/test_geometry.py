@@ -19,6 +19,7 @@ different screen in one SDK, a persona stops being portable across them, so all 
 same table.
 """
 import os
+import sys
 
 import pytest
 
@@ -200,12 +201,13 @@ def test_regime_2_keeps_a_callers_own_display_or_window_switch():
     assert len(sized["args"]) == 1 and sized["args"][0].startswith("--screen-info=")
 
 
-def test_regime_1_takes_no_viewport_and_leaves_screen_to_the_persona():
-    """Setting `screen` here would be a silent no-op: the persona's own value wins over the CDP
-    override (measured), so the SDK must not pretend to control it."""
+def test_regime_1_takes_no_viewport_and_sets_linux_headless_display():
+    """The engine owns the exposed screen; Linux also needs a matching real headless display."""
     kwargs = {"headless": True}
     applied = apply_headless_geometry(kwargs, "seed", args=["--fingerprint=seed", "--no-sandbox"])
-    assert applied == {"mode": "persona", "args": []}
+    assert applied["mode"] == "persona"
+    assert applied["args"] == ([screen_info_switch(headless_display("seed", ["--fingerprint=seed", "--no-sandbox"]))]
+                               if sys.platform == "linux" else [])
     assert kwargs["no_viewport"] is True
     assert "screen" not in kwargs and "viewport" not in kwargs
 
@@ -289,7 +291,9 @@ def test_a_seed_beside_a_profile_still_takes_the_persona_regime():
     arg = _profile_arg({"screen": {"width": 2560, "height": 1440}})
     kwargs = {"headless": True}
     applied = apply_headless_geometry(kwargs, "seed", args=[arg, "--fingerprint=seed"])
-    assert applied == {"mode": "persona", "args": []}
+    assert applied["mode"] == "persona"
+    assert applied["args"] == (["--screen-info={2560x1440}"]
+                               if sys.platform == "linux" else [])
     assert kwargs["no_viewport"] is True
 
 
@@ -540,7 +544,7 @@ def test_persistent_context_with_a_seed_uses_no_viewport_and_fits_the_window(mon
         str(tmp_path / "prof"), executable_path=_fake_exe(tmp_path), fingerprint="geo-1", quiet=True)
     assert cap.context_kwargs["no_viewport"] is True
     assert "screen" not in cap.context_kwargs and "viewport" not in cap.context_kwargs
-    assert _screen_info(cap.context_kwargs) == [], "the persona owns the display"
+    assert len(_screen_info(cap.context_kwargs)) == (1 if sys.platform == "linux" else 0)
     assert cap.bounds == {"left": 0, "top": 0, "width": 2560, "height": 1400}
 
 

@@ -174,10 +174,13 @@ describe("apply / skip rules", () => {
     expect(sized?.args[0]).toMatch(/^--screen-info=/);
   });
 
-  it("takes viewport: null and leaves screen to the persona", () => {
-    // Setting screen here would be a silent no-op: the persona's value beats the CDP override.
+  it("takes viewport: null and sets the Linux headless display to the persona", () => {
     const opts: Record<string, unknown> = { headless: true };
-    expect(applyHeadlessGeometry(opts, "seed", ["--fingerprint=seed"])).toEqual({ mode: "persona", args: [] });
+    const applied = applyHeadlessGeometry(opts, "seed", ["--fingerprint=seed"]);
+    expect(applied?.mode).toBe("persona");
+    expect(applied?.args).toEqual(process.platform === "linux"
+      ? [screenInfoSwitch(servedDisplay({ seed: "seed", args: ["--fingerprint=seed"] }))]
+      : []);
     expect(opts.viewport).toBeNull();
     expect("screen" in opts).toBe(false);
   });
@@ -250,7 +253,10 @@ describe("the imported profile's screen", () => {
     const opts: Record<string, unknown> = { headless: true };
     const applied = applyHeadlessGeometry(opts, "seed",
       [profileArg({ screen: { width: 2560, height: 1440 } }), "--fingerprint=seed"]);
-    expect(applied).toEqual({ mode: "persona", args: [] });
+    expect(applied?.mode).toBe("persona");
+    expect(applied?.args).toEqual(process.platform === "linux"
+      ? ["--screen-info={2560x1440}"]
+      : []);
     expect(opts.viewport).toBeNull();
   });
 });

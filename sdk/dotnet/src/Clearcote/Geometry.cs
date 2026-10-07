@@ -294,7 +294,19 @@ public static class Geometry
         bool callerSetGeometry)
     {
         if (headless == false || callerSetGeometry) return new(Mode.None, null, Array.Empty<string>());
-        if (PersonaActive(args)) return new(Mode.Persona, null, Array.Empty<string>());
+        if (PersonaActive(args))
+        {
+            // Linux headless otherwise starts with an 800x600/host-shaped display even though
+            // Blink exposes the persona screen. Give the compositor the persona display before
+            // fullscreen, popups, or moveTo can observe it. Headed and non-Linux launches keep
+            // their native display; an explicit caller --screen-info always wins.
+            var personaDisplay = OperatingSystem.IsLinux() && !CallerSetTheDisplay(args)
+                ? HeadlessDisplay(seed, args)
+                : null;
+            return new(Mode.Persona, null, personaDisplay is null
+                ? Array.Empty<string>()
+                : new[] { ScreenInfoSwitch(personaDisplay) });
+        }
         var display = CallerSetTheDisplay(args) ? null : HeadlessDisplay(seed, args);
         var extra = new List<string>();
         if (display is not null) extra.Add(ScreenInfoSwitch(display));

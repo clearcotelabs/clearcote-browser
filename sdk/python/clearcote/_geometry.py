@@ -256,7 +256,9 @@ def apply_headless_geometry(pw_kwargs, seed=None, args=None):
     ``"args"`` are switches to APPEND to the command line — in regime 2 the ones that give the
     browser its headless display; the fit and skip checks keep reading the caller's own ``args``.
 
-    ``{"mode": "persona", "args": []}`` is regime 1. ``{"mode": "display", "display": ..., "args":
+    ``{"mode": "persona", "args": [...]}`` is regime 1. On Linux its args include
+    ``--screen-info`` so the real headless display matches the persona before the first page.
+    ``{"mode": "display", "display": ..., "args":
     [...]}`` is regime 2; ``display`` is None when the caller passed their own ``--screen-info``.
     A caller's own window switch keeps their window (the display is still set under it).
 
@@ -269,7 +271,9 @@ def apply_headless_geometry(pw_kwargs, seed=None, args=None):
         return None
     pw_kwargs["no_viewport"] = True
     if persona_active(args):
-        return {"mode": "persona", "args": []}
+        display = (None if sys.platform != "linux" or caller_set_the_display(args)
+                   else headless_display(seed, args))
+        return {"mode": "persona", "args": [screen_info_switch(display)] if display else []}
     display = None if caller_set_the_display(args) else headless_display(seed, args)
     extra = [screen_info_switch(display)] if display else []
     if not caller_sized_the_window(args):

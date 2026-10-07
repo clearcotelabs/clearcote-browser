@@ -183,6 +183,7 @@ export interface DisplayFingerprint {
 }
 
 export type AppliedGeometry =
+  /** On Linux, args carries the persona's real headless display (`--screen-info`). */
   | { mode: "persona"; args: string[] }
   /** display: what `--screen-info` sets, or null when the caller passed their own display switch. */
   | { mode: "display"; display: Display | null; args: string[] };
@@ -209,7 +210,12 @@ export function applyHeadlessGeometry(
   if (opts.headless === false) return null;
   if ("viewport" in opts || "screen" in opts) return null;
   opts.viewport = null;
-  if (personaActive(args)) return { mode: "persona", args: [] };
+  if (personaActive(args)) {
+    const display = process.platform === "linux" && !callerSetTheDisplay(args)
+      ? servedDisplay({ ...fp, seed, args, lightStealth: false })
+      : null;
+    return { mode: "persona", args: display ? [screenInfoSwitch(display)] : [] };
+  }
   // Not lightStealth's own row, unlike serve(): launch() keeps the seed -> screen row the Python and
   // .NET launch() pick (headlessGeometry). An imported profile's screen still wins over it.
   const display = callerSetTheDisplay(args) ? null : servedDisplay({ ...fp, seed, args, lightStealth: false });
