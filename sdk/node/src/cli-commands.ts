@@ -15,7 +15,7 @@
 import { parseArgs } from "node:util";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import {
   download,
   launch,
@@ -38,6 +38,7 @@ import { DeviceLoginError, pollForKey, requestDeviceCode } from "./devicelogin.j
 import { licenseExpiry, removeLicenseMeta, saveLicenseMeta, type LicenseExpiry } from "./license.js";
 import { geoCacheRoot } from "./geoip.js";
 import { GATED_ENGINE_SWITCHES } from "./launchopts.js";
+import { fontLines, linuxFontReport, type FontReport } from "./fonts.js";
 import { toProxySpec } from "./net.js";
 import { clearRecovered, recoverRoot } from "./winlaunch.js";
 import { Cloud, CloudError, announceHandoff, type Json, type RunOptions } from "./cloud.js";
@@ -77,7 +78,9 @@ INFO FLAGS
 ENVIRONMENT
   CLEARCOTE_LICENSE_KEY, CLEARCOTE_RELEASE_CHANNEL, CLEARCOTE_GEOIP_TIMEOUT_SECONDS,
   CLEARCOTE_LICENSE_THROUGH_PROXY, CLEARCOTE_BINARY, CLEARCOTE_CACHE, CLEARCOTE_SERVE_IDLE_TIMEOUT,
-  CLEARCOTE_API_KEY, CLEARCOTE_API_URL, CLEARCOTE_CLOUD`;
+  CLEARCOTE_API_KEY, CLEARCOTE_API_URL, CLEARCOTE_CLOUD,
+  CLEARCOTE_FONT_DIRS (Linux: your own fonts, e.g. a copy of Windows' Fonts folder, used instead of the lookalikes),
+  CLEARCOTE_FALLBACK_FONT_DIRS (Linux: fonts only for characters nothing else covers)`;
 
 /** `clearcote cloud --help`. Kept byte-identical to CLOUD_USAGE in the Python SDK's _commands.py. */
 export const CLOUD_USAGE = `clearcote cloud -- the hosted Clearcote API from the command line.
@@ -130,7 +133,7 @@ export interface InfoReport {
   };
   engineFeatures?: Record<string, boolean>;
   launch?: { tested: boolean; ok?: boolean; version?: string; build?: string; error?: string; missingLibs?: string[]; reason?: string };
-  fonts?: { bundled: boolean; note: string };
+  fonts?: FontReport;
   geoip: { databaseCached: boolean; path: string; proxy?: { exitIp?: string; country?: string; timezone?: string; acceptLanguage?: string; error?: string } };
 }
 
@@ -248,10 +251,10 @@ export async function buildInfo(
   }
 
   if (process.platform === "linux" && pick) {
-    const template = join(dirname(pick.path), "fonts", "fonts.conf.template");
-    report.fonts = existsSync(template)
-      ? { bundled: true, note: "metric-compatible Windows font clones are bundled with this build" }
-      : { bundled: false, note: "this build ships no font bundle; a Windows persona on this host may render with Linux fonts" };
+    // The fonts a launch would see (bundle + CLEARCOTE_FONT_DIRS + CLEARCOTE_FALLBACK_FONT_DIRS): which
+    // scripts they draw, and which Windows families are genuine rather than lookalikes.
+    report.fonts = linuxFontReport(pick.path)
+      ?? { bundled: false, note: "this build ships no font bundle; a Windows persona on this host may render with Linux fonts" };
   }
 
   if (!flags.quick && src.source !== "none") {
@@ -317,7 +320,7 @@ function printInfo(r: InfoReport): void {
       for (const lib of r.launch.missingLibs ?? []) out(`                missing library: ${lib}`);
     }
   }
-  if (r.fonts) out(`Fonts           ${r.fonts.note}`);
+  if (r.fonts) for (const line of fontLines(r.fonts)) out(line);
   out(`GeoIP database  ${r.geoip.databaseCached ? "cached" : "not cached (downloaded on first geoip launch)"}`);
   if (r.geoip.proxy) {
     const p = r.geoip.proxy;

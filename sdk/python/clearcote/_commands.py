@@ -52,7 +52,9 @@ INFO FLAGS
 ENVIRONMENT
   CLEARCOTE_LICENSE_KEY, CLEARCOTE_RELEASE_CHANNEL, CLEARCOTE_GEOIP_TIMEOUT_SECONDS,
   CLEARCOTE_LICENSE_THROUGH_PROXY, CLEARCOTE_BINARY, CLEARCOTE_CACHE, CLEARCOTE_SERVE_IDLE_TIMEOUT,
-  CLEARCOTE_API_KEY, CLEARCOTE_API_URL, CLEARCOTE_CLOUD"""
+  CLEARCOTE_API_KEY, CLEARCOTE_API_URL, CLEARCOTE_CLOUD,
+  CLEARCOTE_FONT_DIRS (Linux: your own fonts, e.g. a copy of Windows' Fonts folder, used instead of the lookalikes),
+  CLEARCOTE_FALLBACK_FONT_DIRS (Linux: fonts only for characters nothing else covers)"""
 
 # `clearcote cloud --help`. Kept byte-identical to CLOUD_USAGE in the Node SDK's cli-commands.ts.
 CLOUD_USAGE = """clearcote cloud -- the hosted Clearcote API from the command line.
@@ -230,12 +232,12 @@ def build_info(quick=False, proxy=None, launch_fn=None):
         report["engineFeatures"] = {n: engine_supports_switch(pick["path"], n) for n in names}
 
     if sys.platform.startswith("linux") and pick:
-        template = os.path.join(os.path.dirname(pick["path"]), "fonts", "fonts.conf.template")
-        report["fonts"] = (
-            {"bundled": True, "note": "metric-compatible Windows font clones are bundled with this build"}
-            if os.path.exists(template) else
-            {"bundled": False, "note": "this build ships no font bundle; a Windows persona on this host "
-                                       "may render with Linux fonts"})
+        from ._fonts import linux_font_report
+        # The fonts a launch would see (bundle + CLEARCOTE_FONT_DIRS + CLEARCOTE_FALLBACK_FONT_DIRS):
+        # which scripts they draw, and which Windows families are genuine rather than lookalikes.
+        report["fonts"] = linux_font_report(pick["path"]) or {
+            "bundled": False, "note": "this build ships no font bundle; a Windows persona on this host "
+                                      "may render with Linux fonts"}
 
     if not quick and src["source"] != "none":
         report["license"]["seats"] = get_session_seats()
@@ -319,12 +321,38 @@ def print_info(r):
             for lib in la.get("missingLibs") or []:
                 _out(f"                missing library: {lib}")
     if r.get("fonts"):
-        _out(f"Fonts           {r['fonts']['note']}")
+        for line in font_lines(r["fonts"]):
+            _out(line)
     _out("GeoIP database  " + ("cached" if r["geoip"]["databaseCached"] else "not cached (downloaded on first geoip launch)"))
     p = r["geoip"].get("proxy")
     if p:
         _out(f"Proxy geo       FAILED: {p['error']}" if p.get("error") else
              f"Proxy geo       exit {p['exitIp']} ({p['country']})  timezone {p['timezone']}  language {p['acceptLanguage']}")
+
+
+def font_lines(f):
+    """The Linux font lines of ``clearcote info`` (same text as the Node CLI)."""
+    lines = [f"Fonts           {f['note']}"]
+    scripts = f.get("scripts")
+    if scripts:
+        total = len(scripts["covered"]) + len(scripts["missing"])
+        if scripts["missing"]:
+            lines.append(f"Scripts         {len(scripts['covered'])} of {total} render; no font for "
+                         + ", ".join(scripts["missing"]) + " (they draw as empty boxes)")
+        else:
+            lines.append(f"Scripts         all {total} render")
+    for d in f.get("fontDirs") or []:
+        lines.append(f"Your fonts      {d}")
+    if f.get("fontDirs"):
+        genuine, lookalike = f.get("genuineWindowsFamilies") or [], f.get("lookalikeWindowsFamilies") or []
+        lines.append("                real: " + (", ".join(genuine) if genuine else "none of the key Windows families"))
+        if lookalike:
+            lines.append("                lookalike: " + ", ".join(lookalike))
+    for d in f.get("fallbackFontDirs") or []:
+        lines.append(f"Fallback fonts  {d}")
+    for d in f.get("ignoredFontDirs") or []:
+        lines.append(f"Ignored         {d} (not a directory)")
+    return lines
 
 
 def _prompt_key():

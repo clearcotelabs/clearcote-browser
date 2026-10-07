@@ -168,7 +168,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     """
     # Lazy import to avoid a circular import at module load (this module is imported by __init__).
     from . import _acquire_lease_from_kwargs, _prepare_or_release, _win_av_retry
-    from ._fonts import linux_font_env, linux_locale_env
+    from ._fonts import check_font_dirs, linux_font_env, linux_locale_env
     from ._geometry import fit_served_window, served_geometry, validate_window_size
     from ._launchopts import serve_infobar_args, serve_needs_no_sandbox
     from ._shaderdialect import resolve_shader_dialect, shader_dialect_env
@@ -186,6 +186,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     shader_dialect = kwargs.pop("shader_dialect", None)  # an env var for the GPU process, not a switch
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a switch
     resolve_shader_dialect(shader_dialect, [])  # a typo raises here, before a lease or a temp dir exists
+    font_dirs = check_font_dirs(kwargs.pop("font_dirs", None))  # Linux fontconfig dirs: likewise
     # License (opt-in, inert in free mode). This MUST run before _prepare: it converts license_key
     # into the _cc_pro tuple _prepare needs to select the gated binary. Without it serve() silently
     # dropped the key and launched the FREE engine for a licensed caller -- and even had it resolved
@@ -233,7 +234,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
 
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     env = dict(os.environ)
-    env.update(linux_font_env(exe))  # Linux: FONTCONFIG_FILE -> bundled font clones (no-op elsewhere)
+    env.update(linux_font_env(exe, font_dirs))  # Linux: FONTCONFIG_FILE -> bundled font clones (no-op elsewhere)
     env.update(linux_locale_env(args))  # Linux: UI locale from --lang (no-op elsewhere)
     # Windows claim on a non-Windows host -> HLSL from WEBGL_debug_shaders, as launch() does.
     shader_dialect_env(shader_dialect, args, env)

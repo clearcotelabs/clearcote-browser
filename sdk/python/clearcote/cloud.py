@@ -222,7 +222,7 @@ def _local_only_options():
     launch_side = (
         "executable_path", "args", "ignore_default_args", "user_data_dir", "ephemeral_profile",
         "extensions", "portable_profile", "encryption_key", "disable_privacy_sandbox", "socks5_udp",
-        "shader_dialect", "widevine", "profile_select", "cache_dir", "auto_update", "release_channel",
+        "shader_dialect", "font_dirs", "widevine", "profile_select", "cache_dir", "auto_update", "release_channel",
         "allow_third_party_cookies", "transparent_proxy", "license_key", "license_api_base",
         "license_through_proxy", "env", "devtools", "downloads_path", "traces_dir",
         "chromium_sandbox", "channel", "handle_sigint", "handle_sigterm", "handle_sighup",

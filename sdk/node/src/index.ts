@@ -66,7 +66,7 @@ import {
 import { RELEASE, platformRelease } from "./release.js";
 import { fetchWidevine, seedWidevine, widevineArgs, widevineCdmArgs } from "./widevine.js";
 import { emitCoherenceWarnings, emitWarnings, serveExposureWarnings } from "./warnings.js";
-import { fontLaunchEnv } from "./fonts.js";
+import { checkFontDirs, fontLaunchEnv } from "./fonts.js";
 import { withShaderDialect, type ShaderDialect } from "./shaderdialect.js";
 import { apply as applyPersonaEnv } from "./personaenv.js";
 import {
@@ -243,6 +243,17 @@ interface PersonaEnvOption {
   personaEnv?: boolean;
 }
 
+interface FontDirsOption {
+  /** Linux: directories of your own fonts, typically a copy of a Windows machine's Fonts folder. The
+   * bundled fonts are self-contained, so fonts installed on the host are otherwise invisible to the
+   * browser. These are listed ahead of the bundle, and every family they provide renders as itself
+   * instead of its metric-compatible lookalike (Arial instead of Arimo, Segoe UI instead of Selawik,
+   * …); the CSS generics follow (sans-serif -> Arial, system-ui -> Segoe UI, …). Added to the
+   * CLEARCOTE_FONT_DIRS environment variable. A path that is not a directory throws. Ignored on
+   * Windows and macOS, which have their own fonts. */
+  fontDirs?: string | string[];
+}
+
 /** Engine behaviour switches that are not part of the persona (engine 152 r22+). */
 interface EngineExtrasOption {
   /**
@@ -286,7 +297,7 @@ interface CloudSwitchOption {
 }
 
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, PersonaEnvOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption, DockerOption {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, PersonaEnvOption, FontDirsOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption, DockerOption {}
 
 /** The account options a local launch drops (see CloudSwitchOption). */
 function withoutCloudOptions<T extends object>(options: T): T {
@@ -308,6 +319,7 @@ export interface PersistentContextOptions
     LicenseOptions,
     ShaderDialectOption,
     PersonaEnvOption,
+    FontDirsOption,
     Socks5UdpOption,
     EngineExtrasOption,
     CloudSwitchOption {
@@ -1013,9 +1025,10 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // profile= a saved persona: its options are the base, explicit options override. ("auto" is
   // resolved later, once the executable is known.)
   const merged = mergeSavedProfile(options);
-  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
+  const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
   const geo = geoip ? await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet) : undefined;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
@@ -1052,7 +1065,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
       playwrightIgnoreDefaultArgs: ((pwOptions as PlaywrightLaunchOptions).ignoreDefaultArgs as string[] | boolean | undefined) ?? null });
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …)
   // and LANGUAGE at the persona's UI locale (after engineArgs: it reads their --lang).
-  const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env, engineArgs), engineArgs);
+  const launchEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (pwOptions as PlaywrightLaunchOptions).env, engineArgs, fontDirList), engineArgs);
   const launchToken = lease?.bindLaunch();
   // A function: a launch retried after a stale-token refusal must carry the lease's fresh token.
   const runtimeEnv = () => (lease ? withRunToken(lease.token, launchEnv, launchToken?.file) : launchEnv);
@@ -1127,9 +1140,10 @@ async function launchLocalPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = mergeSavedProfile(options);
-  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
+  const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
   const geo = geoip ? await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet) : undefined;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
@@ -1186,7 +1200,7 @@ async function launchLocalPersistentContext(
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined, socks5Udp,
     { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy,
       playwrightIgnoreDefaultArgs: ignoreDefaultArgs ?? null });
-  const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env, engineArgs), engineArgs);
+  const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env, engineArgs, fontDirList), engineArgs);
   const launchToken = lease?.bindLaunch();
   // A function: a launch retried after a stale-token refusal must carry the lease's fresh token.
   const runtimeEnv = () => (lease ? withRunToken(lease.token, ctxEnv, launchToken?.file) : ctxEnv);
@@ -1423,11 +1437,12 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // Build the same stealth arg set as launch(), then launch the binary ourselves.
   const merged = mergeSavedProfile(launchOpts);
   const {
-    profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
+    profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
     args: userArgs, geoip, autoUpdate, cacheDir, quiet, version, licenseKey, licenseApiBase, licenseThroughProxy, releaseChannel, allowThirdPartyCookies, transparentProxy, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
+  const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined;
   const geo = geoip ? await applyGeoip(fingerprint, proxyOpt, quiet) : undefined;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
@@ -1484,7 +1499,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const launchToken = lease?.bindLaunch();
-  const env = { ...process.env, ...(withShaderDialect(shaderDialect, fontLaunchEnv(exe, undefined, engineArgs), engineArgs) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token, ...(launchToken ? { CLEARCOTE_RUN_TOKEN_FILE: launchToken.file } : {}) } : {}) };
+  const env = { ...process.env, ...(withShaderDialect(shaderDialect, fontLaunchEnv(exe, undefined, engineArgs, fontDirList), engineArgs) ?? {}), ...(lease ? { CLEARCOTE_RUN_TOKEN: lease.token, ...(launchToken ? { CLEARCOTE_RUN_TOKEN_FILE: launchToken.file } : {}) } : {}) };
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.

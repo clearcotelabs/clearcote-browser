@@ -39,7 +39,7 @@ from ._docker import docker_requested, launch_docker_async
 from ._launchopts import DEFAULT_IGNORED_ARGS
 from ._geometry import apply_headless_geometry, fit_window_to_work_area_async
 from ._license import inject_run_token
-from ._fonts import apply_font_env
+from ._fonts import apply_font_env, check_font_dirs
 from ._shaderdialect import apply_shader_dialect
 from . import _personaenv
 from ._colorscheme import (default_color_scheme, engine_decides_color_scheme,
@@ -269,13 +269,14 @@ async def launch(cloud=None, **kwargs):
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
+    font_dirs = check_font_dirs(kwargs.pop("font_dirs", None))  # Linux fontconfig dirs; a typo raises before the lease
     lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
     exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(
         _prepare_releasing, kwargs, lease)
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
         inject_run_token(pw_kwargs, lease.token, launch_token[0])
-    await asyncio.to_thread(apply_font_env, exe, pw_kwargs, args)  # Linux: bundled font clones (mirror sync)
+    await asyncio.to_thread(apply_font_env, exe, pw_kwargs, args, font_dirs)  # Linux: bundled font clones (mirror sync)
     apply_shader_dialect(shader_dialect, pw_kwargs, args)  # after fonts: that helper rebuilds the env
     headed = _headed_no_viewport(pw_kwargs)  # launch() takes no viewport kwarg -> wrap new_page/context
     # Headless: the display switches go on the command line, no_viewport rides on
@@ -333,13 +334,14 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
+    font_dirs = check_font_dirs(kwargs.pop("font_dirs", None))  # Linux fontconfig dirs; a typo raises before the lease
     lease = await asyncio.to_thread(_acquire_lease_from_kwargs, kwargs)  # opt-in; None in free mode
     exe, args, pw_kwargs, humanize, show_cursor, seed = await asyncio.to_thread(
         _prepare_releasing, kwargs, lease)
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
         inject_run_token(pw_kwargs, lease.token, launch_token[0])
-    await asyncio.to_thread(apply_font_env, exe, pw_kwargs, args)  # Linux: bundled font clones (mirror sync)
+    await asyncio.to_thread(apply_font_env, exe, pw_kwargs, args, font_dirs)  # Linux: bundled font clones (mirror sync)
     apply_shader_dialect(shader_dialect, pw_kwargs, args)  # after fonts: that helper rebuilds the env
     geom = None
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option

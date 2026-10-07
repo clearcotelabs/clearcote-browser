@@ -193,7 +193,7 @@ export const LOCAL_ONLY_OPTIONS: readonly string[] = [
   ...(FINGERPRINT_KEYS as string[]).filter((k) => !Object.prototype.hasOwnProperty.call(SESSION_FIELDS, k)),
   ...(AGENT_KEYS as string[]),
   "executablePath", "args", "ignoreDefaultArgs", "userDataDir", "ephemeralProfile", "extensions",
-  "portableProfile", "encryptionKey", "disablePrivacySandbox", "socks5Udp", "shaderDialect", "widevine",
+  "portableProfile", "encryptionKey", "disablePrivacySandbox", "socks5Udp", "shaderDialect", "fontDirs", "widevine",
   "profileSelect", "cacheDir", "autoUpdate", "releaseChannel", "allowThirdPartyCookies", "transparentProxy",
   "licenseKey", "licenseApiBase", "licenseThroughProxy", "env", "devtools", "downloadsPath", "tracesDir",
   "chromiumSandbox", "channel", "handleSIGINT", "handleSIGTERM", "handleSIGHUP", "firefoxUserPrefs",

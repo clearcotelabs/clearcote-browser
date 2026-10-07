@@ -281,7 +281,7 @@ def test_free_open_browsers_released_at_process_exit(env):
 def test_free_launch_failure_releases_the_slot(env, monkeypatch):
     _, be = env("free")
     monkeypatch.setattr(clearcote, "_prepare", lambda kwargs: ("exe", [], {}, None, False, None))
-    monkeypatch.setattr(clearcote, "apply_font_env", lambda exe, kw, args=(): None)
+    monkeypatch.setattr(clearcote, "apply_font_env", lambda exe, kw, *a, **k: None)
     monkeypatch.setattr(clearcote, "apply_shader_dialect", lambda d, kw, *a, **k: None)
     monkeypatch.setattr(clearcote, "_headless_geometry_kwargs", lambda *a: None)
 

@@ -37,7 +37,7 @@ from ._fingerprint import (
     persona_platform,
 )
 from ._fontpersona import ensure_persona_fonts, font_reachability, profile_with_windows11_faces
-from ._fonts import apply_font_env
+from ._fonts import apply_font_env, check_font_dirs
 from ._shaderdialect import apply_shader_dialect
 from . import _personaenv
 from ._geometry import apply_headless_geometry, fit_window_to_work_area
@@ -1069,6 +1069,7 @@ def launch(cloud=None, **kwargs):
 
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
+    font_dirs = check_font_dirs(kwargs.pop("font_dirs", None))  # Linux fontconfig dirs; a typo raises before the lease
     # _cc_lease (internal): the host probe behind profile="auto" runs on its caller's slot rather
     # than checking out its own. It does not own the lease, so it must not release it on close.
     reused = kwargs.pop("_cc_lease", None)
@@ -1077,7 +1078,7 @@ def launch(cloud=None, **kwargs):
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(
         kwargs, lease if owns_lease else None)
-    apply_font_env(exe, pw_kwargs, args)  # Linux: bundled font clones + UI-locale LANGUAGE
+    apply_font_env(exe, pw_kwargs, args, font_dirs)  # Linux: bundled font clones (+ font_dirs) + UI-locale LANGUAGE
     apply_shader_dialect(shader_dialect, pw_kwargs, args)  # after fonts: that helper rebuilds the env
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
@@ -1136,6 +1137,7 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
         apply_widevine_launch(user_data_dir, kwargs, quiet=wv_quiet)
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
+    font_dirs = check_font_dirs(kwargs.pop("font_dirs", None))  # Linux fontconfig dirs; a typo raises before the lease
     # _cc_lease (internal): a launch that borrows its caller's slot (the profile="auto" host probe
     # reaches here when ephemeral_profile is left on). It must not release a slot it does not own.
     reused = kwargs.pop("_cc_lease", None)
@@ -1144,7 +1146,7 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     exe, args, pw_kwargs, humanize, show_cursor, seed = _prepare_or_release(
         kwargs, lease if owns_lease else None)
-    apply_font_env(exe, pw_kwargs, args)  # Linux: bundled font clones + UI-locale LANGUAGE
+    apply_font_env(exe, pw_kwargs, args, font_dirs)  # Linux: bundled font clones (+ font_dirs) + UI-locale LANGUAGE
     apply_shader_dialect(shader_dialect, pw_kwargs, args)  # after fonts: that helper rebuilds the env
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch

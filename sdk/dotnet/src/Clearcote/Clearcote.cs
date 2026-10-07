@@ -113,6 +113,7 @@ public static class Clearcote
         options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
         var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
@@ -131,6 +132,8 @@ public static class Clearcote
         // browser once the token stops advancing; passed ALONGSIDE CLEARCOTE_RUN_TOKEN. Inert in free mode.
         var launchToken = lease?.BindLaunch();
         var callerEnv = Languages.ApplyLinuxLanguage(args, options.Env);  // Linux: UI locale from --lang
+        // Linux: FONTCONFIG_FILE -> the bundled metric-compatible clones (+ FontDirs), as Python and Node do.
+        callerEnv = Fonts.ApplyLinuxFonts(exe, fontDirs, callerEnv, options.Env);
         // Built per attempt: a launch retried after a stale-token refusal must carry the lease's fresh token.
         var envFor = () => ShaderDialect.Apply(options.ShaderDialect,  // hlsl by default for a Windows claim off Windows
             lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv, args);
@@ -222,6 +225,7 @@ public static class Clearcote
         options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
         var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
@@ -240,6 +244,8 @@ public static class Clearcote
         // CLEARCOTE_RUN_TOKEN. Inert in free mode.
         var launchToken = lease?.BindLaunch();
         var callerEnv = Languages.ApplyLinuxLanguage(args, options.Env);  // Linux: UI locale from --lang
+        // Linux: FONTCONFIG_FILE -> the bundled metric-compatible clones (+ FontDirs), as Python and Node do.
+        callerEnv = Fonts.ApplyLinuxFonts(exe, fontDirs, callerEnv, options.Env);
         // Built per attempt: a launch retried after a stale-token refusal must carry the lease's fresh token.
         var envFor = () => ShaderDialect.Apply(options.ShaderDialect,  // hlsl by default for a Windows claim off Windows
             lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv, args);
@@ -311,6 +317,7 @@ public static class Clearcote
         var host = string.IsNullOrEmpty(options.Host) ? "127.0.0.1" : options.Host;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
         // serve launches the binary directly, so Playwright's SwiftShader default is never added; the
@@ -378,6 +385,9 @@ public static class Clearcote
             // Linux: the UI locale from --lang (engines before 153 r29 read it only from the env).
             var language = Languages.LinuxLanguageEnv(engineArgs);
             if (language is not null) psi.Environment["LANGUAGE"] = language;
+            // Linux: FONTCONFIG_FILE -> the bundled metric-compatible clones (+ FontDirs).
+            var fontConfig = Fonts.LinuxFontConfig(exe, fontDirs);
+            if (fontConfig is not null) psi.Environment["FONTCONFIG_FILE"] = fontConfig;
             var p = Process.Start(psi) ?? throw new Exception("clearcote serve: failed to start the engine process.");
             return Task.FromResult(p);
         }, exe)).ConfigureAwait(false);

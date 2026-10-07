@@ -19,6 +19,7 @@ const stub = vi.hoisted(() => ({
   savedProfileDir: ((prev) => { process.env.CLEARCOTE_PROFILE_DIR = `${process.cwd()}/.no-saved-profiles`; return prev; })(process.env.CLEARCOTE_PROFILE_DIR),
   launches: [] as Array<{ kind: "persistent" | "incognito"; userDataDir?: string; opts: Record<string, unknown> }>,
   spawns: [] as string[][],
+  fontDirs: [] as unknown[],  // the fontDirs argument of every fontLaunchEnv call
   failLaunch: null as Error | null,
   // The stand-in browser: what it leaves in its profile at launch, and what it does while it shuts down.
   browser: {
@@ -87,6 +88,18 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
+// The font wiring runs for real; only the directories it was handed are recorded.
+vi.mock("../src/fonts.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/fonts.js")>();
+  return {
+    ...actual,
+    fontLaunchEnv: (...a: Parameters<typeof actual.fontLaunchEnv>) => {
+      stub.fontDirs.push(a[3]);
+      return actual.fontLaunchEnv(...a);
+    },
+  };
+});
+
 vi.mock("../src/profilesource.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/profilesource.js")>()),
   measureHost: async () => stub.host,
@@ -133,6 +146,7 @@ beforeEach(() => {
   for (const k of ["CLEARCOTE_LICENSE_KEY", "CLEARCOTE_BINARY", "CLEARCOTE_BROWSER_VERSION"]) delete process.env[k];
   stub.launches.length = 0;
   stub.spawns.length = 0;
+  stub.fontDirs.length = 0;
   stub.failLaunch = null;
   stub.browser.onLaunch = null;
   stub.browser.shutdown = null;
@@ -525,5 +539,46 @@ describe("profile: \"auto\" from a Windows 11 donor carries the Windows 11 syste
     } finally {
       (stub as { serviceProfile: unknown }).serviceProfile = saved;
     }
+  });
+});
+
+describe("fontDirs reaches the font wiring on every entry point", () => {
+  it("launch() — the default ephemeral profile, and ephemeralProfile: false", async () => {
+    const fonts = join(root, "winfonts");
+    mkdirSync(fonts);
+    for (const extra of [{}, { ephemeralProfile: false }]) {
+      const browser = await launch({ ...base(), fontDirs: fonts, ...extra });
+      expect(stub.fontDirs.at(-1)).toEqual([fonts]);
+      expect(stub.launches.at(-1)!.opts).not.toHaveProperty("fontDirs"); // an SDK option, not a Playwright one
+      await browser.close();
+    }
+  });
+
+  it("launchPersistentContext()", async () => {
+    const fonts = join(root, "winfonts");
+    mkdirSync(fonts);
+    const context = await launchPersistentContext(join(root, "profile"), { ...base(), fontDirs: [fonts] });
+    expect(stub.fontDirs.at(-1)).toEqual([fonts]);
+    expect(stub.launches.at(-1)!.opts).not.toHaveProperty("fontDirs");
+    await context.close();
+  });
+
+  it("serve()", async () => {
+    const fonts = join(root, "winfonts");
+    mkdirSync(fonts);
+    const { port, close } = await fakeCdpEndpoint();
+    try {
+      const srv = await serve({ ...base(), port, fontDirs: fonts });
+      expect(stub.fontDirs.at(-1)).toEqual([fonts]);
+      await srv.close();
+    } finally {
+      await close();
+    }
+  });
+
+  it("no fontDirs: the wiring gets an empty list", async () => {
+    const browser = await launch(base());
+    expect(stub.fontDirs.at(-1)).toEqual([]);
+    await browser.close();
   });
 });

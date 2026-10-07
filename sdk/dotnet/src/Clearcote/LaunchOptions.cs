@@ -81,6 +81,15 @@ public class LaunchOptions : FingerprintOptions
     /// turn it off. A shader the HLSL translator rejects falls back to the backend's own output, the
     /// state every launch was in before. Needs a PRO engine 151 r15+; older engines ignore it.</para>
     public string? ShaderDialect { get; set; }
+    /// Linux: directories of your own fonts, typically a copy of a Windows machine's Fonts folder.
+    ///
+    /// <para>The bundled fonts are self-contained, so fonts installed on the host are otherwise invisible
+    /// to the browser. These are listed ahead of the bundle, and every family they provide renders as
+    /// itself instead of its metric-compatible lookalike (Arial instead of Arimo, Segoe UI instead of
+    /// Selawik, ...); the CSS generics follow (sans-serif -> Arial, system-ui -> Segoe UI, ...). Added to the
+    /// CLEARCOTE_FONT_DIRS environment variable. A path that is not a directory throws. Ignored on Windows
+    /// and macOS, which have their own fonts.</para>
+    public IReadOnlyList<string>? FontDirs { get; set; }
     /// Relay WebRTC's UDP through the SOCKS5 proxy using UDP ASSOCIATE, instead of letting it
     /// egress on the host's own path.
     ///

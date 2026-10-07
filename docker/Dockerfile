@@ -22,20 +22,41 @@ LABEL org.opencontainers.image.title="clearcote" \
       org.opencontainers.image.url="https://github.com/clearcotelabs/clearcote-browser" \
       org.opencontainers.image.licenses="BSD-3-Clause"
 
-# Chromium runtime libraries + a base font set (fontconfig + Liberation + Noto emoji/CJK so
-# canvas/text hashes stay coherent on a bare container — the #1 Linux tell). The clearcote
-# release ALSO bundles the Windows metric-clone fonts, wired in by the SDK on launch. socat
-# publishes Chrome's loopback-only DevTools port. xvfb provides a virtual X display so the
-# browser runs HEADFUL by default (headed Chrome avoids headless-mode tells; see serve.py). libegl1
-# (with Mesa's EGL) lets a Linux persona render WebGL through Mesa under CC_HEADLESS, with no display.
-# tini runs as PID 1 (see ENTRYPOINT) so processes orphaned inside the container are reaped.
+# Chromium runtime libraries + fontconfig. socat publishes Chrome's loopback-only DevTools port. xvfb
+# provides a virtual X display so the browser runs HEADFUL by default (headed Chrome avoids headless-mode
+# tells; see serve.py). libegl1 (with Mesa's EGL) lets a Linux persona render WebGL through Mesa under
+# CC_HEADLESS, with no display. tini runs as PID 1 (see ENTRYPOINT) so processes orphaned inside the
+# container are reaped.
+#
+# Fonts. The clearcote release bundles the Windows metric-clone fonts, and the SDK points fontconfig at
+# them with a SELF-CONTAINED config, so nothing under /usr/share/fonts reaches the browser: the emoji and
+# CJK packages this image used to install were invisible, and every CJK, Indic or Thai character drew
+# as an empty box (a Windows machine draws all of them). The script fonts now go into their own
+# directory, which CLEARCOTE_FALLBACK_FONT_DIRS (below) lists AFTER the bundle: they are used only for
+# characters the bundle cannot draw. Only script fonts go there; a Latin family would compete with the
+# clones and change the Windows widths. Hard links, so nothing is stored twice; fonts-noto-core is then
+# removed (~50 MB, mostly faces we do not use) and the linked files stay.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       xz-utils ca-certificates socat xvfb libegl1 tini \
       libnss3 libnspr4 libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
       libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libxfixes3 libxext6 libxrender1 libxcb1 \
       libpango-1.0-0 libcairo2 libx11-6 libexpat1 libdbus-1-3 libxi6 libxtst6 \
       fontconfig fonts-liberation fonts-noto-color-emoji fonts-unifont fonts-wqy-zenhei \
+      fonts-ipafont-gothic fonts-noto-core \
+ && F=/usr/local/share/clearcote/fonts && mkdir -p $F && cd /usr/share/fonts \
+ && cp -l truetype/noto/NotoColorEmoji.ttf truetype/wqy/wqy-zenhei.ttc \
+          opentype/ipafont-gothic/ipag.ttf opentype/ipafont-gothic/ipagp.ttf $F/ \
+ && for s in Arabic Armenian Bengali Cherokee Devanagari Ethiopic Georgian Gujarati Gurmukhi Javanese \
+             Kannada Khmer Lao Malayalam Myanmar Oriya Sinhala Symbols Tamil Telugu Thaana Thai; do \
+      cp -l truetype/noto/NotoSans$s-Regular.ttf truetype/noto/NotoSans$s-Bold.ttf $F/ || exit 1; done \
+ && for s in Gothic Math Mongolian NKo NewTaiLue Ogham OldItalic Osmanya PhagsPa Runic Symbols2 TaiLe \
+             Tifinagh Vai Yi; do \
+      cp -l truetype/noto/NotoSans$s-Regular.ttf $F/ || exit 1; done \
+ && cp -l truetype/noto/NotoSerifTibetan-Regular.ttf truetype/noto/NotoSerifTibetan-Bold.ttf $F/ \
+ && apt-get purge -y fonts-noto-core \
+ && test "$(ls $F | wc -l)" = 65 \
  && rm -rf /var/lib/apt/lists/*
+ENV CLEARCOTE_FALLBACK_FONT_DIRS=/usr/local/share/clearcote/fonts
 
 # Install the SDK + bake the signed clearcote Linux binary into the image (SHA-256 verified).
 # CLEARCOTE_SPEC pins the SDK version: empty (the default) installs the LATEST release, so a
