@@ -20,7 +20,8 @@ Two layers, one rule:
   devtools:, filesystem:, ftp: ...); ws: and wss: are judged by their host. The browser itself already refuses to let
   a web page load or open file:, chrome:, chrome-extension: and devtools: urls (and a redirect to one), so at this
   layer those only come from the browser; the tools' urls are the way there that check_url() closes. A redirect is
-  followed only to an http or https url (a Location comes from a web server).
+  followed only to an http or https url (a Location comes from a web server), judged where the browser goes: the
+  Location read as the browser reads it (control characters and spaces around it trimmed, see _trimmed()).
 
 An address is refused when it is in a non-public range (BLOCKED_V4 / BLOCKED_V6, IPv4 inside IPv6 checked as IPv4),
 when its name is localhost or a metadata name, or when the name resolves to any such address.
@@ -94,7 +95,15 @@ def ip_blocked(text: str) -> bool:
 
 # ── reading a url the way the browser does ───────────────────────────────────
 _TAB_NL = re.compile(r"[\t\n\r]")
+_C0_AND_SPACE = "".join(map(chr, range(0x21)))  # U+0000 to U+0020; not U+007F, not a no-break space
 _SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*):")
+
+
+def _trimmed(url: str) -> str:
+    """`url` as the browser has it before parsing: tabs and newlines dropped anywhere, then C0 control characters and
+    spaces trimmed from both ends. str.strip() is not that: it keeps most control characters (U+0001 to U+0008,
+    U+000E to U+001B), which the browser drops, and drops a no-break space, which the browser keeps."""
+    return _TAB_NL.sub("", url).strip(_C0_AND_SPACE)
 
 
 def _ipv4_number(part: str) -> int | None:
@@ -134,8 +143,7 @@ def _ipv4(host: str) -> str | None:
 def url_scheme_and_host(url: str) -> tuple[str, str]:
     """(scheme, host) of `url` as the browser parses it; host is an IP address or a lower-case domain without a
     trailing dot. Raises ValueError for a url the browser would not open."""
-    url = _TAB_NL.sub("", url).strip("\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15"
-                                       "\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f ")
+    url = _trimmed(url)
     m = _SCHEME.match(url)
     if not m:
         raise ValueError(f"not an absolute url: {url[:80]!r}")
@@ -260,9 +268,10 @@ async def redirect_refusal(target: str) -> str | None:
 
 
 def _redirect_target(base: str, location: str) -> str:
-    """Where a Location header sends the browser, enough to judge its host (an absolute url as is, including the
-    'http:host' forms the browser accepts; a path stays on the same host)."""
-    location = _TAB_NL.sub("", location).strip()
+    """Where a Location header sends the browser, enough to judge its host, read as the browser reads it (see
+    _trimmed): an absolute url as is, including the 'http:host' forms the browser accepts; a protocol-relative one
+    ('//host', with either slash) on the scheme of the request; a path stays on the same host."""
+    location = _trimmed(location)
     if _SCHEME.match(location):
         return location
     if location[:2] in ("//", "\\\\", "/\\", "\\/"):

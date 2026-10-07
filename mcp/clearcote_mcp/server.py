@@ -248,7 +248,11 @@ async def _b() -> ClearcoteBrowser:
     return _browser
 
 
-_CLOSE_SECONDS = 20  # the longest a stopping server waits for its browser to close (a launch under way included)
+# The longest a stopping server waits for its browser to close, a launch under way included. Not raised to cover
+# serve()'s own 30 s launch limit plus the licence lease: a launch takes a few seconds, a client that stops a server
+# rarely waits even 20 s before it kills it, and Ctrl+C should not feel hung. A launch still going after this is left
+# to itself (README, limits).
+_CLOSE_SECONDS = 20
 _EXIT_GRACE = 2  # after a stop signal and the browser's close: seconds to finish on its own before it leaves anyway
 _closed_on_stop = threading.Event()  # set once this run of the server has closed its browser (see _lifespan, main)
 _exiting = threading.Lock()  # held by whichever exit goes first: the server's own, or _leave_once_closed's

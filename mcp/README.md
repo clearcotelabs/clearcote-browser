@@ -131,8 +131,9 @@ holds it, so `get_cdp_endpoint` has no endpoint to hand out; start your own host
   and nothing in it can pass for a fence tag.
 - The shared browser is **rebuilt** automatically if it dies, and **closed** whenever the server stops (its input
   closed, Ctrl+C, Ctrl+Break, SIGTERM or SIGHUP), with its profile and temporary files. Not after a forced kill of
-  the server; and on Windows a Ctrl+Break also ends Playwright's driver at once, which leaves its
-  `playwright-artifacts-*` folder in the temp directory.
+  the server; not a browser whose launch is still under way 20 s after the stop (the server waits no longer); and on
+  Windows a Ctrl+Break also ends Playwright's driver at once, which leaves its `playwright-artifacts-*` folder in the
+  temp directory.
 
 ## Just want the raw endpoint?
 

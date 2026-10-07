@@ -42,8 +42,14 @@ A client that reads the old fields needs updating.
   ended the server at once and left the browser running, with its profile and Playwright's folders in the temp
   directory; Ctrl+C waited for the input to close. A stopped server now exits with 128 + the signal's number. Left
   behind still: Playwright's artifacts folder in temp after a Ctrl+Break on Windows (it ends Playwright's driver at
-  the same moment), and everything after a forced kill of the server. On Windows, `npx clearcote-mcp` no longer ends
-  the server by force on Ctrl+C (the server gets the Ctrl+C itself).
+  the same moment), everything after a forced kill of the server, and a browser whose launch is still under way 20
+  seconds after the stop (the server does not wait longer: a launch takes a few seconds, and a client that stops a
+  server rarely waits that long before it kills it). On Windows, `npx clearcote-mcp` no longer ends the server by
+  force on Ctrl+C (the server gets the Ctrl+C itself).
+- A redirect is judged where the browser goes: control characters and spaces around a `Location` are trimmed as the
+  browser trims them. Before, a `Location` starting with one of most control characters (U+0001 to U+0008, U+000E
+  to U+001B) was judged a path on the same host, and the browser followed it to any address, this machine and cloud
+  metadata endpoints included.
 - Needs `mcp` 1.19 or newer (earlier releases turn a returned image into text).
 - `npx clearcote-mcp` runs the server with `uvx`, then `pipx`, then `pip`, and only with Python 3.10 or newer;
   when `pip` is refused as an externally managed environment, it says how to fix that.

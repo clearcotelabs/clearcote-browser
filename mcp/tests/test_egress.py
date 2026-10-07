@@ -222,3 +222,42 @@ async def test_a_redirect_to_a_private_address_is_failed(status, location, verdi
     for _ in range(20):
         await asyncio.sleep(0.01)
     assert cdp.sent[-1][0] == verdict and cdp.sent[-1][1]["requestId"] == "r1"
+
+
+# The browser reads a Location the way it reads any url: tabs and newlines dropped anywhere, then every C0 control
+# character and space trimmed from both ends (not U+007F, not a no-break space); what is left is absolute when it
+# starts with a scheme, and protocol-relative when it starts with two slashes (either way round).
+TRIMMED = ["\x01", "\x08", "\x0b", "\x0c", "\x1b", "\x1f", " \x01\t", "\x01 \x1f\x08", "\r\n\x02"]
+PRIVATE = ["http://127.0.0.2:8765/x", "//127.0.0.2:8765/x", "\\\\127.0.0.2:8765/x", "/\\169.254.169.254/latest",
+           "HTTP://[::1]/x", "http:127.0.0.2/x"]
+
+
+async def redirect_verdict(location, start="https://example.com/start"):
+    """What the redirect hold answers for a 302 to `location`: Fetch.failRequest or Fetch.continueRequest."""
+    import asyncio
+    ctx = Context()
+    await _egress.guard_redirects(ctx, type("Page", (), {})())
+    cdp = ctx.sessions[0]
+    cdp.handlers["Fetch.requestPaused"]({"requestId": "r1", "request": {"url": start}, "responseStatusCode": 302,
+                                         "responseHeaders": [{"name": "Location", "value": location}]})
+    for _ in range(200):
+        if cdp.sent[-1][0] != "Fetch.enable":
+            return cdp.sent[-1][0]
+        await asyncio.sleep(0.001)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before", TRIMMED + [""])
+@pytest.mark.parametrize("target", PRIVATE)
+async def test_a_redirect_padded_with_control_characters_is_judged_as_the_browser_reads_it(before, target):
+    for after in ("", "\x01", " \x1f"):
+        assert await redirect_verdict(before + target + after) == "Fetch.failRequest", repr(before + target + after)
+
+
+@pytest.mark.parametrize("location,where", [
+    ("\x7fhttp://127.0.0.2/x", "https://example.com/start"),       # not trimmed: no scheme, a path on this host
+    ("\xa0http://127.0.0.2/x", "https://example.com/start"),       # a no-break space is not trimmed either
+    ("\x01/same/host", "https://example.com/start"), ("\x01https://example.com/next\x1f", "https://example.com/next"),
+    ("\x01//example.org/x", "https://example.org/x")])
+def test_a_location_resolves_where_the_browser_goes(location, where):
+    assert _egress._redirect_target("https://example.com/start", location) == where

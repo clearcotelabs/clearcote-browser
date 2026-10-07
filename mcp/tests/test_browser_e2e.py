@@ -432,3 +432,98 @@ async def test_a_pdf_renders_with_every_request_checked(monkeypatch):
         await browser.close()
         srv.shutdown()
         srv.server_close()
+
+
+# --- a redirect padded with control characters ------------------------------------------------------------------------
+
+# Locations the browser follows to 127.0.0.2 once it has trimmed the control characters and spaces around them.
+PADDED = ["\x01http://127.0.0.2:{port}/a", "\x08http://127.0.0.2:{port}/b", "\x1bhttp://127.0.0.2:{port}/c",
+          "\x0bhttp://127.0.0.2:{port}/d", "\x0c\x1fhttp://127.0.0.2:{port}/e", " \x01http://127.0.0.2:{port}/f\x01 ",
+          "\x01//127.0.0.2:{port}/g", "\x1b\\\\127.0.0.2:{port}/h"]
+# Not trimmed by the browser: read as a path on the redirecting host (U+007F, and a no-break space sent as UTF-8),
+# so the browser stays there.
+KEPT = ["\x7fhttp://127.0.0.2:{port}/i", "\xc2\xa0http://127.0.0.2:{port}/j"]  # header values go out as latin-1
+# A no-break space sent as the single byte A0 (not UTF-8): the browser reads it as a path too, but the protocol hands
+# the guard the Location without that byte, so it sees 127.0.0.2 and refuses (stricter than the browser, never looser).
+RAW = ["\xa0http://127.0.0.2:{port}/k"]
+
+
+@pytest.mark.asyncio
+async def test_a_redirect_padded_with_control_characters_cannot_reach_a_private_address(monkeypatch):
+    """A page on a public host (127.0.0.1 counts as one here) redirects to 127.0.0.2, which stays private, with control
+    characters around the Location. The browser trims them and follows the redirect; the request guard must read the
+    Location the same way and refuse it. First, the control: with 127.0.0.2 allowed too, the browser does get there."""
+    from clearcote_mcp import _egress, _facade
+    hits = []
+
+    class Private(BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            data = page("Private", NOTE).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *_a):
+            pass
+
+    private = ThreadingHTTPServer(("127.0.0.2", 0), Private)
+    port = private.server_address[1]
+    locations = [loc.format(port=port) for loc in PADDED + KEPT + RAW]
+
+    class Redirect(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/to/") and self.path[4:].isdigit():
+                self.send_response(302)
+                self.send_header("Location", locations[int(self.path[4:])])
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            data = page("Public", NOTE).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *_a):
+            pass
+
+    public = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    for srv in (private, public):
+        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    real = _egress.host_refusal
+    allowed = {"127.0.0.1"}
+
+    async def narrowed(host):  # the real check, with the redirecting server counted as public
+        return None if host in allowed else await real(host)
+    monkeypatch.setattr(_egress, "host_refusal", narrowed)
+    browser = _facade.ClearcoteBrowser({"headless": True}, guard=True)
+    await browser.start()
+    base = f"http://127.0.0.1:{public.server_address[1]}"
+    try:
+        async def follow(index):
+            hits.clear()
+            try:
+                await browser.navigate(f"{base}/to/{index}")
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+            return list(hits), browser._page.url
+
+        allowed.add("127.0.0.2")  # the control
+        reached, _ = await follow(0)
+        assert reached == ["/a"], "control: the browser follows a padded Location to 127.0.0.2"
+        allowed.discard("127.0.0.2")
+        for index, location in enumerate(locations):
+            reached, url = await follow(index)
+            assert reached == [], f"{location!r} reached the private server ({url})"
+            if location in [loc.format(port=port) for loc in KEPT]:  # the browser stayed on the public host
+                assert url.startswith(base + "/"), (location, url)
+    finally:
+        await browser.close()
+        for srv in (private, public):
+            srv.shutdown()
+            srv.server_close()
