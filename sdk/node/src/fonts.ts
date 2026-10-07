@@ -396,9 +396,17 @@ function writeAtomic(path: string, text: string): void {
  * `fontDirs` (and CLEARCOTE_FONT_DIRS / CLEARCOTE_FALLBACK_FONT_DIRS) add directories: see the top of
  * this file. Without any, the file is `fonts.generated.conf` exactly as before; with some, each
  * distinct result gets its own `fonts.generated-<hash>.conf`, so launches with different directories
- * never rewrite each other's file.
+ * never rewrite each other's file. `args` is the engine's command line (see genuineFacesDisabled).
  */
-export function linuxFontEnv(exePath: string, fontDirs?: unknown): Record<string, string> {
+/** Whether the launch turns genuine faces off itself (`--disable-genuine-font-faces` in `args`). The engine
+ * then keeps every substitute, so the rules must stay as the template has them: measured on an engine with
+ * the switch, retargeting anyway sent Helvetica to the genuine file while Arial stayed on its substitute. */
+export function genuineFacesDisabled(args: readonly string[] | undefined): boolean {
+  const flag = `--${GENUINE_FACES_SWITCH}`;
+  return (args ?? []).some((a) => typeof a === "string" && (a === flag || a.startsWith(`${flag}=`)));
+}
+
+export function linuxFontEnv(exePath: string, fontDirs?: unknown, args?: readonly string[]): Record<string, string> {
   if (process.platform !== "linux") return {};
   const { user, fallback } = resolveFontDirs(fontDirs);
   const fontsDir = join(dirname(exePath), "fonts");
@@ -408,7 +416,8 @@ export function linuxFontEnv(exePath: string, fontDirs?: unknown): Record<string
     const cacheDir = join(tmpdir(), "cc-fc-cache");
     mkdirSync(cacheDir, { recursive: true });
     // The rules follow your fonts only on an engine that draws them (GENUINE_FACES_SWITCH).
-    const genuine = user.length && engineHonoursGenuineFaces(exePath) ? dirFamilies(user) : new Set<string>();
+    const genuine = user.length && engineHonoursGenuineFaces(exePath) && !genuineFacesDisabled(args)
+      ? dirFamilies(user) : new Set<string>();
     const conf = buildConf(readFileSync(template, "utf8"), fontsDir, cacheDir, user, fallback, genuine);
     const name = user.length || fallback.length
       ? `fonts.generated-${createHash("sha256").update(conf, "utf8").digest("hex").slice(0, 12)}.conf`
@@ -521,7 +530,7 @@ export function linuxLocaleEnv(args: readonly string[] | undefined, platform: st
  * Returns `undefined` when there is nothing to add (preserve Playwright's default env).
  */
 export function fontLaunchEnv(exePath: string, userEnv?: EnvMap, args?: readonly string[], fontDirs?: readonly string[]): EnvMap | undefined {
-  const fontEnv = { ...linuxFontEnv(exePath, fontDirs), ...linuxLocaleEnv(args) };
+  const fontEnv = { ...linuxFontEnv(exePath, fontDirs, args), ...linuxLocaleEnv(args) };
   if (Object.keys(fontEnv).length === 0 && !userEnv) return undefined;
   return { ...process.env, ...fontEnv, ...(userEnv ?? {}) };
 }

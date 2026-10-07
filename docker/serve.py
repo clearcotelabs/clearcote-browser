@@ -463,7 +463,11 @@ base_args += serve_infobar_args(headless, base_args)
 cmd = [exe] + merge_feature_flags(base_args)
 
 env = dict(os.environ)
-env.update(linux_font_env(exe))  # point FONTCONFIG_FILE at the bundled Windows-font clones
+try:  # point FONTCONFIG_FILE at the bundled Windows-font clones (+ CLEARCOTE_*FONT_DIRS)
+    font_env = linux_font_env(exe, args=cmd)  # --disable-genuine-font-faces in CC_EXTRA_ARGS keeps the rules
+except TypeError:  # an image built with an SDK older than this entrypoint
+    font_env = linux_font_env(exe)
+env.update(font_env)
 
 # Shader dialect -- enabled ONLY for a Windows persona on this Linux host, the same condition as the
 # Widevine seeding above and for the same reason: it is where the absence is a measured

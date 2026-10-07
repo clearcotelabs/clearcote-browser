@@ -377,13 +377,23 @@ def engine_honours_genuine_faces(exe_path):
     return engine_supports_switch(exe_path, GENUINE_FACES_SWITCH)
 
 
-def linux_font_env(exe_path, font_dirs=None):
+def genuine_faces_disabled(args):
+    """Whether the launch turns genuine faces off itself (``--disable-genuine-font-faces`` in ``args``).
+    The engine then keeps every substitute, so the rules must stay as the template has them: measured on
+    an engine with the switch, retargeting anyway sent Helvetica to the genuine file while Arial stayed
+    on its substitute."""
+    flag = "--" + GENUINE_FACES_SWITCH
+    return any(isinstance(a, str) and (a == flag or a.startswith(flag + "=")) for a in args or ())
+
+
+def linux_font_env(exe_path, font_dirs=None, args=()):
     """Return ``{"FONTCONFIG_FILE": ...}`` on Linux when the font bundle is present, else ``{}``.
 
     ``font_dirs`` (and CLEARCOTE_FONT_DIRS / CLEARCOTE_FALLBACK_FONT_DIRS) add directories: see the
     module docstring. Without any, the file is ``fonts.generated.conf`` exactly as before; with some,
     each distinct result gets its own ``fonts.generated-<hash>.conf``, so launches with different
-    directories never rewrite each other's file."""
+    directories never rewrite each other's file. ``args`` is the engine's command line (see
+    genuine_faces_disabled)."""
     if sys.platform != "linux":
         return {}
     user_dirs, fallback_dirs, _ignored = resolve_font_dirs(font_dirs)
@@ -397,7 +407,8 @@ def linux_font_env(exe_path, font_dirs=None):
         with open(template, "r", encoding="utf-8") as fh:
             text = fh.read()
         # The rules follow your fonts only on an engine that draws them (GENUINE_FACES_SWITCH).
-        genuine = dir_families(user_dirs) if user_dirs and engine_honours_genuine_faces(exe_path) else frozenset()
+        genuine = (dir_families(user_dirs) if user_dirs and engine_honours_genuine_faces(exe_path)
+                   and not genuine_faces_disabled(args) else frozenset())
         conf = build_conf(text, fonts_dir, cache_dir, user_dirs, fallback_dirs, genuine)
         name = "fonts.generated.conf"
         if user_dirs or fallback_dirs:
@@ -472,7 +483,7 @@ def apply_font_env(exe_path, pw_kwargs, args=(), font_dirs=None):
     Precedence: os.environ < bundled fonts + locale < caller-supplied env. No-op when there's nothing
     to add (leaves ``pw_kwargs`` untouched so Playwright uses the default env).
     """
-    font_env = dict(linux_font_env(exe_path, font_dirs))
+    font_env = dict(linux_font_env(exe_path, font_dirs, args))
     font_env.update(linux_locale_env(args))
     user_env = pw_kwargs.get("env")
     if not font_env and not user_env:

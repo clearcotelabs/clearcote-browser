@@ -226,6 +226,25 @@ def test_an_engine_without_genuine_faces_keeps_the_rules(linux, monkeypatch, tmp
             'binding="strong"><string>Arimo</string></edit>') in conf
 
 
+def test_the_launch_opt_out_keeps_the_rules(linux, tmp_path):
+    # --disable-genuine-font-faces makes the engine keep every substitute. Measured on an engine with 1040:
+    # with the rules changed anyway, Helvetica reached the genuine file while Arial stayed on its substitute.
+    exe, _fonts_dir = _bundle(tmp_path, genuine_faces=True)
+    win = tmp_path / "winfonts"
+    win.mkdir()
+    make_font(win / "arial.ttf", ["Arial"], [0x41])
+    for args in (["--disable-genuine-font-faces"], ["--lang=de", "--disable-genuine-font-faces=1"]):
+        conf = _read(_fonts.linux_font_env(exe, [str(win)], args)["FONTCONFIG_FILE"])
+        assert "<string>Arial</string></test>" in conf
+        assert ('<test name="family"><string>Helvetica</string></test><edit name="family" mode="assign" '
+            'binding="strong"><string>Arimo</string></edit>') in conf
+    assert "<string>Arial</string></test>" not in _read(_fonts.linux_font_env(exe, [str(win)], ["--lang=de"])["FONTCONFIG_FILE"])
+    pw = {}
+    _fonts.apply_font_env(exe, pw, ["--disable-genuine-font-faces"], [str(win)])
+    assert "<string>Arial</string></test>" in _read(pw["env"]["FONTCONFIG_FILE"])
+    assert not _fonts.genuine_faces_disabled(["--disable-genuine-font-faces-not", None, 3])
+
+
 def test_linux_font_env_with_fallback_fonts(linux, monkeypatch, tmp_path):
     exe, fonts = _bundle(tmp_path)
     fb = tmp_path / "fallback"

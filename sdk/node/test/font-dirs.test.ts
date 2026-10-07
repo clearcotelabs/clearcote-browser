@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   FALLBACK_FONT_DIRS_ENV, FONT_DIRS_ENV, GENUINE_FACES_SWITCH, SCRIPT_SAMPLES, buildConf, checkFontDirs, fontFiles, fontLaunchEnv, fontLines,
-  genuineRules, linuxFontEnv, linuxFontReport, readFont, resolveFontDirs,
+  genuineFacesDisabled, genuineRules, linuxFontEnv, linuxFontReport, readFont, resolveFontDirs,
 } from "../src/fonts.js";
 import { makeCollection, makeFont } from "./helpers/fontfiles.js";
 import { removeAfterFile, tempDir } from "./helpers/temp.js";
@@ -216,6 +216,25 @@ describe("the generated fontconfig file", () => {
       expect(conf).toContain("<string>Arial</string></test>");
       expect(conf).toContain("<alias><family>sans-serif</family><prefer><family>Arimo</family></prefer></alias>");
       expect(conf).toContain('<test name="family"><string>Helvetica</string></test><edit name="family" mode="assign" binding="strong"><string>Arimo</string></edit>');
+    });
+  });
+
+  it("the launch opt-out (--disable-genuine-font-faces) keeps the rules", () => {
+    // The engine then keeps every substitute. Measured on an engine with 1040: with the rules changed anyway,
+    // Helvetica reached the genuine file while Arial stayed on its substitute.
+    withPlatform("linux", () => {
+      const { dir, exe } = bundle(true);
+      const win = sub(dir, "winfonts");
+      makeFont(join(win, "arial.ttf"), ["Arial"], [0x41]);
+      for (const args of [["--disable-genuine-font-faces"], ["--lang=de", "--disable-genuine-font-faces=1"]]) {
+        const conf = readFileSync(linuxFontEnv(exe, [win], args).FONTCONFIG_FILE, "utf8");
+        expect(conf).toContain("<string>Arial</string></test>");
+        expect(conf).toContain('<test name="family"><string>Helvetica</string></test><edit name="family" mode="assign" binding="strong"><string>Arimo</string></edit>');
+      }
+      expect(readFileSync(linuxFontEnv(exe, [win], ["--lang=de"]).FONTCONFIG_FILE, "utf8")).not.toContain("<string>Arial</string></test>");
+      expect(readFileSync(fontLaunchEnv(exe, undefined, ["--disable-genuine-font-faces"], [win])!.FONTCONFIG_FILE!, "utf8"))
+        .toContain("<string>Arial</string></test>");
+      expect(genuineFacesDisabled(["--disable-genuine-font-faces-not"])).toBe(false);
     });
   });
 

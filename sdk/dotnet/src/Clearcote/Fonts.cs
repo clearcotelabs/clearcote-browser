@@ -41,6 +41,16 @@ internal static class Fonts
     /// Whether the engine at <paramref name="exePath"/> lets a genuine face from your own fonts win.
     internal static bool EngineHonoursGenuineFaces(string exePath) => LaunchOpts.EngineSupportsSwitch(exePath, GenuineFacesSwitch);
 
+    /// Whether the launch turns genuine faces off itself (--disable-genuine-font-faces in <paramref name="args"/>).
+    /// The engine then keeps every substitute, so the rules must stay as the template has them: measured on an
+    /// engine with the switch, retargeting anyway sent Helvetica to the genuine file while Arial stayed on its
+    /// substitute.
+    internal static bool GenuineFacesDisabled(IEnumerable<string>? args)
+    {
+        var flag = "--" + GenuineFacesSwitch;
+        return (args ?? Array.Empty<string>()).Any(a => a is not null && (a == flag || a.StartsWith(flag + "=", StringComparison.Ordinal)));
+    }
+
     private static readonly string[] FontExts = { ".ttf", ".otf", ".ttc", ".otc" };
 
     /// The Windows family each non-Windows name in the template stands for (the registry's FontSubstitutes).
@@ -382,7 +392,8 @@ internal static class Fonts
     /// The FONTCONFIG_FILE for a launch of <paramref name="exePath"/>, or null off Linux or for a build with
     /// no font bundle. Without extra directories the file is <c>fonts.generated.conf</c>, exactly as the Python
     /// and Node SDKs write it; with some, each distinct result gets its own <c>fonts.generated-&lt;hash&gt;.conf</c>.
-    internal static string? LinuxFontConfig(string exePath, IEnumerable<string>? fontDirs, bool? isLinux = null)
+    internal static string? LinuxFontConfig(string exePath, IEnumerable<string>? fontDirs, bool? isLinux = null,
+        IEnumerable<string>? args = null)
     {
         if (!(isLinux ?? OperatingSystem.IsLinux())) return null;
         var (user, fallback, _) = ResolveFontDirs(fontDirs, null, isLinux);
@@ -394,7 +405,8 @@ internal static class Fonts
             var cacheDir = Path.Join(Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar), "cc-fc-cache");
             Directory.CreateDirectory(cacheDir);
             // The rules follow your fonts only on an engine that draws them (GenuineFacesSwitch).
-            var genuine = user.Count > 0 && EngineHonoursGenuineFaces(exePath) ? DirFamilies(user) : new HashSet<string>();
+            var genuine = user.Count > 0 && EngineHonoursGenuineFaces(exePath) && !GenuineFacesDisabled(args)
+                ? DirFamilies(user) : new HashSet<string>();
             var conf = BuildConf(File.ReadAllText(template), fontsDir, cacheDir, user, fallback, genuine);
             var name = user.Count > 0 || fallback.Count > 0
                 ? $"fonts.generated-{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(conf)))[..12].ToLowerInvariant()}.conf"
@@ -415,10 +427,11 @@ internal static class Fonts
     /// <paramref name="callerEnv"/>, the launch option) always wins. Playwright REPLACES the child env when
     /// Env is set, so without an env the parent environment comes along (as Languages.ApplyLinuxLanguage does).
     internal static IDictionary<string, string>? ApplyLinuxFonts(string exePath, IEnumerable<string>? fontDirs,
-        IDictionary<string, string>? env, IDictionary<string, string>? callerEnv, bool? isLinux = null)
+        IDictionary<string, string>? env, IDictionary<string, string>? callerEnv, bool? isLinux = null,
+        IEnumerable<string>? args = null)
     {
         if (callerEnv is not null && callerEnv.ContainsKey("FONTCONFIG_FILE")) return env;
-        var conf = LinuxFontConfig(exePath, fontDirs, isLinux);
+        var conf = LinuxFontConfig(exePath, fontDirs, isLinux, args);
         if (conf is null) return env;
         var outEnv = new Dictionary<string, string>();
         if (env is not null)

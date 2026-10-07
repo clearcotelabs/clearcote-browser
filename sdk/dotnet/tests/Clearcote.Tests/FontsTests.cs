@@ -346,6 +346,26 @@ public class FontsTests : IDisposable
     }
 
     [Fact]
+    public void The_launch_opt_out_keeps_the_rules()
+    {
+        // --disable-genuine-font-faces makes the engine keep every substitute. Measured on an engine with 1040:
+        // with the rules changed anyway, Helvetica reached the genuine file while Arial stayed on its substitute.
+        var (exe, _) = Bundle(genuineFaces: true);
+        var win = Sub("winfonts");
+        MakeFont(Path.Join(win, "arial.ttf"), new[] { "Arial" }, new[] { 0x41 });
+        foreach (var args in new[] { new[] { "--disable-genuine-font-faces" }, new[] { "--lang=de", "--disable-genuine-font-faces=1" } })
+        {
+            var conf = File.ReadAllText(Fonts.LinuxFontConfig(exe, new[] { win }, isLinux: true, args: args)!);
+            Assert.Contains("<string>Arial</string></test>", conf);
+            Assert.Contains("<test name=\"family\"><string>Helvetica</string></test><edit name=\"family\" mode=\"assign\" binding=\"strong\"><string>Arimo</string></edit>", conf);
+        }
+        Assert.DoesNotContain("<string>Arial</string></test>", File.ReadAllText(Fonts.LinuxFontConfig(exe, new[] { win }, isLinux: true, args: new[] { "--lang=de" })!));
+        var env = Fonts.ApplyLinuxFonts(exe, new[] { win }, null, null, isLinux: true, args: new[] { "--disable-genuine-font-faces" })!;
+        Assert.Contains("<string>Arial</string></test>", File.ReadAllText(env["FONTCONFIG_FILE"]));
+        Assert.False(Fonts.GenuineFacesDisabled(new[] { "--disable-genuine-font-faces-not" }));
+    }
+
+    [Fact]
     public void Fallback_fonts_come_after_the_bundle_and_change_no_rule()
     {
         var (exe, fonts) = Bundle();

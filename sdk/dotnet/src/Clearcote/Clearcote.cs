@@ -133,7 +133,7 @@ public static class Clearcote
         var launchToken = lease?.BindLaunch();
         var callerEnv = Languages.ApplyLinuxLanguage(args, options.Env);  // Linux: UI locale from --lang
         // Linux: FONTCONFIG_FILE -> the bundled metric-compatible clones (+ FontDirs), as Python and Node do.
-        callerEnv = Fonts.ApplyLinuxFonts(exe, fontDirs, callerEnv, options.Env);
+        callerEnv = Fonts.ApplyLinuxFonts(exe, fontDirs, callerEnv, options.Env, args: args);
         // Built per attempt: a launch retried after a stale-token refusal must carry the lease's fresh token.
         var envFor = () => ShaderDialect.Apply(options.ShaderDialect,  // hlsl by default for a Windows claim off Windows
             lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv, args);
@@ -245,7 +245,7 @@ public static class Clearcote
         var launchToken = lease?.BindLaunch();
         var callerEnv = Languages.ApplyLinuxLanguage(args, options.Env);  // Linux: UI locale from --lang
         // Linux: FONTCONFIG_FILE -> the bundled metric-compatible clones (+ FontDirs), as Python and Node do.
-        callerEnv = Fonts.ApplyLinuxFonts(exe, fontDirs, callerEnv, options.Env);
+        callerEnv = Fonts.ApplyLinuxFonts(exe, fontDirs, callerEnv, options.Env, args: args);
         // Built per attempt: a launch retried after a stale-token refusal must carry the lease's fresh token.
         var envFor = () => ShaderDialect.Apply(options.ShaderDialect,  // hlsl by default for a Windows claim off Windows
             lease is not null ? License.WithRunToken(lease.Token, callerEnv, launchToken?.File) : callerEnv, args);
@@ -386,7 +386,7 @@ public static class Clearcote
             var language = Languages.LinuxLanguageEnv(engineArgs);
             if (language is not null) psi.Environment["LANGUAGE"] = language;
             // Linux: FONTCONFIG_FILE -> the bundled metric-compatible clones (+ FontDirs).
-            var fontConfig = Fonts.LinuxFontConfig(exe, fontDirs);
+            var fontConfig = Fonts.LinuxFontConfig(exe, fontDirs, args: engineArgs);
             if (fontConfig is not null) psi.Environment["FONTCONFIG_FILE"] = fontConfig;
             var p = Process.Start(psi) ?? throw new Exception("clearcote serve: failed to start the engine process.");
             return Task.FromResult(p);

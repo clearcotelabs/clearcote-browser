@@ -234,7 +234,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
 
     launch_token = lease.bind_launch() if lease else None  # (file, release) or None; r23+ opt-in
     env = dict(os.environ)
-    env.update(linux_font_env(exe, font_dirs))  # Linux: FONTCONFIG_FILE -> bundled font clones (no-op elsewhere)
+    env.update(linux_font_env(exe, font_dirs, args))  # Linux: FONTCONFIG_FILE -> bundled font clones (no-op elsewhere)
     env.update(linux_locale_env(args))  # Linux: UI locale from --lang (no-op elsewhere)
     # Windows claim on a non-Windows host -> HLSL from WEBGL_debug_shaders, as launch() does.
     shader_dialect_env(shader_dialect, args, env)
