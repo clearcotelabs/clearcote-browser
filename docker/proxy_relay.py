@@ -14,8 +14,12 @@ the browser, without credentials, at a ``Relay`` on 127.0.0.1 that adds them on 
   connection upstream with RFC 1929 username/password and then relays byte for byte. The browser hands
   host names to a SOCKS5 proxy, so names are still resolved at the proxy.
 
+One thread relays each connection, both ways: an https:// proxy's connection is an ssl socket, and OpenSSL
+does not allow one to be read in one thread while another writes to it (Python adds no lock).
+
 Only this container's loopback can reach the relay."""
 import base64
+import selectors
 import socket
 import ssl
 import threading
@@ -126,19 +130,186 @@ class _Buffered:
         return out
 
 
-def _pipe(src, dst):
+def _fields(head):
+    fields = {}
+    for line in head[:-4].split(b"\r\n")[1:]:
+        k, _, v = line.partition(b":")
+        fields[k.strip().lower()] = v.strip()
+    return fields
+
+
+class _Requests:
+    """The browser's plain-http requests to the proxy, cut out of its bytes as they arrive: each head is
+    rewritten by ``with_auth``, each body (Content-Length or chunked) is passed on as it is."""
+
+    def __init__(self, with_auth):
+        self.with_auth = with_auth
+        self.buf = b""
+        self.state = "head"  # what the next line is: "head", a chunk's "size" line or a "trailer" line
+        self.left = 0  # body bytes still to pass on (a chunk's closing CRLF included)
+
+    def feed(self, data):
+        """What to send to the proxy for ``data``, the browser's next bytes. ValueError: a head or chunk line
+        that cannot be read."""
+        self.buf += data
+        out = []
+        while True:
+            if self.left:
+                part, self.buf = self.buf[:self.left], self.buf[self.left:]
+                out.append(part)
+                self.left -= len(part)
+                if self.left:
+                    break
+                continue
+            sep = b"\r\n\r\n" if self.state == "head" else b"\r\n"
+            i = self.buf.find(sep)
+            if i < 0:
+                if len(self.buf) > 1 << 16:
+                    raise ValueError("header too long")
+                break
+            line, self.buf = self.buf[:i + len(sep)], self.buf[i + len(sep):]
+            if self.state == "head":
+                out.append(self.with_auth(line))
+                fields = _fields(line)
+                if b"chunked" in fields.get(b"transfer-encoding", b"").lower():
+                    self.state = "size"
+                else:
+                    self.left = max(0, int(fields.get(b"content-length", b"0") or 0))
+            elif self.state == "size":
+                out.append(line)
+                size = int(line.split(b";")[0].strip() or b"0", 16)
+                if size:
+                    self.left = size + 2
+                else:
+                    self.state = "trailer"
+            else:  # trailers, up to the empty line
+                out.append(line)
+                if line == b"\r\n":
+                    self.state = "head"
+        return b"".join(out)
+
+
+_CHUNK = 1 << 16
+_BACKLOG = 1 << 20  # bytes waiting for one side before the relay stops reading the other
+_READS = 16  # reads per wake-up: an ssl socket hands over one TLS record (16 KB at most) per read
+
+
+class _End:
+    """One socket of a relayed connection, non-blocking: the bytes waiting to be sent to it, and whether it
+    is still read (its peer may send more) and written (the relay may send more)."""
+
+    def __init__(self, sock, out=b""):
+        sock.setblocking(False)
+        self.sock = sock
+        self.tls = isinstance(sock, ssl.SSLSocket)
+        self.out = bytearray(out)
+        self.reading = True
+        self.writing = True
+        self.wait = 0  # the event an unfinished ssl call waits for besides its own (a read may have to write)
+        self.retry = 0  # the length of an ssl write to repeat: OpenSSL wants the same bytes again
+
+    def ready_to_read(self):
+        """Decrypted bytes already inside the ssl object, which the selector cannot see."""
+        return self.tls and self.sock.pending() > 0
+
+    def recv(self):
+        """Bytes read now; b"" once the peer has ended (or the connection broke); None when none are ready."""
+        try:
+            return self.sock.recv(_CHUNK)
+        except (BlockingIOError, InterruptedError, ssl.SSLWantReadError):
+            return None
+        except ssl.SSLWantWriteError:
+            self.wait = selectors.EVENT_WRITE
+            return None
+        except OSError:
+            return b""
+
+    def send(self):
+        """Sends what the socket takes now. False when it takes nothing more (its peer is gone)."""
+        n = self.retry or min(len(self.out), _CHUNK)
+        try:
+            sent = self.sock.send(self.out[:n])
+        except (BlockingIOError, InterruptedError):
+            return True
+        except (ssl.SSLWantWriteError, ssl.SSLWantReadError) as e:
+            self.retry = n
+            self.wait = selectors.EVENT_READ if isinstance(e, ssl.SSLWantReadError) else 0
+            return True
+        except OSError:
+            return False
+        self.retry = 0
+        del self.out[:sent]
+        return True
+
+    def end_writing(self):
+        """No more bytes for the peer (a TCP half-close). On an ssl socket it is done under the TLS layer:
+        SSLSocket.shutdown() would drop that layer, and the bytes read afterwards would be passed on still
+        encrypted."""
+        self.writing = False
+        try:
+            socket.socket.shutdown(self.sock, socket.SHUT_WR)
+        except OSError:
+            pass
+
+
+def _watch(sel, sock, events):
+    try:
+        key = sel.get_key(sock)
+    except KeyError:
+        if events:
+            sel.register(sock, events)
+        return
+    if not events:
+        sel.unregister(sock)
+    elif key.events != events:
+        sel.modify(sock, events)
+
+
+def _pump(client, up, forward=None, first=b""):
+    """Relays between the browser's socket and the proxy's until both directions have ended, in this one
+    thread: ``first`` and then the browser's bytes (through ``forward`` when given) go to the proxy, the
+    proxy's bytes come back as they are. A side that has ended is half-closed toward the other once all
+    that was read before it has been sent; a side that cannot be written any more stops the reading of the
+    other."""
+    browser, proxy = _End(client), _End(up, first)
+    sel = selectors.DefaultSelector()
     try:
         while True:
-            data = src.recv(65536)
-            if not data:
-                break
-            dst.sendall(data)
-    except OSError:
-        pass
-    try:
-        dst.shutdown(socket.SHUT_WR)
-    except OSError:
-        pass
+            for src, dst in ((browser, proxy), (proxy, browser)):
+                if not src.reading and not dst.out and dst.writing:
+                    dst.end_writing()
+            if not browser.writing and not proxy.writing:
+                return
+            for end, other in ((browser, proxy), (proxy, browser)):
+                read = end.reading and len(other.out) < _BACKLOG
+                _watch(sel, end.sock, end.wait | (selectors.EVENT_READ if read else 0)
+                       | (selectors.EVENT_WRITE if end.out else 0))
+            buffered = [e.sock for e, o in ((browser, proxy), (proxy, browser))
+                        if e.reading and len(o.out) < _BACKLOG and e.ready_to_read()]
+            ready = {key.fileobj for key, _mask in sel.select(0 if buffered else None)}
+            ready.update(buffered)
+            for end, other, transform in ((browser, proxy, forward), (proxy, browser, None)):
+                if end.sock not in ready:
+                    continue
+                end.wait = 0
+                if end.out and not end.send():
+                    end.out.clear()
+                    other.reading = False
+                for _ in range(_READS):
+                    if not end.reading or len(other.out) >= _BACKLOG:
+                        break
+                    data = end.recv()
+                    if data is None:
+                        break
+                    if data == b"":
+                        end.reading = False
+                        break
+                    try:
+                        other.out += transform(data) if transform else data
+                    except ValueError:
+                        end.reading = False
+    finally:
+        sel.close()
 
 
 def _close(*socks):
@@ -150,10 +321,12 @@ def _close(*socks):
 
 
 class Relay:
-    """A local proxy without a password in front of ``upstream_url``'s proxy, which has one."""
+    """A local proxy without a password in front of ``upstream_url``'s proxy, which has one. ``context``:
+    the ssl context an https:// proxy's certificate is checked with (default: the system's CAs)."""
 
-    def __init__(self, upstream_url, bind="127.0.0.1"):
+    def __init__(self, upstream_url, bind="127.0.0.1", context=None):
         self.scheme, self.host, self.port, self.user, self.password = split_proxy(upstream_url)
+        self.context = context
         self.socks = self.scheme.startswith("socks5")
         self.auth = base64.b64encode(("%s:%s" % (self.user, self.password)).encode("utf-8"))
         self.server = socket.create_server((bind, 0))
@@ -175,7 +348,7 @@ class Relay:
         s = socket.create_connection((self.host, self.port), timeout=30)
         s.settimeout(None)
         if self.scheme == "https":
-            s = ssl.create_default_context().wrap_socket(s, server_hostname=self.host)
+            s = (self.context or ssl.create_default_context()).wrap_socket(s, server_hostname=self.host)
         return s
 
     def _handle(self, client):
@@ -193,52 +366,15 @@ class Relay:
         kept = [ln for ln in lines[1:] if not ln.lower().startswith(b"proxy-authorization:")]
         return b"\r\n".join([lines[0], b"Proxy-Authorization: Basic " + self.auth] + kept) + b"\r\n\r\n"
 
-    @staticmethod
-    def _body(c, head, up):
-        fields = {}
-        for line in head[:-4].split(b"\r\n")[1:]:
-            k, _, v = line.partition(b":")
-            fields[k.strip().lower()] = v.strip()
-        if b"chunked" in fields.get(b"transfer-encoding", b"").lower():
-            while True:
-                size_line = c.until(b"\r\n")
-                up.sendall(size_line)
-                if int(size_line.split(b";")[0].strip() or b"0", 16) == 0:
-                    while True:  # trailers, up to the empty line
-                        line = c.until(b"\r\n")
-                        up.sendall(line)
-                        if line == b"\r\n":
-                            return
-                up.sendall(c.exact(int(size_line.split(b";")[0].strip(), 16) + 2))
-        left = int(fields.get(b"content-length", b"0") or 0)
-        while left > 0:
-            part = c.exact(min(left, 65536))
-            up.sendall(part)
-            left -= len(part)
-
     def _http(self, client):
         c = _Buffered(client)
         head = c.until(b"\r\n\r\n")
         up = self._upstream()
-        back = threading.Thread(target=_pipe, args=(up, client), daemon=True)
         if head.split(b" ", 1)[0].upper() == b"CONNECT":
-            up.sendall(self._with_auth(head) + c.take())
-            back.start()
-            _pipe(client, up)
-        else:
-            back.start()
-            try:
-                while True:  # absolute-form requests, one after another on this connection
-                    up.sendall(self._with_auth(head))
-                    self._body(c, head, up)
-                    head = c.until(b"\r\n\r\n")
-            except (EOFError, ValueError, OSError):
-                pass
-            try:
-                up.shutdown(socket.SHUT_WR)
-            except OSError:
-                pass
-        back.join()
+            _pump(client, up, first=self._with_auth(head) + c.take())
+        else:  # absolute-form requests, one after another on this connection, each with the login
+            requests = _Requests(self._with_auth)
+            _pump(client, up, requests.feed, requests.feed(head + c.take()))
         return up
 
     # -- socks5 upstream ----------------------------------------------------------------------------
@@ -273,9 +409,5 @@ class Relay:
         client.sendall(rep + bound + u.exact(2) + u.take())
         if rep[1] != 0:
             return up
-        up.sendall(c.take())
-        back = threading.Thread(target=_pipe, args=(up, client), daemon=True)
-        back.start()
-        _pipe(client, up)
-        back.join()
+        _pump(client, up, first=c.take())
         return up
