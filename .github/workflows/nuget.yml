@@ -35,7 +35,18 @@ permissions:
   id-token: write # REQUIRED for OIDC trusted publishing
 
 jobs:
+  # Gate: SDK unit tests + the release-pin guard (which also checks the .NET pin) must pass before we
+  # publish, as for npm.yml and pypi.yml.
+  ci:
+    uses: ./.github/workflows/sdk-ci.yml
+
+  # Gate: the pinned browser binary (what this SDK auto-downloads) must also pass the stealth-coherence
+  # checks.
+  coherence:
+    uses: ./.github/workflows/stealth-coherence.yml
+
   publish:
+    needs: [ci, coherence]
     runs-on: ubuntu-latest
     # Registers the publish as a GitHub Deployment (repo -> Deployments/Environments) and lets you add
     # a manual-approval gate under repo Settings -> Environments -> nuget. The Trusted Publishing policy's
