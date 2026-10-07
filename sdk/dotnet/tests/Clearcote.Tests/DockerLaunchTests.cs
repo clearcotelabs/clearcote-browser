@@ -54,7 +54,7 @@ public sealed class DockerLaunchTests : IDisposable
             DockerLaunch.CliResult r;
             switch (argv[1])
             {
-                case "info": r = InfoError.Length > 0 ? new(1, "", InfoError) : new(0, (argv.Contains("{{.Architecture}}") ? Arch : "29.1.3") + "\n", ""); break;
+                case "info": r = InfoError.Length > 0 ? new(1, "", InfoError) : new(0, (argv[^1].Contains("{{.Architecture}}") ? $"29.1.3 {Arch}" : "29.1.3") + "\n", ""); break;
                 case "ps" when argv.Any(a => a.StartsWith("id=", StringComparison.Ordinal)):
                     if (PsError.Length > 0) { r = new(1, "", PsError); break; }
                     r = new(0, Listed ? "c0ffee1234\n" : "", "");
@@ -870,7 +870,7 @@ public sealed class DockerLaunchTests : IDisposable
         var cmds = _docker.Commands;
         var first = Array.IndexOf(cmds, "start");
         // the refused container is removed, then created again without the profile (secrets copied in again)
-        Assert.Equal(new[] { "start", "stop", "rm", "create", "cp", "start" }, cmds[first..(first + 6)]);
+        Assert.Equal(new[] { "start", "stop", "rm", "ps", "create", "cp", "start" }, cmds[first..(first + 7)]);
         var creates = _docker.Calls.Where(c => c.Argv[1] == "create").Select(c => c.Argv).ToArray();
         Assert.Contains("--security-opt", creates[0]);
         Assert.DoesNotContain("--security-opt", creates[1]);
@@ -914,7 +914,6 @@ public sealed class DockerLaunchTests : IDisposable
     [Theory]
     [InlineData("aarch64")]
     [InlineData("arm64")]
-    [InlineData("")]
     public async Task A_docker_on_another_cpu_runs_the_image_emulated_and_without_the_profile(string arch)
     {
         // Rosetta may let the namespace calls through and then trip over Chrome's x86_64 seccomp-bpf filter: untested
@@ -922,10 +921,46 @@ public sealed class DockerLaunchTests : IDisposable
         _docker.CdpPort = stub.Port;
         _docker.Labels = new(SandboxImage);
         _docker.Arch = arch;
-        var (container, exe) = await DockerLaunch.StartContainerAsync(new LaunchOptions { Quiet = true });
+        using var err = new StderrCapture();
+        var (container, exe) = await DockerLaunch.StartContainerAsync(new LaunchOptions());
         Assert.DoesNotContain("--security-opt", _docker.Call("create").Argv);
-        Assert.Contains("docker info --format {{.Architecture}}", _docker.Calls.Select(c => string.Join(' ', c.Argv)));
+        Assert.Equal(new[] { Info }, Infos());
+        Assert.DoesNotContain("did not say which CPU", err.Text);   // by design, as the README says: no warning
         await DockerLaunch.RemoveAsync(exe, container.Id);
+    }
+
+    private static readonly string[] Info = { "docker", "info", "--format", "{{.ServerVersion}} {{.Architecture}}" };
+    private string[][] Infos() => _docker.Calls.Where(c => c.Argv[1] == "info").Select(c => c.Argv).ToArray();
+
+    [Fact]
+    public async Task One_docker_info_tells_whether_docker_runs_and_on_which_cpu()
+    {
+        // `docker info` takes about a second on Docker Desktop: a launch asks it once
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Labels = new(SandboxImage);
+        var (container, exe) = await DockerLaunch.StartContainerAsync(new LaunchOptions { Quiet = true });
+        Assert.Equal(new[] { Info }, Infos());
+        Assert.Contains("--security-opt", _docker.Call("create").Argv);
+        await DockerLaunch.RemoveAsync(exe, container.Id);
+    }
+
+    [Fact]
+    public async Task A_docker_that_does_not_say_its_cpu_gets_no_profile_and_one_warning()
+    {
+        DockerLaunch.ResetWarnings();
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Labels = new(SandboxImage);
+        _docker.Arch = "";
+        using var err = new StderrCapture();
+        for (var i = 0; i < 2; i++)
+        {
+            var (container, exe) = await DockerLaunch.StartContainerAsync(new LaunchOptions());
+            await DockerLaunch.RemoveAsync(exe, container.Id);
+        }
+        Assert.All(_docker.Calls.Where(c => c.Argv[1] == "create"), c => Assert.DoesNotContain("--security-opt", c.Argv));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(err.Text, "did not say which CPU Docker runs on"));
     }
 
     [Fact]

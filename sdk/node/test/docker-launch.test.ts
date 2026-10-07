@@ -20,7 +20,7 @@ import {
 } from "../src/docker.js";
 import { LocalChromium, findChromium } from "./helpers/chromium.js";
 import { tempDir } from "./helpers/temp.js";
-import { SECCOMP_PROFILE, seccompArgs } from "../src/docker.js";
+import { resetWarnings, SECCOMP_PROFILE, seccompArgs } from "../src/docker.js";
 import { fileURLToPath } from "node:url";
 
 // installHumanize, made to fail on demand: a setup step after the connect (ESM exports cannot be spied on).
@@ -74,7 +74,7 @@ class FakeDocker {
     this.calls.push({ argv: [...argv], env: { ...(env ?? {}) }, input });
     switch (argv[1]) {
       case "info": return this.infoError ? { code: 1, stdout: "", stderr: this.infoError }
-        : { code: 0, stdout: (argv.includes("{{.Architecture}}") ? this.arch : "29.1.3") + "\n", stderr: "" };
+        : { code: 0, stdout: (argv.at(-1)!.includes("{{.Architecture}}") ? `29.1.3 ${this.arch}` : "29.1.3") + "\n", stderr: "" };
       case "ps": {
         if (argv.some((a) => a.startsWith("id="))) {
           if (this.psError) return { code: 1, stdout: "", stderr: this.psError };
@@ -741,7 +741,7 @@ describe("Chrome's sandbox: the seccomp profile", () => {
     const cmds = docker.commands();
     const first = cmds.indexOf("start");
     // the refused container is removed, then created again without the profile (secrets copied in again)
-    expect(cmds.slice(first, first + 6)).toEqual(["start", "stop", "rm", "create", "cp", "start"]);
+    expect(cmds.slice(first, first + 7)).toEqual(["start", "stop", "rm", "ps", "create", "cp", "start"]);
     const creates = docker.calls.filter((x) => x.argv[1] === "create").map((x) => x.argv);
     expect(creates[0]).toContain("--security-opt");
     expect(creates[1]).not.toContain("--security-opt");
@@ -774,16 +774,38 @@ describe("Chrome's sandbox: the seccomp profile", () => {
     });
   }
 
-  for (const arch of ["aarch64", "arm64", ""]) {
-    it(`a Docker on another CPU (${JSON.stringify(arch)}) runs the image emulated and without the profile`, async () => {
+  const INFO = ["docker", "info", "--format", "{{.ServerVersion}} {{.Architecture}}"];
+  const infos = () => docker.calls.filter((x) => x.argv[1] === "info").map((x) => x.argv);
+  const stderrText = () => vi.mocked(process.stderr.write).mock.calls.map((x) => String(x[0])).join("");
+
+  it("one docker info tells whether Docker runs and on which CPU", async () => {
+    // `docker info` takes about a second on Docker Desktop: a launch asks it once
+    docker.labels = { ...SANDBOX_IMAGE };
+    await withStub(() => startContainer({ quiet: true }));
+    expect(infos()).toEqual([INFO]);
+    expect(docker.call("create").argv).toContain("--security-opt");
+  });
+
+  for (const arch of ["aarch64", "arm64"]) {
+    it(`a Docker on another CPU (${arch}) runs the image emulated and without the profile`, async () => {
       // Rosetta may let the namespace calls through and then trip over Chrome's x86_64 seccomp-bpf filter: untested
       docker.labels = { ...SANDBOX_IMAGE };
       docker.arch = arch;
-      await withStub(() => startContainer({ quiet: true }));
+      await withStub(() => startContainer({}));
       expect(docker.call("create").argv).not.toContain("--security-opt");
-      expect(docker.calls.map((x) => x.argv.join(" "))).toContain("docker info --format {{.Architecture}}");
+      expect(infos()).toEqual([INFO]);
+      expect(stderrText()).not.toContain("warning"); // by design, as the README says
     });
   }
+
+  it("a Docker that does not say its CPU gets no profile and one warning", async () => {
+    resetWarnings();
+    docker.labels = { ...SANDBOX_IMAGE };
+    docker.arch = "";
+    for (let i = 0; i < 2; i++) await withStub(() => startContainer({}));
+    expect(docker.calls.filter((x) => x.argv[1] === "create").some((x) => x.argv.includes("--security-opt"))).toBe(false);
+    expect(stderrText().split("did not say which CPU Docker runs on")).toHaveLength(2);
+  });
 
   it("seccompArgs", () => {
     const opt = ["--security-opt", `seccomp=${SECCOMP_PROFILE}`];

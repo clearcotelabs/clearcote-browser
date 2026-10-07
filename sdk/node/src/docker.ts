@@ -291,19 +291,36 @@ export const dockerCli = {
 const firstLine = (t: string): string => (t ?? "").split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? "";
 
 /** The docker executable, or DockerUnavailableError saying what to do. */
-export async function checkDocker(): Promise<string> {
+/** The docker executable and the daemon's CPU architecture as `docker info` reports it ("x86_64", "aarch64", or ""
+ * when it does not say), from one `docker info` (it takes about a second on Docker Desktop), or
+ * DockerUnavailableError saying what to do. */
+export async function dockerInfo(): Promise<{ exe: string; arch: string }> {
   const exe = dockerCli.which();
   if (!exe) {
     throw new DockerUnavailableError(
       `Clearcote has no native macOS build, so on macOS launch() runs it in Docker, but the \`docker\` command was not found. Install Docker Desktop (${INSTALL_URL}), start it, and try again. ${OFF_HINT}`);
   }
-  const r = await dockerCli.run([exe, "info", "--format", "{{.ServerVersion}}"], undefined, 30_000);
+  const r = await dockerCli.run([exe, "info", "--format", "{{.ServerVersion}} {{.Architecture}}"], undefined, 30_000);
   if (r.code !== 0) {
     throw new DockerUnavailableError(
       `Clearcote has no native macOS build, so on macOS launch() runs it in Docker, but Docker is not running (\`docker info\`: ${firstLine(r.stderr) || `exit ${r.code}`}). Start Docker Desktop and try again. ${OFF_HINT}`);
   }
-  return exe;
+  return { exe, arch: r.stdout.trim().split(/\s+/)[1] ?? "" };
 }
+
+/** The docker executable, or DockerUnavailableError saying what to do. */
+export async function checkDocker(): Promise<string> {
+  return (await dockerInfo()).exe;
+}
+
+const warned = new Set<string>(); // the warnings this process has given once already
+function warnOnce(key: string, message: string, quiet: boolean): void {
+  if (quiet || warned.has(key)) return;
+  warned.add(key);
+  process.stderr.write(`${message}\n`);
+}
+/** Forget the warnings given once (for tests). */
+export function resetWarnings(): void { warned.clear(); }
 
 /** How long a launched container waits with no CDP client before it stops itself: CLEARCOTE_DOCKER_IDLE_EXIT
  * (seconds, 0 = never), default 30. */
@@ -706,12 +723,6 @@ export function seccompArgs(protocol: number, arch: string): string[] {
     ? ["--security-opt", `seccomp=${SECCOMP_PROFILE}`] : [];
 }
 
-/** The Docker daemon's CPU architecture as `docker info` reports it ("x86_64", "aarch64"), or "". */
-export async function daemonArch(exe: string): Promise<string> {
-  const r = await dockerCli.run([exe, "info", "--format", "{{.Architecture}}"], undefined, 30_000);
-  return r.code === 0 ? r.stdout.trim() : "";
-}
-
 /** Docker would not run the container with the seccomp profile: at `docker create`, or at `docker start`, which is
  * where Docker 29 first loads it (a profile its runtime cannot apply, a kernel without seccomp). */
 class ProfileRefused extends Error {}
@@ -768,7 +779,7 @@ async function createStarted(exe: string, argv: string[], env: Record<string, st
 export async function startContainer(options: Record<string, unknown>): Promise<DockerContainer & { exe: string }> {
   const env = containerEnv(options);
   const idle = idleExitSeconds();
-  const exe = await checkDocker();
+  const { exe, arch } = await dockerInfo();
   await sweepStale(exe);
   const image = (options.dockerImage as string | undefined) || defaultImage();
   const protocol = await imageProtocol(exe, image, !!options.quiet);
@@ -791,7 +802,10 @@ export async function startContainer(options: Record<string, unknown>): Promise<
   }
   const argv = [exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
     "--label", LABEL, "--label", `${OWNER_HOST_LABEL}=${hostname()}`, "--label", `${OWNER_TOKEN_LABEL}=${ownerToken()}`];
-  const seccomp = protocol >= SANDBOX_PROTOCOL ? seccompArgs(protocol, await daemonArch(exe)) : [];
+  const seccomp = seccompArgs(protocol, arch);
+  if (protocol >= SANDBOX_PROTOCOL && !arch) {
+    warnOnce("arch", "[clearcote] warning: `docker info` did not say which CPU Docker runs on, so the container runs Chrome without its sandbox.", !!options.quiet);
+  }
   argv.push(...seccomp);
   for (const name of Object.keys(env).sort()) argv.push("-e", name); // the value comes from the CLI's environment
   if (expect.licensed) argv.push("-v", `${cacheVolume()}:/opt/xdg-cache`); // the licensed engine downloads once

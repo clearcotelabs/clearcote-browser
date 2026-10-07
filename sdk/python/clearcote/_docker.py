@@ -253,21 +253,39 @@ def _first_line(text):
     return next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")
 
 
-def check_docker() -> str:
-    """The docker executable, or DockerUnavailableError saying what to do."""
+def docker_info() -> tuple:
+    """(the docker executable, the daemon's CPU architecture as `docker info` reports it: "x86_64", "aarch64", or
+    "" when it does not say), from one `docker info` (it takes about a second on Docker Desktop), or
+    DockerUnavailableError saying what to do."""
     exe = _docker_cli()
     if not exe:
         raise DockerUnavailableError(
             "Clearcote has no native macOS build, so on macOS launch() runs it in Docker, but the "
             f"`docker` command was not found. Install Docker Desktop ({INSTALL_URL}), start it, and try "
             "again. " + _OFF_HINT)
-    code, _out, err = _run([exe, "info", "--format", "{{.ServerVersion}}"], timeout=30)
+    code, out, err = _run([exe, "info", "--format", "{{.ServerVersion}} {{.Architecture}}"], timeout=30)
     if code != 0:
         raise DockerUnavailableError(
             "Clearcote has no native macOS build, so on macOS launch() runs it in Docker, but Docker is "
             f"not running (`docker info`: {_first_line(err) or f'exit {code}'}). Start Docker Desktop and "
             "try again. " + _OFF_HINT)
-    return exe
+    parts = (out or "").split()
+    return exe, parts[1] if len(parts) > 1 else ""
+
+
+def check_docker() -> str:
+    """The docker executable, or DockerUnavailableError saying what to do."""
+    return docker_info()[0]
+
+
+_WARNED = set()  # the warnings this process has given once already
+
+
+def _warn_once(key, message, quiet):
+    if not quiet and key not in _WARNED:
+        _WARNED.add(key)
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
 
 
 def idle_exit_seconds() -> int:
@@ -788,12 +806,6 @@ class _ProfileRefused(Exception):
     which is where Docker 29 first loads it (a profile its runtime cannot apply, a kernel without seccomp)."""
 
 
-def daemon_arch(exe) -> str:
-    """The Docker daemon's CPU architecture as `docker info` reports it ("x86_64", "aarch64"), or ""."""
-    code, out, _err = _run([exe, "info", "--format", "{{.Architecture}}"], timeout=30)
-    return (out or "").strip() if code == 0 else ""
-
-
 def seccomp_args(protocol, arch) -> list:
     """The docker create options that let Chrome's sandbox run in an image of ``protocol`` on a daemon of CPU
     ``arch``: the seccomp profile for an image that uses it (SANDBOX_PROTOCOL), nothing for an older one, whose
@@ -862,7 +874,7 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     carries this process's owner token for sweep_stale()."""
     env = container_env(kwargs)
     idle = idle_exit_seconds()
-    exe = check_docker()
+    exe, arch = docker_info()
     sweep_stale(exe)
     image = kwargs.get("docker_image") or default_image()
     protocol = image_protocol(exe, image, quiet)
@@ -890,7 +902,10 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     argv = [exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
             "--label", LABEL, "--label", f"{OWNER_HOST_LABEL}={socket.gethostname()}",
             "--label", f"{OWNER_TOKEN_LABEL}={owner_token()}"]
-    seccomp = seccomp_args(protocol, daemon_arch(exe)) if protocol >= SANDBOX_PROTOCOL else []
+    seccomp = seccomp_args(protocol, arch)
+    if protocol >= SANDBOX_PROTOCOL and not arch:
+        _warn_once("arch", "[clearcote] warning: `docker info` did not say which CPU Docker runs on, so the "
+                   "container runs Chrome without its sandbox.", quiet)
     argv += seccomp
     for name in sorted(env):
         argv += ["-e", name]  # the value comes from the CLI's environment, never its command line

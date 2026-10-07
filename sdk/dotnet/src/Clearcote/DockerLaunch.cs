@@ -268,16 +268,35 @@ internal static class DockerLaunch
         (text ?? "").Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? "";
 
     /// The docker executable, or DockerUnavailableException saying what to do.
-    internal static async Task<string> CheckDockerAsync()
+    internal static async Task<string> CheckDockerAsync() => (await DockerInfoAsync().ConfigureAwait(false)).Exe;
+
+    /// The docker executable and the daemon's CPU architecture as `docker info` reports it ("x86_64", "aarch64", or ""
+    /// when it does not say), from one `docker info` (it takes about a second on Docker Desktop), or
+    /// DockerUnavailableException saying what to do.
+    internal static async Task<(string Exe, string Arch)> DockerInfoAsync()
     {
         var exe = Which() ?? throw new DockerUnavailableException(
             $"Clearcote has no native macOS build, so on macOS LaunchAsync runs it in Docker, but the `docker` command was not found. Install Docker Desktop ({InstallUrl}), start it, and try again. {OffHint}");
-        var r = await Run(new[] { exe, "info", "--format", "{{.ServerVersion}}" }, null, 30_000, null).ConfigureAwait(false);
+        var r = await Run(new[] { exe, "info", "--format", "{{.ServerVersion}} {{.Architecture}}" }, null, 30_000, null).ConfigureAwait(false);
         if (r.Code != 0)
             throw new DockerUnavailableException(
                 $"Clearcote has no native macOS build, so on macOS LaunchAsync runs it in Docker, but Docker is not running (`docker info`: {(FirstLine(r.Stderr) is { Length: > 0 } l ? l : $"exit {r.Code}")}). Start Docker Desktop and try again. {OffHint}");
-        return exe;
+        var parts = r.Stdout.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        return (exe, parts.Length > 1 ? parts[1] : "");
     }
+
+    private static readonly HashSet<string> Warned = new(StringComparer.Ordinal);   // the warnings given once already
+
+    private static void WarnOnce(string key, string message, bool quiet)
+    {
+        if (quiet) return;
+        lock (Warned)
+            if (!Warned.Add(key)) return;
+        Console.Error.WriteLine(message);
+    }
+
+    /// Forget the warnings given once (for tests).
+    internal static void ResetWarnings() { lock (Warned) Warned.Clear(); }
 
     /// How long a launched container waits with no CDP client before it stops itself:
     /// CLEARCOTE_DOCKER_IDLE_EXIT (seconds, 0 = never), default 30.
@@ -875,13 +894,6 @@ internal static class DockerLaunch
         protocol >= SandboxProtocol && X86_64.Contains(arch) && SeccompProfilePath(quiet) is { } path
             ? new[] { "--security-opt", $"seccomp={path}" } : Array.Empty<string>();
 
-    /// The Docker daemon's CPU architecture as `docker info` reports it ("x86_64", "aarch64"), or "".
-    internal static async Task<string> DaemonArchAsync(string exe)
-    {
-        var r = await Run(new[] { exe, "info", "--format", "{{.Architecture}}" }, null, 30_000, null).ConfigureAwait(false);
-        return r.Code == 0 ? r.Stdout.Trim() : "";
-    }
-
     /// Docker would not run the container with the seccomp profile: at `docker create`, or at `docker start`, which is
     /// where Docker 29 first loads it (a profile its runtime cannot apply, a kernel without seccomp).
     private sealed class ProfileRefusedException : Exception
@@ -948,7 +960,7 @@ internal static class DockerLaunch
     {
         var env = ContainerEnv(o);
         var idle = IdleExitSeconds();
-        var exe = await CheckDockerAsync().ConfigureAwait(false);
+        var (exe, arch) = await DockerInfoAsync().ConfigureAwait(false);
         await SweepStaleAsync(exe).ConfigureAwait(false);
         var image = string.IsNullOrEmpty(o.DockerImage) ? DefaultImage() : o.DockerImage;
         var protocol = await ImageProtocolAsync(exe, image, o.Quiet).ConfigureAwait(false);
@@ -977,7 +989,9 @@ internal static class DockerLaunch
             exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
             "--label", Label, "--label", $"{OwnerHostLabel}={System.Net.Dns.GetHostName()}", "--label", $"{OwnerTokenLabel}={OwnerToken()}",
         };
-        var seccomp = protocol >= SandboxProtocol ? SeccompArgs(protocol, await DaemonArchAsync(exe).ConfigureAwait(false), o.Quiet) : Array.Empty<string>();
+        var seccomp = SeccompArgs(protocol, arch, o.Quiet);
+        if (protocol >= SandboxProtocol && arch.Length == 0)
+            WarnOnce("arch", "[clearcote] warning: `docker info` did not say which CPU Docker runs on, so the container runs Chrome without its sandbox.", o.Quiet);
         argv.AddRange(seccomp);
         foreach (var name in env.Keys.OrderBy(k => k, StringComparer.Ordinal)) argv.AddRange(new[] { "-e", name });   // value via the CLI's environment
         if (licensed) argv.AddRange(new[] { "-v", $"{CacheVolume()}:/opt/xdg-cache" });   // the licensed engine downloads once

@@ -65,7 +65,7 @@ class FakeDocker:
         self.calls.append({"argv": list(argv), "env": dict(env or {}), "input": input})
         cmd = argv[1]
         if cmd == "info":
-            answer = self.arch if "{{.Architecture}}" in argv else "29.1.3"
+            answer = f"29.1.3 {self.arch}" if "{{.Architecture}}" in argv[-1] else "29.1.3"
             return (1, "", self.info_error) if self.info_error else (0, answer + "\n", "")
         if cmd == "ps" and any(a.startswith("id=") for a in argv):
             if self.ps_error:
@@ -818,8 +818,8 @@ def test_a_profile_refused_at_start_gets_the_container_again_without_it(mac, doc
     container = _docker.start_container(dict(KEYED))
     cmds = docker.commands()
     first = cmds.index("start")
-    # the refused container is removed, then created again without the profile (secrets copied in again)
-    assert cmds[first:first + 6] == ["start", "stop", "rm", "create", "cp", "start"]
+    # the refused container is removed (and gone), then created again without the profile (secrets copied in again)
+    assert cmds[first:first + 7] == ["start", "stop", "rm", "ps", "create", "cp", "start"]
     creates = [c["argv"] for c in docker.calls if c["argv"][1] == "create"]
     assert "--security-opt" in creates[0] and "--security-opt" not in creates[1]
     assert [a for a in creates[0] if a != "--security-opt" and not a.startswith("seccomp=")] == creates[1]
@@ -855,15 +855,39 @@ def test_any_other_failure_is_not_retried_without_the_profile(mac, docker, cmd):
     assert docker.commands().count("create") == 1 and _docker._LIVE == {}
 
 
-@pytest.mark.parametrize("arch", ["aarch64", "arm64", ""])
-def test_a_docker_on_another_cpu_runs_the_image_emulated_and_without_the_profile(mac, docker, cdp, arch):
+INFO = ["docker", "info", "--format", "{{.ServerVersion}} {{.Architecture}}"]
+
+
+def test_one_docker_info_tells_whether_docker_runs_and_on_which_cpu(mac, docker, cdp):
+    # `docker info` takes about a second on Docker Desktop: a launch asks it once
+    docker.labels = dict(SANDBOX_IMAGE)
+    container = _docker.start_container({}, quiet=True)
+    assert [c["argv"] for c in docker.calls if c["argv"][1] == "info"] == [INFO]
+    assert "--security-opt" in docker.call("create")["argv"]
+    _docker._remove("docker", container["id"])
+
+
+@pytest.mark.parametrize("arch", ["aarch64", "arm64"])
+def test_a_docker_on_another_cpu_runs_the_image_emulated_and_without_the_profile(mac, docker, cdp, arch, capsys):
     # Rosetta may let the namespace calls through and then trip over Chrome's x86_64 seccomp-bpf filter: untested
     docker.labels = dict(SANDBOX_IMAGE)
     docker.arch = arch
-    container = _docker.start_container({}, quiet=True)
+    container = _docker.start_container({})
     assert "--security-opt" not in docker.call("create")["argv"]
-    assert ["docker", "info", "--format", "{{.Architecture}}"] in [c["argv"] for c in docker.calls]
+    assert [c["argv"] for c in docker.calls if c["argv"][1] == "info"] == [INFO]
+    assert "warning" not in capsys.readouterr().err  # by design, as the README says
     _docker._remove("docker", container["id"])
+
+
+def test_a_docker_that_does_not_say_its_cpu_gets_no_profile_and_one_warning(mac, docker, cdp, capsys, monkeypatch):
+    monkeypatch.setattr(_docker, "_WARNED", set())
+    docker.labels = dict(SANDBOX_IMAGE)
+    docker.arch = ""
+    for _ in range(2):
+        container = _docker.start_container({})
+        _docker._remove("docker", container["id"])
+    assert not any("--security-opt" in c["argv"] for c in docker.calls if c["argv"][1] == "create")
+    assert capsys.readouterr().err.count("did not say which CPU Docker runs on") == 1
 
 
 def test_seccomp_args():
