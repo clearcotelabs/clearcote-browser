@@ -3,11 +3,11 @@
 // download.ts): an O_EXCL lock file with an owner record, a heartbeat, and stale-lock recovery.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
-import { INSTALL_LOCK, acquireInstallLock, installLockTiming, proEnsureBinary } from "../src/download.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { INSTALL_LOCK, acquireInstallLock, installLockTiming, installTestHooks, proEnsureBinary } from "../src/download.js";
 import { BINARY, TAG, startFakeBuild, verifiedTree } from "./helpers/fake-build.js";
 import { tempDir } from "./helpers/temp.js";
 
@@ -22,6 +22,13 @@ function pidNamespace(): string | null {
 }
 
 const lockPath = (base: string) => path.join(base, INSTALL_LOCK);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const timing = { ...installLockTiming };
+afterEach(() => {
+  Object.assign(installLockTiming, timing);
+  if (installTestHooks) delete installTestHooks.beforeVerified;
+});
 
 /** A lock file as any of the three SDKs writes it; `ageMs` back-dates its heartbeat. */
 function writeLock(base: string, fields: Record<string, unknown> = {}, ageMs = 0): void {
@@ -73,12 +80,70 @@ describe("install lock", () => {
     expect(readdirSync(base)).toEqual([]);
   });
 
-  it("takes over a lock whose heartbeat stopped (a holder elsewhere cannot be asked)", async () => {
+  it("takes over a lock from elsewhere that stops changing (timed by the waiter's own clock)", async () => {
+    installLockTiming.staleMs = 1000;
     const base = path.join(tempDir("cc-lock-"), TAG);
-    writeLock(base, { host: "another-machine", pid: 1 }, installLockTiming.staleMs + 5000);
+    writeLock(base, { host: "another-machine", pid: 1 });
+    const started = Date.now();
     const lock = await acquireInstallLock(base, { timeoutMs: 10_000 });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900); // watched it stay unchanged first
     expect(lock.held()).toBe(true);
     await lock.release();
+  });
+
+  it("does not break a lock from elsewhere that keeps changing, whatever its clock says", async () => {
+    installLockTiming.staleMs = 1000;
+    installLockTiming.unreadableMs = 1000;
+    const base = path.join(tempDir("cc-lock-"), TAG);
+    for (const offset of [-3_600_000, 3_600_000]) { // its clock an hour behind ours, then an hour ahead
+      writeLock(base, { host: "another-machine", pid: 1 });
+      let i = 0;
+      const toucher = setInterval(() => {
+        const then = new Date(Date.now() + offset + ++i * 10);
+        try { utimesSync(lockPath(base), then, then); } catch { /* next time */ }
+      }, 100);
+      try {
+        await expect(acquireInstallLock(base, { timeoutMs: 2500 })).rejects.toThrow("Gave up");
+      } finally {
+        clearInterval(toucher);
+      }
+      expect(JSON.parse(readFileSync(lockPath(base), "utf8")).nonce).toBe("f".repeat(32)); // not broken
+    }
+    const started = Date.now();
+    await (await acquireInstallLock(base, { timeoutMs: 10_000 })).release(); // once it stops changing
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+  }, 30_000);
+
+  it("never takes over the lock of a live process here, however old its heartbeat", async () => {
+    // Its heartbeat can stop while it is alive: a debugger, a paused container, a laptop asleep.
+    installLockTiming.staleMs = 1000;
+    const base = path.join(tempDir("cc-lock-"), TAG);
+    writeLock(base, {}, 600_000); // this very process: alive
+    const err = await acquireInstallLock(base, { timeoutMs: 2000 }).then(() => null, (e: Error) => e);
+    expect(err?.message).toContain(`process ${process.pid} on ${os.hostname()} (Clearcote Python SDK), which is still running`);
+    expect(JSON.parse(readFileSync(lockPath(base), "utf8")).nonce).toBe("f".repeat(32)); // not broken
+  });
+
+  it.runIf(process.platform === "linux")("takes over at once a lock whose pid now belongs to another process", async () => {
+    const base = path.join(tempDir("cc-lock-"), TAG);
+    writeLock(base, { start: "linux:1" }); // our pid, but a process that started at another time
+    const started = Date.now();
+    await (await acquireInstallLock(base, { timeoutMs: 10_000 })).release();
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it("keeps the heartbeat going while the event loop is blocked", async () => {
+    installLockTiming.heartbeatMs = 100;
+    const base = path.join(tempDir("cc-lock-"), TAG);
+    const lock = await acquireInstallLock(base, { timeoutMs: 1000 });
+    try {
+      await sleep(300);
+      const before = statSync(lockPath(base)).mtimeMs;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500); // a long synchronous install step
+      expect(statSync(lockPath(base)).mtimeMs).toBeGreaterThan(before + 500);
+    } finally {
+      await lock.release();
+    }
   });
 
   it("respects a live lock from another machine", async () => {
@@ -99,14 +164,14 @@ describe("install lock", () => {
     mkdirSync(base, { recursive: true });
     writeFileSync(lockPath(base), ""); // created, owner record not written yet
     await expect(acquireInstallLock(base, { timeoutMs: 600 })).rejects.toThrow("a process that left no details");
-    const then = new Date(Date.now() - installLockTiming.unreadableMs - 5000);
-    utimesSync(lockPath(base), then, then);
+    installLockTiming.unreadableMs = 1000;
     await (await acquireInstallLock(base, { timeoutMs: 10_000 })).release();
   });
 
   it("clears a breaker left by a crashed process", async () => {
+    installLockTiming.staleMs = 1000;
     const base = path.join(tempDir("cc-lock-"), TAG);
-    writeLock(base, { host: "another-machine" }, installLockTiming.staleMs + 5000);
+    writeLock(base, { host: "another-machine" });
     const breaker = `${lockPath(base)}.break`;
     writeFileSync(breaker, "");
     const then = new Date(Date.now() - installLockTiming.breakerStaleMs - 5000);
@@ -162,13 +227,77 @@ describe.runIf(proPlatform)("installs under the install lock", () => {
     const cache = tempDir("cc-lock-");
     const base = path.join(cache, TAG);
     for (const leftover of [".tmp-0123", ".incoming", path.join("browser", "half")]) mkdirSync(path.join(base, leftover), { recursive: true });
-    writeLock(base, { host: "another-machine" }, installLockTiming.staleMs + 5000); // its installer died
+    installLockTiming.staleMs = 1000;
+    writeLock(base, { host: "another-machine" }); // its installer died
     const srv = await startFakeBuild();
     try {
       const exe = await proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
       expect(existsSync(exe)).toBe(true);
       expect(readdirSync(base).sort()).toEqual([".manifest.json", ".verified", "browser"]);
       expect(existsSync(path.join(base, "browser", "half"))).toBe(false);
+    } finally {
+      await srv.close();
+    }
+  }, 30_000);
+
+  it("uses a verified build that appeared during the install and leaves it as it is", async () => {
+    // Another installer finished this build after this one's cache check: the tree it marked verified may
+    // already be running, so it is used, never moved.
+    const cache = tempDir("cc-lock-");
+    const base = path.join(cache, TAG);
+    const finished: string[] = [];
+    const srv = await startFakeBuild({ onArchive: () => { finished.push(verifiedTree(base)); } });
+    try {
+      const exe = await proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
+      expect(exe).toBe(finished[0]);
+      expect(readFileSync(path.join(base, ".verified"), "utf8")).toBe(`${"0".repeat(64)}\n`); // its marker
+      expect(readFileSync(exe, "utf8")).toBe("y".repeat(64)); // its files, not replaced by ours
+      expect(readdirSync(base).sort()).toEqual([".manifest.json", ".verified", "browser"]);
+    } finally {
+      await srv.close();
+    }
+  }, 30_000);
+
+  it("never marks its tree verified once it lost the lock", async () => {
+    const cache = tempDir("cc-lock-");
+    const base = path.join(cache, TAG);
+    let taken = false;
+    installTestHooks.beforeVerified = () => { // another process takes the lock over right after the tree is in place
+      if (!taken) writeLock(base, { nonce: "e".repeat(32), sdk: "node" });
+      taken = true;
+    };
+    const srv = await startFakeBuild();
+    try {
+      const install = proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
+      for (let i = 0; i < 300 && !taken; i++) await sleep(50);
+      expect(taken).toBe(true);
+      await sleep(700);
+      const verifiedWhileLost = existsSync(path.join(base, ".verified"));
+      const nonce = JSON.parse(readFileSync(lockPath(base), "utf8")).nonce;
+      rmSync(lockPath(base), { force: true }); // the other process lets go without installing
+      const exe = await install;
+      expect(verifiedWhileLost).toBe(false); // never marked verified without the lock
+      expect(nonce).toBe("e".repeat(32)); // and the new holder's lock was left alone
+      expect(existsSync(exe)).toBe(true);
+      expect(srv.archiveHits).toBe(2); // it waited, then installed under the lock again
+      expect(readdirSync(base).sort()).toEqual([".manifest.json", ".verified", "browser"]);
+    } finally {
+      await srv.close();
+    }
+  }, 30_000);
+
+  it("clears a breaker and trash a hard kill left behind", async () => {
+    const cache = tempDir("cc-lock-");
+    const base = path.join(cache, TAG);
+    mkdirSync(path.join(base, ".trash-0123", "locales"), { recursive: true });
+    const breaker = `${lockPath(base)}.break`;
+    writeFileSync(breaker, ""); // killed between deleting a stale lock and deleting its breaker
+    const then = new Date(Date.now() - 60_000);
+    utimesSync(breaker, then, then);
+    const srv = await startFakeBuild();
+    try {
+      await proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
+      expect(readdirSync(base).sort()).toEqual([".manifest.json", ".verified", "browser"]);
     } finally {
       await srv.close();
     }

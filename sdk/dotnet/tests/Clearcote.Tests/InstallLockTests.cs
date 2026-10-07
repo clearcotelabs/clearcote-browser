@@ -10,9 +10,12 @@ namespace Clearcote.Tests;
 public class InstallLockTests : IDisposable
 {
     private readonly List<string> _temp = new();
+    private readonly (TimeSpan, TimeSpan, TimeSpan) _timing = (Download.LockStaleAfter, Download.LockUnreadableAfter, Download.LockHeartbeat);
 
     public void Dispose()
     {
+        (Download.LockStaleAfter, Download.LockUnreadableAfter, Download.LockHeartbeat) = _timing;
+        Download.BeforeVerifiedHook = null;
         foreach (var dir in _temp) TestTemp.Remove(dir);
     }
 
@@ -31,12 +34,12 @@ public class InstallLockTests : IDisposable
 
     /// A lock file as any of the three SDKs writes it; <paramref name="age"/> back-dates its heartbeat.
     private static void WriteLock(string @base, TimeSpan age = default, long? pid = null, string? host = null,
-                                  string sdk = "node", string nonce = "ffffffffffffffffffffffffffffffff")
+                                  string sdk = "node", string nonce = "ffffffffffffffffffffffffffffffff", string? start = null)
     {
         Directory.CreateDirectory(@base);
         File.WriteAllText(LockPath(@base), JsonSerializer.Serialize(new
         {
-            pid = pid ?? Environment.ProcessId, host = host ?? System.Net.Dns.GetHostName(), boot = Download.BootId(),
+            pid = pid ?? Environment.ProcessId, start, host = host ?? System.Net.Dns.GetHostName(), boot = Download.BootId(),
             pidns = Download.PidNamespace(), nonce, sdk, created = 0,
         }));
         if (age > TimeSpan.Zero) File.SetLastWriteTimeUtc(LockPath(@base), DateTime.UtcNow - age);
@@ -94,14 +97,67 @@ public class InstallLockTests : IDisposable
     }
 
     [Fact]
-    public async Task A_lock_without_a_heartbeat_is_taken_over()
+    public async Task A_lock_from_elsewhere_that_stops_changing_is_taken_over()
     {
         // A holder on another machine or in another container cannot be asked whether it is alive: its
-        // heartbeat (the lock file's mtime) decides.
+        // heartbeat decides, timed by the waiter's own clock.
+        Download.LockStaleAfter = TimeSpan.FromSeconds(1);
         var @base = Base();
-        WriteLock(@base, Download.LockStaleAfter + TimeSpan.FromSeconds(5), pid: 1, host: "another-machine");
+        WriteLock(@base, pid: 1, host: "another-machine");
+        var sw = Stopwatch.StartNew();
         using var held = await Download.AcquireInstallLockAsync(@base, TimeSpan.FromSeconds(10));
+        Assert.True(sw.ElapsedMilliseconds >= 900); // watched it stay unchanged first
         Assert.True(held.Held());
+    }
+
+    [Fact]
+    public async Task A_lock_from_elsewhere_that_keeps_changing_is_not_broken_whatever_its_clock()
+    {
+        // Machines sharing a cache can disagree about the time: only "unchanged while I watched" counts.
+        Download.LockStaleAfter = TimeSpan.FromSeconds(1);
+        Download.LockUnreadableAfter = TimeSpan.FromSeconds(1);
+        var @base = Base();
+        foreach (var offset in new[] { TimeSpan.FromHours(-1), TimeSpan.FromHours(1) }) // an hour behind ours, then ahead
+        {
+            WriteLock(@base, pid: 1, host: "another-machine");
+            var i = 0;
+            using (new Timer(_ =>
+                   {
+                       try { File.SetLastWriteTimeUtc(LockPath(@base), DateTime.UtcNow + offset + TimeSpan.FromMilliseconds(10 * Interlocked.Increment(ref i))); }
+                       catch { /* next time */ }
+                   }, null, 100, 100))
+            {
+                await Assert.ThrowsAsync<TimeoutException>(() => Download.AcquireInstallLockAsync(@base, TimeSpan.FromMilliseconds(2500)));
+            }
+            Assert.Equal(new string('f', 32), ReadLock(@base).GetProperty("nonce").GetString()); // not broken
+        }
+        await Task.Delay(300); // a last touch in flight
+        var sw = Stopwatch.StartNew();
+        (await Download.AcquireInstallLockAsync(@base, TimeSpan.FromSeconds(10))).Dispose(); // once it stops changing
+        Assert.True(sw.ElapsedMilliseconds >= 900);
+    }
+
+    [Fact]
+    public async Task A_live_holder_on_this_machine_is_never_taken_over_by_age()
+    {
+        // Its heartbeat can stop while it is alive: a debugger, a paused container, a laptop asleep.
+        Download.LockStaleAfter = TimeSpan.FromSeconds(1);
+        var @base = Base();
+        WriteLock(@base, TimeSpan.FromMinutes(10)); // this very process: alive
+        var err = await Assert.ThrowsAsync<TimeoutException>(() => Download.AcquireInstallLockAsync(@base, TimeSpan.FromSeconds(2)));
+        Assert.Contains($"process {Environment.ProcessId} on {System.Net.Dns.GetHostName()} (Clearcote Node SDK), which is still running", err.Message);
+        Assert.Equal(new string('f', 32), ReadLock(@base).GetProperty("nonce").GetString()); // not broken
+    }
+
+    [Fact]
+    public async Task A_reused_pid_on_this_machine_is_taken_over_at_once()
+    {
+        if (!OperatingSystem.IsLinux()) return; // process start times are read from /proc
+        var @base = Base();
+        WriteLock(@base, start: "linux:1"); // our pid, but a process that started at another time
+        var sw = Stopwatch.StartNew();
+        (await Download.AcquireInstallLockAsync(@base, TimeSpan.FromSeconds(10))).Dispose();
+        Assert.True(sw.ElapsedMilliseconds < 3000);
     }
 
     [Fact]
@@ -131,15 +187,16 @@ public class InstallLockTests : IDisposable
         File.WriteAllText(LockPath(@base), ""); // created, owner record not written yet
         var err = await Assert.ThrowsAsync<TimeoutException>(() => Download.AcquireInstallLockAsync(@base, TimeSpan.FromMilliseconds(600)));
         Assert.Contains("a process that left no details", err.Message);
-        File.SetLastWriteTimeUtc(LockPath(@base), DateTime.UtcNow - Download.LockUnreadableAfter - TimeSpan.FromSeconds(5));
+        Download.LockUnreadableAfter = TimeSpan.FromSeconds(1);
         (await Download.AcquireInstallLockAsync(@base, TimeSpan.FromSeconds(10))).Dispose();
     }
 
     [Fact]
     public async Task A_breaker_left_by_a_crashed_process_is_cleared()
     {
+        Download.LockStaleAfter = TimeSpan.FromSeconds(1);
         var @base = Base();
-        WriteLock(@base, Download.LockStaleAfter + TimeSpan.FromSeconds(5), host: "another-machine");
+        WriteLock(@base, host: "another-machine");
         var breaker = LockPath(@base) + ".break";
         File.WriteAllText(breaker, "");
         File.SetLastWriteTimeUtc(breaker, DateTime.UtcNow - Download.LockBreakerStaleAfter - TimeSpan.FromSeconds(5));
@@ -200,11 +257,71 @@ public class InstallLockTests : IDisposable
         var @base = Path.Combine(cache, FakeBuildServer.Tag);
         foreach (var leftover in new[] { ".tmp-0123", ".incoming", Path.Combine("browser", "half") })
             Directory.CreateDirectory(Path.Combine(@base, leftover));
-        WriteLock(@base, Download.LockStaleAfter + TimeSpan.FromSeconds(5), host: "another-machine"); // its installer died
+        Download.LockStaleAfter = TimeSpan.FromSeconds(1);
+        WriteLock(@base, host: "another-machine"); // its installer died
         await using var srv = new FakeBuildServer();
         var exe = await Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true });
         Assert.True(File.Exists(exe));
         Assert.Equal(new[] { ".manifest.json", ".verified", "browser" }, FakeBuildServer.Entries(@base));
         Assert.False(Directory.Exists(Path.Combine(@base, "browser", "half")));
+    }
+
+    [Fact]
+    public async Task A_verified_build_that_appears_during_the_install_is_used_not_replaced()
+    {
+        // Another installer finished this build after this one's cache check: the tree it marked verified may
+        // already be running, so it is used, never moved.
+        if (OperatingSystem.IsMacOS()) return;
+        var cache = Cache();
+        var @base = Path.Combine(cache, FakeBuildServer.Tag);
+        var finished = new List<string>();
+        await using var srv = new FakeBuildServer(onArchive: () => finished.Add(FakeBuildServer.VerifiedTree(@base)));
+        var exe = await Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true });
+        Assert.Equal(finished[0], exe);
+        Assert.Equal(new string('0', 64) + "\n", File.ReadAllText(Path.Combine(@base, ".verified"))); // its marker
+        Assert.Equal(new string('y', 64), File.ReadAllText(exe)); // its files, not replaced by ours
+        Assert.Equal(new[] { ".manifest.json", ".verified", "browser" }, FakeBuildServer.Entries(@base));
+    }
+
+    [Fact]
+    public async Task A_holder_that_lost_the_lock_never_marks_its_tree_verified()
+    {
+        if (OperatingSystem.IsMacOS()) return;
+        var cache = Cache();
+        var @base = Path.Combine(cache, FakeBuildServer.Tag);
+        var taken = 0;
+        Download.BeforeVerifiedHook = () => // another process takes the lock over right after the tree is in place
+        {
+            if (Interlocked.Exchange(ref taken, 1) == 0) WriteLock(@base, nonce: new string('e', 32));
+        };
+        await using var srv = new FakeBuildServer();
+        var install = Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true });
+        for (var i = 0; i < 300 && Volatile.Read(ref taken) == 0; i++) await Task.Delay(50);
+        Assert.Equal(1, Volatile.Read(ref taken));
+        await Task.Delay(700);
+        var verifiedWhileLost = File.Exists(Path.Combine(@base, ".verified"));
+        var nonce = ReadLock(@base).GetProperty("nonce").GetString();
+        File.Delete(LockPath(@base)); // the other process lets go without installing
+        var exe = await install.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.False(verifiedWhileLost); // never marked verified without the lock
+        Assert.Equal(new string('e', 32), nonce); // and the new holder's lock was left alone
+        Assert.True(File.Exists(exe));
+        Assert.Equal(2, srv.ArchiveHits); // it waited, then installed under the lock again
+        Assert.Equal(new[] { ".manifest.json", ".verified", "browser" }, FakeBuildServer.Entries(@base));
+    }
+
+    [Fact]
+    public async Task A_breaker_and_trash_left_by_a_hard_kill_are_cleared_by_the_next_install()
+    {
+        if (OperatingSystem.IsMacOS()) return;
+        var cache = Cache();
+        var @base = Path.Combine(cache, FakeBuildServer.Tag);
+        Directory.CreateDirectory(Path.Combine(@base, ".trash-0123", "locales"));
+        var breaker = LockPath(@base) + ".break";
+        File.WriteAllText(breaker, ""); // killed between deleting a stale lock and deleting its breaker
+        File.SetLastWriteTimeUtc(breaker, DateTime.UtcNow - TimeSpan.FromMinutes(1));
+        await using var srv = new FakeBuildServer();
+        await Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true });
+        Assert.Equal(new[] { ".manifest.json", ".verified", "browser" }, FakeBuildServer.Entries(@base));
     }
 }

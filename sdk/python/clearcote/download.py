@@ -419,24 +419,30 @@ def _gpg_verify(rel, sums_body, quiet):
 # (Download.cs) -- change all three together. Any mix of processes installing one build into
 # <cache>/<tag> takes turns:
 #  1. The lock is the file <tag>/.install-lock, created with O_CREAT|O_EXCL (atomic on every OS and in
-#     all three languages; Node has no flock). It holds JSON: pid, host, boot, pidns, nonce, sdk, created.
-#  2. The holder touches the file (mtime) every 5 s while it works.
-#  3. Waiters poll every 0.25 s. The lock is stale when its record is from this machine (same host, boot
-#     id and PID namespace) and that pid is gone, when its mtime is over 120 s old, or when it is still
-#     not valid JSON 10 s after it was written. A stale lock is broken while holding
-#     <tag>/.install-lock.break (also O_EXCL; one older than 30 s is removed): re-check that it is still
-#     stale, delete it, delete the breaker.
+#     all three languages; Node has no flock). It holds JSON: pid, start, host, boot, pidns, nonce, sdk,
+#     created ("start" is the process start time from /proc on Linux, else null).
+#  2. The holder touches the file (mtime) every 5 s while it works, from a thread of its own.
+#  3. Waiters poll every 0.25 s. A record from this machine (same host, boot id and PID namespace) is
+#     stale exactly when its process is gone (pid dead, or reused: another start time); a live one is
+#     never broken, however old its heartbeat. Any other lock is stale once it (mtime + content) has not
+#     changed for 120 s by the waiter's own clock -- 10 s when it is not valid JSON or its mtime is over
+#     15 min old -- so clocks that disagree across machines do not matter. A stale lock is broken while
+#     holding <tag>/.install-lock.break (also O_EXCL; one older than 30 s is removed): if the lock is still
+#     exactly what was judged stale, delete it; then delete the breaker.
 #  4. The holder re-checks the cache and uses a verified build if one is there now. Otherwise it downloads
-#     and extracts into <tag>/.tmp-<nonce>/, moves the tree to <tag>/browser, writes .manifest.json then
-#     .verified, and removes the temp dir. A verified tree is never deleted or written over; a damaged
-#     one is moved aside (<tag>/.trash-*) by the holder only.
+#     and extracts into <tag>/.tmp-<nonce>/. Then, only while the lock is still its own: it uses a
+#     verified tree that appeared meanwhile, else moves an unverified browser/ aside (<tag>/.trash-*),
+#     moves its tree to <tag>/browser and writes .manifest.json; it checks the lock once more and only
+#     then writes .verified. A verified tree is never moved or written over by an install (a damaged one
+#     is moved aside by the lock holder only). Leftovers (.tmp-*, .trash-*, an old breaker) are swept.
 #  5. Release deletes the lock only while it still holds our nonce. Waiting gives up after 30 min with an
-#     error that names the holder and the lock file.
+#     error that names the holder (pid, host) and the lock file.
 INSTALL_LOCK = ".install-lock"
 _LOCK_POLL = 0.25
 _LOCK_HEARTBEAT = 5.0
 _LOCK_STALE = 120.0
 _LOCK_UNREADABLE = 10.0
+_LOCK_ANCIENT = 15 * 60.0
 _LOCK_BREAKER_STALE = 30.0
 INSTALL_WAIT = 30 * 60.0
 
@@ -454,6 +460,17 @@ def _pid_namespace():
         return os.readlink("/proc/self/ns/pid")
     except (OSError, AttributeError, NotImplementedError, ValueError):
         return None
+
+
+def _process_start(pid):
+    """A marker that differs once ``pid`` belongs to another process: its start time from /proc (Linux)."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            stat = f.read()
+    except OSError:
+        return None
+    fields = stat[stat.rfind(")") + 2:].split()
+    return f"linux:{fields[19]}" if len(fields) > 19 else None
 
 
 def _pid_alive(pid):
@@ -480,38 +497,53 @@ def _pid_alive(pid):
 
 
 def _read_lock(path):
-    """("gone" | "busy" | "ok" | "invalid", record or None, mtime). "busy": cannot be read right now."""
+    """(state, record, mtime, raw bytes); state is "gone", "busy" (cannot be read right now), "ok" or "invalid"."""
     try:
         mtime = os.stat(path).st_mtime
         with open(path, "rb") as f:
             raw = f.read()
     except FileNotFoundError:
-        return "gone", None, None
+        return "gone", None, None, None
     except OSError:
-        return "busy", None, None
+        return "busy", None, None, None
     try:
         rec = json.loads(raw.decode("utf-8"))
     except ValueError:
-        return "invalid", None, mtime
-    return ("ok", rec, mtime) if isinstance(rec, dict) else ("invalid", None, mtime)
+        return "invalid", None, mtime, raw
+    return ("ok", rec, mtime, raw) if isinstance(rec, dict) else ("invalid", None, mtime, raw)
 
 
-def _lock_stale(rec, mtime):
-    age = time.time() - mtime
-    if rec is None:
-        return age > _LOCK_UNREADABLE
-    pid = rec.get("pid")
-    host = rec.get("host")
-    if (isinstance(host, str) and host.lower() == socket.gethostname().lower()
+def _from_here(rec):
+    """The record is from this machine (same host, boot id and PID namespace) and names a usable pid."""
+    pid, host = rec.get("pid"), rec.get("host")
+    return (isinstance(host, str) and host.lower() == socket.gethostname().lower()
             and rec.get("boot") == _boot_id() and rec.get("pidns") == _pid_namespace()
-            and isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
-            and not _pid_alive(pid)):
-        return True
-    return age > _LOCK_STALE
+            and isinstance(pid, int) and not isinstance(pid, bool) and 0 < pid < 2**31)
 
 
-def _break_stale_lock(path):
-    """Delete a stale lock, under the breaker file. True when the lock is gone afterwards."""
+def _owner_alive(rec):
+    """For a record from this machine: its process still runs (and the pid was not reused)."""
+    if not _pid_alive(rec["pid"]):
+        return False
+    start = rec.get("start")
+    if isinstance(start, str) and start.startswith("linux:"):
+        now = _process_start(rec["pid"])
+        if now and now.startswith("linux:") and now != start:
+            return False
+    return True
+
+
+def _lock_stale(rec, mtime, unchanged_for):
+    """``unchanged_for``: how long the lock has stayed exactly as it is, by this process's own clock."""
+    if rec is not None and _from_here(rec):
+        return not _owner_alive(rec)
+    quick = rec is None or time.time() - mtime > _LOCK_ANCIENT
+    return unchanged_for >= (min(_LOCK_STALE, _LOCK_UNREADABLE) if quick else _LOCK_STALE)
+
+
+def _break_stale_lock(path, judged):
+    """Delete the lock if it is still exactly ``judged`` (state, mtime, raw), under the breaker file.
+    True when the lock is gone afterwards."""
     breaker = path + ".break"
     try:
         os.close(os.open(breaker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
@@ -523,10 +555,10 @@ def _break_stale_lock(path):
             pass
         return False
     try:
-        state, rec, mtime = _read_lock(path)
-        if state in ("ok", "invalid") and _lock_stale(rec, mtime):
+        state, _rec, mtime, raw = _read_lock(path)
+        if (state, mtime, raw) == judged:
             os.remove(path)
-            state = "gone"
+            return True
         return state == "gone"
     except OSError:
         return False
@@ -561,10 +593,10 @@ class _HeldLock:
         self._thread.start()
 
     def held(self):
-        """False once the lock file no longer carries our nonce (another process judged it stale)."""
+        """False once the lock file no longer carries our nonce (another process took the lock over)."""
         if self._lost:
             return False
-        state, rec, _ = _read_lock(self.path)
+        state, rec, _, _ = _read_lock(self.path)
         if state != "busy" and (rec or {}).get("nonce") != self.nonce:
             self._lost = True
         return not self._lost
@@ -582,7 +614,7 @@ class _HeldLock:
         self._stop.set()
         self._thread.join(5)
         for _ in range(40):  # another process may be reading the file this instant (Windows refuses the delete)
-            state, rec, _ = _read_lock(self.path)
+            state, rec, _, _ = _read_lock(self.path)
             if state == "gone" or (state != "busy" and (rec or {}).get("nonce") != self.nonce):
                 return
             if state == "ok":
@@ -601,13 +633,14 @@ def _acquire_install_lock(base, timeout=None, quiet=True):
     os.makedirs(base, exist_ok=True)
     path = os.path.join(base, INSTALL_LOCK)
     nonce = uuid.uuid4().hex
-    body = json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "boot": _boot_id(),
-                       "pidns": _pid_namespace(), "nonce": nonce, "sdk": "python",
+    body = json.dumps({"pid": os.getpid(), "start": _process_start(os.getpid()), "host": socket.gethostname(),
+                       "boot": _boot_id(), "pidns": _pid_namespace(), "nonce": nonce, "sdk": "python",
                        "created": int(time.time() * 1000)}).encode("utf-8")
     wait = INSTALL_WAIT if timeout is None else timeout
     deadline = time.monotonic() + wait
     told = False
     refused = 0
+    seen, seen_at = None, 0.0  # the lock as last read, and since when (our clock) it has looked like that
     while True:
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0), 0o644)
@@ -628,20 +661,24 @@ def _acquire_install_lock(base, timeout=None, quiet=True):
                 raise
             os.close(fd)
             return _HeldLock(path, nonce)
-        state, rec, mtime = _read_lock(path)
+        state, rec, mtime, raw = _read_lock(path)
         if state != "gone":
             refused = 0
         elif refused > 40:  # no lock file, yet we may not create one: not a race, a real error
             raise PermissionError(f"Clearcote cannot create {path}: permission denied")
-        if state in ("ok", "invalid") and _lock_stale(rec, mtime) and _break_stale_lock(path):
+        now = time.monotonic()
+        if (state, mtime, raw) != seen:
+            seen, seen_at = (state, mtime, raw), now
+        if state in ("ok", "invalid") and _lock_stale(rec, mtime, now - seen_at) and _break_stale_lock(path, seen):
             _log(quiet, f"removed an abandoned install lock ({_lock_holder(rec)})")
             continue
-        if time.monotonic() >= deadline:
+        if now >= deadline:
+            running = ", which is still running" if state == "ok" and _from_here(rec) and _owner_alive(rec) else ""
             raise RuntimeError(
                 f"Gave up after {_wait_words(wait)} waiting for another program to finish installing the "
                 f"Clearcote browser in\n    {base}\n"
-                f"The other installer is {_lock_holder(rec)}. If nothing else is installing it, delete this "
-                f"file and try again:\n    {path}")
+                f"The other installer is {_lock_holder(rec)}{running}. If it is stuck, end it; if nothing "
+                f"else is installing, delete this file and try again:\n    {path}")
         if not told and state == "ok":
             _log(quiet, f"another program is installing this browser build ({_lock_holder(rec)}); waiting for it")
             told = True
@@ -694,14 +731,19 @@ def _move_aside(base, browser_dir):
     _remove_tree(trash)  # what is still in use stays until the next install sweeps it
 
 
-def _sweep_leftovers(base, asset):
+def _sweep_leftovers(base, asset=None):
     """Remove what an install that stopped part-way left behind. Only called by the lock holder."""
     with contextlib.suppress(OSError):
         for name in os.listdir(base):
             if name == ".incoming" or name.startswith((".tmp-", ".trash-")):
                 _remove_tree(os.path.join(base, name))
+    breaker = os.path.join(base, INSTALL_LOCK + ".break")
     with contextlib.suppress(OSError):
-        os.remove(os.path.join(base, asset))  # where earlier versions downloaded the archive
+        if time.time() - os.stat(breaker).st_mtime > _LOCK_BREAKER_STALE:
+            os.remove(breaker)  # left by a process killed while it broke a stale lock
+    if asset:
+        with contextlib.suppress(OSError):
+            os.remove(os.path.join(base, asset))  # where earlier versions downloaded the archive
 
 
 def _fetch_and_verify(rel, base, quiet):
@@ -718,10 +760,12 @@ def _fetch_and_verify(rel, base, quiet):
                 return cached
             try:
                 return _fetch_and_verify_unlocked(rel, base, quiet, lock)
+            except _LockLost:
+                pass
             except Exception:
                 if lock.held():
                     raise
-            _log(quiet, "another process took over this install; waiting for it")
+            _log(quiet, "another process took over or changed this install; checking again")
     raise RuntimeError(f"Clearcote could not install {rel['tag']}: other processes kept taking over the install in {base}")
 
 
@@ -825,17 +869,22 @@ def _install_into(rel, base, tmp, quiet, lock):
             except OSError:
                 pass
 
-    # Move the tree into place only while the lock is still ours. The caller found no verified tree
-    # under the lock, so whatever sits at browser/ is an install that stopped part-way.
+    # Move the tree into place only while the lock is still ours, and never over a verified tree: one that
+    # appeared since the cache check (another installer finished it) may already be running, so use it.
     if lock is not None:
         lock.beat()
         if not lock.held():
             raise _LockLost()
-    for marker in (".verified", MANIFEST):
-        with contextlib.suppress(OSError):
-            os.remove(os.path.join(base, marker))
+    done = _cached(base, binary, quiet, repair=False)
+    if done:
+        _log(quiet, f"installed by another process meanwhile: {done}")
+        return done
+    if os.path.exists(os.path.join(base, ".verified")):
+        raise _LockLost()  # marked verified by another process, yet not usable: start over under the lock
+    with contextlib.suppress(OSError):
+        os.remove(os.path.join(base, MANIFEST))
     if os.path.lexists(browser_dir):
-        _move_aside(base, browser_dir)
+        _move_aside(base, browser_dir)  # not verified: an install that stopped part-way
     _rename_dir(incoming, browser_dir)
     exe = os.path.join(browser_dir, os.path.relpath(exe, incoming))
 
@@ -848,8 +897,13 @@ def _install_into(rel, base, tmp, quiet, lock):
     # Record the finished tree BEFORE the .verified marker, so a launch never sees "verified" with
     # no manifest to check it against.
     _write_manifest(base, browser_dir)
+    # Mark it verified only while the lock is still ours: a process that took the lock over meanwhile
+    # then finds an unverified tree it may replace, not a verified one it must leave alone.
+    if lock is not None and not lock.held():
+        raise _LockLost()
     with open(os.path.join(base, ".verified"), "w", encoding="utf-8") as f:
         f.write(rel["sha256"] + "\n")
+    _sweep_leftovers(base)
     _log(quiet, f"ready: {exe}")
     return exe
 

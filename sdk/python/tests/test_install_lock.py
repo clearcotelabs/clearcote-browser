@@ -5,6 +5,7 @@ with "Directory not empty" (measured with two parallel licensed containers on a 
 
 The lock is one protocol shared with the Node and .NET SDKs (see download.py): an O_EXCL lock file with an
 owner record, a heartbeat, and stale-lock recovery."""
+import contextlib
 import hashlib
 import importlib
 import io
@@ -132,14 +133,73 @@ def test_a_lock_left_by_a_dead_process_on_this_machine_is_taken_over_at_once(tmp
     assert os.listdir(base) == []
 
 
-def test_a_lock_without_a_heartbeat_is_taken_over(tmp_path):
+def test_a_lock_from_elsewhere_that_stops_changing_is_taken_over(tmp_path, monkeypatch):
     """A holder on another machine or in another container cannot be asked whether it is alive: its
-    heartbeat (the lock file's mtime) decides."""
+    heartbeat decides, timed by the waiter's own clock."""
+    monkeypatch.setattr(download, "_LOCK_STALE", 1.0)
     base = str(tmp_path / TAG)
-    _write_lock(base, age=download._LOCK_STALE + 5, host="another-machine", pid=1)
+    _write_lock(base, host="another-machine", pid=1)
+    started = time.monotonic()
     lock = download._acquire_install_lock(base, timeout=10)
+    assert time.monotonic() - started >= 0.9  # watched it stay unchanged first
     assert lock.held()
     lock.release()
+
+
+def _keep_touching(path, offset, stop):
+    """A live holder's heartbeat, written by a clock ``offset`` seconds off ours."""
+    i = 0
+    while not stop.wait(0.1):
+        i += 1
+        then = time.time() + offset + i * 0.01
+        with contextlib.suppress(OSError):
+            os.utime(path, (then, then))
+
+
+def test_a_lock_from_elsewhere_that_keeps_changing_is_not_broken_whatever_its_clock(tmp_path, monkeypatch):
+    """Machines sharing a cache can disagree about the time: only "unchanged while I watched" counts."""
+    monkeypatch.setattr(download, "_LOCK_STALE", 1.0)
+    monkeypatch.setattr(download, "_LOCK_UNREADABLE", 1.0)
+    base = str(tmp_path / TAG)
+    for offset in (-3600, 3600):  # its clock an hour behind ours, then an hour ahead
+        _write_lock(base, host="another-machine", pid=1)
+        stop = threading.Event()
+        toucher = threading.Thread(target=_keep_touching, args=(_lock_path(base), offset, stop))
+        toucher.start()
+        try:
+            with pytest.raises(RuntimeError, match="Gave up"):
+                download._acquire_install_lock(base, timeout=2.5)
+        finally:
+            stop.set()
+            toucher.join()
+        with open(_lock_path(base), encoding="utf-8") as f:
+            assert json.load(f)["nonce"] == "f" * 32  # not broken
+    started = time.monotonic()
+    download._acquire_install_lock(base, timeout=10).release()  # once it stops changing, it is taken over
+    assert time.monotonic() - started >= 0.9
+
+
+def test_a_live_holder_on_this_machine_is_never_taken_over_by_age(tmp_path, monkeypatch):
+    """Its heartbeat can stop while it is alive (a debugger, a paused container, a laptop asleep, a
+    blocked event loop): a live process here keeps its lock, however old the heartbeat."""
+    monkeypatch.setattr(download, "_LOCK_STALE", 1.0)
+    base = str(tmp_path / TAG)
+    _write_lock(base, age=600)  # this very process: alive
+    with pytest.raises(RuntimeError) as err:
+        download._acquire_install_lock(base, timeout=2)
+    holder = f"process {os.getpid()} on {socket.gethostname()} (Clearcote Node SDK), which is still running"
+    assert holder in str(err.value)
+    with open(_lock_path(base), encoding="utf-8") as f:
+        assert json.load(f)["nonce"] == "f" * 32  # not broken
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process start times are read from /proc")
+def test_a_reused_pid_on_this_machine_is_taken_over_at_once(tmp_path):
+    base = str(tmp_path / TAG)
+    _write_lock(base, start="linux:1")  # our pid, but a process that started at another time
+    started = time.monotonic()
+    download._acquire_install_lock(base, timeout=10).release()
+    assert time.monotonic() - started < 3
 
 
 def test_a_live_lock_from_another_machine_is_respected(tmp_path):
@@ -158,20 +218,20 @@ def test_a_lock_of_a_live_process_here_is_respected(tmp_path):
         download._acquire_install_lock(base, timeout=0.6)
 
 
-def test_a_half_written_lock_is_taken_over_only_after_its_grace_period(tmp_path):
+def test_a_half_written_lock_is_taken_over_only_after_its_grace_period(tmp_path, monkeypatch):
     base = str(tmp_path / TAG)
     os.makedirs(base)
     open(_lock_path(base), "w").close()  # created, owner record not written yet
     with pytest.raises(RuntimeError, match="a process that left no details"):
         download._acquire_install_lock(base, timeout=0.6)
-    then = time.time() - download._LOCK_UNREADABLE - 5
-    os.utime(_lock_path(base), (then, then))
+    monkeypatch.setattr(download, "_LOCK_UNREADABLE", 1.0)
     download._acquire_install_lock(base, timeout=10).release()
 
 
-def test_a_breaker_left_by_a_crashed_process_is_cleared(tmp_path):
+def test_a_breaker_left_by_a_crashed_process_is_cleared(tmp_path, monkeypatch):
+    monkeypatch.setattr(download, "_LOCK_STALE", 1.0)
     base = str(tmp_path / TAG)
-    _write_lock(base, age=download._LOCK_STALE + 5, host="another-machine")
+    _write_lock(base, host="another-machine")
     breaker = _lock_path(base) + ".break"
     open(breaker, "w").close()
     then = time.time() - download._LOCK_BREAKER_STALE - 5
@@ -229,6 +289,7 @@ def test_a_failed_install_leaves_nothing_behind(tmp_path):
 
 
 def test_leftovers_of_an_install_that_stopped_part_way_are_cleared(tmp_path, monkeypatch):
+    monkeypatch.setattr(download, "_LOCK_STALE", 1.0)
     data = _archive()
     sha = hashlib.sha256(data).hexdigest()
 
@@ -241,10 +302,80 @@ def test_leftovers_of_an_install_that_stopped_part_way_are_cleared(tmp_path, mon
     base = str(tmp_path / TAG)
     for leftover in (".tmp-0123", ".incoming", os.path.join("browser", "half")):
         os.makedirs(os.path.join(base, leftover))
-    _write_lock(base, age=download._LOCK_STALE + 5, host="another-machine")  # its installer died
+    _write_lock(base, host="another-machine")  # its installer died
     rel = {"tag": TAG, "version": "0.0.0", "url": "https://example.invalid/a.zip", "sha256": sha,
            "asset": "a.zip", "archive": "zip", "binary": BINARY, "size": len(data), "unpinned": False}
     exe = download._fetch_and_verify(rel, base, True)
     assert os.path.isfile(exe)
     assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]
     assert not os.path.exists(os.path.join(base, "browser", "half"))
+
+
+@needs_pro_platform
+def test_a_verified_build_that_appears_during_the_install_is_used_not_replaced(tmp_path):
+    """Another installer finished this build after this one's cache check (it held the lock before us, or
+    took it over): the tree it marked verified may already be running, so it is used, never moved."""
+    cache = str(tmp_path / "cache")
+    base = os.path.join(cache, TAG)
+    finished = []
+    with FakeBuildServer(on_archive=lambda: finished.append(verified_tree(base))) as srv:
+        path = download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
+    assert path == finished[0]
+    with open(os.path.join(base, ".verified"), encoding="utf-8") as f:
+        assert f.read() == "0" * 64 + "\n"  # the other installer's marker, not rewritten
+    with open(path, "rb") as f:
+        assert f.read() == b"y" * 64  # its files, not replaced by ours
+    assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]
+
+
+@needs_pro_platform
+def test_a_holder_that_lost_the_lock_never_marks_its_tree_verified(tmp_path, monkeypatch):
+    cache = str(tmp_path / "cache")
+    base = os.path.join(cache, TAG)
+    taken = threading.Event()
+    real = download._write_manifest
+
+    def manifest_then_lose_the_lock(b, browser):
+        real(b, browser)
+        if not taken.is_set():  # another process takes the lock over right after the tree is in place
+            _write_lock(base, nonce="e" * 32)
+            taken.set()
+
+    monkeypatch.setattr(download, "_write_manifest", manifest_then_lose_the_lock)
+    out, errors = [], []
+    with FakeBuildServer() as srv:
+        def install():
+            try:
+                out.append(download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True))
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        t = threading.Thread(target=install)
+        t.start()
+        assert taken.wait(30)
+        time.sleep(0.7)
+        verified_while_lost = os.path.exists(os.path.join(base, ".verified"))
+        with open(_lock_path(base), encoding="utf-8") as f:
+            nonce = json.load(f)["nonce"]
+        with contextlib.suppress(OSError):
+            os.remove(_lock_path(base))  # the other process lets go without installing
+        t.join(30)
+    assert not verified_while_lost  # never marked verified without the lock
+    assert nonce == "e" * 32  # and the new holder's lock was left alone
+    assert errors == [] and os.path.isfile(out[0])
+    assert srv.archive_hits == 2  # it waited, then installed under the lock again
+    assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]
+
+
+@needs_pro_platform
+def test_a_breaker_and_trash_left_by_a_hard_kill_are_cleared_by_the_next_install(tmp_path):
+    cache = str(tmp_path / "cache")
+    base = os.path.join(cache, TAG)
+    os.makedirs(os.path.join(base, ".trash-0123", "locales"))
+    breaker = _lock_path(base) + ".break"
+    open(breaker, "w").close()  # killed between deleting a stale lock and deleting its breaker
+    then = time.time() - 60
+    os.utime(breaker, (then, then))
+    with FakeBuildServer() as srv:
+        download.pro_ensure_binary("test-key", api_base=srv.url, cache_dir=cache, quiet=True)
+    assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]

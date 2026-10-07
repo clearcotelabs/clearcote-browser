@@ -550,6 +550,11 @@ Cache location (override with `CLEARCOTE_CACHE`):
 - macOS: `~/Library/Caches/clearcote/<tag>`
 - Linux: `${XDG_CACHE_HOME:-~/.cache}/clearcote/<tag>`
 
+Processes that share this cache take turns installing a build: the first one downloads it, the others
+wait and then use it, whichever SDK (Python, Node or .NET) each one runs. That needs every process
+sharing the cache to run an SDK release with this install lock (any release after 0.40.1); earlier
+releases do not wait for it.
+
 A SHA-256 mismatch is a hard error — the SDK refuses to run an unverified binary. You can
 independently confirm the published checksums and GPG signatures on the
 [release page](https://github.com/clearcotelabs/clearcote-browser/releases).

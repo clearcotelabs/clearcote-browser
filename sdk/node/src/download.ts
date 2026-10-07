@@ -22,6 +22,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import { Worker } from "node:worker_threads";
 import extract from "extract-zip";
 import { RELEASE, REPO, SIGNING_KEY_FPR, platformRelease, CATALOG_URL, CATALOG_FALLBACK, type ReleaseInfo, type Catalog, type CatalogBuild } from "./release.js";
 
@@ -489,26 +490,38 @@ export function cachedBinary(base: string, binary: string, quiet?: boolean, repa
 // (Download.cs) -- change all three together. Any mix of processes installing one build into
 // <cache>/<tag> takes turns:
 //  1. The lock is the file <tag>/.install-lock, created with O_CREAT|O_EXCL (atomic on every OS and in
-//     all three languages; Node has no flock). It holds JSON: pid, host, boot, pidns, nonce, sdk, created.
-//  2. The holder touches the file (mtime) every 5 s while it works.
-//  3. Waiters poll every 0.25 s. The lock is stale when its record is from this machine (same host, boot
-//     id and PID namespace) and that pid is gone, when its mtime is over 120 s old, or when it is still
-//     not valid JSON 10 s after it was written. A stale lock is broken while holding
-//     <tag>/.install-lock.break (also O_EXCL; one older than 30 s is removed): re-check that it is still
-//     stale, delete it, delete the breaker.
+//     all three languages; Node has no flock). It holds JSON: pid, start, host, boot, pidns, nonce, sdk,
+//     created ("start" is the process start time from /proc on Linux, else null).
+//  2. The holder touches the file (mtime) every 5 s while it works, from a thread of its own.
+//  3. Waiters poll every 0.25 s. A record from this machine (same host, boot id and PID namespace) is
+//     stale exactly when its process is gone (pid dead, or reused: another start time); a live one is
+//     never broken, however old its heartbeat. Any other lock is stale once it (mtime + content) has not
+//     changed for 120 s by the waiter's own clock -- 10 s when it is not valid JSON or its mtime is over
+//     15 min old -- so clocks that disagree across machines do not matter. A stale lock is broken while
+//     holding <tag>/.install-lock.break (also O_EXCL; one older than 30 s is removed): if the lock is still
+//     exactly what was judged stale, delete it; then delete the breaker.
 //  4. The holder re-checks the cache and uses a verified build if one is there now. Otherwise it downloads
-//     and extracts into <tag>/.tmp-<nonce>/, moves the tree to <tag>/browser, writes .manifest.json then
-//     .verified, and removes the temp dir. A verified tree is never deleted or written over; a damaged
-//     one is moved aside (<tag>/.trash-*) by the holder only.
+//     and extracts into <tag>/.tmp-<nonce>/. Then, only while the lock is still its own: it uses a
+//     verified tree that appeared meanwhile, else moves an unverified browser/ aside (<tag>/.trash-*),
+//     moves its tree to <tag>/browser and writes .manifest.json; it checks the lock once more and only
+//     then writes .verified. A verified tree is never moved or written over by an install (a damaged one
+//     is moved aside by the lock holder only). Leftovers (.tmp-*, .trash-*, an old breaker) are swept.
 //  5. Release deletes the lock only while it still holds our nonce. Waiting gives up after 30 min with an
-//     error that names the holder and the lock file.
+//     error that names the holder (pid, host) and the lock file.
 export const INSTALL_LOCK = ".install-lock";
 
 /** Install-lock timings in ms (see the protocol above). Tests may shorten them. */
-export const installLockTiming = { pollMs: 250, heartbeatMs: 5_000, staleMs: 120_000, unreadableMs: 10_000, breakerStaleMs: 30_000, waitMs: 30 * 60_000 };
+export const installLockTiming = {
+  pollMs: 250, heartbeatMs: 5_000, staleMs: 120_000, unreadableMs: 10_000, ancientMs: 15 * 60_000, breakerStaleMs: 30_000, waitMs: 30 * 60_000,
+};
 
-type LockRecord = { pid?: unknown; host?: unknown; boot?: unknown; pidns?: unknown; nonce?: unknown; sdk?: unknown };
-type LockRead = { state: "gone" | "busy"; rec: null; mtimeMs: 0 } | { state: "ok" | "invalid"; rec: LockRecord | null; mtimeMs: number };
+/** Test seam: called right before an install writes .verified. Left empty in production. */
+export const installTestHooks: { beforeVerified?: () => void } = {};
+
+type LockRecord = { pid?: unknown; start?: unknown; host?: unknown; boot?: unknown; pidns?: unknown; nonce?: unknown; sdk?: unknown };
+type LockRead =
+  | { state: "gone" | "busy"; rec: null; mtimeMs: 0; raw: null }
+  | { state: "ok" | "invalid"; rec: LockRecord | null; mtimeMs: number; raw: string };
 
 const errCode = (e: unknown): string | undefined => (e as NodeJS.ErrnoException)?.code;
 
@@ -523,6 +536,17 @@ function bootId(): string | null {
 function pidNamespace(): string | null {
   try {
     return readlinkSync("/proc/self/ns/pid");
+  } catch {
+    return null;
+  }
+}
+
+/** A marker that differs once `pid` belongs to another process: its start time from /proc (Linux). */
+function processStart(pid: number): string | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const f = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/);
+    return f[19] ? `linux:${f[19]}` : null;
   } catch {
     return null;
   }
@@ -544,31 +568,49 @@ function readLock(p: string): LockRead {
     mtimeMs = statSync(p).mtimeMs;
     raw = readFileSync(p, "utf8");
   } catch (e) {
-    return { state: errCode(e) === "ENOENT" ? "gone" : "busy", rec: null, mtimeMs: 0 };
+    return { state: errCode(e) === "ENOENT" ? "gone" : "busy", rec: null, mtimeMs: 0, raw: null };
   }
   try {
     const rec = JSON.parse(raw) as unknown;
-    if (rec && typeof rec === "object" && !Array.isArray(rec)) return { state: "ok", rec: rec as LockRecord, mtimeMs };
+    if (rec && typeof rec === "object" && !Array.isArray(rec)) return { state: "ok", rec: rec as LockRecord, mtimeMs, raw };
   } catch {
     /* not (yet) valid JSON */
   }
-  return { state: "invalid", rec: null, mtimeMs };
+  return { state: "invalid", rec: null, mtimeMs, raw };
 }
 
-function lockStale(rec: LockRecord | null, mtimeMs: number): boolean {
-  const age = Date.now() - mtimeMs;
-  if (!rec) return age > installLockTiming.unreadableMs;
+/** What a waiter compares to tell whether the lock changed since it last looked. */
+const lockKey = (s: LockRead): string => `${s.state}\u0000${s.mtimeMs}\u0000${s.raw ?? ""}`;
+
+/** The record is from this machine (same host, boot id and PID namespace) and names a usable pid. */
+function fromHere(rec: LockRecord): rec is LockRecord & { pid: number } {
   const { pid, host } = rec;
-  if (
+  return (
     typeof host === "string" && host.toLowerCase() === os.hostname().toLowerCase() &&
     (rec.boot ?? null) === bootId() && (rec.pidns ?? null) === pidNamespace() &&
-    typeof pid === "number" && Number.isInteger(pid) && pid > 0 && !pidAlive(pid)
-  ) return true;
-  return age > installLockTiming.staleMs;
+    typeof pid === "number" && Number.isInteger(pid) && pid > 0 && pid < 2 ** 31
+  );
 }
 
-/** Delete a stale lock, under the breaker file. True when the lock is gone afterwards. */
-function breakStaleLock(p: string): boolean {
+/** For a record from this machine: its process still runs (and the pid was not reused). */
+function ownerAlive(rec: LockRecord & { pid: number }): boolean {
+  if (!pidAlive(rec.pid)) return false;
+  if (typeof rec.start === "string" && rec.start.startsWith("linux:")) {
+    const now = processStart(rec.pid);
+    if (now && now.startsWith("linux:") && now !== rec.start) return false;
+  }
+  return true;
+}
+
+/** `unchangedForMs`: how long the lock has stayed exactly as it is, by this process's own clock. */
+function lockStale(rec: LockRecord | null, mtimeMs: number, unchangedForMs: number): boolean {
+  if (rec && fromHere(rec)) return !ownerAlive(rec);
+  const quick = !rec || Date.now() - mtimeMs > installLockTiming.ancientMs;
+  return unchangedForMs >= (quick ? Math.min(installLockTiming.staleMs, installLockTiming.unreadableMs) : installLockTiming.staleMs);
+}
+
+/** Delete the lock if it is still exactly what was judged stale, under the breaker file. True when the lock is gone afterwards. */
+function breakStaleLock(p: string, judged: string): boolean {
   const breaker = `${p}.break`;
   try {
     closeSync(openSync(breaker, "wx"));
@@ -582,7 +624,7 @@ function breakStaleLock(p: string): boolean {
   }
   try {
     const s = readLock(p);
-    if ((s.state === "ok" || s.state === "invalid") && lockStale(s.rec, s.mtimeMs)) {
+    if (lockKey(s) === judged) {
       unlinkSync(p);
       return true;
     }
@@ -611,11 +653,42 @@ function waitWords(ms: number): string {
 export interface InstallLock {
   readonly path: string;
   readonly nonce: string;
-  /** False once the lock file no longer carries our nonce (another process judged it stale). */
+  /** False once the lock file no longer carries our nonce (another process took the lock over). */
   held(): boolean;
-  /** Touch the lock file now (the heartbeat timer does this every few seconds too). */
+  /** Touch the lock file now (the heartbeat does this every few seconds too). */
   beat(): void;
   release(): Promise<void>;
+}
+
+// The heartbeat runs in a worker thread, so a long synchronous step on the main thread (reading the whole
+// tree on Windows, extraction, a large delete) cannot stop it.
+const HEARTBEAT_WORKER = `
+const { workerData } = require("node:worker_threads");
+const { readFileSync, utimesSync } = require("node:fs");
+setInterval(() => {
+  try {
+    if (JSON.parse(readFileSync(workerData.path, "utf8")).nonce !== workerData.nonce) return;
+    const now = new Date();
+    utimesSync(workerData.path, now, now);
+  } catch {
+    /* next beat */
+  }
+}, workerData.everyMs);
+`;
+
+function startHeartbeat(p: string, nonce: string, beat: () => void): () => Promise<void> {
+  try {
+    const worker = new Worker(HEARTBEAT_WORKER, { eval: true, workerData: { path: p, nonce, everyMs: installLockTiming.heartbeatMs } });
+    worker.on("error", () => { /* the main thread still beats at each install step */ });
+    worker.unref();
+    return async () => {
+      await worker.terminate().catch(() => 0);
+    };
+  } catch {
+    const timer = setInterval(beat, installLockTiming.heartbeatMs);
+    timer.unref();
+    return async () => clearInterval(timer);
+  }
 }
 
 function holdLock(p: string, nonce: string): InstallLock {
@@ -635,15 +708,14 @@ function holdLock(p: string, nonce: string): InstallLock {
       /* next beat */
     }
   };
-  const timer = setInterval(beat, installLockTiming.heartbeatMs);
-  timer.unref();
+  const stopHeartbeat = startHeartbeat(p, nonce, beat);
   return {
     path: p,
     nonce,
     held,
     beat,
     async release(): Promise<void> {
-      clearInterval(timer);
+      await stopHeartbeat();
       for (let i = 0; i < 40; i++) { // another process may be reading the file this instant (Windows refuses the delete)
         const s = readLock(p);
         if (s.state === "gone" || (s.state !== "busy" && s.rec?.nonce !== nonce)) return;
@@ -666,11 +738,15 @@ export async function acquireInstallLock(base: string, opts: { timeoutMs?: numbe
   mkdirSync(base, { recursive: true });
   const p = path.join(base, INSTALL_LOCK);
   const nonce = randomBytes(16).toString("hex");
-  const body = JSON.stringify({ pid: process.pid, host: os.hostname(), boot: bootId(), pidns: pidNamespace(), nonce, sdk: "node", created: Date.now() });
+  const body = JSON.stringify({
+    pid: process.pid, start: processStart(process.pid), host: os.hostname(), boot: bootId(), pidns: pidNamespace(), nonce, sdk: "node", created: Date.now(),
+  });
   const wait = opts.timeoutMs ?? installLockTiming.waitMs;
-  const deadline = Date.now() + wait;
+  const deadline = performance.now() + wait;
   let told = false;
   let refused = 0;
+  let seen = ""; // the lock as last read, and since when (our clock) it has looked like that
+  let seenAt = 0;
   for (;;) {
     let fd: number | null = null;
     try {
@@ -695,14 +771,21 @@ export async function acquireInstallLock(base: string, opts: { timeoutMs?: numbe
     const s = readLock(p);
     if (s.state !== "gone") refused = 0;
     else if (refused > 40) throw new Error(`Clearcote cannot create ${p}: permission denied`); // not a race: a real error
-    if ((s.state === "ok" || s.state === "invalid") && lockStale(s.rec, s.mtimeMs) && breakStaleLock(p)) {
+    const now = performance.now();
+    const key = lockKey(s);
+    if (key !== seen) {
+      seen = key;
+      seenAt = now;
+    }
+    if ((s.state === "ok" || s.state === "invalid") && lockStale(s.rec, s.mtimeMs, now - seenAt) && breakStaleLock(p, key)) {
       log(opts.quiet ?? true, `removed an abandoned install lock (${lockHolder(s.rec)})`);
       continue;
     }
-    if (Date.now() >= deadline) {
+    if (now >= deadline) {
+      const running = s.state === "ok" && s.rec && fromHere(s.rec) && ownerAlive(s.rec) ? ", which is still running" : "";
       throw new Error(
         `Gave up after ${waitWords(wait)} waiting for another program to finish installing the Clearcote browser in\n    ${base}\n` +
-          `The other installer is ${lockHolder(s.rec)}. If nothing else is installing it, delete this file and try again:\n    ${p}`,
+          `The other installer is ${lockHolder(s.rec)}${running}. If it is stuck, end it; if nothing else is installing, delete this file and try again:\n    ${p}`,
       );
     }
     if (!told && s.state === "ok") {
@@ -712,6 +795,9 @@ export async function acquireInstallLock(base: string, opts: { timeoutMs?: numbe
     await sleep(installLockTiming.pollMs);
   }
 }
+
+/** Another process took the lock over, or changed the build meanwhile: check again under the lock. */
+class LockLost extends Error {}
 
 /** Synchronous sleep for the short Windows retries below. */
 const pause = (ms: number): void => {
@@ -752,7 +838,7 @@ function moveAside(base: string, browserDir: string): void {
 }
 
 /** Remove what an install that stopped part-way left behind. Only called by the lock holder. */
-function sweepLeftovers(base: string, asset: string): void {
+function sweepLeftovers(base: string, asset?: string): void {
   let names: string[] = [];
   try {
     names = readdirSync(base);
@@ -768,6 +854,14 @@ function sweepLeftovers(base: string, asset: string): void {
       }
     }
   }
+  const breaker = path.join(base, `${INSTALL_LOCK}.break`);
+  try {
+    // left by a process killed while it broke a stale lock
+    if (Date.now() - statSync(breaker).mtimeMs > installLockTiming.breakerStaleMs) rmSync(breaker, { force: true });
+  } catch {
+    /* none */
+  }
+  if (!asset) return;
   try {
     rmSync(path.join(base, asset), { force: true }); // where earlier versions downloaded the archive
   } catch {
@@ -794,9 +888,9 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
       try {
         return await installLocked(rel, base, opts, lock);
       } catch (e) {
-        if (lock.held()) throw e;
+        if (!(e instanceof LockLost) && lock.held()) throw e;
       }
-      log(opts.quiet, "another process took over this install; waiting for it");
+      log(opts.quiet, "another process took over or changed this install; checking again");
     } finally {
       await lock.release();
     }
@@ -893,12 +987,18 @@ async function installInto(rel: ResolvedRelease, base: string, tmp: string, opts
     }
   }
 
-  // Move the tree into place only while the lock is still ours. The caller found no verified tree
-  // under the lock, so whatever sits at browser/ is an install that stopped part-way.
+  // Move the tree into place only while the lock is still ours, and never over a verified tree: one that
+  // appeared since the cache check (another installer finished it) may already be running, so use it.
   lock.beat();
-  if (!lock.held()) throw new Error("Clearcote: another process took over this install");
-  for (const marker of [".verified", MANIFEST]) rmSync(path.join(base, marker), { force: true });
-  if (existsSync(browserDir)) moveAside(base, browserDir);
+  if (!lock.held()) throw new LockLost();
+  const done = cachedBinary(base, binaryName, opts.quiet, false);
+  if (done) {
+    log(opts.quiet, `installed by another process meanwhile: ${done}`);
+    return done;
+  }
+  if (existsSync(path.join(base, ".verified"))) throw new LockLost(); // marked verified by another process, yet not usable: start over
+  rmSync(path.join(base, MANIFEST), { force: true });
+  if (existsSync(browserDir)) moveAside(base, browserDir); // not verified: an install that stopped part-way
   renameDir(incoming, browserDir);
   exe = path.join(browserDir, path.relative(incoming, exe));
 
@@ -906,12 +1006,16 @@ async function installInto(rel: ResolvedRelease, base: string, tmp: string, opts
     // Pre-scan so real-time AV finishes with the freshly-extracted binaries before the first launch
     // — closes the chrome_elf.dll scan race that otherwise poisons the path (see warmFiles).
     warmFiles(browserDir);
-    lock.beat(); // the read above blocks the heartbeat timer
   }
   // Record the finished tree BEFORE the .verified marker, so a launch never sees "verified" with
   // no manifest to check it against.
   writeManifest(base, browserDir);
+  // Mark it verified only while the lock is still ours: a process that took the lock over meanwhile then
+  // finds an unverified tree it may replace, not a verified one it must leave alone.
+  installTestHooks.beforeVerified?.();
+  if (!lock.held()) throw new LockLost();
   writeFileSync(path.join(base, ".verified"), `${rel.sha256}\n`);
+  sweepLeftovers(base);
   log(opts.quiet, `ready: ${exe}`);
   return exe;
 }

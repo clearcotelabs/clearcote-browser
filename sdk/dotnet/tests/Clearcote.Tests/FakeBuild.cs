@@ -24,12 +24,14 @@ internal sealed class FakeBuildServer : LocalServer
     private readonly int _metaBarrier;
     private readonly int _archiveDelayMs;
     private readonly string? _exeSha;
+    private readonly Action? _onArchive;
     private readonly TaskCompletionSource _allAsked = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _asked;
     private int _archiveHits;
 
-    public FakeBuildServer(int metaBarrier = 1, int archiveDelayMs = 0, string? sha = null, string? exeSha = null)
+    public FakeBuildServer(int metaBarrier = 1, int archiveDelayMs = 0, string? sha = null, string? exeSha = null, Action? onArchive = null)
     {
+        _onArchive = onArchive;
         _metaBarrier = metaBarrier;
         _archiveDelayMs = archiveDelayMs;
         _exeSha = exeSha;
@@ -93,6 +95,7 @@ internal sealed class FakeBuildServer : LocalServer
         else if (target == "/fake.zip")
         {
             Interlocked.Increment(ref _archiveHits);
+            _onArchive?.Invoke(); // e.g. another installer finishes while this one downloads
             await Task.Delay(_archiveDelayMs, ct); // long enough for a second installer to arrive meanwhile
             body = _archive;
             type = "application/zip";

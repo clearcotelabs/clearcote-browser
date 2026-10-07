@@ -91,7 +91,9 @@ export interface FakeBuild {
   close(): Promise<void>;
 }
 
-export async function startFakeBuild(opts: { metaBarrier?: number; archiveDelayMs?: number; sha?: string; exeSha?: string } = {}): Promise<FakeBuild> {
+export async function startFakeBuild(
+  opts: { metaBarrier?: number; archiveDelayMs?: number; sha?: string; exeSha?: string; onArchive?: () => void } = {},
+): Promise<FakeBuild> {
   const archive = fakeArchive();
   const sha = opts.sha ?? createHash("sha256").update(archive).digest("hex");
   let archiveHits = 0;
@@ -115,6 +117,7 @@ export async function startFakeBuild(opts: { metaBarrier?: number; archiveDelayM
     }
     if (req.url === "/fake.zip") {
       archiveHits++;
+      opts.onArchive?.(); // e.g. another installer finishes while this one downloads
       setTimeout(() => { // long enough for a second installer to arrive meanwhile
         res.setHeader("content-type", "application/zip");
         res.setHeader("content-length", String(archive.length));

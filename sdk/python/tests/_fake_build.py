@@ -43,7 +43,7 @@ def verified_tree(base):
 
 
 class FakeBuildServer:
-    def __init__(self, meta_barrier=1, archive_delay=0.0, exe_sha256=None):
+    def __init__(self, meta_barrier=1, archive_delay=0.0, exe_sha256=None, on_archive=None):
         self.archive = fake_archive()
         self.sha = hashlib.sha256(self.archive).hexdigest()
         self.archive_hits = 0
@@ -71,6 +71,8 @@ class FakeBuildServer:
                 elif self.path == "/fake.zip":
                     with server._count:
                         server.archive_hits += 1
+                    if on_archive:
+                        on_archive()  # e.g. another installer finishes while this one downloads
                     time.sleep(archive_delay)  # long enough for a second installer to arrive meanwhile
                     body, ctype = server.archive, "application/zip"
                 else:

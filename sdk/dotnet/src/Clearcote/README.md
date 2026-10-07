@@ -232,6 +232,12 @@ await Geometry.FitWindowToWorkAreaAsync(page);
 `CLEARCOTE_CACHE`, `CLEARCOTE_AUTO_UPDATE`; for the cloud, `CLEARCOTE_CLOUD`, `CLEARCOTE_API_KEY` and
 `CLEARCOTE_API_URL`.
 
+Downloaded browsers are cached per build, in the same place the Python and Node SDKs use (`CLEARCOTE_CACHE`
+overrides it). Processes that share this cache take turns installing a build: the first one downloads it, the
+others wait and then use it, whichever SDK (Python, Node or .NET) each one runs. That needs every process
+sharing the cache to run an SDK release with this install lock (any release after 0.40.1); earlier releases do
+not wait for it.
+
 ## Scope
 
 This SDK covers the core: persona → engine switches, free + PRO binary resolution (download / verify /
