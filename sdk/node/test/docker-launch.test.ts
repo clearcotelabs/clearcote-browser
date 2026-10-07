@@ -20,6 +20,8 @@ import {
 } from "../src/docker.js";
 import { LocalChromium, findChromium } from "./helpers/chromium.js";
 import { tempDir } from "./helpers/temp.js";
+import { SECCOMP_PROFILE } from "../src/docker.js";
+import { fileURLToPath } from "node:url";
 
 // installHumanize, made to fail on demand: a setup step after the connect (ESM exports cannot be spied on).
 const hoisted = vi.hoisted(() => ({ failHumanize: false }));
@@ -55,6 +57,7 @@ class FakeDocker {
   running = true;
   infoError = "";
   createError = "";
+  createErrors: string[] = []; // one error per `docker create`, before createError applies
   pullError = "";
   labels: Record<string, string> | null = { ...PROTOCOL }; // null: not here until pulled
   logs = "";
@@ -86,7 +89,9 @@ class FakeDocker {
         if (this.pullError) return { code: 1, stdout: "", stderr: this.pullError };
         this.labels ??= { ...PROTOCOL };
         return { code: 0, stdout: "", stderr: "" };
-      case "create": return this.createError ? { code: 125, stdout: "", stderr: this.createError } : { code: 0, stdout: "c0ffee1234\n", stderr: "" };
+      case "create":
+        if (this.createErrors.length) return { code: 125, stdout: "", stderr: this.createErrors.shift()! };
+        return this.createError ? { code: 125, stdout: "", stderr: this.createError } : { code: 0, stdout: "c0ffee1234\n", stderr: "" };
       case "port": return { code: 0, stdout: `127.0.0.1:${this.cdpPort}\n[::1]:${this.cdpPort}\n`, stderr: "" };
       case "inspect": return this.running ? { code: 0, stdout: "true\n", stderr: "" } : { code: 1, stdout: "", stderr: "Error: No such object: c0ffee1234" };
       default: return { code: 0, stdout: "", stderr: "" }; // cp, start, stop, rm
@@ -667,4 +672,62 @@ describe("launch() on macOS runs the Clearcote Docker image", () => {
     }
     expect(docker.commands().slice(-3)).toEqual(["stop", "rm", "ps"]);
   }, 60_000);
+});
+
+// An image of serve protocol 3 runs Chrome with its sandbox when the container allows the namespaces it makes, which
+// Docker's default seccomp profile does not: launch() starts it with the profile this package ships.
+describe("Chrome's sandbox: the seccomp profile", () => {
+  const SANDBOX_IMAGE = { "com.clearcotelabs.serve-protocol": "3" };
+  const REPO_PROFILE = fileURLToPath(new URL("../../../docker/seccomp.json", import.meta.url));
+  const withStub = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const stub = await cdpStub();
+    docker.cdpPort = stub.port;
+    try { return await fn(); } finally { await stub.close(); }
+  };
+
+  it("an image that runs Chrome's sandbox is started with the seccomp profile", async () => {
+    docker.labels = { ...SANDBOX_IMAGE };
+    const c = await withStub(() => startContainer({ quiet: true }));
+    expect(c.serveProtocol).toBe(3);
+    const argv = docker.call("create").argv;
+    expect(argv.filter((a) => a === "--security-opt")).toHaveLength(1);
+    expect(argv.indexOf("--security-opt")).toBeLessThan(argv.indexOf(IMAGE));
+    expect(after(argv, "--security-opt")).toEqual([`seccomp=${SECCOMP_PROFILE}`]);
+    const added = (JSON.parse(readFileSync(SECCOMP_PROFILE, "utf8")).syscalls as Array<{ names: string[]; comment?: string }>)
+      .filter((s) => (s.comment ?? "").startsWith("clearcote:")).map((s) => s.names);
+    expect(added).toEqual([["clone"], ["unshare"]]);
+  });
+
+  for (const labels of [PROTOCOL, {}]) {
+    it(`an older image keeps Docker's default profile (${JSON.stringify(labels)})`, async () => {
+      // its Chrome runs with --no-sandbox whatever it gets: the profile would only widen what it may call
+      docker.labels = { ...labels };
+      await withStub(() => startContainer({ quiet: true }));
+      expect(docker.call("create").argv.some((a) => a === "--security-opt" || a.includes("seccomp"))).toBe(false);
+    });
+  }
+
+  it("a Docker that refuses the profile gets the container without it", async () => {
+    docker.labels = { ...SANDBOX_IMAGE };
+    docker.createErrors = ["docker: Error response from daemon: seccomp profiles are not supported on this daemon.\n"];
+    await withStub(() => startContainer({}));
+    const creates = docker.calls.filter((c) => c.argv[1] === "create").map((c) => c.argv);
+    expect(creates).toHaveLength(2);
+    expect(creates[0]).toContain("--security-opt");
+    expect(creates[1]).not.toContain("--security-opt");
+    expect(creates[0].filter((a) => a !== "--security-opt" && !a.startsWith("seccomp="))).toEqual(creates[1]);
+    const warned = vi.mocked(process.stderr.write).mock.calls.map((c) => String(c[0])).join("");
+    expect(warned).toContain("Docker refused the seccomp profile");
+  });
+
+  it("any other create failure is not retried without the profile", async () => {
+    docker.labels = { ...SANDBOX_IMAGE };
+    docker.createError = "docker: Error response from daemon: Conflict. The container name is already in use.\n";
+    await expect(startContainer({ quiet: true })).rejects.toThrow(/docker create/);
+    expect(docker.commands().filter((c) => c === "create")).toHaveLength(1);
+  });
+
+  it.skipIf(!existsSync(REPO_PROFILE))("the packaged profile is docker/seccomp.json", () => {
+    expect(readFileSync(SECCOMP_PROFILE).equals(readFileSync(REPO_PROFILE))).toBe(true);
+  });
 });

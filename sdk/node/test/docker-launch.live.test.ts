@@ -105,6 +105,11 @@ function engineOf(id: string): string | null {
   return null;
 }
 
+// Every chrome process in a container: its user namespace and its command line, read from the container's /proc.
+const CHROME_PROCESSES = String.raw`for p in /proc/[0-9]*; do a=$(tr '\0' ' ' < $p/cmdline 2>/dev/null); case "$a" in */chrome\ *) echo "$(readlink $p/ns/user) $a" ;; esac; done`;
+const chromeProcesses = (id: string) =>
+  dk("exec", id, "sh", "-c", CHROME_PROCESSES).split("\n").filter((l) => l.includes(" ")).map((l) => [l.slice(0, l.indexOf(" ")), l.slice(l.indexOf(" ") + 1)]);
+
 async function probe(browser: Browser) {
   const page = await browser.newPage();
   await page.goto("data:text/html,<title>loaded in docker</title><p>hi</p>");
@@ -235,4 +240,30 @@ describe.skipIf(!IMAGE || !dockerCli.which())("launch() on macOS against the rea
       tp.stop();
     }
   }, 900_000);
+
+  it("Chrome runs with its sandbox", async () => {
+    // launch() starts the image with the seccomp profile, and its Chrome runs sandboxed: no --no-sandbox on any chrome
+    // process, renderers in user namespaces of their own, and Chrome's own sandbox page agrees. An image older than
+    // serve protocol 3 runs Chrome with --no-sandbox whatever it gets: there this fails.
+    const b = await launch({ quiet: true });
+    const id = containerOf(b).id;
+    try {
+      const procs = chromeProcesses(id);
+      expect(procs.length).toBeGreaterThan(0);
+      expect(procs.filter(([, args]) => args.includes("--no-sandbox"))).toEqual([]);
+      const browserNs = procs.find(([, args]) => !args.includes("--type="))![0];
+      const renderers = procs.filter(([, args]) => args.includes("--type=renderer")).map(([ns]) => ns);
+      expect(renderers.length).toBeGreaterThan(0);
+      expect(renderers.filter((ns) => ns === browserNs)).toEqual([]);
+      const page = await b.newPage();
+      await page.goto("chrome://sandbox");
+      await page.waitForFunction(() => /adequately sandboxed/.test(document.body.innerText), null, { timeout: 30_000 });
+      const text = await page.evaluate(() => document.body.innerText);
+      expect(text).toContain("You are adequately sandboxed.");
+      expect(text).toContain("Layer 1 Sandbox\tNamespace");
+    } finally {
+      await b.close();
+    }
+    expect(containerExists(id)).toBe(false);
+  }, 600_000);
 });

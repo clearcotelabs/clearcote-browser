@@ -17,6 +17,7 @@
   },
   "files": [
     "dist",
+    "docker-seccomp.json",
     "README.md"
   ],
   "engines": {

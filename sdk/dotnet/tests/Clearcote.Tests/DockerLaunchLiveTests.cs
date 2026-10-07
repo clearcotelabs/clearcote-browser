@@ -99,6 +99,40 @@ public sealed class DockerLaunchLiveTests : IDisposable
         Assert.DoesNotContain(vols1, VolumeExists);
     }
 
+    /// Every chrome process in a container: its user namespace and its command line, read from the container's /proc.
+    private const string ChromeProcesses =
+        "for p in /proc/[0-9]*; do a=$(tr '\\0' ' ' < $p/cmdline 2>/dev/null); case \"$a\" in */chrome\\ *) echo \"$(readlink $p/ns/user) $a\" ;; esac; done";
+
+    [Fact]
+    public async Task Chrome_runs_with_its_sandbox()
+    {
+        // LaunchAsync starts the image with the seccomp profile, and its Chrome runs sandboxed: no --no-sandbox on any
+        // chrome process, renderers in user namespaces of their own, and Chrome's own sandbox page agrees. An image older
+        // than serve protocol 3 runs Chrome with --no-sandbox whatever it gets: there this fails.
+        if (string.IsNullOrEmpty(_image) || DockerLaunch.Which() is null) return;
+        var b = await Clearcote.LaunchAsync(new LaunchOptions { Quiet = true });
+        var id = Clearcote.DockerContainerOf(b)!.Id;
+        try
+        {
+            var procs = Docker("exec", id, "sh", "-c", ChromeProcesses).Out
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Split(' ', 2)).Where(p => p.Length == 2).ToArray();
+            Assert.NotEmpty(procs);
+            Assert.DoesNotContain(procs, p => p[1].Contains("--no-sandbox"));
+            var browserNs = procs.First(p => !p[1].Contains("--type=")).First();
+            var renderers = procs.Where(p => p[1].Contains("--type=renderer")).Select(p => p[0]).ToArray();
+            Assert.NotEmpty(renderers);
+            Assert.All(renderers, ns => Assert.NotEqual(browserNs, ns));
+            var page = await b.NewPageAsync();
+            await page.GotoAsync("chrome://sandbox");
+            await page.WaitForFunctionAsync("() => /adequately sandboxed/.test(document.body.innerText)", null, new() { Timeout = 30_000 });
+            var text = await page.EvaluateAsync<string>("() => document.body.innerText");
+            Assert.Contains("You are adequately sandboxed.", text);
+            Assert.Contains("Layer 1 Sandbox\tNamespace", text);
+        }
+        finally { await b.CloseAsync(); }
+        Assert.False(ContainerExists(id));
+    }
+
     // A proxy the test can see into: a small CONNECT proxy run from the same image (it has Python) on Docker's default
     // network, which the browser's container reaches by address. It logs every tunnel it opens, and with a username and
     // password it turns away (407) whatever does not log in -- so these tests check for themselves that the traffic went

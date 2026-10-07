@@ -32,6 +32,8 @@
 
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
+    <!-- The seccomp profile a Docker launch passes so Chrome's sandbox can run (docker/seccomp.json). -->
+    <EmbeddedResource Include="docker-seccomp.json" LogicalName="Clearcote.docker-seccomp.json" />
     <InternalsVisibleTo Include="Clearcote.Tests" />
   </ItemGroup>
 

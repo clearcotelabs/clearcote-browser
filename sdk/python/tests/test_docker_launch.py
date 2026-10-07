@@ -47,6 +47,7 @@ class FakeDocker:
         self.running = True
         self.info_error = None
         self.create_error = None
+        self.create_errors = []  # one error per `docker create`, before create_error applies
         self.pull_error = None
         self.labels = dict(PROTOCOL)  # the image's labels; None: not here until pulled
         self.logs = ""
@@ -86,6 +87,8 @@ class FakeDocker:
             self.labels = self.labels if self.labels is not None else dict(PROTOCOL)
             return 0, "", ""
         if cmd == "create":
+            if self.create_errors:
+                return 125, "", self.create_errors.pop(0)
             return (125, "", self.create_error) if self.create_error else (0, "c0ffee1234\n", "")
         if cmd == "port":
             return 0, f"127.0.0.1:{self.cdp_port}\n[::1]:{self.cdp_port}\n", ""
@@ -754,3 +757,58 @@ def test_cloud_launch_still_wins(mac, docker, monkeypatch):
     with pytest.raises(ValueError, match="docker is not available for cloud browsers"):
         clearcote.launch(cloud=True, docker=True)
     assert docker.calls == []
+
+
+# ── Chrome's sandbox: the seccomp profile ──────────────────────────────────────────────────────────────────
+# An image of serve protocol 3 runs Chrome with its sandbox when the container allows the namespaces it makes,
+# which Docker's default seccomp profile does not: launch() starts it with the profile this package ships.
+
+SANDBOX_IMAGE = {"com.clearcotelabs.serve-protocol": "3"}
+REPO_PROFILE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "docker", "seccomp.json"))
+
+
+def test_an_image_that_runs_chromes_sandbox_is_started_with_the_seccomp_profile(mac, docker, cdp):
+    docker.labels = dict(SANDBOX_IMAGE)
+    container = _docker.start_container({}, quiet=True)
+    assert container["serve_protocol"] == 3
+    argv = docker.call("create")["argv"]
+    assert argv.count("--security-opt") == 1 and argv.index("--security-opt") < argv.index(IMAGE)
+    assert argv[argv.index("--security-opt") + 1] == f"seccomp={_docker.SECCOMP_PROFILE}"
+    with open(_docker.SECCOMP_PROFILE, encoding="utf-8") as fh:
+        added = [s for s in json.load(fh)["syscalls"] if str(s.get("comment", "")).startswith("clearcote:")]
+    assert [s["names"] for s in added] == [["clone"], ["unshare"]]
+    _docker._remove("docker", container["id"])
+
+
+@pytest.mark.parametrize("labels", [PROTOCOL, {}])
+def test_an_older_image_keeps_dockers_default_profile(mac, docker, cdp, labels):
+    # its Chrome runs with --no-sandbox whatever it gets: the profile would only widen what it may call
+    docker.labels = dict(labels)
+    container = _docker.start_container({}, quiet=True)
+    assert not any("seccomp" in a or a == "--security-opt" for a in docker.call("create")["argv"])
+    _docker._remove("docker", container["id"])
+
+
+def test_a_docker_that_refuses_the_profile_gets_the_container_without_it(mac, docker, cdp, capsys):
+    docker.labels = dict(SANDBOX_IMAGE)
+    docker.create_errors = ["docker: Error response from daemon: seccomp profiles are not supported on this daemon.\n"]
+    container = _docker.start_container({})
+    creates = [c["argv"] for c in docker.calls if c["argv"][1] == "create"]
+    assert len(creates) == 2 and "--security-opt" in creates[0] and "--security-opt" not in creates[1]
+    assert [a for a in creates[0] if a != "--security-opt" and not a.startswith("seccomp=")] == creates[1]
+    assert "Docker refused the seccomp profile" in capsys.readouterr().err
+    _docker._remove("docker", container["id"])
+
+
+def test_any_other_create_failure_is_not_retried_without_the_profile(mac, docker):
+    docker.labels = dict(SANDBOX_IMAGE)
+    docker.create_error = "docker: Error response from daemon: Conflict. The container name is already in use.\n"
+    with pytest.raises(RuntimeError, match="docker create"):
+        _docker.start_container({}, quiet=True)
+    assert docker.commands().count("create") == 1
+
+
+@pytest.mark.skipif(not os.path.exists(REPO_PROFILE), reason="no docker/seccomp.json in this tree")
+def test_the_packaged_profile_is_docker_seccomp_json():
+    with open(_docker.SECCOMP_PROFILE, "rb") as mine, open(REPO_PROFILE, "rb") as repo:
+        assert mine.read() == repo.read(), "copy docker/seccomp.json to clearcote/docker-seccomp.json"

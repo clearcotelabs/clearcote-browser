@@ -30,6 +30,12 @@
 // connected for 30 s after its CDP first answers (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch removes
 // any whose owner process is certainly gone (sweepStale). close() stops it at once and resolves once Docker
 // has removed it (waiting up to 15 s for that).
+//
+// Chrome's sandbox: an image of serve protocol 3 runs Chrome with its sandbox when the container allows the
+// user, PID and network namespaces the sandbox makes, and Docker's default seccomp profile does not. Such an
+// image is started with --security-opt seccomp=docker-seccomp.json (shipped in this package: Docker's default
+// profile plus those two calls; docker/seccomp.json in the repository). An older image is not: its Chrome runs
+// with --no-sandbox whatever it gets.
 // Mirrors _docker.py in the Python SDK.
 
 import { execFile, spawn, spawnSync } from "node:child_process";
@@ -38,6 +44,7 @@ import http from "node:http";
 import { randomBytes } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
 import { installHumanize, installHumanizeOnContext } from "./humanize.js";
@@ -66,6 +73,11 @@ const DEFAULT_CACHE_VOLUME = "clearcote-cache";
 const SECRET_ENV = ["CLEARCOTE_LICENSE_KEY", "CC_PROXY"];
 const SECRETS_FILE = "/tmp/clearcote-secrets.json";
 const IMAGE_UID = 10001; // the image's user (cc)
+// An image of this serve protocol runs Chrome's sandbox when the container allows it, so it is started with this
+// seccomp profile: Docker's default plus the namespace calls the sandbox makes (docker/seccomp.json).
+export const SANDBOX_PROTOCOL = 3;
+export const SECCOMP_PROFILE = fileURLToPath(new URL("../docker-seccomp.json", import.meta.url));
+const SECCOMP_REFUSED = /seccomp/i;
 const TRUTHY = ["1", "true", "yes", "on"];
 const FALSY = ["0", "false", "no", "off"];
 // The image starts a virtual display, Chromium and (with a licence) fetches the licensed engine on its
@@ -678,6 +690,13 @@ export function tarOneFile(name: string, data: Buffer, opts: { uid: number; gid:
 
 export interface DockerContainer { id: string; image: string; endpoint: string; serveProtocol: number }
 
+/** The docker create options that let Chrome's sandbox run in an image of `protocol`: the seccomp profile for an
+ * image that uses it (SANDBOX_PROTOCOL), nothing for an older one, whose Chrome runs with --no-sandbox anyway and
+ * so keeps Docker's stricter default. */
+export function seccompArgs(protocol: number): string[] {
+  return protocol >= SANDBOX_PROTOCOL && existsSync(SECCOMP_PROFILE) ? ["--security-opt", `seccomp=${SECCOMP_PROFILE}`] : [];
+}
+
 /**
  * Start the image and wait for its CDP endpoint. Nothing is left running when this rejects.
  *
@@ -715,8 +734,10 @@ export async function startContainer(options: Record<string, unknown>): Promise<
     Object.assign(env, secrets); // plain variables: names on the command line, values in the CLI's environment
     for (const k of Object.keys(secrets)) delete secrets[k];
   }
-  const argv = [exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
+  let argv = [exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
     "--label", LABEL, "--label", `${OWNER_HOST_LABEL}=${hostname()}`, "--label", `${OWNER_TOKEN_LABEL}=${ownerToken()}`];
+  const seccomp = seccompArgs(protocol);
+  argv.push(...seccomp);
   for (const name of Object.keys(env).sort()) argv.push("-e", name); // the value comes from the CLI's environment
   if (expect.licensed) argv.push("-v", `${cacheVolume()}:/opt/xdg-cache`); // the licensed engine downloads once
   argv.push(image);
@@ -727,6 +748,13 @@ export async function startContainer(options: Record<string, unknown>): Promise<
   // later, once the volume has been filled.
   for (let attempt = 1; attempt < 4 && r.code !== 0 && VOLUME_INIT_RACE.test(r.stderr); attempt++) {
     await new Promise((res) => setTimeout(res, 1000 * attempt));
+    r = await dockerCli.run(argv, env, 1_800_000);
+  }
+  if (r.code !== 0 && seccomp.length && SECCOMP_REFUSED.test(r.stderr)) {
+    // A Docker that will not take a seccomp profile: start the container without it. It then runs Chrome with
+    // --no-sandbox, as it did before the profile existed.
+    if (!options.quiet) process.stderr.write(`[clearcote] warning: Docker refused the seccomp profile (${firstLine(r.stderr)}); the container runs Chrome without its sandbox.\n`);
+    argv = argv.filter((a) => !seccomp.includes(a));
     r = await dockerCli.run(argv, env, 1_800_000);
   }
   const id = r.stdout.trim().split(/\r?\n/).pop()?.trim() ?? "";

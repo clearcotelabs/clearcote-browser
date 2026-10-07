@@ -31,6 +31,12 @@ Nothing outlives its owner: the container is created with --rm, stops itself onc
 connected for 30 s after its CDP first answers (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch removes
 any whose owner process is certainly gone (sweep_stale). close() stops it at once and returns once Docker
 has removed it (waiting up to 15 s for that).
+
+Chrome's sandbox: an image of serve protocol 3 runs Chrome with its sandbox when the container allows the
+user, PID and network namespaces the sandbox makes, and Docker's default seccomp profile does not. Such an
+image is started with --security-opt seccomp=docker-seccomp.json (shipped in this package: Docker's default
+profile plus those two calls; docker/seccomp.json in the repository). An older image is not: its Chrome runs
+with --no-sandbox whatever it gets.
 """
 from __future__ import annotations
 
@@ -74,6 +80,11 @@ DEFAULT_CACHE_VOLUME = "clearcote-cache"
 SECRET_ENV = ("CLEARCOTE_LICENSE_KEY", "CC_PROXY")
 SECRETS_FILE = "/tmp/clearcote-secrets.json"
 IMAGE_UID = 10001  # the image's user (cc)
+# An image of this serve protocol runs Chrome's sandbox when the container allows it, so it is started with this
+# seccomp profile: Docker's default plus the namespace calls the sandbox makes (docker/seccomp.json).
+SANDBOX_PROTOCOL = 3
+SECCOMP_PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker-seccomp.json")
+_SECCOMP_REFUSED = re.compile(r"seccomp", re.I)
 _TRUTHY = ("1", "true", "yes", "on")
 _FALSY = ("0", "false", "no", "off")
 # The image starts a virtual display, Chromium and (with a licence) fetches the licensed engine on its
@@ -769,6 +780,15 @@ def secrets_tar(secrets: dict) -> bytes:
     return buf.getvalue()
 
 
+def seccomp_args(protocol) -> list:
+    """The docker create options that let Chrome's sandbox run in an image of ``protocol``: the seccomp profile
+    for an image that uses it (SANDBOX_PROTOCOL), nothing for an older one, whose Chrome runs with --no-sandbox
+    anyway and so keeps Docker's stricter default."""
+    if protocol >= SANDBOX_PROTOCOL and os.path.isfile(SECCOMP_PROFILE):
+        return ["--security-opt", f"seccomp={SECCOMP_PROFILE}"]
+    return []
+
+
 def start_container(kwargs: dict, quiet=False) -> dict:
     """Start the image and wait for its CDP endpoint -> {"id", "image", "endpoint", "serve_protocol",
     "exe"}. Nothing is left running when this raises.
@@ -814,6 +834,8 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     argv = [exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
             "--label", LABEL, "--label", f"{OWNER_HOST_LABEL}={socket.gethostname()}",
             "--label", f"{OWNER_TOKEN_LABEL}={owner_token()}"]
+    seccomp = seccomp_args(protocol)
+    argv += seccomp
     for name in sorted(env):
         argv += ["-e", name]  # the value comes from the CLI's environment, never its command line
     if expect["licensed"]:  # the licensed engine is fetched once into this volume
@@ -830,6 +852,15 @@ def start_container(kwargs: dict, quiet=False) -> dict:
         if code == 0 or attempt == 3 or not _VOLUME_INIT_RACE.search(err or ""):
             break
         time.sleep(1.0 + attempt)
+    if code != 0 and seccomp and _SECCOMP_REFUSED.search(err or ""):
+        # A Docker that will not take a seccomp profile: start the container without it. It then runs Chrome
+        # with --no-sandbox, as it did before the profile existed.
+        if not quiet:
+            sys.stderr.write(f"[clearcote] warning: Docker refused the seccomp profile ({_first_line(err)}); the "
+                             "container runs Chrome without its sandbox.\n")
+            sys.stderr.flush()
+        argv = [a for a in argv if a not in seccomp]
+        code, out, err = _run(argv, env=env, timeout=1800)
     cid = (out or "").strip().splitlines()[-1] if (out or "").strip() else ""
     if code != 0 or not cid:
         raise _image_failed(image, code, err, "docker create")

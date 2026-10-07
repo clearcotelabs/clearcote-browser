@@ -31,6 +31,7 @@ public sealed class DockerLaunchTests : IDisposable
         public bool Running = true;
         public string InfoError = "";
         public string CreateError = "";
+        public Queue<string> CreateErrors = new();                   // one error per `docker create`, before CreateError applies
         public string PullError = "";
         public Dictionary<string, string>? Labels = new(Protocol);   // null: not here until pulled
         public string Logs = "";
@@ -70,7 +71,10 @@ public sealed class DockerLaunchTests : IDisposable
                     Labels ??= new(Protocol);
                     r = new(0, "", "");
                     break;
-                case "create": r = CreateError.Length > 0 ? new(125, "", CreateError) : new(0, "c0ffee1234\n", ""); break;
+                case "create":
+                    r = CreateErrors.Count > 0 ? new(125, "", CreateErrors.Dequeue())
+                        : CreateError.Length > 0 ? new(125, "", CreateError) : new(0, "c0ffee1234\n", "");
+                    break;
                 case "port": r = new(0, $"127.0.0.1:{CdpPort}\n[::1]:{CdpPort}\n", ""); break;
                 case "inspect": r = Running ? new(0, "true\n", "") : new(1, "", "Error: No such object: c0ffee1234"); break;
                 default: r = new(0, "", ""); break;   // cp, start, stop, rm
@@ -777,5 +781,89 @@ public sealed class DockerLaunchTests : IDisposable
         var e = await Assert.ThrowsAsync<ArgumentException>(() => Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, Docker = true, ApiKey = "k" }));
         Assert.Equal("Docker is not available for cloud browsers", e.Message);
         Assert.Empty(_docker.Calls);
+    }
+
+    // ── Chrome's sandbox: the seccomp profile ───────────────────────────────────────────────────────────
+    // An image of serve protocol 3 runs Chrome with its sandbox when the container allows the namespaces it makes,
+    // which Docker's default seccomp profile does not: LaunchAsync starts it with the profile this assembly carries.
+
+    private static readonly Dictionary<string, string> SandboxImage = new() { ["com.clearcotelabs.serve-protocol"] = "3" };
+
+    [Fact]
+    public async Task An_image_that_runs_chromes_sandbox_is_started_with_the_seccomp_profile()
+    {
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Labels = new(SandboxImage);
+        var (container, exe) = await DockerLaunch.StartContainerAsync(new LaunchOptions { Quiet = true });
+        Assert.Equal(3, container.ServeProtocol);
+        var argv = _docker.Call("create").Argv;
+        Assert.Single(argv, a => a == "--security-opt");
+        Assert.True(Array.IndexOf(argv, "--security-opt") < Array.IndexOf(argv, Image));
+        var path = After(argv, "--security-opt")[0]["seccomp=".Length..];
+        Assert.StartsWith("seccomp=", After(argv, "--security-opt")[0]);
+        // written once into ~/.clearcote, the embedded profile byte for byte
+        Assert.Equal(Path.Combine(_home, ".clearcote"), Path.GetDirectoryName(path));
+        Assert.Equal(DockerLaunch.SeccompProfile(), File.ReadAllBytes(path));
+        using var doc = JsonDocument.Parse(File.ReadAllBytes(path));
+        var added = doc.RootElement.GetProperty("syscalls").EnumerateArray()
+            .Where(s => s.TryGetProperty("comment", out var c) && c.GetString()!.StartsWith("clearcote:", StringComparison.Ordinal))
+            .Select(s => s.GetProperty("names")[0].GetString()).ToArray();
+        Assert.Equal(new[] { "clone", "unshare" }, added);
+        Assert.Equal(path, DockerLaunch.SeccompProfilePath());   // the next launch reuses it
+        Assert.Single(Directory.GetFiles(Path.GetDirectoryName(path)!, "docker-seccomp-*"));
+        await DockerLaunch.RemoveAsync(exe, container.Id);
+    }
+
+    [Theory]
+    [InlineData("2")]
+    [InlineData(null)]
+    public async Task An_older_image_keeps_dockers_default_profile(string? protocol)
+    {
+        // its Chrome runs with --no-sandbox whatever it gets: the profile would only widen what it may call
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Labels = protocol is null ? new() : new() { ["com.clearcotelabs.serve-protocol"] = protocol };
+        var (container, exe) = await DockerLaunch.StartContainerAsync(new LaunchOptions { Quiet = true });
+        Assert.DoesNotContain(_docker.Call("create").Argv, a => a == "--security-opt" || a.Contains("seccomp"));
+        await DockerLaunch.RemoveAsync(exe, container.Id);
+    }
+
+    [Fact]
+    public async Task A_docker_that_refuses_the_profile_gets_the_container_without_it()
+    {
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Labels = new(SandboxImage);
+        _docker.CreateErrors.Enqueue("docker: Error response from daemon: seccomp profiles are not supported on this daemon.\n");
+        using var err = new StderrCapture();
+        var (container, exe) = await DockerLaunch.StartContainerAsync(new LaunchOptions());
+        var creates = _docker.Calls.Where(c => c.Argv[1] == "create").Select(c => c.Argv).ToArray();
+        Assert.Equal(2, creates.Length);
+        Assert.Contains("--security-opt", creates[0]);
+        Assert.DoesNotContain("--security-opt", creates[1]);
+        Assert.Equal(creates[0].Where(a => a != "--security-opt" && !a.StartsWith("seccomp=", StringComparison.Ordinal)), creates[1]);
+        Assert.Contains("Docker refused the seccomp profile", err.Text);
+        await DockerLaunch.RemoveAsync(exe, container.Id);
+    }
+
+    [Fact]
+    public async Task Any_other_create_failure_is_not_retried_without_the_profile()
+    {
+        _docker.Labels = new(SandboxImage);
+        _docker.CreateError = "docker: Error response from daemon: Conflict. The container name is already in use.\n";
+        var e = await Assert.ThrowsAsync<InvalidOperationException>(() => DockerLaunch.StartContainerAsync(new LaunchOptions { Quiet = true }));
+        Assert.Contains("docker create", e.Message);
+        Assert.Single(_docker.Commands, c => c == "create");
+    }
+
+    /// The embedded profile is docker/seccomp.json, byte for byte. Skipped when the tree has no docker/ next to sdk/.
+    [Fact]
+    public void The_embedded_profile_is_docker_seccomp_json()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "docker", "seccomp.json"))) dir = dir.Parent;
+        if (dir is null) return;
+        Assert.Equal(File.ReadAllBytes(Path.Combine(dir.FullName, "docker", "seccomp.json")), DockerLaunch.SeccompProfile());
     }
 }

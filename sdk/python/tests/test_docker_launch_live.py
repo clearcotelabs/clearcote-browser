@@ -206,6 +206,74 @@ def image_protocol():
     return _docker.image_protocol("docker", IMAGE, quiet=True)
 
 
+# Every chrome process in a container: its user namespace and its command line, read from the container's /proc.
+CHROME_PROCESSES = r"""for p in /proc/[0-9]*; do
+  a=$(tr '\0' ' ' < $p/cmdline 2>/dev/null)
+  case "$a" in */chrome\ *) echo "$(readlink $p/ns/user) $a" ;; esac
+done"""
+
+
+def chrome_processes(cid):
+    out = dk("exec", cid, "sh", "-c", CHROME_PROCESSES)
+    return [tuple(line.split(" ", 1)) for line in out.splitlines() if " " in line]
+
+
+def sandbox_page(browser):
+    page = browser.new_page()
+    page.goto("chrome://sandbox")
+    page.wait_for_function("() => /adequately sandboxed/.test(document.body.innerText)", timeout=30_000)
+    return page.evaluate("() => document.body.innerText")
+
+
+def test_chrome_runs_with_its_sandbox():
+    # launch() starts the image with the seccomp profile, and its Chrome runs sandboxed: no --no-sandbox on any
+    # chrome process, renderers in user namespaces of their own, and Chrome's own sandbox page agrees. An image
+    # older than serve protocol 3 runs Chrome with --no-sandbox whatever it gets: there this fails.
+    b = clearcote.launch(quiet=True)
+    try:
+        cid = b.docker_container["id"]
+        procs = chrome_processes(cid)
+        assert procs and not any("--no-sandbox" in args for _ns, args in procs)
+        browser_ns = next(ns for ns, args in procs if "--type=" not in args)
+        renderers = [ns for ns, args in procs if "--type=renderer" in args]
+        assert renderers and all(ns != browser_ns for ns in renderers)
+        text = sandbox_page(b)
+        assert "You are adequately sandboxed." in text and "Layer 1 Sandbox\tNamespace" in text
+    finally:
+        b.close()
+    assert not container_exists(cid)
+
+
+def test_without_the_profile_the_container_still_serves_without_the_sandbox():
+    # A plain `docker run`, no profile: Docker's default refuses the sandbox's namespaces. The container must come
+    # up as it always did (Chrome with --no-sandbox), and say why and how to turn the sandbox on.
+    cid = dk("run", "-d", "--rm", "-p", "127.0.0.1::9222", IMAGE).strip()
+    try:
+        port = int(dk("port", cid, "9222/tcp").splitlines()[0].rsplit(":", 1)[1])
+        for _ in range(240):
+            if _docker._cdp_ready(port):
+                break
+            time.sleep(0.5)
+        assert _docker._cdp_ready(port), dk("logs", cid, check=False)
+        procs = chrome_processes(cid)
+        assert procs and all("--no-sandbox" in args for _ns, args in procs)
+        if image_protocol() >= 3:
+            logs = subprocess.run(["docker", "logs", cid], capture_output=True, text=True).stdout
+            [line] = [ln for ln in logs.splitlines() if ln.startswith("[clearcote] sandbox:")]
+            assert line.startswith("[clearcote] sandbox: OFF, Chrome runs with --no-sandbox: clone(CLONE_NEWUSER) failed")
+            assert "seccomp profile blocks" in line and "--security-opt seccomp=" in line
+        pw = clearcote._playwright()
+        b = pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+        try:
+            page = b.contexts[0].new_page()
+            page.goto("data:text/html,<title>no profile</title>")
+            assert page.title() == "no profile"
+        finally:
+            b.close()
+    finally:
+        dk("rm", "-f", "-v", cid, check=False)
+
+
 # Licensed and proxied, against whatever image CLEARCOTE_TEST_DOCKER_IMAGE names (one from before sdk-0.40.0
 # too): launch() must come back on the licensed engine with the proxy applied -- or refuse -- never on the open
 # engine with traffic going direct. The test checks both itself: the engine from the container's process

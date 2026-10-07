@@ -21,8 +21,9 @@ public sealed class DockerUnavailableException : Exception
 /// <param name="Id">The container id.</param>
 /// <param name="Image">The image it runs.</param>
 /// <param name="Endpoint">The CDP endpoint the browser was connected through.</param>
-/// <param name="ServeProtocol">The image's serve protocol: 2 takes the licence key and proxy as a file and stops on
-/// its own; 0 is an image older than sdk-0.40.0 (plain variables, no idle exit).</param>
+/// <param name="ServeProtocol">The image's serve protocol: 3 also runs Chrome's sandbox when the container allows it
+/// (it is started with the seccomp profile); 2 takes the licence key and proxy as a file and stops on its own; 0 is an
+/// image older than sdk-0.40.0 (plain variables, no idle exit).</param>
 public sealed record DockerContainer(string Id, string Image, string Endpoint, int ServeProtocol);
 
 /// LaunchAsync on macOS: run the Clearcote Docker image and connect to it.
@@ -54,6 +55,12 @@ public sealed record DockerContainer(string Id, string Image, string Endpoint, i
 /// connected for 30 s after its CDP first answers (CLEARCOTE_DOCKER_IDLE_EXIT), and the next launch removes any
 /// whose owner process is certainly gone (SweepStaleAsync). CloseAsync stops it at once and returns once Docker has
 /// removed it (waiting up to 15 s for that).
+///
+/// Chrome's sandbox: an image of serve protocol 3 runs Chrome with its sandbox when the container allows the user,
+/// PID and network namespaces the sandbox makes, and Docker's default seccomp profile does not. Such an image is
+/// started with --security-opt seccomp=&lt;profile&gt; (embedded in this assembly and written once to
+/// ~/.clearcote/: Docker's default profile plus those two calls; docker/seccomp.json in the repository). An older
+/// image is not: its Chrome runs with --no-sandbox whatever it gets.
 /// Mirrors _docker.py (Python) and docker.ts (Node).
 internal static class DockerLaunch
 {
@@ -77,6 +84,11 @@ internal static class DockerLaunch
     private static readonly string[] SecretEnv = { "CLEARCOTE_LICENSE_KEY", "CC_PROXY" };
     internal const string SecretsFile = "/tmp/clearcote-secrets.json";
     private const int ImageUid = 10001;   // the image's user (cc)
+    // An image of this serve protocol runs Chrome's sandbox when the container allows it, so it is started with this
+    // seccomp profile: Docker's default plus the namespace calls the sandbox makes (docker/seccomp.json).
+    internal const int SandboxProtocol = 3;
+    internal const string SeccompResource = "Clearcote.docker-seccomp.json";
+    private static readonly System.Text.RegularExpressions.Regex SeccompRefused = new("seccomp", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     private static readonly string[] Truthy = { "1", "true", "yes", "on" };
     private static readonly string[] Falsy = { "0", "false", "no", "off" };
     private const int ReadyTimeoutMs = 180_000;
@@ -802,6 +814,45 @@ internal static class DockerLaunch
         return ms.ToArray();
     }
 
+    /// The seccomp profile embedded in this assembly (docker/seccomp.json).
+    internal static byte[] SeccompProfile()
+    {
+        using var s = typeof(DockerLaunch).Assembly.GetManifestResourceStream(SeccompResource)
+            ?? throw new InvalidOperationException($"the {SeccompResource} resource is missing from this assembly");
+        using var ms = new MemoryStream();
+        s.CopyTo(ms);
+        return ms.ToArray();
+    }
+
+    /// The embedded profile as a file, which is what the docker CLI reads: ~/.clearcote/docker-seccomp-&lt;hash&gt;.json,
+    /// written once for each version of the profile. Null when it cannot be written.
+    internal static string? SeccompProfilePath()
+    {
+        var data = SeccompProfile();
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data))[..12].ToLowerInvariant();
+        var path = Path.Combine(Native.ClearcoteDir, $"docker-seccomp-{hash}.json");
+        var tmp = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            if (File.Exists(path) && File.ReadAllBytes(path).AsSpan().SequenceEqual(data)) return path;
+            Directory.CreateDirectory(Native.ClearcoteDir);
+            File.WriteAllBytes(tmp, data);
+            File.Move(tmp, path, overwrite: true);   // whole or not at all, for a launch reading it at the same time
+            return path;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            try { File.Delete(tmp); } catch (Exception) { }
+            return null;
+        }
+    }
+
+    /// The docker create options that let Chrome's sandbox run in an image of <paramref name="protocol"/>: the seccomp
+    /// profile for an image that uses it (SandboxProtocol), nothing for an older one, whose Chrome runs with
+    /// --no-sandbox anyway and so keeps Docker's stricter default.
+    internal static IReadOnlyList<string> SeccompArgs(int protocol) =>
+        protocol >= SandboxProtocol && SeccompProfilePath() is { } path ? new[] { "--security-opt", $"seccomp={path}" } : Array.Empty<string>();
+
     /// Start the image and wait for its CDP endpoint. Nothing is left running when this throws.
     ///
     /// What the image does with its settings is known first (ImageProtocolAsync). An image of this SDK's protocol
@@ -848,6 +899,8 @@ internal static class DockerLaunch
             exe, "create", "--rm", "--platform", "linux/amd64", "--shm-size", "1g", "-p", "127.0.0.1::9222",
             "--label", Label, "--label", $"{OwnerHostLabel}={System.Net.Dns.GetHostName()}", "--label", $"{OwnerTokenLabel}={OwnerToken()}",
         };
+        var seccomp = SeccompArgs(protocol);
+        argv.AddRange(seccomp);
         foreach (var name in env.Keys.OrderBy(k => k, StringComparer.Ordinal)) argv.AddRange(new[] { "-e", name });   // value via the CLI's environment
         if (licensed) argv.AddRange(new[] { "-v", $"{CacheVolume()}:/opt/xdg-cache" });   // the licensed engine downloads once
         argv.Add(image);
@@ -859,6 +912,14 @@ internal static class DockerLaunch
         for (var attempt = 1; attempt < 4 && r.Code != 0 && VolumeInitRace.IsMatch(r.Stderr); attempt++)
         {
             await Task.Delay(1000 * attempt).ConfigureAwait(false);
+            r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
+        }
+        if (r.Code != 0 && seccomp.Count > 0 && SeccompRefused.IsMatch(r.Stderr))
+        {
+            // A Docker that will not take a seccomp profile: start the container without it. It then runs Chrome with
+            // --no-sandbox, as it did before the profile existed.
+            if (!o.Quiet) Console.Error.WriteLine($"[clearcote] warning: Docker refused the seccomp profile ({FirstLine(r.Stderr)}); the container runs Chrome without its sandbox.");
+            argv.RemoveAll(a => seccomp.Contains(a));
             r = await Run(argv, env, 1_800_000, null).ConfigureAwait(false);
         }
         var id = r.Stdout.Trim().Split('\n').LastOrDefault()?.Trim() ?? "";
