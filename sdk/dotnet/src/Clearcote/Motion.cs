@@ -91,7 +91,9 @@ public static class Motion
         if (seed is int or long or double or float)
         {
             double d = Convert.ToDouble(seed);
-            if (double.IsFinite(d)) return unchecked((uint)(int)(Math.Abs(d) * 2654435761.0));
+            // JS `>>> 0` is ToUint32: the product modulo 2^32 (fmod is exact). A cast to int of a
+            // product this size is out of range, and x64 answers 0x80000000 for every nonzero seed.
+            if (double.IsFinite(d)) return (uint)(Math.Abs(d) * 2654435761.0 % 4294967296.0);
         }
         string s = seed.ToString() ?? "";
         unchecked
@@ -179,6 +181,56 @@ public static class Motion
     {
         rng ??= Random.Shared.NextDouble;
         return (Lerp(p.GrabMinMs, p.GrabMaxMs, rng()), Lerp(p.ReleaseMinMs, p.ReleaseMaxMs, rng()));
+    }
+
+    // Salt for the rollover stream. Drawing from Mulberry32(seed ^ salt) instead of adding a field to
+    // MakePersona keeps the persona draw ORDER (and so every existing seed's motor identity) unchanged.
+    private const uint RolloverSalt = 0x9E3779B9;
+
+    /// <summary>
+    /// Share of eligible key pairs this persona types with ROLLOVER: the next key goes down before the
+    /// previous one comes up, the way people type fast common pairs. Stable per seed, 0.12–0.38.
+    /// Measured on r32/r33 before this existed: 0 overlapping keydowns in 30–32 typed keys, because
+    /// every character was one press (down, dwell, up) before the next began. Same value as the other
+    /// SDKs' rolloverRate / rollover_rate.
+    /// </summary>
+    public static double RolloverRate(Persona p) => Lerp(0.12, 0.38, Mulberry32(p.Seed ^ RolloverSalt)());
+
+    /// <summary>
+    /// Pixels one wheel notch scrolls, by the platform the persona claims. A wheel event sent over CDP
+    /// always carries wheelDelta ±120 (input_handler.cc sets wheel_ticks to ±1 whatever the delta), and
+    /// a real notch is the only event whose distance goes with a 120 wheelDelta:
+    ///   windows 100 = 3 lines × 100/3 px (web_input_event_builders_win.cc, default 3 lines per notch)
+    ///   linux   120 = ui::MouseWheelEvent::kWheelDelta (event.cc); measured 120/-120 per X11 notch
+    ///   macos    40 = kScrollbarPixelsPerCocoaTick (cocoa_event_utils.h)
+    /// android is not measured; it gets the windows value.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, int> WheelNotchPx = new Dictionary<string, int>
+    {
+        ["windows"] = 100, ["linux"] = 120, ["macos"] = 40, ["android"] = 100,
+    };
+
+    /// <summary>
+    /// Whole notches for a requested scroll distance: the nearest count, at least one when the caller
+    /// asked for any scroll at all. A wheel cannot move 39px; it moves notches. Rounds half up like JS
+    /// Math.round — Math.Round's default is banker's rounding, which would turn 250/100 into 2, not 3.
+    /// </summary>
+    public static int WheelNotches(double delta, double notchPx)
+    {
+        if (delta == 0 || double.IsNaN(delta)) return 0;   // NaN: JS plans no events for it either
+        return Math.Max(1, (int)Math.Floor(Math.Abs(delta) / notchPx + 0.5));
+    }
+
+    /// <summary>Map navigator.userAgentData.platform / navigator.platform to a <see cref="WheelNotchPx"/> key.</summary>
+    public static string? PlatformFromNavigator(string? value)
+    {
+        string v = (value ?? "").ToLowerInvariant();
+        if (v.Length == 0) return null;
+        if (v.Contains("android")) return "android";   // before linux: Android's navigator.platform is "Linux armv8l"
+        if (v.Contains("win")) return "windows";
+        if (v.Contains("mac")) return "macos";
+        if (v.Contains("linux") || v.Contains("x11") || v.Contains("cros")) return "linux";
+        return null;
     }
 
     /// <summary>

@@ -145,6 +145,51 @@ export function keyDwell(p: Persona, rng: Rng = Math.random): number {
   return p.keyDwellMinMs + Math.min(1, Math.abs(gaussFrom(rng)) * 0.45) * (p.keyDwellMaxMs - p.keyDwellMinMs);
 }
 
+// Salt for the rollover stream. Drawing from mulberry32(seed ^ salt) instead of adding a field to
+// makePersona keeps the persona draw ORDER (and so every existing seed's motor identity) unchanged.
+const ROLLOVER_SALT = 0x9e3779b9;
+
+/** Share of eligible key pairs this persona types with ROLLOVER: the next key goes down before the
+ * previous one comes up, the way people type fast common pairs. Stable per seed, 0.12–0.38.
+ *
+ * Measured on r32/r33 before this existed: 0 overlapping keydowns in 30–32 typed keys, because every
+ * character was one press() (down, dwell, up) before the next began. Same value as Python
+ * `_motion.rollover_rate` and .NET `Motion.RolloverRate`. */
+export function rolloverRate(p: Persona): number {
+  return lerp(0.12, 0.38, mulberry32((p.seed ^ ROLLOVER_SALT) >>> 0)());
+}
+
+/** The platforms a wheel notch size is known for (the keys of WHEEL_NOTCH_PX). */
+export type WheelPlatform = "windows" | "linux" | "macos" | "android";
+
+/** Pixels one wheel notch scrolls, by the platform the persona claims. A wheel event sent over CDP
+ * always carries wheelDelta ±120 (input_handler.cc sets wheel_ticks to ±1 whatever the delta), and a
+ * real notch is the only event whose distance goes with a 120 wheelDelta:
+ *   windows 100 = 3 lines × 100/3 px (web_input_event_builders_win.cc, default 3 lines per notch)
+ *   linux   120 = ui::MouseWheelEvent::kWheelDelta (event.cc); measured 120/−120 per X11 notch
+ *   macos    40 = kScrollbarPixelsPerCocoaTick (cocoa_event_utils.h)
+ * android is not measured; it gets the windows value. */
+export const WHEEL_NOTCH_PX: Readonly<Record<WheelPlatform, number>> = { windows: 100, linux: 120, macos: 40, android: 100 };
+
+/** Whole notches for a requested scroll distance: the nearest count, at least one when the caller
+ * asked for any scroll at all. A wheel cannot move 39 px; it moves notches. floor(x + 0.5), not
+ * Math.round, so the count is the same expression as Python's and .NET's (half rounds up). */
+export function wheelNotches(delta: number, notchPx: number): number {
+  if (!delta) return 0;
+  return Math.max(1, Math.floor(Math.abs(delta) / notchPx + 0.5));
+}
+
+/** Map navigator.userAgentData.platform / navigator.platform to a WHEEL_NOTCH_PX key (null = unknown). */
+export function platformFromNavigator(value: string | null | undefined): WheelPlatform | null {
+  const v = (value || "").toLowerCase();
+  if (!v) return null;
+  if (v.includes("android")) return "android"; // before linux: Android's navigator.platform is "Linux armv8l"
+  if (v.includes("win")) return "windows";
+  if (v.includes("mac")) return "macos";
+  if (v.includes("linux") || v.includes("x11") || v.includes("cros")) return "linux";
+  return null;
+}
+
 export interface Point { x: number; y: number; }
 /** One dispatched sample: move the cursor to (x,y), then sleep `sleepMs` before the next. */
 export interface Step { x: number; y: number; sleepMs: number; }

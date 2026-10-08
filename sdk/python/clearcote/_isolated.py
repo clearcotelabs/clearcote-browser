@@ -109,6 +109,8 @@ COVER_CHECK_MS = 400
 
 # The reads humanize makes, as functions of one JSON argument (run by IsolatedWorld.evaluate).
 VIEWPORT = "() => [innerWidth, innerHeight]"
+# The platform the page believes (the persona's), for the wheel notch size.
+PLATFORM = "() => { const d = navigator.userAgentData; return (d && d.platform) || navigator.platform || ''; }"
 IS_FOCUSED = ("(s) => { const e = document.querySelector(s);"
               " return !!e && e === document.activeElement; }")
 SELECT_PLAN = """(a) => { const s = document.querySelector(a.sel);

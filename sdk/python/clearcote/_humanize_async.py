@@ -8,12 +8,18 @@ call is awaited and pacing uses asyncio.sleep. See _humanize.py for the rational
 import asyncio
 import random
 
-from ._humanize import CURSOR_OVERLAY, _needs_shift, _rand, _shift_lag_s, _shift_lead_s
+from ._humanize import (
+    CURSOR_OVERLAY, ENGINE_POINTER_PATH, _ROLL_KEYS, _cdp_method_missing, _host_platform, _needs_shift, _rand,
+    _shift_lag_s, _shift_lead_s,
+)
 from ._isolated import (
-    COVER_CHECK_MS, IS_FOCUSED as ISO_IS_FOCUSED, SELECT_PLAN as ISO_SELECT_PLAN,
+    COVER_CHECK_MS, IS_FOCUSED as ISO_IS_FOCUSED, PLATFORM as ISO_PLATFORM, SELECT_PLAN as ISO_SELECT_PLAN,
     SELECTED_INDEX as ISO_SELECTED_INDEX, VIEWPORT as ISO_VIEWPORT, async_world_for,
 )
-from ._motion import make_persona, plan_move, drag_dwell, click_hold, key_dwell, click_point, plan_ambient
+from ._motion import (
+    WHEEL_NOTCH_PX, make_persona, plan_move, drag_dwell, click_hold, key_dwell, click_point, plan_ambient,
+    platform_from_navigator, rollover_rate, wheel_notches,
+)
 
 
 async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None):
@@ -71,10 +77,10 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         st["pos"] = (x, y)
 
     # Engine real-trajectory routing (PRO): send point-to-point moves/clicks through
-    # Browser.humanizedClick (real recorded human paths for PRO, engine bezier for free,
+    # Browser.dispatchPointerPath, humanizedClick before r34 (real recorded human paths for PRO, engine bezier for free,
     # tiered by the engine license gate). Drags stay native (held button); fall back to
     # the SDK bezier if the method is unavailable.
-    _eng = {"session": None, "tid": None, "ok": True}
+    _eng = {"session": None, "tid": None, "ok": True, "method": None}
 
     async def _engine_glide(x, y, no_click):
         if not _eng["ok"]:
@@ -90,9 +96,21 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
             dx, dy = x - st["pos"][0], y - st["pos"][1]
             dist = (dx * dx + dy * dy) ** 0.5
             dur = min(1.10, max(0.28, 0.30 + dist / 1700.0)) * (0.85 + 0.30 * random.random())
-            await _eng["session"].send("Browser.humanizedClick", {
-                "targetId": _eng["tid"], "x": float(x), "y": float(y),
-                "duration": dur, "noClick": bool(no_click)})
+            params = {"targetId": _eng["tid"], "x": float(x), "y": float(y),
+                      "duration": dur, "noClick": bool(no_click)}
+            if _eng.get("method"):
+                await _eng["session"].send(_eng["method"], params)
+            else:
+                # New name first; an engine older than r34 answers "wasn't found" (-32601)
+                # and gets the old one. Any other error is a real failure (below).
+                try:
+                    await _eng["session"].send(ENGINE_POINTER_PATH[0], params)
+                    _eng["method"] = ENGINE_POINTER_PATH[0]
+                except Exception as e:  # noqa: BLE001
+                    if not _cdp_method_missing(e):
+                        raise
+                    await _eng["session"].send(ENGINE_POINTER_PATH[1], params)
+                    _eng["method"] = ENGINE_POINTER_PATH[1]
             # The engine walks the trajectory in the BROWSER process and answers before it has
             # finished. Without waiting, a following mouse.down() fires at the cursor's stale
             # position -- measured on the sync path: a move to (110,58) then a press landed at
@@ -238,32 +256,48 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         except Exception:  # noqa: BLE001 - never let the anchor stop the scroll
             pass
 
+    async def _notch_px():
+        """Pixels per wheel notch for the platform the page believes, read once per page."""
+        if "notch" not in st:
+            plat = None
+            try:
+                plat = platform_from_navigator(await async_world_for(page).evaluate(ISO_PLATFORM))
+            except Exception:  # noqa: BLE001
+                pass
+            st["notch"] = WHEEL_NOTCH_PX[plat or _host_platform()]
+        return st["notch"]
+
     async def hwheel(delta_x, delta_y):
+        # Whole notches only: a CDP wheel event always reports wheelDelta +-120, so the eased
+        # sub-notch slices this replaced were events no mouse emits (see _humanize.hwheel).
         await _wheel_anchor()
-        steps = max(5, min(24, round((abs(delta_x) + abs(delta_y)) / 60)))
-        px = py = 0
-        for i in range(1, steps + 1):
-            t = i / steps
-            f = 1 - (1 - t) ** 2.2            # ease-OUT inertia (fast flick -> slow settle)
-            nx, ny = round(delta_x * f), round(delta_y * f)
-            await native_wheel(nx - px, ny - py)
-            px, py = nx, ny
-            await asyncio.sleep(_rand(10, 38) / 1000.0)
+        notch = await _notch_px()
+        plan = ([(0, notch if delta_y > 0 else -notch)] * wheel_notches(delta_y, notch)
+                + [(notch if delta_x > 0 else -notch, 0)] * wheel_notches(delta_x, notch))
+        burst = random.randint(2, 5)
+        for k, (ex, ey) in enumerate(plan):
+            await native_wheel(ex, ey)
+            if k == len(plan) - 1:
+                break
+            burst -= 1
+            if burst == 0:
+                await asyncio.sleep(_rand(110, 320) / 1000.0)  # the finger resets for the next flick
+                burst = random.randint(2, 5)
+            else:
+                await asyncio.sleep(_rand(18, 55) / 1000.0)
             if random.random() < 0.07:
-                await asyncio.sleep(_rand(40, 120) / 1000.0)
+                await asyncio.sleep(_rand(150, 450) / 1000.0)
             # A hand resting on the mouse does not hold it perfectly still through a long scroll, so
-            # 20 wheel events sharing one identical clientX/clientY is a script signature. A couple
+            # wheel events sharing one identical clientX/clientY are a script signature. A couple
             # of px, so the scroll stays over the same element (and never while a button is down,
             # where a move is a drag leg).
-            if steps >= 10 and not st["held"] and random.random() < 0.06:
+            if len(plan) >= 6 and not st["held"] and random.random() < 0.06:
                 try:
                     dx, dy = random.gauss(0, 1.5), random.gauss(0, 1.2)
                     await native_move(st["pos"][0] + dx, st["pos"][1] + dy)
                     st["pos"] = (st["pos"][0] + dx, st["pos"][1] + dy)
                 except Exception:  # noqa: BLE001
                     pass
-        if px != delta_x or py != delta_y:
-            await native_wheel(delta_x - px, delta_y - py)
 
     mouse.move, mouse.click, mouse.wheel = hmove, hclick, hwheel
     # down/up wrapped only to TRACK held state for hmove; the presses stay native.
@@ -361,16 +395,45 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         text = str(text)
         n = len(text)
         shift = False
+        roll_rate = rollover_rate(persona)
+        i = 0
         try:
-            for i, ch in enumerate(text):
+            while i < n:
+                ch = text[i]
                 if _needs_shift(ch) and not shift and native_kb_down and native_kb_up:
                     await native_kb_down("Shift")
                     shift = True
                     await asyncio.sleep(_shift_lead_s())
-                try:
-                    await _emit_key(ch)
-                except Exception:  # noqa: BLE001
-                    break
+                # ROLLOVER: the next key goes down before this one comes up (see
+                # _humanize._human_type_text). Unshifted single-key pairs only.
+                nxt = text[i + 1] if i + 1 < n else None
+                d1 = key_dwell(persona)
+                if (nxt is not None and not shift and native_kb_down and native_kb_up
+                        and ch in _ROLL_KEYS and nxt in _ROLL_KEYS and ch != nxt and d1 - 8 >= 12
+                        and random.random() < roll_rate):
+                    overlap = _rand(12, min(55, d1 - 8))
+                    try:
+                        await native_kb_down(ch)
+                        await asyncio.sleep((d1 - overlap) / 1000.0)
+                        await native_kb_down(nxt)
+                        await asyncio.sleep(overlap / 1000.0)
+                        await native_kb_up(ch)
+                        await asyncio.sleep(max(5.0, key_dwell(persona) - overlap) / 1000.0)
+                        await native_kb_up(nxt)
+                    except Exception:  # noqa: BLE001
+                        for k in (ch, nxt):
+                            try:
+                                await native_kb_up(k)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        break
+                    i += 1          # nxt is typed; the cadence below runs as if after it
+                    ch = nxt
+                else:
+                    try:
+                        await _emit_key(ch)
+                    except Exception:  # noqa: BLE001
+                        break
                 if shift and (i == n - 1 or not _needs_shift(text[i + 1])):
                     await asyncio.sleep(_shift_lag_s())
                     await native_kb_up("Shift")
@@ -382,6 +445,7 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
                     if random.random() < 0.05:
                         d += _rand(0.18, 0.5)
                     await asyncio.sleep(d)
+                i += 1
         finally:
             if shift:  # never leave Shift held for the caller's next keystroke
                 try:

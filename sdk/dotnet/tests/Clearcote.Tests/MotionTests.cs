@@ -167,6 +167,69 @@ public class MotionTests
         Assert.Single(steps);
     }
 
+    // A NUMBER seed hashes as JS (|seed| * 2654435761) >>> 0 — the product is far outside int range,
+    // so it has to wrap modulo 2^32 the way ToUint32 does. Values from the Python/Node hash_seed.
+    [Theory]
+    [InlineData(0, 0u)]
+    [InlineData(1111, 2730565415u)]
+    [InlineData(31337, 1421820825u)]
+    [InlineData(-31337, 1421820825u)]
+    public void HashSeed_of_a_number_matches_the_other_sdks(int seed, uint expected)
+        => Assert.Equal(expected, Motion.HashSeed(seed));
+
+    // Rollover share: the first draw of mulberry32(seed ^ 0x9E3779B9). Must match the Node
+    // rolloverRate and Python rollover_rate to the last digit (exact double equality here).
+    [Fact]
+    public void RolloverRate_matches_the_other_sdks()
+    {
+        Assert.Equal(0.18545862230472265, Motion.RolloverRate(Motion.MakePersona("1111")));
+        Assert.Equal(0.33123080658726395, Motion.RolloverRate(Motion.MakePersona(1111)));
+        Assert.Equal(0.3663359977304935, Motion.RolloverRate(Motion.MakePersona("abc")));
+        Assert.Equal(0.21331139486283063, Motion.RolloverRate(Motion.MakePersona(0)));
+        Assert.Equal(0.3733816216979176, Motion.RolloverRate(Motion.MakePersona(31337)));
+    }
+
+    [Fact]
+    public void RolloverRate_leaves_the_persona_draw_order_alone()
+    {
+        // It draws from its own salted stream, so the persona of a seed is what it was before.
+        var p = Motion.MakePersona("identity-42");
+        Motion.RolloverRate(p);
+        Assert.Equal(1361500432u, p.Seed);
+        Assert.Equal(151, p.DeviceHz);
+        Assert.Equal(-0.172724717, Motion.MakePersona("identity-42").ApproachBias, 8);
+    }
+
+    [Theory]
+    [InlineData(100, new double[] { 0, 3, 39, 49, 50, 100, 149, 151, 1000, -39, -250 }, new[] { 0, 1, 1, 1, 1, 1, 1, 2, 10, 1, 3 })]
+    [InlineData(120, new double[] { 0, 39, 59, 60, 100, 180, 1000 }, new[] { 0, 1, 1, 1, 1, 2, 8 })]
+    public void WheelNotches_is_the_nearest_count_rounded_half_up_and_at_least_one(double notch, double[] deltas, int[] want)
+        => Assert.Equal(want, deltas.Select(d => Motion.WheelNotches(d, notch)).ToArray());
+
+    [Fact]
+    public void WheelNotchPx_is_the_per_platform_notch()
+    {
+        Assert.Equal(100, Motion.WheelNotchPx["windows"]);
+        Assert.Equal(120, Motion.WheelNotchPx["linux"]);
+        Assert.Equal(40, Motion.WheelNotchPx["macos"]);
+        Assert.Equal(100, Motion.WheelNotchPx["android"]);
+    }
+
+    [Theory]
+    [InlineData("Win32", "windows")]
+    [InlineData("Windows", "windows")]
+    [InlineData("MacIntel", "macos")]
+    [InlineData("macOS", "macos")]
+    [InlineData("Linux x86_64", "linux")]
+    [InlineData("Linux armv8l", "linux")]
+    [InlineData("Android", "android")]
+    [InlineData("CrOS", "linux")]
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    [InlineData("PlayStation 5", null)]
+    public void PlatformFromNavigator_maps_to_a_notch_key(string? navigator, string? want)
+        => Assert.Equal(want, Motion.PlatformFromNavigator(navigator));
+
     [Fact]
     public void MinJerk_is_a_monotone_zero_to_one_easing()
     {

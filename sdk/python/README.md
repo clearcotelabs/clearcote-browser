@@ -232,7 +232,7 @@ page.goto("https://example.com")
 page.click("#login")                       # eased bezier glide, then a trusted click
 page.fill("#user", "alice")                # focus + key-by-key typing with human timing
 page.locator("#pwd").type("s3cr3t")        # locators are humanized too
-page.mouse.wheel(0, 800)                   # eased, multi-step scroll
+page.mouse.wheel(0, 800)                   # whole wheel notches, in finger-flick bursts
 # a held-button drag (slider captchas): the button stays pressed across the move
 page.mouse.move(x0, y0); page.mouse.down(); page.mouse.move(x1, y0); page.mouse.up()
 ```
@@ -248,10 +248,13 @@ slightly over/undershoots plus a corrective move, i.e. the multi-peak velocity o
 one symmetric bell. Because they use native input, the button held by `mouse.down()` stays held
 across the move, so `down → move → up` is a real drag (slider captchas work). Clicks get an
 actionability pre-flight (visible + enabled + stable + not covered) and fall back to the native click
-if it fails. Typing goes key-by-key with **gaussian inter-key timing** + word-boundary pauses and the
-occasional fat-finger correction; `page.fill` over 200 chars stays atomic (skips per-key typing) to
-avoid crawling. Scrolling uses **ease-out inertia** (a fast flick decaying to a slow settle) with the
-occasional reading pause.
+if it fails. Typing goes key-by-key with **gaussian inter-key timing** + word-boundary pauses, the
+occasional fat-finger correction and **key rollover** (on some fast pairs the next key goes down
+before the previous one comes up, at a rate fixed per identity); `page.fill` over 200 chars stays
+atomic (skips per-key typing) to avoid crawling. Scrolling moves in **whole wheel notches** (100 px on
+a Windows identity, 120 on Linux, 40 on macOS), because a browser reports every wheel event as one
+full notch: the requested distance is rounded to the nearest notch (at least one). Notches come in
+short flicks with the occasional reading pause.
 
 `show_cursor=True` injects a red cursor dot that follows the real mouse, handy for watching a
 headed run. Both default to off; everything stays standard Playwright when `humanize=False`.

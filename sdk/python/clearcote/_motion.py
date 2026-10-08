@@ -295,6 +295,55 @@ def key_dwell(p: Persona, rng: Optional[Rng] = None) -> float:
     return p.key_dwell_min_ms + min(1.0, abs(gauss_from(rng)) * 0.45) * (p.key_dwell_max_ms - p.key_dwell_min_ms)
 
 
+# Salt for the rollover stream. Drawing from mulberry32(seed ^ salt) instead of adding a field to
+# make_persona keeps the persona draw ORDER (and so every existing seed's motor identity) unchanged.
+_ROLLOVER_SALT = 0x9E3779B9
+
+
+def rollover_rate(p: Persona) -> float:
+    """Share of eligible key pairs this persona types with ROLLOVER: the next key goes down before
+    the previous one comes up, the way people type fast common pairs. Stable per seed, 0.12..0.38.
+
+    Measured on r32/r33 before this existed: 0 overlapping keydowns in 30-32 typed keys, because
+    every character was one press() (down, dwell, up) before the next began.
+    Same value in motion.ts rolloverRate and Motion.RolloverRate."""
+    return _lerp(0.12, 0.38, mulberry32((p.seed ^ _ROLLOVER_SALT) & _MASK)())
+
+
+# Pixels one wheel notch scrolls, by the platform the persona claims. A wheel event sent over CDP
+# always carries wheelDelta +-120 (input_handler.cc sets wheel_ticks to +-1 whatever the delta), and
+# a real notch is the only event whose distance goes with a 120 wheelDelta:
+#   windows 100 = 3 lines x 100/3 px (web_input_event_builders_win.cc, default 3 lines per notch)
+#   linux   120 = ui::MouseWheelEvent::kWheelDelta (event.cc); measured 120/-120 per X11 notch
+#   macos    40 = kScrollbarPixelsPerCocoaTick (cocoa_event_utils.h)
+# android is not measured; it gets the windows value.
+WHEEL_NOTCH_PX = {"windows": 100, "linux": 120, "macos": 40, "android": 100}
+
+
+def wheel_notches(delta: float, notch_px: float) -> int:
+    """Whole notches for a requested scroll distance: the nearest count, at least one when the
+    caller asked for any scroll at all. A wheel cannot move 39 px; it moves notches."""
+    if not delta:
+        return 0
+    return max(1, _js_round(abs(delta) / notch_px))
+
+
+def platform_from_navigator(value: Optional[str]) -> Optional[str]:
+    """Map navigator.userAgentData.platform / navigator.platform to a WHEEL_NOTCH_PX key."""
+    v = (value or "").lower()
+    if not v:
+        return None
+    if "android" in v:   # before linux: Android's navigator.platform is "Linux armv8l"
+        return "android"
+    if "win" in v:
+        return "windows"
+    if "mac" in v:
+        return "macos"
+    if "linux" in v or "x11" in v or "cros" in v:
+        return "linux"
+    return None
+
+
 def click_point(box, frm, p: Persona, rng: Optional[Rng] = None):
     """A human click point inside ``box`` (dict with x/y/width/height): 2D gaussian toward center,
     nudged toward the approach side (undershoot), clamped a couple px inside the edges."""

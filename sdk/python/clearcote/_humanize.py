@@ -26,13 +26,17 @@ Design notes:
 """
 
 import random
+import sys
 import time
 
 from ._isolated import (
-    COVER_CHECK_MS, IS_FOCUSED as ISO_IS_FOCUSED, SELECT_PLAN as ISO_SELECT_PLAN,
+    COVER_CHECK_MS, IS_FOCUSED as ISO_IS_FOCUSED, PLATFORM as ISO_PLATFORM, SELECT_PLAN as ISO_SELECT_PLAN,
     SELECTED_INDEX as ISO_SELECTED_INDEX, VIEWPORT as ISO_VIEWPORT, world_for,
 )
-from ._motion import make_persona, plan_move, drag_dwell, click_hold, key_dwell, click_point, plan_ambient
+from ._motion import (
+    WHEEL_NOTCH_PX, make_persona, plan_move, drag_dwell, click_hold, key_dwell, click_point, plan_ambient,
+    platform_from_navigator, rollover_rate, wheel_notches,
+)
 
 # IIFE so it runs both as an add_init_script source AND when passed to page.evaluate().
 CURSOR_OVERLAY = """(() => {
@@ -76,6 +80,30 @@ _SHIFTED_SYMBOLS = frozenset('~!@#$%^&*()_+{}|:"<>?')
 
 def _needs_shift(ch):
     return "A" <= ch <= "Z" or ch in _SHIFTED_SYMBOLS
+
+
+# The engine's trajectory command, new name first. r34 renamed it and dropped both names from the
+# served /json/protocol: "humanizedClick" was listed there, and it is a known tool's vocabulary. The
+# old name still works on r34 and is the only one r33 and older know.
+ENGINE_POINTER_PATH = ("Browser.dispatchPointerPath", "Browser.humanizedClick")
+
+
+def _cdp_method_missing(err):
+    """True for CDP's "method not found" (-32601), which Playwright reports as "'X' wasn't found"."""
+    m = str(err)
+    return "wasn't found" in m or "-32601" in m or "method not found" in m.lower()
+
+
+# Keys a person rolls over: unshifted, one physical key each. Shifted characters, Enter/Backspace and
+# the typo path keep the plain one-press-at-a-time path.
+_ROLL_KEYS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789 ,.;'/-=")
+
+
+def _host_platform():
+    """The persona platform when the page cannot say: the SDK's default persona follows the host."""
+    if sys.platform.startswith("win"):
+        return "windows"
+    return "macos" if sys.platform == "darwin" else "linux"
 
 
 def _shift_lead_s():
@@ -158,7 +186,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
 
     # --- Engine real-trajectory routing (PRO) --------------------------------
     # Route point-to-point moves/clicks through the browser engine's
-    # Browser.humanizedClick: a trusted WebMouseEvent path built in the browser
+    # Browser.dispatchPointerPath (humanizedClick before r34): a trusted WebMouseEvent path built in the browser
     # process from REAL recorded human trajectories (PRO) or the engine bezier
     # (free) -- tiered automatically by the engine's runtime license gate, so the
     # SDK stays tier-agnostic. One CDP call per action (far less Input-domain
@@ -167,7 +195,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
     # button across the path -- sliders depend on it); wheel/typing unchanged.
     # Falls back to the SDK bezier (plan_move) permanently if the method is
     # unavailable (older engine, or a persistent context with no Browser handle).
-    _eng = {"session": None, "tid": None, "ok": True}
+    _eng = {"session": None, "tid": None, "ok": True, "method": None}
 
     def _engine_glide(x, y, no_click):
         if not _eng["ok"]:
@@ -183,9 +211,21 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
             dx, dy = x - st["pos"][0], y - st["pos"][1]
             dist = (dx * dx + dy * dy) ** 0.5
             dur = min(1.10, max(0.28, 0.30 + dist / 1700.0)) * (0.85 + 0.30 * random.random())
-            _eng["session"].send("Browser.humanizedClick", {
-                "targetId": _eng["tid"], "x": float(x), "y": float(y),
-                "duration": dur, "noClick": bool(no_click)})
+            params = {"targetId": _eng["tid"], "x": float(x), "y": float(y),
+                      "duration": dur, "noClick": bool(no_click)}
+            if _eng.get("method"):
+                _eng["session"].send(_eng["method"], params)
+            else:
+                # New name first; an engine older than r34 answers "wasn't found" (-32601)
+                # and gets the old one. Any other error is a real failure (below).
+                try:
+                    _eng["session"].send(ENGINE_POINTER_PATH[0], params)
+                    _eng["method"] = ENGINE_POINTER_PATH[0]
+                except Exception as e:  # noqa: BLE001
+                    if not _cdp_method_missing(e):
+                        raise
+                    _eng["session"].send(ENGINE_POINTER_PATH[1], params)
+                    _eng["method"] = ENGINE_POINTER_PATH[1]
             # The engine runs the trajectory in the BROWSER process and answers this command
             # before it has finished walking it. Without waiting, a following mouse.down() fires
             # at the cursor's stale position -- measured: a move to (110,58) then a press landed
@@ -364,35 +404,56 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
         except Exception:  # noqa: BLE001 - never let the anchor stop the scroll
             pass
 
+    def _notch_px():
+        """Pixels per wheel notch for the platform the page believes, read once per page."""
+        if "notch" not in st:
+            plat = None
+            try:
+                plat = platform_from_navigator(world_for(page).evaluate(ISO_PLATFORM))
+            except Exception:  # noqa: BLE001
+                pass
+            st["notch"] = WHEEL_NOTCH_PX[plat or _host_platform()]
+        return st["notch"]
+
     def hwheel(delta_x, delta_y):
+        """Scroll in WHOLE NOTCHES, the only thing a wheel emits.
+
+        A CDP wheel event always reports wheelDelta +-120 (one notch), whatever its distance. The
+        eased slices this replaced (39/28/20/10/3 px for a 100 px scroll, each at wheelDelta 120,
+        measured on r32/r33) were events no mouse produces: a real notch moves 100 px on Windows,
+        120 on Linux, 40 on macOS. So the total is rounded to the nearest whole notch (at least
+        one), and the notches come in finger-flick bursts."""
         _wheel_anchor()
-        steps = max(5, min(24, round((abs(delta_x) + abs(delta_y)) / 60)))
-        px = py = 0
-        for i in range(1, steps + 1):
-            t = i / steps
-            f = 1 - (1 - t) ** 2.2           # ease-OUT: a fast flick decaying to a slow inertial settle
-            nx, ny = round(delta_x * f), round(delta_y * f)
-            native_wheel(nx - px, ny - py)
-            px, py = nx, ny
+        notch = _notch_px()
+        plan = ([(0, notch if delta_y > 0 else -notch)] * wheel_notches(delta_y, notch)
+                + [(notch if delta_x > 0 else -notch, 0)] * wheel_notches(delta_x, notch))
+        burst = random.randint(2, 5)
+        for k, (ex, ey) in enumerate(plan):
+            native_wheel(ex, ey)
+            if k == len(plan) - 1:
+                break
             # local sleep, NOT page.wait_for_timeout: the latter is a CDP round-trip per call,
             # so it emits protocol traffic that bot-detectors (e.g. reCAPTCHA) can score — a
             # self-inflicted tell inside the humanize path. time.sleep is off-protocol.
-            time.sleep(_rand(10, 38) / 1000.0)
+            burst -= 1
+            if burst == 0:
+                time.sleep(_rand(110, 320) / 1000.0)  # the finger resets for the next flick
+                burst = random.randint(2, 5)
+            else:
+                time.sleep(_rand(18, 55) / 1000.0)
             if random.random() < 0.07:
-                time.sleep(_rand(40, 120) / 1000.0)   # occasional mid-scroll pause (reading)
+                time.sleep(_rand(150, 450) / 1000.0)  # occasional mid-scroll pause (reading)
             # A hand resting on the mouse does not hold it perfectly still through a long scroll,
-            # so a burst of 20 wheel events sharing one identical clientX/clientY is a signature
+            # so a burst of wheel events sharing one identical clientX/clientY is a signature
             # only a script produces. A couple of px, so the scroll stays over the same element
             # (and never while a button is down, where a move is a drag leg).
-            if steps >= 10 and not st["held"] and random.random() < 0.06:
+            if len(plan) >= 6 and not st["held"] and random.random() < 0.06:
                 try:
                     dx, dy = random.gauss(0, 1.5), random.gauss(0, 1.2)
                     native_move(st["pos"][0] + dx, st["pos"][1] + dy)
                     st["pos"] = (st["pos"][0] + dx, st["pos"][1] + dy)
                 except Exception:  # noqa: BLE001
                     pass
-        if px != delta_x or py != delta_y:
-            native_wheel(delta_x - px, delta_y - py)  # exact total
 
     mouse.move, mouse.click, mouse.wheel = hmove, hclick, hwheel
     # down/up are wrapped only to TRACK the held state hmove needs; the presses themselves stay
@@ -447,15 +508,20 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
         with "Ab!") -- input no keyboard produces."""
         n = len(text)
         shift = False
+        roll_rate = rollover_rate(persona)
+        i = 0
         try:
-            for i, ch in enumerate(text):
+            while i < n:
+                ch = text[i]
                 need = _needs_shift(ch)
                 if need and not shift and native_kb_down and native_kb_up:
                     native_kb_down("Shift")
                     shift = True
                     time.sleep(_shift_lead_s())
                 # occasional fat-finger on unshifted alnum chars, then notice + correct
+                typo = False
                 if not need and ch.isascii() and ch.isalnum() and random.random() < 0.02:
+                    typo = True
                     try:
                         _emit_key(_nearby_key(ch))
                         time.sleep(_rand(120, 300) / 1000.0)
@@ -463,10 +529,37 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
                         time.sleep(_rand(80, 200) / 1000.0)
                     except Exception:  # noqa: BLE001
                         pass
-                try:
-                    _emit_key(ch)
-                except Exception:  # noqa: BLE001
-                    break
+                # ROLLOVER: the next key goes down before this one comes up, the way people type fast
+                # pairs. One press() per character never overlaps (0 of 32 keydowns, measured on
+                # r32/r33), a keystroke-dynamics tell. Unshifted single-key pairs only.
+                nxt = text[i + 1] if i + 1 < n else None
+                d1 = key_dwell(persona)
+                if (nxt is not None and not typo and not shift and native_kb_down and native_kb_up
+                        and ch in _ROLL_KEYS and nxt in _ROLL_KEYS and ch != nxt and d1 - 8 >= 12
+                        and random.random() < roll_rate):
+                    overlap = _rand(12, min(55, d1 - 8))
+                    try:
+                        native_kb_down(ch)
+                        time.sleep((d1 - overlap) / 1000.0)
+                        native_kb_down(nxt)
+                        time.sleep(overlap / 1000.0)
+                        native_kb_up(ch)
+                        time.sleep(max(5.0, key_dwell(persona) - overlap) / 1000.0)
+                        native_kb_up(nxt)
+                    except Exception:  # noqa: BLE001
+                        for k in (ch, nxt):
+                            try:
+                                native_kb_up(k)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        break
+                    i += 1          # nxt is typed; the cadence below runs as if after it
+                    ch = nxt
+                else:
+                    try:
+                        _emit_key(ch)
+                    except Exception:  # noqa: BLE001
+                        break
                 if shift and (i == n - 1 or not _needs_shift(text[i + 1])):
                     time.sleep(_shift_lag_s())
                     native_kb_up("Shift")
@@ -479,6 +572,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
                     if random.random() < 0.06:
                         d += _rand(0.18, 0.45)                    # occasional thinking pause
                     time.sleep(d)
+                i += 1
         finally:
             if shift:  # never leave Shift held for the caller's next keystroke
                 try:

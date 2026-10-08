@@ -62,6 +62,8 @@ export const COVER_CHECK_MS = 400;
 
 // The reads humanize makes, as functions of one JSON argument (run by IsolatedWorld.evaluate).
 export const ISO_VIEWPORT = "() => [innerWidth, innerHeight]";
+// The platform the page believes (the persona's), for the wheel notch size.
+export const ISO_PLATFORM = "() => { const d = navigator.userAgentData; return (d && d.platform) || navigator.platform || ''; }";
 export const ISO_IS_FOCUSED =
   "(s) => { const e = document.querySelector(s); return !!e && e === document.activeElement; }";
 export const ISO_SELECT_PLAN = `(a) => { const s = document.querySelector(a.sel);

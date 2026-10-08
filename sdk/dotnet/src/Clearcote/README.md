@@ -138,7 +138,11 @@ holds for ~1 ms, and every click lands on the element's exact centre. No hand do
 each is separately measurable from the page. `Humanize` replaces those with a seeded motor persona —
 Fitts-timed minimum-jerk pointer paths, human press-hold and key dwell, dispersed landing points, and
 dropdown selection driven with the keyboard so the **engine** fires `input`/`change` (Playwright's
-`SelectOptionAsync` dispatches them from script, so they arrive `isTrusted: false`).
+`SelectOptionAsync` dispatches them from script, so they arrive `isTrusted: false`). Typing rolls over
+on some fast key pairs (the next key goes down before the previous one comes up), and
+`HumanWheelAsync` scrolls in **whole wheel notches** (100 px on a Windows identity, 120 on Linux, 40 on
+macOS; the distance is rounded to the nearest notch), because a browser reports every wheel event as
+one full notch.
 
 ```csharp
 var page = await browser.NewPageAsync();

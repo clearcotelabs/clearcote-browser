@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   makePersona, planMove, dragDwell, clickPoint, planAmbient, mulberry32, minJerk,
+  rolloverRate, wheelNotches, platformFromNavigator, WHEEL_NOTCH_PX,
 } from "../src/motion.js";
 import { scoreMotion, stepsToSamples, extractFeatures } from "../src/motionscore.js";
 
@@ -34,6 +35,43 @@ describe("persona", () => {
     expect(a.tremorHz).toBeGreaterThanOrEqual(8);
     expect(a.tremorHz).toBeLessThanOrEqual(12);
     expect(a.deviceHz).toBeGreaterThan(100);
+  });
+});
+
+// Bit-identical across SDKs (Python _motion.py, .NET Motion.cs): the same seed must give the same
+// rollover share and the same notch count in every language.
+describe("rolloverRate / wheel notches (cross-SDK parity)", () => {
+  it("rolloverRate matches the other SDKs to the last digit", () => {
+    expect(rolloverRate(makePersona("1111"))).toBe(0.18545862230472265);
+    expect(rolloverRate(makePersona(1111))).toBe(0.33123080658726395);
+    expect(rolloverRate(makePersona("abc"))).toBe(0.3663359977304935);
+    expect(rolloverRate(makePersona(0))).toBe(0.21331139486283063);
+    expect(rolloverRate(makePersona(31337))).toBe(0.3733816216979176);
+  });
+
+  it("rolloverRate leaves the persona draw order alone", () => {
+    const p = makePersona("1111");
+    const before = { ...p };
+    rolloverRate(p);
+    expect(p).toEqual(before);
+    expect(Object.keys(p)).not.toContain("rolloverRate");
+  });
+
+  it("wheelNotches rounds to the nearest whole notch, at least one", () => {
+    expect([0, 3, 39, 49, 50, 100, 149, 151, 1000, -39, -250].map((d) => wheelNotches(d, 100)))
+      .toEqual([0, 1, 1, 1, 1, 1, 1, 2, 10, 1, 3]);
+    expect([0, 39, 59, 60, 100, 180, 1000].map((d) => wheelNotches(d, 120)))
+      .toEqual([0, 1, 1, 1, 1, 2, 8]);
+  });
+
+  it("WHEEL_NOTCH_PX and platformFromNavigator", () => {
+    expect(WHEEL_NOTCH_PX).toEqual({ windows: 100, linux: 120, macos: 40, android: 100 });
+    const cases: [string | null, string | null][] = [
+      ["Win32", "windows"], ["Windows", "windows"], ["MacIntel", "macos"], ["macOS", "macos"],
+      ["Linux x86_64", "linux"], ["Linux armv8l", "linux"], ["Android", "android"], ["", null],
+      ["CrOS", "linux"], [null, null], ["PlayStation 5", null],
+    ];
+    for (const [nav, want] of cases) expect(platformFromNavigator(nav), String(nav)).toBe(want);
   });
 });
 

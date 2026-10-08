@@ -40,8 +40,9 @@ namespace Clearcote;
 ///                         actually write, and it goes straight to the untrusted path.
 ///   HumanWheelAsync /     pointer-movement-precedes-click, wheel edition: a wheel event carries the
 ///   HumanScrollAsync      cursor's coordinates, so an unpositioned scroll delivers every one of them
-///                         at the driver's origin, a corner no reader scrolls from. Also eases the
-///                         delta into chunks — one 1000px wheel event is not a gesture a wheel emits.
+///                         at the driver's origin, a corner no reader scrolls from. Also scrolls in
+///                         whole notches of the persona platform's size, in bursts — a CDP wheel event
+///                         always reports a full notch, so a sub-notch slice is an event no device emits.
 ///   HumanDragToAsync      pointer-press-dwell-duration at both ends of the gesture (grab hesitation
 ///                         after the press, settle before the release) plus a held-button path
 ///                         instead of down/teleport/up, which a range thumb reads as no drag at all.
@@ -55,8 +56,12 @@ public static class Humanize
 
     // Known is the invariant every press depends on: false means the driver's cursor has never been
     // moved on this page and still sits at the document origin. Ambient records that the one-per-page
-    // pre-keystroke placement has been spent.
-    private sealed class PointerState { public double X; public double Y; public bool Known; public bool Ambient; }
+    // pre-keystroke placement has been spent. NotchPx is the wheel notch of the platform the page
+    // claims, read on the first wheel and kept (0 until then).
+    private sealed class PointerState { public double X; public double Y; public bool Known; public bool Ambient; public int NotchPx; }
+
+    // Test seam: a forced rollover share for one page, in place of the persona's (the tests pin 0 and 1).
+    internal static readonly ConditionalWeakTable<IPage, StrongBox<double>> RolloverOverride = new();
 
     /// <summary>
     /// Attach a motor persona to a page. Pass the fingerprint seed so the same identity moves the
@@ -384,19 +389,26 @@ public static class Humanize
     }
 
     /// <summary>
-    /// Scroll with the wheel from a place a reader would actually scroll from, easing the delta the
-    /// way a wheel does.
+    /// Scroll with the wheel from a place a reader would actually scroll from, in whole notches.
     ///
     /// A wheel event carries the cursor's coordinates, and Playwright's cursor starts at the document
     /// origin: an unpositioned scroll delivers every wheel at (0,0), a corner where the element under
     /// the pointer is never the content being read. The pointer is only re-homed when it is nowhere
     /// sensible — a human does not move the mouse back to the middle between two scrolls of one page.
+    ///
+    /// Humanize scrolls WHOLE NOTCHES: the distance delivered is the nearest number of notches (at least
+    /// one) of the size the page's platform scrolls per notch — 100px Windows, 120px Linux, 40px macOS —
+    /// so a 39px request scrolls 100px under a Windows persona. A wheel event sent over CDP reports a
+    /// full notch (wheelDelta ±120) whatever its distance, so the eased sub-notch slices this used to
+    /// send (one scroll of 100 as 39/28/20/10/3, measured on r32 and r33) were events no device emits.
+    /// Use <c>page.Mouse.WheelAsync</c> where an exact pixel distance matters more than that.
     /// </summary>
     public static async Task HumanWheelAsync(this IPage page, float deltaX, float deltaY)
     {
         ArgumentNullException.ThrowIfNull(page);
         var p = PersonaFor(page);
         var st = StateFor(page);
+        int notch = await NotchPxAsync(page, st).ConfigureAwait(false);
 
         try
         {
@@ -417,34 +429,55 @@ public static class Humanize
             // Placement is best effort; the scroll below still runs.
         }
 
-        int chunks = (int)Math.Clamp(Math.Round((Math.Abs(deltaX) + Math.Abs(deltaY)) / 60.0), 5, 24);
-        float px = 0, py = 0;
+        // One notch per event and one axis per event, like a real wheel or tilt: vertical, then horizontal.
+        var plan = new List<(float X, float Y)>();
+        for (int i = Motion.WheelNotches(deltaY, notch); i > 0; i--) plan.Add((0, Math.Sign(deltaY) * notch));
+        for (int i = Motion.WheelNotches(deltaX, notch); i > 0; i--) plan.Add((Math.Sign(deltaX) * notch, 0));
+        int next = 0;
         try
         {
-            for (int i = 1; i <= chunks; i++)
+            // A finger spins a wheel in bursts: a few notches close together, then a gap while it resets.
+            int burstLeft = Rnd.Next(2, 6);
+            while (next < plan.Count)
             {
-                double t = (double)i / chunks;
-                double f = 1 - Math.Pow(1 - t, 2.2);   // ease-OUT: a fast flick decaying to an inertial settle
-                float nx = (float)Math.Round(deltaX * f), ny = (float)Math.Round(deltaY * f);
-                await page.Mouse.WheelAsync(nx - px, ny - py).ConfigureAwait(false);
-                px = nx; py = ny;
+                await page.Mouse.WheelAsync(plan[next].X, plan[next].Y).ConfigureAwait(false);
+                if (++next == plan.Count) break;
                 // Local sleep, never WaitForTimeoutAsync: that is a CDP round-trip per call, so it emits
                 // protocol traffic a detector can score — a self-inflicted tell inside the humanize path.
-                await Task.Delay((int)Rand(10, 38)).ConfigureAwait(false);
+                if (--burstLeft == 0)
+                {
+                    await Task.Delay((int)Rand(110, 320)).ConfigureAwait(false);
+                    burstLeft = Rnd.Next(2, 6);
+                }
+                else await Task.Delay((int)Rand(18, 55)).ConfigureAwait(false);
                 if (Rnd.NextDouble() < 0.07)
-                    await Task.Delay((int)Rand(40, 120)).ConfigureAwait(false);   // mid-scroll reading pause
-                // A hand resting on the mouse does not hold it still through a long scroll, and two
-                // dozen wheel events on byte-identical coordinates is not what a hand produces.
-                if (chunks >= 10 && Rnd.NextDouble() < 0.06) await DriftAsync(page, st).ConfigureAwait(false);
+                    await Task.Delay((int)Rand(150, 450)).ConfigureAwait(false);   // mid-scroll reading pause
+                // A hand resting on the mouse does not hold it still through a long scroll, and a run of
+                // wheel events on byte-identical coordinates is not what a hand produces.
+                if (plan.Count >= 6 && Rnd.NextDouble() < 0.06) await DriftAsync(page, st).ConfigureAwait(false);
             }
-            if (px != deltaX || py != deltaY)
-                await page.Mouse.WheelAsync(deltaX - px, deltaY - py).ConfigureAwait(false);   // exact total
         }
         catch (PlaywrightException)
         {
-            // Deliver the remainder plainly: humanize must never lose scroll the caller asked for.
-            await page.Mouse.WheelAsync(deltaX - px, deltaY - py).ConfigureAwait(false);
+            // Deliver the rest plainly: humanize must never lose scroll the caller asked for. Whole
+            // notches and no sleeps — a sub-notch remainder would be the very event this method avoids.
+            for (; next < plan.Count; next++)
+                await page.Mouse.WheelAsync(plan[next].X, plan[next].Y).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Pixels per wheel notch on this page: read once, from the platform the page claims (the
+    /// persona's, which need not be the host's), then kept. The host OS stands in when the read fails.
+    /// </summary>
+    private static async Task<int> NotchPxAsync(IPage page, PointerState st)
+    {
+        if (st.NotchPx > 0) return st.NotchPx;
+        // Read in an isolated world (IsolatedWorld): the page never sees it.
+        var r = await IsolatedWorld.For(page).EvaluateAsync(IsolatedWorld.Platform).ConfigureAwait(false);
+        string? platform = r is { ValueKind: JsonValueKind.String } s ? Motion.PlatformFromNavigator(s.GetString()) : null;
+        platform ??= OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsMacOS() ? "macos" : "linux";
+        return st.NotchPx = Motion.WheelNotchPx[platform];
     }
 
     /// <summary>Vertical <see cref="HumanWheelAsync(IPage,float,float)"/>: the common reading scroll.</summary>
@@ -481,6 +514,8 @@ public static class Humanize
     /// Type into whatever holds focus, key-by-key with human dwell and cadence. A bare type with no
     /// pointer history on the page gets one ambient placement first: keystrokes from a session where
     /// the mouse never existed are separable from a human's however good the per-key timing is.
+    /// Some pairs of plain keys roll over — the next key goes down before the previous one is up — at
+    /// the persona's stable <see cref="Motion.RolloverRate"/>.
     /// </summary>
     public static async Task HumanTypeAsync(this IPage page, string text)
     {
@@ -490,6 +525,7 @@ public static class Humanize
         await AmbientPlaceAsync(page, p, StateFor(page)).ConfigureAwait(false);
         // One key per code point (a surrogate pair is one character, not two half keys).
         var chars = text.EnumerateRunes().Select(r => r.ToString()).ToArray();
+        double rollover = RolloverOverride.TryGetValue(page, out var forced) ? forced.Value : Motion.RolloverRate(p);
         // Capitals and shifted symbols are typed the way a person types them: ShiftLeft goes down a
         // moment before the key (35-120 ms) and comes up just after it (10-70 ms), held across a run of
         // them. PressAsync("A") alone sent the key with shiftKey=false and no Shift key at all
@@ -506,7 +542,14 @@ public static class Humanize
                     shift = true;
                     await Task.Delay((int)Rand(35, 120)).ConfigureAwait(false);
                 }
-                await PressOrInsertAsync(page, ch, p).ConfigureAwait(false);
+                // Rollover: one press per character never overlaps two keys, and a real typist's fast
+                // pairs do (0 overlapping keydowns in 32 keys, measured on r32/r33). Only two different
+                // plain keys, never under Shift.
+                if (!shift && i + 1 < chars.Length && CanRoll(ch) && CanRoll(chars[i + 1]) && ch != chars[i + 1]
+                    && Rnd.NextDouble() < rollover && await RollPairAsync(page, ch, chars[i + 1], p).ConfigureAwait(false))
+                    ch = chars[++i];   // both typed: carry on as if after the second
+                else
+                    await PressOrInsertAsync(page, ch, p).ConfigureAwait(false);
                 if (shift && (i == chars.Length - 1 || !NeedsShift(chars[i + 1])))
                 {
                     await Task.Delay((int)Rand(10, 70)).ConfigureAwait(false);
@@ -538,6 +581,42 @@ public static class Humanize
     // types with Shift held: capitals and the shifted symbols.
     internal static bool NeedsShift(string ch)
         => ch.Length == 1 && ((ch[0] >= 'A' && ch[0] <= 'Z') || "~!@#$%^&*()_+{}|:\"<>?".IndexOf(ch[0]) >= 0);
+
+    // Keys that may roll: lower-case, unshifted, one physical key each on the US layout.
+    private const string RollKeys = "abcdefghijklmnopqrstuvwxyz0123456789 ,.;'/-=";
+    private static bool CanRoll(string ch) => ch.Length == 1 && RollKeys.IndexOf(ch[0]) >= 0;
+
+    // Two keys with rollover: b goes down while a is still held, then a comes up, then b. DownAsync
+    // inserts the character just as PressAsync does, so the typed value is unchanged. False (nothing
+    // sent) when the dwell is too short to overlap inside. A failure releases both keys, best effort,
+    // and stops the typing the way a failed press does.
+    private static async Task<bool> RollPairAsync(IPage page, string a, string b, Persona p)
+    {
+        double d1 = Motion.KeyDwell(p), d2 = Motion.KeyDwell(p);
+        if (d1 - 8 < 12) return false;
+        double overlap = Rand(12, Math.Min(55, d1 - 8));
+        try
+        {
+            await page.Keyboard.DownAsync(a).ConfigureAwait(false);
+            await Task.Delay((int)Math.Round(d1 - overlap)).ConfigureAwait(false);
+            await page.Keyboard.DownAsync(b).ConfigureAwait(false);
+            await Task.Delay((int)Math.Round(overlap)).ConfigureAwait(false);
+            await page.Keyboard.UpAsync(a).ConfigureAwait(false);
+            await Task.Delay((int)Math.Round(Math.Max(5, d2 - overlap))).ConfigureAwait(false);
+            await page.Keyboard.UpAsync(b).ConfigureAwait(false);
+            return true;
+        }
+        catch
+        {
+            // As with Shift: never leave a key held for the caller's next keystroke.
+            foreach (var k in new[] { a, b })
+            {
+                try { await page.Keyboard.UpAsync(k).ConfigureAwait(false); }
+                catch (Exception) { /* best-effort */ }
+            }
+            throw;
+        }
+    }
 
     // One key with the persona's hold. Playwright maps only its US layout; for anything else ("ö",
     // emoji) PressAsync throws "Unknown key", and the text is inserted instead -- the same fallback

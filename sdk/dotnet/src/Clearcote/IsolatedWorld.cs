@@ -69,6 +69,8 @@ public sealed class IsolatedWorld
 
     // The reads humanize makes, as functions of one JSON argument.
     internal const string Viewport = "() => [innerWidth, innerHeight]";
+    // The platform the page believes (the persona's), for the wheel notch size.
+    internal const string Platform = "() => { const d = navigator.userAgentData; return (d && d.platform) || navigator.platform || ''; }";
     internal const string FocusedRect = @"() => {
         const el = document.activeElement;
         if (!el || el === document.body || el === document.documentElement) return null;

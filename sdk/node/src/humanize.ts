@@ -21,8 +21,11 @@
 // special binary command required.
 
 import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
-import { makePersona, planMove, dragDwell, clickHold, keyDwell, clickPoint, planAmbient, gaussFrom, type Persona, type Step } from "./motion.js";
-import { COVER_CHECK_MS, ISO_IS_FOCUSED, ISO_SELECT_PLAN, ISO_SELECTED_INDEX, ISO_VIEWPORT, worldFor } from "./isolated.js";
+import {
+  makePersona, planMove, dragDwell, clickHold, keyDwell, clickPoint, planAmbient, gaussFrom, rolloverRate,
+  wheelNotches, platformFromNavigator, WHEEL_NOTCH_PX, type Persona, type Step, type WheelPlatform,
+} from "./motion.js";
+import { COVER_CHECK_MS, ISO_IS_FOCUSED, ISO_PLATFORM, ISO_SELECT_PLAN, ISO_SELECTED_INDEX, ISO_VIEWPORT, worldFor } from "./isolated.js";
 
 export interface HumanizeOptions {
   /** Humanize all input (move/click/drag/scroll/type) as native trusted events. */
@@ -54,6 +57,56 @@ export const CURSOR_OVERLAY = `(() => {
 })();`;
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
+const randInt = (a: number, b: number) => a + Math.floor(Math.random() * (b - a + 1)); // inclusive
+
+// Keys a person rolls over (see humanTypeText): lower-case, unshifted, one physical key each.
+// Shifted characters, Enter/Backspace and the typo path keep the plain one-press-at-a-time path.
+const ROLL_KEYS = new Set("abcdefghijklmnopqrstuvwxyz0123456789 ,.;'/-=");
+
+/** The persona platform when the page cannot say: the SDK's default persona follows the host. */
+const hostWheelPlatform = (): WheelPlatform =>
+  process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux";
+
+// The engine's pointer-path command. r34 renamed Browser.humanizedClick to Browser.dispatchPointerPath:
+// the old name was listed in /json/protocol for anyone who asked, and "humanizedClick" is known
+// vocabulary, so the method list alone said what the build was for. r33 and older only know the old
+// name, so the new one goes first and the old one is the fallback for a method-not-found only.
+/** @internal exported for tests */
+export const POINTER_PATH = "Browser.dispatchPointerPath";
+/** @internal exported for tests */
+export const POINTER_PATH_LEGACY = "Browser.humanizedClick";
+
+// Which name each browser answered to, so only its first call can pay for a miss.
+const engineMethodNames = new WeakMap<object, Map<string, string>>();
+
+// A CDP method-not-found: the engine predates the name. A raw CDP client sees code -32601;
+// Playwright's CDPSession keeps only the message ("Protocol error (X): 'X' wasn't found").
+const isMethodNotFound = (e: any): boolean =>
+  e?.code === -32601 || /-32601|wasn't found|method not found/i.test(String(e?.message ?? e));
+
+/** @internal exported for tests. Send `method`, or `legacy` when the engine predates the rename, and
+ * remember per `cacheKey` (a Browser, or the context when there is none) which one answered. Any
+ * error other than method-not-found propagates as-is: retrying a real failure under the old name
+ * would only replay it. */
+export async function sendEngineCommand(
+  session: { send(method: string, params?: any): Promise<any> }, cacheKey: object,
+  method: string, legacy: string, params: Record<string, unknown>
+): Promise<any> {
+  let names = engineMethodNames.get(cacheKey);
+  if (!names) { names = new Map(); engineMethodNames.set(cacheKey, names); }
+  const known = names.get(method);
+  if (known) return session.send(known, params);
+  try {
+    const r = await session.send(method, params);
+    names.set(method, method);
+    return r;
+  } catch (e) {
+    if (!isMethodNotFound(e)) throw e;
+  }
+  const r = await session.send(legacy, params);
+  names.set(method, legacy);
+  return r;
+}
 
 // The characters a US-layout keyboard (Playwright's, and the engine's keyboard.getLayoutMap())
 // types with Shift held: capitals and the shifted symbols.
@@ -150,10 +203,12 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   };
 
   // Engine real-trajectory routing (PRO): send point-to-point moves/clicks through
-  // Browser.humanizedClick (real recorded human paths for PRO, engine bezier for free,
-  // tiered by the engine license gate). Held-button DRAGS stay native; falls back to the
-  // SDK bezier if the method is unavailable (older engine / no browser session).
-  const eng: { session: any; tid: string | null; ok: boolean } = { session: null, tid: null, ok: true };
+  // Browser.dispatchPointerPath (Browser.humanizedClick before r34, see sendEngineCommand; real
+  // recorded human paths for PRO, engine bezier for free, tiered by the engine license gate).
+  // Held-button DRAGS stay native; falls back to the SDK bezier if the method is unavailable
+  // (older engine / no browser session).
+  const eng: { session: any; key: object | null; tid: string | null; ok: boolean } =
+    { session: null, key: null, tid: null, ok: true };
   const engineGlide = async (x: number, y: number, noClick: boolean): Promise<boolean> => {
     if (!eng.ok) return false;
     try {
@@ -163,12 +218,14 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
         const info: any = await tsession.send("Target.getTargetInfo");
         eng.tid = info.targetInfo.targetId;
         const br: any = ctx.browser ? ctx.browser() : null;
+        eng.key = br ?? ctx; // the command name is a property of the engine: learn it once per browser
         eng.session = br ? await br.newBrowserCDPSession() : tsession;
       }
       const dx = x - st.x, dy = y - st.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       const dur = Math.min(1.10, Math.max(0.28, 0.30 + dist / 1700)) * (0.85 + 0.30 * Math.random());
-      await eng.session.send("Browser.humanizedClick", { targetId: eng.tid, x, y, duration: dur, noClick });
+      await sendEngineCommand(eng.session, eng.key!, POINTER_PATH, POINTER_PATH_LEGACY,
+        { targetId: eng.tid, x, y, duration: dur, noClick });
       // The engine walks the trajectory in the BROWSER process and answers this command before it
       // has finished. Without waiting, a following mouse.down() fires at the cursor's STALE
       // position — measured: a move to (110,58) then a press landed at (981,629), on <body>
@@ -247,7 +304,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
     await glide(x, y);
   };
   // down/up are wrapped to TRACK the held state mouse.move needs, and — critically — to make the
-  // press position DETERMINISTIC. The engine answers humanizedClick before its trajectory has
+  // press position DETERMINISTIC. The engine answers its pointer path before the trajectory has
   // finished walking, and it overruns the `duration` it reports, so sleeping that duration is not
   // enough: measured on Node, a move to (110,58) was still mid-flight at (416,504) when the press
   // fired, landing on <body>. Re-issuing a native move to the tracked target immediately before
@@ -264,7 +321,7 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
     // humanized drag move first, and that move glides and sets `placed`.
     if (st.placed) {
       // Re-pin only once a real move has happened — that is what makes st.x/st.y correspond to
-      // where the engine's cursor actually is. The engine answers humanizedClick before its
+      // where the engine's cursor actually is. The engine answers its pointer path before its
       // trajectory has finished, so without this the press can fire at a stale position.
       try { await nativeMove(st.x, st.y); } catch { /* best effort: keep the press on target */ }
     }
@@ -324,28 +381,55 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
     } catch { /* best-effort: scroll from wherever the cursor is */ }
   };
 
-  // scroll easing: break into eased chunks of native wheel deltas
+  // Pixels per wheel notch for the platform this page claims (WHEEL_NOTCH_PX). Read once per page,
+  // lazily on the first wheel, in the isolated world like every other humanize read. A page that
+  // cannot say (closed, mid-navigation, no CDP) gets the host's platform. Kept for the life of the
+  // page either way: a mouse does not change its notch between two scrolls.
+  let notchPx: number | null = null;
+  const wheelNotchPx = async (): Promise<number> => {
+    if (notchPx === null) {
+      let plat: WheelPlatform | null = null;
+      try { plat = platformFromNavigator(await worldFor(page).evaluate<string>(ISO_PLATFORM)); } catch { /* host below */ }
+      notchPx = WHEEL_NOTCH_PX[plat ?? hostWheelPlatform()];
+    }
+    return notchPx;
+  };
+
+  /** Scroll in WHOLE NOTCHES, the only thing a wheel emits. Humanize scrolls whole notches: the
+   * delivered total is the requested distance rounded to the nearest notch (at least one), not the
+   * exact pixel count.
+   *
+   * A CDP wheel event always reports wheelDelta ±120 (one notch), whatever its distance. The eased
+   * slices this replaced (39/28/20/10/3 px for a 100 px scroll, each at wheelDelta 120, measured on
+   * r32/r33) were events no mouse produces: a real notch moves 100 px on Windows, 120 on Linux, 40 on
+   * macOS. One axis per event, like a real wheel or tilt, and the notches come in finger-flick bursts. */
   mouse.wheel = async (dx: number, dy: number) => {
     await scrollAnchor();
-    const steps = Math.max(5, Math.min(24, Math.round((Math.abs(dx) + Math.abs(dy)) / 60)));
-    const ease = (u: number) => 1 - Math.pow(1 - u, 2.2); // ease-OUT: fast flick -> slow inertial settle
-    let px = 0, py = 0;
-    for (let i = 1; i <= steps; i++) {
-      const f = ease(i / steps);
-      const nxw = Math.round(dx * f), nyw = Math.round(dy * f);
-      await nativeWheel(nxw - px, nyw - py); px = nxw; py = nyw;
+    const notch = await wheelNotchPx();
+    const plan: [number, number][] = [];
+    for (let k = wheelNotches(dy, notch); k > 0; k--) plan.push([0, Math.sign(dy) * notch]);
+    for (let k = wheelNotches(dx, notch); k > 0; k--) plan.push([Math.sign(dx) * notch, 0]);
+    let burst = randInt(2, 5);
+    for (let i = 0; i < plan.length; i++) {
+      await nativeWheel(plan[i][0], plan[i][1]);
+      if (i === plan.length - 1) break;
       // local sleep, NOT page.waitForTimeout: the latter is a CDP round-trip per call, so it
       // emits protocol traffic bot-detectors (e.g. reCAPTCHA) can score — a self-inflicted tell
       // inside the humanize path. setTimeout is off-protocol.
-      await sleep(rand(10, 38));
-      if (Math.random() < 0.07) await sleep(rand(40, 120)); // occasional mid-scroll pause (reading)
+      if (--burst === 0) {
+        await sleep(rand(110, 320)); // the finger resets for the next flick
+        burst = randInt(2, 5);
+      } else {
+        await sleep(rand(18, 55));
+      }
+      if (Math.random() < 0.07) await sleep(rand(150, 450)); // occasional mid-scroll pause (reading)
       // A hand resting on the mouse does not hold it perfectly still through a long scroll. Without
-      // this a wheel burst is the one input where the pointer coordinate never changes at all.
-      if (steps >= 10 && i > 2 && i < steps && Math.random() < 0.06) {
+      // this a wheel burst is the one input where the pointer coordinate never changes at all. Never
+      // while a button is down, where a move is a drag leg.
+      if (plan.length >= 6 && !st.held && Math.random() < 0.06) {
         try { await glide(st.x + gauss() * 3.5, st.y + gauss() * 2.5); } catch { /* drift is cosmetic */ }
       }
     }
-    if (px !== dx || py !== dy) await nativeWheel(dx - px, dy - py);
   };
 
   // ----------------------------------------------------------------- keyboard
@@ -372,13 +456,18 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
   // before the key (35-120 ms) and comes up just after it (10-70 ms), held across a run of them.
   // Playwright's press("A") alone sent the key with shiftKey=false and no Shift key at all (measured
   // on r28 with "Ab!") -- input no keyboard produces.
+  //
+  // Fast pairs ROLL OVER: the next key goes down before the previous one comes up. One press() per
+  // character never overlaps (0 of 32 keydowns, measured on r32/r33), a keystroke-dynamics tell;
+  // real typists overlap many fast pairs. The share is the persona's rolloverRate, stable per seed.
+  const rollRate = rolloverRate(persona);
   const humanTypeText = async (text: string): Promise<void> => {
     const chars = Array.from(text);
     const n = chars.length;
     let shift = false;
     try {
       for (let i = 0; i < n; i++) {
-        const ch = chars[i];
+        let ch = chars[i];
         const need = needsShift(ch);
         if (need && !shift && nativeKbDown && nativeKbUp) {
           await nativeKbDown("Shift");
@@ -386,7 +475,9 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
           await sleep(rand(35, 120));
         }
         // occasional fat-finger on unshifted alnum chars, then notice + correct
+        let typo = false;
         if (!need && /[a-z0-9]/.test(ch) && Math.random() < 0.02) {
+          typo = true;
           try {
             await emitKey(nearbyKey(ch));
             await sleep(rand(120, 300));
@@ -394,7 +485,35 @@ export async function attachHumanize(browser: Browser, page: Page, opts: Humaniz
             await sleep(rand(80, 200));
           } catch { /* typo path best-effort */ }
         }
-        try { await emitKey(ch); } catch { break; }
+        // Rollover of ch and the next char: unshifted single-key pairs only, never a key with itself,
+        // never after a typo. keyboard.down inserts the character exactly as press does, so the typed
+        // value is unchanged. The overlap leaves ch down alone for at least 8 ms first.
+        const nx = chars[i + 1];
+        let rolled = false;
+        if (nativeKbDown && nativeKbUp && !shift && i + 1 < n && !typo && ROLL_KEYS.has(ch)
+            && ROLL_KEYS.has(nx) && ch !== nx && Math.random() < rollRate) {
+          const d1 = keyDwell(persona), d2 = keyDwell(persona);
+          if (d1 - 8 >= 12) {
+            const overlap = rand(12, Math.min(55, d1 - 8));
+            try {
+              await nativeKbDown(ch);
+              await sleep(d1 - overlap);
+              await nativeKbDown(nx);
+              await sleep(overlap);
+              await nativeKbUp(ch);
+              await sleep(Math.max(5, d2 - overlap));
+              await nativeKbUp(nx);
+            } catch {
+              // never strand a key down for the caller's next keystroke
+              try { await nativeKbUp(ch); } catch { /* best-effort */ }
+              try { await nativeKbUp(nx); } catch { /* best-effort */ }
+              break;
+            }
+            rolled = true;
+            i += 1; ch = nx; // nx is typed; the cadence below runs as if after it
+          }
+        }
+        if (!rolled) { try { await emitKey(ch); } catch { break; } }
         if (shift && (i === n - 1 || !needsShift(chars[i + 1]))) {
           await sleep(rand(10, 70));
           await nativeKbUp!("Shift");
