@@ -78,30 +78,42 @@ def test_windows_claim_on_linux_gets_swiftshader_headed_and_headless():
     assert gpu_backend_args("windows", False, "linux") == ["--use-angle=swiftshader-webgl"]
 
 
-def test_linux_claim_headless_uses_mesa_over_the_display_else_over_egl(monkeypatch):
+def test_linux_claim_prefers_mesa_over_egl_in_both_modes_else_over_the_display(monkeypatch):
+    # Real Linux Chrome shows the "OpenGL ES 3.2" (EGL) form 4:1 over desktop GL, and gl-egl renders headed
+    # under Xvfb too (SC 180), so the same backend serves both modes: one WebGL surface, headless or headed.
     _xsock(monkeypatch, True)
-    for egl in (True, False):  # a reachable display always wins: GLX, the format of the persona's own label
-        assert gpu_backend_args("linux", False, "linux", environ={"DISPLAY": ":99"}, mesa_egl=egl) == [
-            "--use-angle=gl", "--ignore-gpu-blocklist"]
+    for env in ({"DISPLAY": ":99"}, {}):
+        assert gpu_backend_args("linux", False, "linux", environ=env, mesa_egl=True) == [
+            "--use-angle=gl-egl", "--ignore-gpu-blocklist"]
+        assert gpu_backend_args("linux", True, "linux", environ=env, mesa_egl=True) == [
+            "--use-angle=gl-egl"]  # headed: gpu_blocklist_args already carries the override
+    # no EGL: a reachable display still gives Mesa (desktop GL, the rarer real form)
+    assert gpu_backend_args("linux", False, "linux", environ={"DISPLAY": ":99"}, mesa_egl=False) == [
+        "--use-angle=gl", "--ignore-gpu-blocklist"]
+    assert gpu_backend_args("linux", True, "linux", environ={"DISPLAY": ":99"}, mesa_egl=False) == ["--use-angle=gl"]
     _xsock(monkeypatch, False)
     for env in ({"DISPLAY": ":99"}, {}):  # a dead local display, or none at all
         assert gpu_backend_args("linux", False, "linux", environ=env, mesa_egl=True) == [
             "--use-angle=gl-egl", "--ignore-gpu-blocklist"]
         assert gpu_backend_args("linux", False, "linux", environ=env, mesa_egl=False) == []  # stays on SwiftShader
-
-
-def test_linux_claim_headed_is_left_to_the_default_gl_path(monkeypatch):
-    _xsock(monkeypatch, True)
-    assert gpu_backend_args("linux", True, "linux", environ={"DISPLAY": ":99"}, mesa_egl=True) == []
+        assert gpu_backend_args("linux", True, "linux", environ=env, mesa_egl=False) == []
 
 
 def test_backend_choice_never_overrides_the_caller_or_other_hosts(monkeypatch):
     _xsock(monkeypatch, True)
     env = {"DISPLAY": ":99"}
     assert gpu_backend_args("windows", True, "linux", ["--use-angle=vulkan"]) == []
-    assert gpu_backend_args("linux", False, "linux", ["--use-gl=egl"], environ=env) == []
-    assert gpu_backend_args("linux", False, "linux", ["--ignore-gpu-blocklist"], environ=env) == ["--use-angle=gl"]
-    assert gpu_backend_args("linux", False, "linux", ["--use-angle=swiftshader"], environ={}, mesa_egl=True) == []
+    # a caller's own backend is kept; headless on a GPU-less host it still needs the blocklist override
+    # (measured: without it a headless launch with the caller's gl-egl or gl had no WebGL context at all)
+    assert gpu_backend_args("linux", False, "linux", ["--use-gl=egl"], environ=env) == ["--ignore-gpu-blocklist"]
+    assert gpu_backend_args("linux", False, "linux", ["--use-angle=gl-egl"], environ={}, mesa_egl=True) == [
+        "--ignore-gpu-blocklist"]
+    assert gpu_backend_args("linux", False, "linux", ["--use-angle=gl", "--ignore-gpu-blocklist"], environ=env) == []
+    assert gpu_backend_args("linux", True, "linux", ["--use-angle=gl"], environ=env) == []  # headed has it already
+    assert gpu_backend_args("linux", False, "linux", ["--ignore-gpu-blocklist"], environ=env, mesa_egl=False) == [
+        "--use-angle=gl"]
+    assert gpu_backend_args("linux", False, "linux", ["--use-angle=swiftshader"], environ={}, mesa_egl=True) == [
+        "--ignore-gpu-blocklist"]
     assert gpu_backend_args("linux", False, "linux", ["--ignore-gpu-blocklist"], environ={}, mesa_egl=True) == [
         "--use-angle=gl-egl"]
     assert gpu_backend_args("windows", False, "linux", environ={}, mesa_egl=True) == ["--use-angle=swiftshader-webgl"]

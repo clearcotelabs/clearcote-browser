@@ -105,15 +105,27 @@ HEADLESS_SCREEN_PROFILES = (
 _CALLER_GEOMETRY_KEYS = ("viewport", "no_viewport", "screen")
 # Window flags that mean the caller sized the window themselves (the fit skips its resize).
 _CALLER_WINDOW_FLAGS = ("--window-size", "--window-position", "--start-maximized")
+# The subset that fixes the window's SIZE. A bare ``--window-position`` only places it: the SDK still
+# gives the browser a realistic display and skips only the fit (SC 180: the hosted gateway passed
+# ``--window-position=10,10`` and lost the display with it, so every session showed the 800x600 surface).
+_CALLER_SIZE_FLAGS = ("--window-size", "--start-maximized")
+# The persona transport's marker (``_personaenv``, SDK 0.41+): the seed left argv for the environment.
+_PERSONA_ENV_SWITCH = "--persona-from-env"
 # Switches that mean the caller set the headless display themselves.
 _CALLER_DISPLAY_FLAGS = ("--screen-info",)
 
 
 def persona_active(args):
-    """Whether ``--fingerprint=<seed>`` is on the command line, i.e. the engine will spoof
-    ``screen``/``avail`` itself (regime 1). ``light_stealth`` drops that switch on purpose, so this
-    is False for it even though a seed was passed to the SDK."""
-    return any(str(a).startswith("--fingerprint=") for a in (args or []))
+    """Whether a persona is active for this launch, i.e. the engine will spoof ``screen``/``avail``
+    itself (regime 1): ``--fingerprint=<seed>`` on the command line, or the persona transport's
+    ``--persona-from-env`` marker when the seed already moved to the environment (``_personaenv``).
+    ``light_stealth`` drops the seed on purpose, so this is False for it even though a seed was
+    passed to the SDK."""
+    for a in (args or []):
+        s = str(a)
+        if s.startswith("--fingerprint=") or s == _PERSONA_ENV_SWITCH or s.startswith(_PERSONA_ENV_SWITCH + "="):
+            return True
+    return False
 
 
 def _pick(seed):
@@ -271,8 +283,10 @@ def apply_headless_geometry(pw_kwargs, seed=None, args=None):
         return None
     pw_kwargs["no_viewport"] = True
     if persona_active(args):
-        display = (None if sys.platform != "linux" or caller_set_the_display(args)
-                   else headless_display(seed, args))
+        # The persona's own display wins over --screen-info on every platform (measured on r32 Linux
+        # and r33 Windows: the seed's screen shows, the switch is ignored), so the SDK's row is a
+        # fallback for a persona that does not engage, never a contradiction.
+        display = None if caller_set_the_display(args) else headless_display(seed, args)
         return {"mode": "persona", "args": [screen_info_switch(display)] if display else []}
     display = None if caller_set_the_display(args) else headless_display(seed, args)
     extra = [screen_info_switch(display)] if display else []
@@ -282,8 +296,15 @@ def apply_headless_geometry(pw_kwargs, seed=None, args=None):
 
 
 def caller_sized_the_window(args):
-    """True when the caller passed their own window geometry flag."""
+    """True when the caller passed their own window geometry flag (size, position or maximize): the
+    window is theirs, so the SDK neither moves nor fits it."""
     return any(str(a).split("=", 1)[0] in _CALLER_WINDOW_FLAGS for a in (args or []))
+
+
+def caller_fixed_the_size(args):
+    """True when the caller fixed the window's SIZE (``--window-size`` / ``--start-maximized``), as
+    opposed to only placing it with ``--window-position``."""
+    return any(str(a).split("=", 1)[0] in _CALLER_SIZE_FLAGS for a in (args or []))
 
 
 def caller_set_the_display(args):
@@ -429,12 +450,13 @@ async def _fit_window_async(set_bounds, read, target, room, timeout=None):
 
 
 def fit_window_to_work_area(page, args=None):
-    """Size the headless window to the display's work area — the persona's (regime 1) or the one
+    """Size the window to the display's work area — the persona's (regime 1) or the one
     ``--screen-info`` set (regime 2) — so the page reports a maximized window (``outer == avail``)
-    instead of the headless default window sitting inside a much larger screen.
+    instead of the default window sitting inside a much larger screen.
 
-    Note ``--start-maximized`` and CDP ``windowState: "maximized"`` are both no-ops in headless
-    (measured — the window stays at its default size), which is why this sets explicit bounds.
+    Headless, and headed on Linux without a window manager (Xvfb, every Docker/VPS headful run):
+    there ``--start-maximized`` and CDP ``windowState: "maximized"`` are both no-ops (measured — the
+    window stays Chrome's 945x1060 default at (10,10)), which is why this sets explicit bounds.
 
     Returns the ``(width, height)`` the window ended up reporting, or None if skipped. Never raises:
     a geometry improvement must not be able to fail a launch.
@@ -524,18 +546,25 @@ def geometry_is_coherent(screen, avail, inner, outer):
 
 def served_geometry(engine_args, seed=None, light_stealth=False, headless=True):
     """What serve() adds for a headless launch, or None to leave geometry alone (headed, or the
-    caller passed a window or display switch of their own; the SDK's own android ``--window-size``
-    counts, since a phone persona sizes itself).
+    caller passed a display switch or fixed the window's size; the SDK's own android
+    ``--window-size`` counts, since a phone persona sizes itself).
 
-    Returns ``{"persona": bool, "display": dict|None, "args": [...]}``.
+    A caller who only PLACED the window (``--window-position``) still gets the display: the switch
+    says where the window goes, not how big the screen is. Only the fit is skipped then
+    (``"fit": False``), so their position holds.
+
+    Both regimes pass ``--screen-info``: under a persona the engine's own display wins over it
+    (measured on r32 Linux and r33 Windows), so the row is a fallback for a persona that does not
+    engage rather than a contradiction; without one it IS the display.
+
+    Returns ``{"persona": bool, "display": dict, "args": [...], "fit": bool}``.
     """
-    if not headless or caller_sized_the_window(engine_args) or caller_set_the_display(engine_args):
+    if not headless or caller_fixed_the_size(engine_args) or caller_set_the_display(engine_args):
         return None
-    origin = "--window-position=0,0"
-    if persona_active(engine_args):
-        return {"persona": True, "display": None, "args": [origin]}
+    placed = caller_sized_the_window(engine_args)  # a bare --window-position: keep theirs, skip the fit
     display = headless_display(seed, engine_args, light_stealth=light_stealth)
-    return {"persona": False, "display": display, "args": [screen_info_switch(display), origin]}
+    args = [screen_info_switch(display)] + ([] if placed else ["--window-position=0,0"])
+    return {"persona": persona_active(engine_args), "display": display, "args": args, "fit": not placed}
 
 
 def validate_window_size(window_size):

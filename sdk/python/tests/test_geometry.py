@@ -137,6 +137,8 @@ def test_persona_active_tracks_the_fingerprint_switch_not_the_kwarg():
     is NOT running and the engine spoofs no screen — the regime has to be read off the command line,
     not off the caller's kwargs."""
     assert persona_active(["--fingerprint=abc", "--no-sandbox"])
+    # the persona transport (0.41+) moves the seed to the environment and leaves this marker behind
+    assert persona_active(["--no-sandbox", "--persona-from-env"])
     assert not persona_active(["--fingerprint-platform=windows", "--fingerprint-screen-width=1920"])
     assert not persona_active([])
     assert not persona_active(None)
@@ -201,13 +203,14 @@ def test_regime_2_keeps_a_callers_own_display_or_window_switch():
     assert len(sized["args"]) == 1 and sized["args"][0].startswith("--screen-info=")
 
 
-def test_regime_1_takes_no_viewport_and_sets_linux_headless_display():
-    """The engine owns the exposed screen; Linux also needs a matching real headless display."""
+def test_regime_1_takes_no_viewport_and_sets_a_fallback_headless_display():
+    """The engine owns the exposed screen (its persona display wins over --screen-info, measured on
+    r32 Linux and r33 Windows); the SDK still passes the seed's row on every platform, so a persona
+    that does not engage never leaves the browser on the 800x600 headless surface."""
     kwargs = {"headless": True}
     applied = apply_headless_geometry(kwargs, "seed", args=["--fingerprint=seed", "--no-sandbox"])
     assert applied["mode"] == "persona"
-    assert applied["args"] == ([screen_info_switch(headless_display("seed", ["--fingerprint=seed", "--no-sandbox"]))]
-                               if sys.platform == "linux" else [])
+    assert applied["args"] == [screen_info_switch(headless_display("seed", ["--fingerprint=seed", "--no-sandbox"]))]
     assert kwargs["no_viewport"] is True
     assert "screen" not in kwargs and "viewport" not in kwargs
 
@@ -292,8 +295,8 @@ def test_a_seed_beside_a_profile_still_takes_the_persona_regime():
     kwargs = {"headless": True}
     applied = apply_headless_geometry(kwargs, "seed", args=[arg, "--fingerprint=seed"])
     assert applied["mode"] == "persona"
-    assert applied["args"] == (["--screen-info={2560x1440}"]
-                               if sys.platform == "linux" else [])
+    assert applied["args"] == [screen_info_switch(headless_display("seed", [arg, "--fingerprint=seed"]))]
+    assert applied["args"][0].startswith("--screen-info={2560x1440")  # the imported screen, not a corpus pick
     assert kwargs["no_viewport"] is True
 
 
@@ -422,6 +425,7 @@ async def test_async_window_fit_measures_the_shortfall_only_once_the_page_has_th
 def test_window_fit_defers_to_a_caller_supplied_window_size():
     page = _FakePageForFit((1920, 1040))
     assert fit_window_to_work_area(page, ["--window-size=1024,768"]) is None
+    assert fit_window_to_work_area(page, ["--window-position=5,5"]) is None  # placed: theirs to keep
     assert page.cdp.calls == []
 
 
@@ -544,7 +548,7 @@ def test_persistent_context_with_a_seed_uses_no_viewport_and_fits_the_window(mon
         str(tmp_path / "prof"), executable_path=_fake_exe(tmp_path), fingerprint="geo-1", quiet=True)
     assert cap.context_kwargs["no_viewport"] is True
     assert "screen" not in cap.context_kwargs and "viewport" not in cap.context_kwargs
-    assert len(_screen_info(cap.context_kwargs)) == (1 if sys.platform == "linux" else 0)
+    assert len(_screen_info(cap.context_kwargs)) == 1  # the fallback display, on every platform
     assert cap.bounds == {"left": 0, "top": 0, "width": 2560, "height": 1400}
 
 
@@ -554,7 +558,10 @@ def test_persistent_context_stays_no_viewport_when_headed(monkeypatch, tmp_path)
         str(tmp_path / "prof"), executable_path=_fake_exe(tmp_path), headless=False, quiet=True)
     assert cap.context_kwargs["no_viewport"] is True
     assert "screen" not in cap.context_kwargs and "viewport" not in cap.context_kwargs
-    assert cap.bounds is None, "a headed window is sized by the OS, not by us"
+    if sys.platform.startswith("linux"):
+        assert cap.bounds is not None, "headed Linux (no window manager under Xvfb) gets the first-page fit"
+    else:
+        assert cap.bounds is None, "a headed window is sized by the OS, not by us"
 
 
 def test_launch_default_path_carries_the_geometry_through_the_throwaway_profile(monkeypatch, tmp_path):
@@ -596,7 +603,24 @@ def test_incognito_headed_launch_still_uses_no_viewport(monkeypatch, tmp_path):
     browser = clearcote.launch(
         executable_path=_fake_exe(tmp_path), ephemeral_profile=False, headless=False, quiet=True)
     assert browser.new_page().kw == {"no_viewport": True}
-    assert cap.bounds is None
+    if sys.platform.startswith("linux"):
+        assert cap.bounds is not None, "headed Linux: the new page is fitted like a headless one"
+    else:
+        assert cap.bounds is None
+
+
+def test_headed_linux_fit_predicate(monkeypatch):
+    """Measured (SC 180): under Xvfb --start-maximized is a no-op and Chrome keeps its 945x1060 default
+    window at (10,10); a CDP fit before the first navigation gives outer == avail with zero resize events.
+    Only Linux hosts, and only when the caller passed no window switch of their own."""
+    from clearcote import _headed_linux_fit
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert _headed_linux_fit(None) and _headed_linux_fit(["--no-sandbox", "--fingerprint=x"])
+    for flag in ("--window-size=1024,768", "--window-position=5,5", "--start-maximized"):
+        assert not _headed_linux_fit([flag])
+    for plat in ("win32", "darwin"):
+        monkeypatch.setattr(sys, "platform", plat)
+        assert not _headed_linux_fit([])
 
 
 # --------------------------------------------------------------- live engine

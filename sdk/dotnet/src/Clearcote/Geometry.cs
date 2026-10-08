@@ -21,7 +21,8 @@ namespace Clearcote;
 /// Regime 1 was measured on 149.0.7827.114/linux-x64, regime 2 on win-x64 149 and 153 (below).
 /// </para>
 /// <para>
-/// REGIME 1 — a persona is active (<c>--fingerprint=&lt;seed&gt;</c> on the command line). The engine
+/// REGIME 1 — a persona is active (<c>--fingerprint=&lt;seed&gt;</c> on the command line, or the persona
+/// transport's <c>--persona-from-env</c> marker once the seed has moved to the environment). The engine
 /// spoofs screen AND avail from the seed, including a taskbar (seed A -> 1920x1080 / avail 1920x1040,
 /// seed B -> 2560x1440 / 1400, seed C -> 1600x900 / 860), and its values BEAT a CDP screen override —
 /// so the SDK must not try to set screen here, it would silently lose. Leaving Playwright's emulated
@@ -29,6 +30,9 @@ namespace Clearcote;
 /// unaccounted for by any frame a real browser has. So NoViewport plus one window resize into the
 /// persona's own work area, which lands a maximized window:
 /// <c>screen 1920x1080, avail 1920x1040, inner 1920x952, outer 1920x1040, frame (0, 88)</c>.
+/// The seed's <c>--screen-info</c> row still goes on the command line, on every platform: the persona's
+/// own display wins over it (measured on r32 Linux and r33 Windows), so it is a fallback for a persona
+/// that does not engage, never a contradiction.
 /// </para>
 /// <para>
 /// REGIME 2 — no persona (the default seedless launch, and <c>LightStealth</c>, which drops
@@ -94,26 +98,68 @@ public static class Geometry
         (1680, 1050, 2, "windows"),
     };
 
+    // Window flags that mean the caller sized the window themselves (the fit skips its resize).
     private static readonly string[] CallerWindowFlags =
         { "--window-size", "--window-position", "--start-maximized" };
+
+    // The subset that fixes the window's SIZE. A bare --window-position only places it: the SDK still
+    // gives the browser a realistic display and skips only the fit (SC 180: the hosted gateway passed
+    // --window-position=10,10 and lost the display with it, so every session showed the 800x600 surface).
+    private static readonly string[] CallerSizeFlags = { "--window-size", "--start-maximized" };
+
+    // The persona transport's marker (PersonaEnv, SDK 0.41+): the seed left argv for the environment.
+    private const string PersonaEnvSwitch = "--" + PersonaEnv.FromEnvSwitch;
 
     private static readonly string[] CallerDisplayFlags = { "--screen-info" };
 
     /// <summary>
-    /// Whether <c>--fingerprint=&lt;seed&gt;</c> is on the command line, i.e. the engine spoofs
-    /// screen/avail itself (regime 1). <c>LightStealth</c> drops that switch on purpose, so this is
-    /// false for it even though a seed was passed to the SDK.
+    /// Whether a persona is active for this launch, i.e. the engine spoofs screen/avail itself
+    /// (regime 1): <c>--fingerprint=&lt;seed&gt;</c> on the command line, or the persona transport's
+    /// <c>--persona-from-env</c> marker when the seed already moved to the environment
+    /// (<see cref="PersonaEnv"/>). <c>LightStealth</c> drops the seed on purpose, so this is false for
+    /// it even though a seed was passed to the SDK.
     /// </summary>
     public static bool PersonaActive(IEnumerable<string>? args) =>
-        args?.Any(a => (a ?? "").StartsWith("--fingerprint=", StringComparison.Ordinal)) == true;
+        args?.Any(a =>
+        {
+            var s = a ?? "";
+            return s.StartsWith("--fingerprint=", StringComparison.Ordinal)
+                || s == PersonaEnvSwitch
+                || s.StartsWith(PersonaEnvSwitch + "=", StringComparison.Ordinal);
+        }) == true;
 
-    /// <summary>True when the caller passed their own window geometry flag.</summary>
+    /// <summary>
+    /// True when the caller passed their own window geometry flag (size, position or maximize): the
+    /// window is theirs, so the SDK neither moves nor fits it.
+    /// </summary>
     public static bool CallerSizedTheWindow(IEnumerable<string>? args) =>
         args?.Any(a => CallerWindowFlags.Contains((a ?? "").Split('=')[0])) == true;
+
+    /// <summary>
+    /// True when the caller fixed the window's SIZE (<c>--window-size</c> / <c>--start-maximized</c>),
+    /// as opposed to only placing it with <c>--window-position</c>.
+    /// </summary>
+    public static bool CallerFixedTheSize(IEnumerable<string>? args) =>
+        args?.Any(a => CallerSizeFlags.Contains((a ?? "").Split('=')[0])) == true;
 
     /// <summary>True when the caller passed their own headless display switch.</summary>
     public static bool CallerSetTheDisplay(IEnumerable<string>? args) =>
         args?.Any(a => CallerDisplayFlags.Contains((a ?? "").Split('=')[0])) == true;
+
+    /// <summary>
+    /// Whether a HEADED launch gets the first-page window fit: a Linux host (no window manager under
+    /// Xvfb/Docker, so nothing else maximizes the window) and no window switch of the caller's own.
+    /// </summary>
+    /// <remarks>
+    /// Measured (SC 180): <c>--start-maximized</c> is a no-op there, and Chrome's 945x1060 default
+    /// window stays at (10,10); CDP <c>Browser.setWindowBounds</c> before the first navigation gives
+    /// <c>outer == avail</c> at (0,0) with zero resize events. Other headed platforms keep the plain
+    /// NoViewport behaviour: their window manager sizes the window.
+    /// </remarks>
+    /// <param name="args">The caller's command line.</param>
+    /// <param name="linuxHost">Null reads this host; tests pass true/false.</param>
+    public static bool HeadedLinuxFit(IEnumerable<string>? args, bool? linuxHost = null) =>
+        (linuxHost ?? OperatingSystem.IsLinux()) && !CallerSizedTheWindow(args);
 
     /// <summary>
     /// Weighted, deterministic choice from <see cref="HeadlessScreenProfiles"/>. Same construction as
@@ -286,6 +332,8 @@ public static class Geometry
     /// headless, matching Playwright. Otherwise the context takes NoViewport and the window is fitted
     /// to the work area (<see cref="InstallWindowFixupAsync"/>). A caller's own <c>--screen-info</c>
     /// keeps their display; a caller's own window switch keeps their window (the display is still set).
+    /// Under a persona the seed's display still goes on the command line, on every platform: the
+    /// engine's persona display wins over it, so it only ever serves a persona that does not engage.
     /// </remarks>
     public static HeadlessPlan ResolveHeadless(
         bool? headless,
@@ -296,13 +344,13 @@ public static class Geometry
         if (headless == false || callerSetGeometry) return new(Mode.None, null, Array.Empty<string>());
         if (PersonaActive(args))
         {
-            // Linux headless otherwise starts with an 800x600/host-shaped display even though
-            // Blink exposes the persona screen. Give the compositor the persona display before
-            // fullscreen, popups, or moveTo can observe it. Headed and non-Linux launches keep
-            // their native display; an explicit caller --screen-info always wins.
-            var personaDisplay = OperatingSystem.IsLinux() && !CallerSetTheDisplay(args)
-                ? HeadlessDisplay(seed, args)
-                : null;
+            // Headless otherwise starts with an 800x600/host-shaped display even though Blink exposes
+            // the persona screen. Give the compositor the persona display before fullscreen, popups,
+            // or moveTo can observe it. The persona's own display wins over --screen-info on every
+            // platform (measured on r32 Linux and r33 Windows: the seed's screen shows, the switch is
+            // ignored), so the SDK's row is a fallback for a persona that does not engage, never a
+            // contradiction. An explicit caller --screen-info always wins.
+            var personaDisplay = CallerSetTheDisplay(args) ? null : HeadlessDisplay(seed, args);
             return new(Mode.Persona, null, personaDisplay is null
                 ? Array.Empty<string>()
                 : new[] { ScreenInfoSwitch(personaDisplay) });
@@ -443,15 +491,16 @@ public static class Geometry
         IPage page, IEnumerable<string>? args = null) => FitWindowToWorkAreaAsync(page, args);
 
     /// <summary>
-    /// Size the headless window to the display's work area — the persona's (regime 1) or the one
+    /// Size the window to the display's work area — the persona's (regime 1) or the one
     /// <c>--screen-info</c> set (regime 2) — so the page reports a maximized window (outer == avail)
-    /// instead of the headless default window sitting inside a much larger screen. Returns the
-    /// reported outer size, or null if skipped.
+    /// instead of the default window sitting inside a much larger screen. Returns the reported outer
+    /// size, or null if skipped (a caller's own window switch, size OR position, keeps their window).
     /// </summary>
     /// <remarks>
-    /// <c>--start-maximized</c> and CDP <c>windowState: "maximized"</c> are both no-ops in headless
-    /// (measured — the window stays at its default size), which is why this sets explicit bounds.
-    /// A <see cref="Clearcote.LaunchAsync"/> caller can use it on a page created with
+    /// Headless, and headed on Linux without a window manager (Xvfb, every Docker/VPS headful run):
+    /// there <c>--start-maximized</c> and CDP <c>windowState: "maximized"</c> are both no-ops
+    /// (measured — the window stays Chrome's 945x1060 default at (10,10)), which is why this sets
+    /// explicit bounds. A <see cref="Clearcote.LaunchAsync"/> caller can use it on a page created with
     /// <c>ViewportSize = ViewportSize.NoViewport</c>. Never throws: a geometry improvement must not be
     /// able to fail a launch.
     /// </remarks>
@@ -609,27 +658,40 @@ public static class Geometry
     //
     // REGIME 1 (persona): the persona picks its display inside the engine, so it is only known once a
     // page can be asked. Emulation.updateScreen (headless-only, browser-level, outlives the session that
-    // sent it) then resizes the headless display to match.
+    // sent it) then resizes the headless display to match. The seed's --screen-info row still goes on
+    // the command line: the engine's own display wins over it (measured on r32 Linux and r33 Windows),
+    // so the row is a fallback for a persona that does not engage rather than a contradiction.
     //
     // BOTH: one Browser.setWindowBounds puts the first window on the work area, and --window-position
     // puts later windows at the work-area origin. Deliberately no --window-size: it forces every popup
-    // to that size, ignoring the window.open() features real Chrome honours.
+    // to that size, ignoring the window.open() features real Chrome honours. A caller who only PLACED
+    // the window (their own --window-position) keeps its place: the display is still set, the fit is
+    // skipped (SC 180: the hosted gateway passed 10,10 and lost the display with it).
 
     /// <summary>What ServeAsync adds for a headless launch.</summary>
-    internal sealed record ServedPlan(bool Persona, Display? Display, string[] Args);
+    /// <param name="Persona">Whether a persona is active (its own display wins over the <c>--screen-info</c> in <paramref name="Args"/>).</param>
+    /// <param name="Display">The headless display <paramref name="Args"/> sets: the display without a persona, the fallback under one.</param>
+    /// <param name="Args">Switches to APPEND to the command line.</param>
+    /// <param name="Fit">Whether the served window fit runs; false when the caller placed the window themselves.</param>
+    internal sealed record ServedPlan(bool Persona, Display Display, string[] Args, bool Fit);
 
     /// <summary>
-    /// The served-browser geometry, or null to leave it alone: headed, or the caller passed a window or
-    /// display switch of their own (the SDK's own android --window-size counts: a phone sizes itself).
+    /// The served-browser geometry, or null to leave it alone: headed, or the caller passed a display
+    /// switch or fixed the window's size (the SDK's own android --window-size counts: a phone sizes
+    /// itself). A caller who only placed the window (<c>--window-position</c>) still gets the display:
+    /// the switch says where the window goes, not how big the screen is. Only the fit is skipped then
+    /// (<see cref="ServedPlan.Fit"/> false), so their position holds.
     /// </summary>
     internal static ServedPlan? ServedGeometry(
         IReadOnlyCollection<string> engineArgs, string? seed, bool lightStealth, bool headless)
     {
-        if (!headless || CallerSizedTheWindow(engineArgs) || CallerSetTheDisplay(engineArgs)) return null;
-        const string origin = "--window-position=0,0";
-        if (PersonaActive(engineArgs)) return new(true, null, new[] { origin });
+        if (!headless || CallerFixedTheSize(engineArgs) || CallerSetTheDisplay(engineArgs)) return null;
+        var placed = CallerSizedTheWindow(engineArgs);   // a bare --window-position: keep theirs, skip the fit
         var display = HeadlessDisplay(seed, engineArgs, lightStealth);
-        return new(false, display, new[] { ScreenInfoSwitch(display), origin });
+        var args = placed
+            ? new[] { ScreenInfoSwitch(display) }
+            : new[] { ScreenInfoSwitch(display), "--window-position=0,0" };
+        return new(PersonaActive(engineArgs), display, args, Fit: !placed);
     }
 
     /// <summary>Throws unless <paramref name="size"/> is null or whole CSS px in 100-10000.</summary>

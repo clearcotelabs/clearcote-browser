@@ -8,8 +8,9 @@
  * `outer > screen` is not a subtle statistical tell but a state no real browser can be in, readable
  * with two property lookups. These lock down the frame arithmetic, the fact that the default is
  * actually applied at both launch entry points (and never over a caller's own choice), and the
- * regime split — with `--fingerprint` the engine's persona owns screen/avail and the SDK only fits
- * the window; without it the SDK also sets the headless display (`--screen-info`).
+ * regime split — with `--fingerprint` (or the persona transport's `--persona-from-env`) the engine's
+ * persona owns screen/avail and the SDK fits the window, passing the seed's display only as a
+ * fallback; without it the SDK's headless display (`--screen-info`) is the one the page sees.
  *
  * PARITY: the vector below is duplicated verbatim in sdk/python/tests/test_geometry.py and
  * sdk/dotnet/tests/GeometryTests.cs. A seed must select the same persona in every SDK or a persona
@@ -22,6 +23,7 @@ import {
   HEADLESS_SCREEN_PROFILES,
   WINDOWS_TASKBAR_HEIGHT,
   applyHeadlessGeometry,
+  callerFixedTheSize,
   callerSetTheDisplay,
   callerSizedTheWindow,
   fitPlan,
@@ -29,6 +31,7 @@ import {
   fitWindowOverCdp,
   fitWindowToWorkArea,
   geometryIsCoherent,
+  headedLinuxFit,
   headlessGeometry,
   personaActive,
   profileScreenFromArgs,
@@ -120,6 +123,10 @@ describe("regime detection", () => {
   it("reads the persona off the command line, not the caller's options", () => {
     // lightStealth passes a seed to the SDK but deliberately drops --fingerprint, so no persona runs.
     expect(personaActive(["--fingerprint=abc", "--no-sandbox"])).toBe(true);
+    // the persona transport (0.41+) moves the seed to the environment and leaves this marker behind
+    expect(personaActive(["--no-sandbox", "--persona-from-env"])).toBe(true);
+    expect(personaActive(["--persona-from-env=1"])).toBe(true);
+    expect(personaActive(["--persona-from-env-x", "--disable-persona-env-transport"])).toBe(false);
     expect(personaActive(["--fingerprint-platform=windows", "--fingerprint-screen-width=1920"])).toBe(false);
     expect(personaActive([])).toBe(false);
     expect(personaActive(null)).toBe(false);
@@ -130,6 +137,28 @@ describe("regime detection", () => {
     expect(callerSizedTheWindow(["--window-position=0,0"])).toBe(true);
     expect(callerSizedTheWindow(["--start-maximized"])).toBe(true);
     expect(callerSizedTheWindow(["--no-sandbox", "--fingerprint=x"])).toBe(false);
+  });
+
+  it("tells a fixed size from a placed window", () => {
+    // --window-position says where the window goes, not how big the screen is (SC 180)
+    expect(callerFixedTheSize(["--window-size=1920,1080"])).toBe(true);
+    expect(callerFixedTheSize(["--start-maximized"])).toBe(true);
+    expect(callerFixedTheSize(["--window-position=10,10"])).toBe(false);
+    expect(callerFixedTheSize(["--no-sandbox", "--fingerprint=x"])).toBe(false);
+    expect(callerFixedTheSize(null)).toBe(false);
+  });
+
+  it("gives a headed launch the window fit on Linux only, never over a caller's window switch", () => {
+    // No window manager under Xvfb/Docker: --start-maximized is a no-op there, and the CDP fit before
+    // the first navigation gives outer == avail at (0,0) with zero resize events (SC 180).
+    expect(headedLinuxFit([], "linux")).toBe(true);
+    expect(headedLinuxFit(["--fingerprint=x", "--no-sandbox"], "linux")).toBe(true);
+    for (const flag of ["--window-size=1024,768", "--window-position=5,5", "--start-maximized"]) {
+      expect(headedLinuxFit([flag], "linux")).toBe(false);
+    }
+    expect(headedLinuxFit([], "win32")).toBe(false);
+    expect(headedLinuxFit([], "darwin")).toBe(false);
+    expect(headedLinuxFit([])).toBe(process.platform === "linux");
   });
 });
 
@@ -174,15 +203,20 @@ describe("apply / skip rules", () => {
     expect(sized?.args[0]).toMatch(/^--screen-info=/);
   });
 
-  it("takes viewport: null and sets the Linux headless display to the persona", () => {
-    const opts: Record<string, unknown> = { headless: true };
-    const applied = applyHeadlessGeometry(opts, "seed", ["--fingerprint=seed"]);
-    expect(applied?.mode).toBe("persona");
-    expect(applied?.args).toEqual(process.platform === "linux"
-      ? [screenInfoSwitch(servedDisplay({ seed: "seed", args: ["--fingerprint=seed"] }))]
-      : []);
-    expect(opts.viewport).toBeNull();
-    expect("screen" in opts).toBe(false);
+  it("takes viewport: null and sets a fallback headless display under a persona, on every platform", () => {
+    // The engine's persona display wins over --screen-info (measured on r32 Linux and r33 Windows), so
+    // the seed's row is a fallback: a persona that does not engage never leaves the 800x600 surface.
+    for (const args of [["--fingerprint=seed"], ["--persona-from-env"]]) {
+      const opts: Record<string, unknown> = { headless: true };
+      const applied = applyHeadlessGeometry(opts, "seed", args);
+      expect(applied?.mode).toBe("persona");
+      expect(applied?.args).toEqual([screenInfoSwitch(servedDisplay({ seed: "seed", args }))]);
+      expect(opts.viewport).toBeNull();
+      expect("screen" in opts).toBe(false);
+    }
+    // a caller's own display switch still wins
+    expect(applyHeadlessGeometry({}, "seed", ["--fingerprint=seed", "--screen-info={1280x720}"]))
+      .toEqual({ mode: "persona", args: [] });
   });
 
   it("is skipped when headed", () => {
@@ -251,12 +285,12 @@ describe("the imported profile's screen", () => {
   it("still takes the persona regime when a seed sits beside the profile", () => {
     // With --fingerprint present the ENGINE applies the profile's screen, so the SDK keeps out.
     const opts: Record<string, unknown> = { headless: true };
-    const applied = applyHeadlessGeometry(opts, "seed",
-      [profileArg({ screen: { width: 2560, height: 1440 } }), "--fingerprint=seed"]);
+    const args = [profileArg({ screen: { width: 2560, height: 1440 } }), "--fingerprint=seed"];
+    const applied = applyHeadlessGeometry(opts, "seed", args);
     expect(applied?.mode).toBe("persona");
-    expect(applied?.args).toEqual(process.platform === "linux"
-      ? ["--screen-info={2560x1440}"]
-      : []);
+    // the fallback display is the imported screen, not a corpus pick, on every platform
+    expect(applied?.args).toEqual([screenInfoSwitch(servedDisplay({ seed: "seed", args }))]);
+    expect(applied?.args[0]).toMatch(/^--screen-info=\{2560x1440/);
     expect(opts.viewport).toBeNull();
   });
 });
@@ -339,9 +373,10 @@ describe("the work-area window fit", () => {
     ]);
   });
 
-  it("defers to a caller-supplied window size", async () => {
+  it("defers to a caller-supplied window size or position", async () => {
     const f = fakePage([1920, 1040]);
     await expect(fitWindowToWorkArea(f.page, ["--window-size=1024,768"])).resolves.toBeNull();
+    await expect(fitWindowToWorkArea(f.page, ["--window-position=5,5"])).resolves.toBeNull(); // placed: theirs to keep
     expect(f.bounds()).toEqual([]);
   });
 
@@ -418,12 +453,20 @@ describe("serve(): which switches", () => {
   it("sets the display and window origin without a persona", () => {
     const g = servedGeometry(["--fingerprint-platform=windows"], { fingerprint: "probe-1", lightStealth: true, platform: "windows" })!;
     expect(g.persona).toBe(false);
+    expect(g.fit).toBe(true);
     expect(g.args).toEqual([screenInfoSwitch(lightStealthScreen("probe-1")), "--window-position=0,0"]);
   });
 
-  it("leaves the display to a persona (matched after launch)", () => {
-    const g = servedGeometry(["--fingerprint=seed"], { fingerprint: "seed" })!;
-    expect(g).toEqual({ persona: true, display: null, args: ["--window-position=0,0"] });
+  it("passes the seed's display as a fallback under a persona (matched after launch)", () => {
+    // The engine's persona display wins over --screen-info (measured on r32 Linux and r33 Windows), so
+    // the row is a fallback: a persona that does not engage must never leave the 800x600 surface.
+    for (const args of [["--fingerprint=seed"], ["--persona-from-env"]]) {
+      const g = servedGeometry(args, { fingerprint: "seed" })!;
+      expect(g.persona).toBe(true);
+      expect(g.fit).toBe(true);
+      expect(g.display).toEqual(servedDisplay({ seed: "seed", args }));
+      expect(g.args).toEqual([screenInfoSwitch(g.display), "--window-position=0,0"]);
+    }
   });
 
   it("never passes --window-size: it would force every popup to that size", () => {
@@ -432,14 +475,28 @@ describe("serve(): which switches", () => {
     }
   });
 
-  it("stays out of the way when headed or when the caller set a window or display", () => {
+  it("stays out of the way when headed or when the caller fixed the window size or set the display", () => {
     expect(servedGeometry([], {}, false)).toBeNull();
-    for (const flag of ["--window-size=1024,768", "--window-position=5,5", "--start-maximized", "--screen-info={1280x720}"]) {
+    for (const flag of ["--window-size=1024,768", "--start-maximized", "--screen-info={1280x720}"]) {
       expect(servedGeometry([flag], {})).toBeNull();
     }
     expect(callerSetTheDisplay(["--screen-info={1x1}"])).toBe(true);
     // The SDK's own android --window-size counts: a phone persona sizes itself.
     expect(servedGeometry(["--fingerprint=s", "--window-size=412,915"], { platform: "android" })).toBeNull();
+  });
+
+  it("keeps the display for a placed window and skips only the fit", () => {
+    // --window-position says where the window goes, not how big the screen is. The hosted gateway
+    // passed 10,10 and, with the old all-or-nothing rule, every session showed the 800x600 surface (SC 180).
+    for (const args of [["--window-position=10,10"], ["--fingerprint=s", "--window-position=10,10"]]) {
+      const g = servedGeometry(args, { fingerprint: "s" })!;
+      expect(g).not.toBeNull();
+      expect(g.fit).toBe(false);
+      expect(g.persona).toBe(args.includes("--fingerprint=s"));
+      expect(g.display).toEqual(servedDisplay({ seed: "s", args }));
+      expect(g.args).toEqual([screenInfoSwitch(g.display)]);
+      expect(g.args.some((a) => a.startsWith("--window-position"))).toBe(false);
+    }
   });
 });
 

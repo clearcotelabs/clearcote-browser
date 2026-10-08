@@ -48,16 +48,23 @@ public class ServeGeometryTests
     {
         var g = Geometry.ServedGeometry(new[] { "--fingerprint-platform=windows" }, "probe-1", lightStealth: true, headless: true)!;
         Assert.False(g.Persona);
+        Assert.True(g.Fit);
+        Assert.Equal(Fingerprint.LightStealthScreen("probe-1"), g.Display);
         Assert.Equal(new[] { Geometry.ScreenInfoSwitch(Fingerprint.LightStealthScreen("probe-1")), "--window-position=0,0" }, g.Args);
     }
 
-    [Fact]
-    public void LeavesTheDisplayToAPersona()
+    [Theory]
+    [InlineData("--fingerprint=seed")]
+    [InlineData("--persona-from-env")]
+    public void PassesTheSeedsDisplayAsAFallbackUnderAPersona(string personaSwitch)
     {
-        var g = Geometry.ServedGeometry(new[] { "--fingerprint=seed" }, "seed", lightStealth: false, headless: true)!;
+        // The engine's persona display wins over --screen-info (measured on r32 Linux and r33 Windows),
+        // so the row is a fallback: a persona that does not engage must never leave the 800x600 surface.
+        var g = Geometry.ServedGeometry(new[] { personaSwitch }, "seed", lightStealth: false, headless: true)!;
         Assert.True(g.Persona);
-        Assert.Null(g.Display);
-        Assert.Equal(new[] { "--window-position=0,0" }, g.Args);
+        Assert.True(g.Fit);
+        Assert.Equal(Geometry.HeadlessDisplay("seed", new[] { personaSwitch }), g.Display);
+        Assert.Equal(new[] { Geometry.ScreenInfoSwitch(g.Display), "--window-position=0,0" }, g.Args);
     }
 
     [Fact]
@@ -69,11 +76,26 @@ public class ServeGeometryTests
 
     [Theory]
     [InlineData("--window-size=1024,768")]
-    [InlineData("--window-position=5,5")]
     [InlineData("--start-maximized")]
     [InlineData("--screen-info={1280x720}")]
-    public void StaysOutOfTheWayOfACallersWindowOrDisplay(string flag) =>
+    public void StaysOutOfTheWayOfACallersWindowSizeOrDisplay(string flag) =>
         Assert.Null(Geometry.ServedGeometry(new[] { flag }, null, false, true));
+
+    [Fact]
+    public void APlacedWindowKeepsTheDisplayAndSkipsOnlyTheFit()
+    {
+        // --window-position says where the window goes, not how big the screen is. The hosted gateway
+        // passed 10,10 and, with the old all-or-nothing rule, every session showed the 800x600 surface.
+        foreach (var args in new[] { new[] { "--window-position=10,10" }, new[] { "--fingerprint=s", "--window-position=10,10" } })
+        {
+            var g = Geometry.ServedGeometry(args, "s", lightStealth: false, headless: true);
+            Assert.NotNull(g);
+            Assert.False(g!.Fit);
+            Assert.Equal(Geometry.PersonaActive(args), g.Persona);
+            Assert.Equal(new[] { Geometry.ScreenInfoSwitch(g.Display) }, g.Args);
+            Assert.DoesNotContain(g.Args, a => a.StartsWith("--window-position"));
+        }
+    }
 
     [Fact]
     public void StaysOutOfTheWayWhenHeadedOrForTheAndroidWindow()

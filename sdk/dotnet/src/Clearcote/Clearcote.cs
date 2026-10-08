@@ -83,6 +83,10 @@ public static class Clearcote
     /// var page = await browser.NewPageAsync(new() { ViewportSize = ViewportSize.NoViewport });
     /// await Geometry.FitWindowToWorkAreaAsync(page);
     /// </code>
+    /// The same two lines apply to a HEADED launch on a Linux host without a window manager (Xvfb,
+    /// every Docker/VPS headful run), where Chrome's 945x1060 default window otherwise stays at
+    /// (10,10); the persistent and ephemeral-profile launches fit it on the first page for you
+    /// (<see cref="Geometry.HeadedLinuxFit"/>).
     /// The same holds for the colour scheme: on an r32+ engine the persona decides
     /// <c>prefers-color-scheme</c>, and a context created with default options emulates light over
     /// it. Pass <c>ColorScheme = ColorScheme.Null</c> to <c>NewPageAsync</c>/<c>NewContextAsync</c>
@@ -253,6 +257,10 @@ public static class Clearcote
         var geometry = Geometry.ResolveHeadless(
             options.Headless, options.Fingerprint, args,
             callerSetGeometry: options.ViewportSize is not null || options.ScreenSize is not null);
+        // Headed Linux with no window manager (Xvfb: every Docker/VPS headful run) leaves Chrome's
+        // 945x1060 default window at (10,10); the same first-page fit as headless maximizes it. A
+        // caller's own viewport or window switch keeps theirs; other headed platforms keep NoViewport alone.
+        var headedFit = options.Headless == false && options.ViewportSize is null && Geometry.HeadedLinuxFit(args);
         // Regime 2 appends the headless display; the fit below keeps reading the caller's args. Then engine
         // 1021: the persona switches leave the browser's argv for CLEARCOTE_PERSONA_ARGS when the engine
         // reads them from there (see PersonaEnv). Probed once; every attempt's env gets the payload.
@@ -286,10 +294,10 @@ public static class Clearcote
 
         // Release the concurrency slot + remove the run-token file when the context closes.
         if (lease is not null) context.Close += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };
-        // Both regimes: maximize into the display's work area. It never throws, so a launch cannot
-        // fail on it, and it runs while the context is still on about:blank, so the caller's page
-        // never observes a resize.
-        if (geometry.Mode != Geometry.Mode.None)
+        // Both headless regimes, and headed Linux: maximize into the display's work area. It never
+        // throws, so a launch cannot fail on it, and it runs while the context is still on about:blank,
+        // so the caller's page never observes a resize.
+        if (geometry.Mode != Geometry.Mode.None || headedFit)
             await Geometry.InstallWindowFixupAsync(context, args).ConfigureAwait(false);
         return context;
     }
@@ -412,8 +420,9 @@ public static class Clearcote
         }
 
         // Before any client attaches: the window onto the work area (and, under a persona, the headless
-        // display onto the persona's). Its own connection, closed again; never fails the launch.
-        if (geometry is not null)
+        // display onto the persona's). Its own connection, closed again; never fails the launch. A
+        // caller's own --window-position keeps its place (Fit false: the display was still set).
+        if (geometry is not null && geometry.Fit)
             await Geometry.FitServedWindowAsync(await srv.WsUrlAsync().ConfigureAwait(false), geometry.Persona, options.WindowSize)
                 .ConfigureAwait(false);
         if (!options.Quiet) Console.Error.WriteLine($"[clearcote] serve: CDP endpoint ready at {srv.CdpUrl}");

@@ -7,7 +7,8 @@
  * and what it reports depends on whether the engine's persona machinery is running. Regime 1 was
  * measured on 149.0.7827.114/linux-x64, regime 2 on win-x64 149 and 153 (below).
  *
- * REGIME 1 — a persona is active (`--fingerprint=<seed>` on the command line). The engine spoofs
+ * REGIME 1 — a persona is active (`--fingerprint=<seed>` on the command line, or the persona
+ * transport's `--persona-from-env` marker once the seed moved to the environment). The engine spoofs
  * screen AND avail from the seed, including a taskbar (seed A -> 1920x1080 / avail 1920x1040, seed B
  * -> 2560x1440 / 1400, seed C -> 1600x900 / 860), and its values BEAT a CDP screen override — so the
  * SDK must not try to set screen here, it would silently lose. Leaving Playwright's emulated viewport
@@ -80,24 +81,58 @@ export const HEADLESS_SCREEN_PROFILES: ReadonlyArray<readonly [number, number, n
   [1680, 1050, 2, "windows"],
 ];
 
-/** Window flags that mean the caller sized the window themselves. */
+/** Window flags that mean the caller sized the window themselves (the fit skips its resize). */
 const CALLER_WINDOW_FLAGS = ["--window-size", "--window-position", "--start-maximized"];
+/**
+ * The subset that fixes the window's SIZE. A bare `--window-position` only places it: the SDK still
+ * gives the browser a realistic display and skips only the fit (SC 180: the hosted gateway passed
+ * `--window-position=10,10` and lost the display with it, so every session showed the 800x600 surface).
+ */
+const CALLER_SIZE_FLAGS = ["--window-size", "--start-maximized"];
+/** The persona transport's marker (./personaenv.ts, SDK 0.41+): the seed left argv for the environment. */
+const PERSONA_ENV_SWITCH = "--persona-from-env";
 
 export interface Size { width: number; height: number }
 export interface HeadlessGeometry { screen: Size; viewport: Size }
 
 /**
- * Whether `--fingerprint=<seed>` is on the command line, i.e. the engine spoofs screen/avail itself
- * (regime 1). `lightStealth` drops that switch on purpose, so this is false for it even though a
- * seed was passed to the SDK.
+ * Whether a persona is active for this launch, i.e. the engine spoofs screen/avail itself (regime 1):
+ * `--fingerprint=<seed>` on the command line, or the persona transport's `--persona-from-env` marker
+ * when the seed already moved to the environment (./personaenv.ts). `lightStealth` drops the seed on
+ * purpose, so this is false for it even though a seed was passed to the SDK.
  */
 export function personaActive(args?: readonly string[] | null): boolean {
-  return (args ?? []).some((a) => String(a).startsWith("--fingerprint="));
+  return (args ?? []).some((a) => {
+    const s = String(a);
+    return s.startsWith("--fingerprint=") || s === PERSONA_ENV_SWITCH || s.startsWith(PERSONA_ENV_SWITCH + "=");
+  });
 }
 
-/** True when the caller passed their own window geometry flag. */
+/**
+ * True when the caller passed their own window geometry flag (size, position or maximize): the
+ * window is theirs, so the SDK neither moves nor fits it.
+ */
 export function callerSizedTheWindow(args?: readonly string[] | null): boolean {
   return (args ?? []).some((a) => CALLER_WINDOW_FLAGS.includes(String(a).split("=")[0]));
+}
+
+/**
+ * True when the caller fixed the window's SIZE (`--window-size` / `--start-maximized`), as opposed
+ * to only placing it with `--window-position`.
+ */
+export function callerFixedTheSize(args?: readonly string[] | null): boolean {
+  return (args ?? []).some((a) => CALLER_SIZE_FLAGS.includes(String(a).split("=")[0]));
+}
+
+/**
+ * Whether a HEADED launch gets the first-page window fit: a Linux host (no window manager under
+ * Xvfb/Docker, so nothing else maximizes the window) and no window switch of the caller's own.
+ * Measured (SC 180): `--start-maximized` is a no-op there; CDP `Browser.setWindowBounds` before the
+ * first navigation gives `outer == avail` at (0,0) with zero resize events. Other headed platforms
+ * keep the plain `viewport: null`: their window manager sizes the window.
+ */
+export function headedLinuxFit(args?: readonly string[] | null, platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "linux" && !callerSizedTheWindow(args);
 }
 
 /**
@@ -183,7 +218,8 @@ export interface DisplayFingerprint {
 }
 
 export type AppliedGeometry =
-  /** On Linux, args carries the persona's real headless display (`--screen-info`). */
+  /** args carries the seed's fallback headless display (`--screen-info`) on every platform (the
+   *  engine's own persona display wins over it); empty when the caller set the display. */
   | { mode: "persona"; args: string[] }
   /** display: what `--screen-info` sets, or null when the caller passed their own display switch. */
   | { mode: "display"; display: Display | null; args: string[] };
@@ -192,9 +228,12 @@ export type AppliedGeometry =
  * Default a headless launch's geometry; returns what was applied, or null.
  *
  * Both regimes set `viewport: null` in `opts` (so innerWidth tracks the real window) and leave the
- * window to be fitted to the work area on the first page (see {@link installWindowFixup}). Regime 2
- * also returns the switches that give the browser its headless display — `args`, to append to the
- * command line; the fit and skip checks keep reading the caller's own `args`, not these.
+ * window to be fitted to the work area on the first page (see {@link installWindowFixup}). Both also
+ * return the switches that give the browser its headless display — `args`, to append to the command
+ * line; the fit and skip checks keep reading the caller's own `args`, not these. Under a persona the
+ * engine's own display wins over `--screen-info` (measured on r32 Linux and r33 Windows: the seed's
+ * screen shows, the switch is ignored), so that row is a fallback for a persona that does not
+ * engage, never a contradiction — it keeps such a launch off the 800x600 headless surface (SC 180).
  *
  * Skipped when headed (the real window is already coherent) and when the caller expressed ANY
  * geometry intent — `viewport` (including an explicit null) or `screen`. `headless` unset means
@@ -211,9 +250,9 @@ export function applyHeadlessGeometry(
   if ("viewport" in opts || "screen" in opts) return null;
   opts.viewport = null;
   if (personaActive(args)) {
-    const display = process.platform === "linux" && !callerSetTheDisplay(args)
-      ? servedDisplay({ ...fp, seed, args, lightStealth: false })
-      : null;
+    // The persona's own display wins over --screen-info on every platform (SC 180), so the SDK's row
+    // is a fallback for a persona that does not engage, never a contradiction.
+    const display = callerSetTheDisplay(args) ? null : servedDisplay({ ...fp, seed, args, lightStealth: false });
     return { mode: "persona", args: display ? [screenInfoSwitch(display)] : [] };
   }
   // Not lightStealth's own row, unlike serve(): launch() keeps the seed -> screen row the Python and
@@ -327,12 +366,15 @@ async function fitWindow(
 }
 
 /**
- * Size the headless window to the display's work area — the persona's (regime 1) or the one
- * `--screen-info` set (regime 2) — so the page reports a maximized window (outer == avail) instead
- * of the headless default window sitting inside a much larger screen.
+ * Size the window to the display's work area — the persona's (regime 1) or the one `--screen-info`
+ * set (regime 2) — so the page reports a maximized window (outer == avail) instead of the default
+ * window sitting inside a much larger screen.
  *
- * `--start-maximized` and CDP `windowState: "maximized"` are both no-ops in headless (measured — the
- * window stays at its default size), which is why this sets explicit bounds.
+ * Headless, and headed on Linux without a window manager (Xvfb, every Docker/VPS headful run; see
+ * {@link headedLinuxFit}): there `--start-maximized` and CDP `windowState: "maximized"` are both
+ * no-ops (measured — the window stays Chrome's 945x1060 default at (10,10)), which is why this sets
+ * explicit bounds. Skipped for ANY caller window flag, a bare `--window-position` included: a placed
+ * window is theirs to keep.
  *
  * Never throws: a geometry improvement must not be able to fail a launch.
  */
@@ -372,13 +414,17 @@ export async function installWindowFixup(
     await fitWindowToWorkArea(page, args);
     return page;
   };
-  const existing = context.pages();
-  if (existing.length) {
-    await fix(existing[0]);
-    return;
+  try {
+    const existing = context.pages();
+    if (existing.length) {
+      await fix(existing[0]);
+      return;
+    }
+    const origNewPage = context.newPage.bind(context);
+    (context as unknown as { newPage: () => Promise<Page> }).newPage = async () => fix(await origNewPage());
+  } catch {
+    // deliberately silent: a geometry improvement must not be able to fail a launch
   }
-  const origNewPage = context.newPage.bind(context);
-  (context as unknown as { newPage: () => Promise<Page> }).newPage = async () => fix(await origNewPage());
 }
 
 /** `inner <= outer <= avail <= screen` on both axes — the chain a real window satisfies. */
@@ -412,10 +458,15 @@ export function geometryIsCoherent(
 // REGIME 1 (persona): the persona picks its display inside the engine, so it is only known once a
 // page can be asked. `Emulation.updateScreen` (headless-only, browser-level, outlives the session
 // that sent it) then resizes the headless display to match. A fixed larger stand-in display would
-// let the window grow, but lets a big popup overhang the persona's screen.
+// let the window grow, but lets a big popup overhang the persona's screen. The seed's `--screen-info`
+// row still goes on the command line as a FALLBACK: the engine's persona display wins over it
+// (measured on r32 Linux and r33 Windows), so a persona that does not engage never leaves the
+// browser on the 800x600 surface (SC 180).
 //
 // BOTH: one `Browser.setWindowBounds` puts the first window on the work area, and
-// `--window-position` puts later windows at the work-area origin. Deliberately no `--window-size`:
+// `--window-position` puts later windows at the work-area origin — unless the caller placed the
+// window themselves (`--window-position`): their position holds, the display is still set and only
+// the fit is skipped (`fit: false`). Deliberately no `--window-size`:
 // it forces every popup to that size, ignoring the window.open() features real Chrome honours.
 // Measured after the fitting connection closed, both regimes: first tab, second tab, a 500x400
 // popup, a 4000x3000 popup (clamped to the work area) and a new context's window all coherent.
@@ -432,10 +483,12 @@ export interface Display { width: number; height: number; availWidth: number; av
 export interface ServedGeometry {
   /** true: the persona owns the display, which is matched after launch (see fitServedWindow). */
   persona: boolean;
-  /** Regime 2: the display serve() launches with. null under a persona. */
-  display: Display | null;
+  /** The display `--screen-info` sets: regime 2's own, or the fallback row under a persona. */
+  display: Display;
   /** Switches for the command line. */
   args: string[];
+  /** false when the caller placed the window (`--window-position`): serve() skips the window fit. */
+  fit: boolean;
 }
 
 export function callerSetTheDisplay(args?: readonly string[] | null): boolean {
@@ -494,8 +547,16 @@ export function screenInfoSwitch(d: Display): string {
 
 /**
  * What serve() adds for a headless launch, or null to leave geometry alone: headed (a real display),
- * or the caller passed a window or display switch of their own. The SDK's own android
+ * or the caller passed a display switch or fixed the window's size. The SDK's own android
  * `--window-size` counts as one: a phone persona sizes itself.
+ *
+ * A caller who only PLACED the window (`--window-position`) still gets the display: the switch says
+ * where the window goes, not how big the screen is. Only the fit is skipped then (`fit: false`), so
+ * their position holds.
+ *
+ * Both regimes pass `--screen-info`: under a persona the engine's own display wins over it (measured
+ * on r32 Linux and r33 Windows), so the row is a fallback for a persona that does not engage rather
+ * than a contradiction; without one it IS the display.
  */
 export function servedGeometry(
   engineArgs: readonly string[],
@@ -505,11 +566,15 @@ export function servedGeometry(
   },
   headless = true,
 ): ServedGeometry | null {
-  if (!headless || callerSizedTheWindow(engineArgs) || callerSetTheDisplay(engineArgs)) return null;
-  const origin = "--window-position=0,0";
-  if (personaActive(engineArgs)) return { persona: true, display: null, args: [origin] };
+  if (!headless || callerFixedTheSize(engineArgs) || callerSetTheDisplay(engineArgs)) return null;
+  const placed = callerSizedTheWindow(engineArgs);  // a bare --window-position: keep theirs, skip the fit
   const display = servedDisplay({ ...fp, seed: fp.fingerprint, args: engineArgs });
-  return { persona: false, display, args: [screenInfoSwitch(display), origin] };
+  return {
+    persona: personaActive(engineArgs),
+    display,
+    args: [screenInfoSwitch(display), ...(placed ? [] : ["--window-position=0,0"])],
+    fit: !placed,
+  };
 }
 
 /** The slice of a CDP connection the window fit needs (sessionId routes to a page). */

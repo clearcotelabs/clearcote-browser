@@ -57,17 +57,23 @@ public class ParityLaunchTests : IDisposable
         // Windows claim: SwiftShader, headed and headless (GL clamps VUV to 1024 under a D3D11 label).
         Assert.Equal(new[] { "--use-angle=swiftshader-webgl" }, LaunchOpts.GpuBackendArgs("windows", true, "linux"));
         Assert.Equal(new[] { "--use-angle=swiftshader-webgl" }, LaunchOpts.GpuBackendArgs("windows", false, "linux"));
-        // Linux claim, headless: Mesa over a reachable X display (whatever EGL offers) ...
-        foreach (var egl in new[] { true, false })
-            Assert.Equal(new[] { "--use-angle=gl", "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", null, "remotehost:0", egl));
-        // ... else over EGL when the host has Mesa's EGL, else nothing (stays on SwiftShader).
-        Assert.Equal(new[] { "--use-angle=gl-egl", "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", null, ":4242", true));
+        // Linux claim: Mesa over EGL in BOTH modes whenever the host has it, display or not. Real Linux
+        // Chrome shows the "OpenGL ES 3.2" (EGL) form 4:1 over desktop GL, and gl-egl renders headed under
+        // Xvfb too (SC 180), so one backend serves both modes: one WebGL surface, headless or headed.
+        foreach (var display in new[] { "remotehost:0", ":4242" })
+        {
+            Assert.Equal(new[] { "--use-angle=gl-egl", "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", null, display, true));
+            // headed: GpuBlocklistArgs already carries the override
+            Assert.Equal(new[] { "--use-angle=gl-egl" }, LaunchOpts.GpuBackendArgs("linux", true, "linux", null, display, true));
+        }
+        // No EGL: a reachable X display still gives Mesa (desktop GL, the rarer real form) ...
+        Assert.Equal(new[] { "--use-angle=gl", "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", null, "remotehost:0", false));
+        Assert.Equal(new[] { "--use-angle=gl" }, LaunchOpts.GpuBackendArgs("linux", true, "linux", null, "remotehost:0", false));
+        // ... and with neither, nothing (stays on SwiftShader), headless or headed.
         Assert.Empty(LaunchOpts.GpuBackendArgs("linux", false, "linux", null, ":4242", false));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", true, "linux", null, ":4242", false));
         Assert.Equal(new[] { "--use-angle=gl-egl" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--ignore-gpu-blocklist" }, ":4242", true));
-        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--use-angle=swiftshader" }, ":4242", true));
         Assert.Equal(new[] { "--use-angle=swiftshader-webgl" }, LaunchOpts.GpuBackendArgs("windows", false, "linux", null, ":4242", true));
-        // Headed Linux claim: already on the default GL path.
-        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", true, "linux", null, "remotehost:0", true));
     }
 
     [Fact]
@@ -102,8 +108,14 @@ public class ParityLaunchTests : IDisposable
     public void Gpu_backend_never_overrides_the_caller_other_hosts_or_passthrough()
     {
         Assert.Empty(LaunchOpts.GpuBackendArgs("windows", true, "linux", new[] { "--use-angle=vulkan" }));
-        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--use-gl=egl" }, "remotehost:0"));
-        Assert.Equal(new[] { "--use-angle=gl" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--ignore-gpu-blocklist" }, "remotehost:0"));
+        // A caller's own backend is kept; headless on a GPU-less host it still needs the blocklist override
+        // (measured: without it a headless launch with the caller's gl-egl or gl had no WebGL context at all).
+        Assert.Equal(new[] { "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--use-gl=egl" }, "remotehost:0"));
+        Assert.Equal(new[] { "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--use-angle=gl-egl" }, ":4242", true));
+        Assert.Equal(new[] { "--ignore-gpu-blocklist" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--use-angle=swiftshader" }, ":4242", true));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--use-angle=gl", "--ignore-gpu-blocklist" }, "remotehost:0"));
+        Assert.Empty(LaunchOpts.GpuBackendArgs("linux", true, "linux", new[] { "--use-angle=gl" }, "remotehost:0"));   // headed has it already
+        Assert.Equal(new[] { "--use-angle=gl" }, LaunchOpts.GpuBackendArgs("linux", false, "linux", new[] { "--ignore-gpu-blocklist" }, "remotehost:0", false));
         Assert.Empty(LaunchOpts.GpuBackendArgs("windows", true, "windows"));
         Assert.Empty(LaunchOpts.GpuBackendArgs("windows", true, "macos"));
         Assert.Empty(LaunchOpts.GpuBackendArgs(null, false, "linux", null, "remotehost:0"));

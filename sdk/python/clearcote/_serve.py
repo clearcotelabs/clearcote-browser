@@ -275,7 +275,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     atexit.register(srv.close)
     # Before any client attaches: the window onto the work area (and, under a persona, the headless
     # display onto the persona's). Its own connection, closed again; never fails the launch.
-    if geometry:
+    if geometry and geometry.get("fit", True):  # a caller's own --window-position keeps its place
         fit_served_window(srv.ws_url, geometry["persona"], window_size)
     if not quiet:
         sys.stderr.write(

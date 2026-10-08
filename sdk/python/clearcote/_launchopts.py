@@ -566,45 +566,51 @@ def mesa_egl_available(lib_dirs=EGL_LIB_DIRS):
 
 
 def gpu_backend_args(claimed_platform, headed, platform=None, user_args=(), environ=None, mesa_egl=None):
-    """The ANGLE backend whose WebGL limits match the platform the page is TOLD it is, on a Linux host.
+    """The ANGLE backend whose WebGL surface matches the platform the page is TOLD it is, on a Linux host.
 
-    A persona's renderer string names a GPU and an API; the limits the page reads next to it come
-    from whichever backend actually renders (the engine only ever lowers them). Measured 2026-10-06
-    on a GPU-less Linux host against real captures:
+    A persona's renderer string names a GPU and an API; the limits, the API suffix and the extension
+    list the page reads next to it come from whichever backend actually renders (the engine only ever
+    lowers limits). Measured 2026-10-06 and 2026-10-08 on a GPU-less Linux host against real captures:
 
-    * A **Windows** claim names Direct3D11. ANGLE's OpenGL backend (Mesa, what a headed launch gets)
-      clamps MAX_VERTEX_UNIFORM_VECTORS to 1024 -- no real Direct3D11 Intel machine reports that
-      (0 of 129 captures; they report 4096) -- and translates shaders to GLSL. SwiftShader reports
-      4096, and the HLSL shader dialect (see shader_dialect) makes its translations match. So a
-      Windows claim gets ``--use-angle=swiftshader-webgl``, the engine's own headless default.
-    * A **Linux** claim names Mesa/OpenGL. Headless Chromium renders WebGL through SwiftShader
-      (8192 textures, 4096 vertex uniforms, SwiftShader shader text: nothing like Mesa); with an X
-      display reachable, ``--use-angle=gl`` renders through Mesa instead (16384 / 1024 / GLSL, the
-      values real Mesa machines report). Headed launches already get Mesa (gpu_blocklist_args).
-      Headless with NO display gets ``--use-angle=gl-egl`` when the host has Mesa's EGL
-      (mesa_egl_available): Mesa again, with the same limits and the shader text of an OpenGL ES
-      context. Without it, headless stays on SwiftShader.
+    * A **Windows** claim names Direct3D11. ANGLE's OpenGL backend (Mesa) clamps
+      MAX_VERTEX_UNIFORM_VECTORS to 1024 -- no real Direct3D11 Intel machine reports that (0 of 129
+      captures; they report 4096) -- and translates shaders to GLSL. SwiftShader reports 4096, and
+      the HLSL shader dialect (see shader_dialect) makes its translations match. So a Windows claim
+      gets ``--use-angle=swiftshader-webgl``, the engine's own headless default.
+    * A **Linux** claim names Mesa. Real Linux Chrome shows the ``OpenGL ES 3.2`` form of the
+      renderer string four to one over desktop ``OpenGL 4.x`` (63 vs 16 decontaminated captures,
+      SC 180), and Mesa over EGL (``--use-angle=gl-egl``) reproduces that form, its extension set
+      (an exact match for 60 of 63 captures) and its limits -- with or without an X display, headed
+      or headless (measured under Xvfb). So a Linux claim gets ``gl-egl`` whenever the host has
+      Mesa's EGL (mesa_egl_available), in BOTH modes, so headless and headed show one WebGL surface.
+      Without EGL but with an X display, ``--use-angle=gl`` (desktop GL, the rarer real form); with
+      neither, SwiftShader stays.
+    * Mesa needs ``--ignore-gpu-blocklist`` on a GPU-less host or Chromium disables WebGL outright.
+      Headed launches already carry it (gpu_blocklist_args); headless ones get it here. That holds
+      for a caller's OWN ``--use-angle=`` / ``--use-gl=`` too: measured, a headless launch with the
+      caller's ``gl-egl`` or ``gl`` and no blocklist override had NO WebGL context at all, a louder
+      tell than any backend. Their backend choice is kept; only the override is added.
 
     ``claimed_platform`` None (pass-through: no persona) adds nothing, nor does any host other than
-    Linux, nor a caller who chose a backend with their own ``--use-angle=`` / ``--use-gl=``.
-    ``mesa_egl`` None probes this host; tests pass True/False."""
+    Linux. ``mesa_egl`` None probes this host; tests pass True/False."""
     platform = sys.platform if platform is None else platform
     if claimed_platform is None or not str(platform).startswith("linux"):
         return []
     user = list(user_args or ())
+    blocklist = [] if (headed or "--ignore-gpu-blocklist" in user) else ["--ignore-gpu-blocklist"]
     if any(a.startswith(("--use-angle=", "--use-gl=")) for a in user):
-        return []
+        return blocklist  # the caller chose the backend; Mesa still needs the blocklist override
     claim = str(claimed_platform).strip().lower()
     if claim == "windows":
         return ["--use-angle=swiftshader-webgl"]
-    if claim == "linux" and not headed:
-        if x_display_available(environ):
-            backend = "--use-angle=gl"
-        elif mesa_egl_available() if mesa_egl is None else mesa_egl:
+    if claim == "linux":
+        if mesa_egl_available() if mesa_egl is None else mesa_egl:
             backend = "--use-angle=gl-egl"
+        elif x_display_available(environ):
+            backend = "--use-angle=gl"
         else:
             return []
-        return [backend] + ([] if "--ignore-gpu-blocklist" in user else ["--ignore-gpu-blocklist"])
+        return [backend] + blocklist
     return []
 
 

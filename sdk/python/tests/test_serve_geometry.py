@@ -58,13 +58,18 @@ def test_a_light_stealth_row_off_windows_has_no_taskbar():
 def test_sets_the_display_and_window_origin_without_a_persona():
     args = ["--fingerprint-platform=windows"]
     g = served_geometry(args, "probe-1", light_stealth=True)
-    assert g["persona"] is False
+    assert g["persona"] is False and g["fit"] is True
     assert g["args"] == [screen_info_switch(_light_stealth_screen("probe-1")), "--window-position=0,0"]
 
 
-def test_leaves_the_display_to_a_persona():
-    assert served_geometry(["--fingerprint=seed"], "seed") == {
-        "persona": True, "display": None, "args": ["--window-position=0,0"]}
+def test_passes_the_seeds_display_as_a_fallback_under_a_persona():
+    """The engine's persona display wins over --screen-info (measured on r32 Linux and r33 Windows), so
+    the row is a fallback: a persona that does not engage must never leave the 800x600 surface."""
+    from clearcote._geometry import headless_display
+    g = served_geometry(["--fingerprint=seed"], "seed")
+    assert g["persona"] is True and g["fit"] is True
+    assert g["display"] == headless_display("seed", ["--fingerprint=seed"])
+    assert g["args"] == [screen_info_switch(g["display"]), "--window-position=0,0"]
 
 
 def test_never_passes_window_size_it_would_force_every_popup_to_that_size():
@@ -72,10 +77,19 @@ def test_never_passes_window_size_it_would_force_every_popup_to_that_size():
         assert not any(a.startswith("--window-size") for a in served_geometry(args)["args"])
 
 
-@pytest.mark.parametrize("flag", [
-    "--window-size=1024,768", "--window-position=5,5", "--start-maximized", "--screen-info={1280x720}"])
-def test_stays_out_of_the_way_of_a_callers_window_or_display(flag):
+@pytest.mark.parametrize("flag", ["--window-size=1024,768", "--start-maximized", "--screen-info={1280x720}"])
+def test_stays_out_of_the_way_of_a_callers_window_size_or_display(flag):
     assert served_geometry([flag]) is None
+
+
+def test_a_placed_window_keeps_the_display_and_skips_only_the_fit():
+    """--window-position says where the window goes, not how big the screen is. The hosted gateway
+    passed 10,10 and, with the old all-or-nothing rule, every session showed the 800x600 surface."""
+    for args in (["--window-position=10,10"], ["--fingerprint=s", "--window-position=10,10"]):
+        g = served_geometry(args, "s")
+        assert g is not None and g["fit"] is False
+        assert g["args"] == [screen_info_switch(g["display"])]
+        assert not any(a.startswith("--window-position") for a in g["args"])
 
 
 def test_stays_out_of_the_way_when_headed_or_for_the_android_window():

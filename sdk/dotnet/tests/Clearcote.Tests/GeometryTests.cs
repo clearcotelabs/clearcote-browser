@@ -15,9 +15,10 @@ namespace Clearcote.Tests;
 /// A default headless launch used to report a window LARGER than the screen it claims to be on
 /// (screen 1280x720, outer 1288x851) — not a subtle statistical tell but a state no real browser can
 /// be in, readable with two property lookups. These lock down the frame arithmetic (the cross-SDK
-/// contract), the regime split (with --fingerprint the engine's persona owns screen/avail and the SDK
-/// only fits the window; without it the SDK also sets the headless display with --screen-info), and
-/// the rule that a caller's own geometry always wins.
+/// contract), the regime split (with --fingerprint, or the persona transport's --persona-from-env,
+/// the engine's persona owns screen/avail and the SDK's --screen-info row is only a fallback for a
+/// persona that does not engage; without a persona that row IS the headless display), and the rule
+/// that a caller's own geometry always wins.
 ///
 /// PARITY: the vector below is duplicated verbatim in sdk/python/tests/test_geometry.py and
 /// sdk/node/test/geometry.test.ts. A seed must select the same persona in every SDK, or a persona
@@ -120,6 +121,10 @@ public class GeometryTests
     {
         // LightStealth passes a seed to the SDK but deliberately drops --fingerprint, so no persona runs.
         Assert.True(Geometry.PersonaActive(new[] { "--fingerprint=abc", "--no-sandbox" }));
+        // the persona transport (0.41+) moves the seed to the environment and leaves this marker behind
+        Assert.True(Geometry.PersonaActive(new[] { "--no-sandbox", "--persona-from-env" }));
+        Assert.True(Geometry.PersonaActive(new[] { "--persona-from-env=1" }));
+        Assert.False(Geometry.PersonaActive(new[] { "--persona-from-environment" }));   // the exact switch only
         Assert.False(Geometry.PersonaActive(new[] { "--fingerprint-platform=windows", "--fingerprint-screen-width=1920" }));
         Assert.False(Geometry.PersonaActive(Array.Empty<string>()));
         Assert.False(Geometry.PersonaActive(null));
@@ -132,6 +137,30 @@ public class GeometryTests
         Assert.True(Geometry.CallerSizedTheWindow(new[] { "--window-position=0,0" }));
         Assert.True(Geometry.CallerSizedTheWindow(new[] { "--start-maximized" }));
         Assert.False(Geometry.CallerSizedTheWindow(new[] { "--no-sandbox", "--fingerprint=x" }));
+    }
+
+    [Fact]
+    public void CallerFixedTheSizeIgnoresABarePosition()
+    {
+        // --window-position only places the window; the size flags are what fix its size.
+        Assert.True(Geometry.CallerFixedTheSize(new[] { "--window-size=1920,1080" }));
+        Assert.True(Geometry.CallerFixedTheSize(new[] { "--start-maximized" }));
+        Assert.False(Geometry.CallerFixedTheSize(new[] { "--window-position=10,10" }));
+        Assert.False(Geometry.CallerFixedTheSize(new[] { "--no-sandbox", "--fingerprint=x" }));
+        Assert.False(Geometry.CallerFixedTheSize(null));
+    }
+
+    [Fact]
+    public void HeadedLinuxFitNeedsALinuxHostAndNoCallerWindowFlag()
+    {
+        // Under Xvfb/Docker nothing else maximizes the window, so headed Linux gets the headless fit;
+        // a caller's own window flag (size OR position) keeps their window, other hosts keep NoViewport alone.
+        Assert.True(Geometry.HeadedLinuxFit(new[] { "--no-sandbox" }, linuxHost: true));
+        Assert.True(Geometry.HeadedLinuxFit(null, linuxHost: true));
+        foreach (var flag in new[] { "--window-size=1024,768", "--window-position=5,5", "--start-maximized" })
+            Assert.False(Geometry.HeadedLinuxFit(new[] { flag }, linuxHost: true));
+        Assert.False(Geometry.HeadedLinuxFit(new[] { "--no-sandbox" }, linuxHost: false));
+        Assert.Equal(OperatingSystem.IsLinux(), Geometry.HeadedLinuxFit(Array.Empty<string>()));
     }
 
     // ─────────────────────────────────────────────────────── resolve / skip rules
@@ -191,20 +220,25 @@ public class GeometryTests
         Assert.StartsWith("--screen-info=", Assert.Single(sized.Args));
     }
 
-    [Fact]
-    public void RegimeOneSetsTheLinuxHeadlessDisplayToThePersona()
+    [Theory]
+    [InlineData("--fingerprint=seed")]
+    [InlineData("--persona-from-env")]
+    public void RegimeOneSetsAFallbackHeadlessDisplayOnEveryPlatform(string personaSwitch)
     {
-        // Setting screen here would be a silent no-op: the persona's value beats the CDP override.
-        var r = Geometry.ResolveHeadless(true, "seed", new[] { "--fingerprint=seed" }, callerSetGeometry: false);
+        // Setting screen here would be a silent no-op: the persona's value beats the CDP override, and
+        // its own display beats --screen-info too (measured on r32 Linux and r33 Windows). The seed's
+        // row still goes on the command line, on every platform, so a persona that does not engage
+        // never leaves the browser on the 800x600 headless surface.
+        var args = new[] { personaSwitch, "--no-sandbox" };
+        var r = Geometry.ResolveHeadless(true, "seed", args, callerSetGeometry: false);
         Assert.Equal(Geometry.Mode.Persona, r.Mode);
         Assert.Null(r.Display);
-        if (OperatingSystem.IsLinux())
-        {
-            Assert.Single(r.Args);
-            Assert.Equal("--screen-info={1920x1080}", r.Args[0]);
-        }
-        else
-            Assert.Empty(r.Args);
+        Assert.Equal(new[] { Geometry.ScreenInfoSwitch(Geometry.HeadlessDisplay("seed", args)) }, r.Args);
+        Assert.StartsWith("--screen-info={1920x1080", r.Args[0]);
+        // a caller's own display switch still wins
+        var own = Geometry.ResolveHeadless(true, "seed", new[] { personaSwitch, "--screen-info={1280x720}" }, callerSetGeometry: false);
+        Assert.Equal(Geometry.Mode.Persona, own.Mode);
+        Assert.Empty(own.Args);
     }
 
     [Fact]
@@ -307,13 +341,9 @@ public class GeometryTests
         var r = Geometry.ResolveHeadless(true, "seed", new[] { arg, "--fingerprint=seed" }, callerSetGeometry: false);
         Assert.Equal(Geometry.Mode.Persona, r.Mode);
         Assert.Null(r.Display);
-        if (OperatingSystem.IsLinux())
-        {
-            Assert.Single(r.Args);
-            Assert.Equal("--screen-info={2560x1440}", r.Args[0]);
-        }
-        else
-            Assert.Empty(r.Args);
+        // the fallback display is the imported screen, not a corpus pick, on every platform
+        Assert.Equal(new[] { Geometry.ScreenInfoSwitch(Geometry.HeadlessDisplay("seed", new[] { arg, "--fingerprint=seed" })) }, r.Args);
+        Assert.StartsWith("--screen-info={2560x1440", r.Args[0]);
     }
 
     // ─────────────────────────────────────────────────────── the fit correction
@@ -329,8 +359,10 @@ public class GeometryTests
     [Fact]
     public void CallerWindowPositionSuppressesTheFit()
     {
-        // The window fit defers to a caller who positioned or sized the window themselves.
+        // The window fit defers to a caller who positioned or sized the window themselves (placed:
+        // theirs to keep), even though a bare position does not fix the size.
         Assert.True(Geometry.CallerSizedTheWindow(new[] { "--window-position=100,100" }));
+        Assert.False(Geometry.CallerFixedTheSize(new[] { "--window-position=100,100" }));
     }
 
     [Fact]

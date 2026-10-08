@@ -40,7 +40,7 @@ from ._fontpersona import ensure_persona_fonts, font_reachability, profile_with_
 from ._fonts import apply_font_env, check_font_dirs
 from ._shaderdialect import apply_shader_dialect
 from . import _personaenv
-from ._geometry import apply_headless_geometry, fit_window_to_work_area
+from ._geometry import apply_headless_geometry, caller_sized_the_window, fit_window_to_work_area
 from ._colorscheme import (default_color_scheme, engine_decides_color_scheme,
                            install_color_scheme_default)
 from ._humanize import install_humanize, install_humanize_on_context
@@ -576,6 +576,14 @@ def _headed_no_viewport(pw_kwargs):
             and "viewport" not in pw_kwargs and "no_viewport" not in pw_kwargs)
 
 
+def _headed_linux_fit(args):
+    """Whether a HEADED launch gets the first-page window fit: a Linux host (no window manager under
+    Xvfb/Docker, so nothing else maximizes the window) and no window switch of the caller's own.
+    Measured (SC 180): ``--start-maximized`` is a no-op there; CDP ``Browser.setWindowBounds`` before
+    the first navigation gives ``outer == avail`` at (0,0) with zero resize events."""
+    return sys.platform.startswith("linux") and not caller_sized_the_window(args)
+
+
 def _install_headed_viewport(browser):
     """Default a headed browser's new pages/contexts to no_viewport (unless the caller sets one)."""
     orig_new_page, orig_new_context = browser.new_page, browser.new_context
@@ -1108,7 +1116,11 @@ def launch(cloud=None, **kwargs):
                 _lease.stop()
             _lt[1]()
         browser.on("disconnected", _on_disconnect)
-    if headed:
+    if headed and _headed_linux_fit(args):
+        # Headed Linux with no window manager (Xvfb: every Docker/VPS headful run) leaves Chrome's
+        # 945x1060 default window at (10,10); the same first-page fit as headless maximizes it.
+        _install_headless_geometry(browser, args)
+    elif headed:
         _install_headed_viewport(browser)
     elif geom:
         _install_headless_geometry(browser, args)
@@ -1160,8 +1172,10 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     if lease:  # inject CLEARCOTE_RUN_TOKEN (+ the r23+ opt-in token FILE) so the gate lets it launch
         inject_run_token(pw_kwargs, lease.token, launch_token[0])
     geom = None
+    headed_fit = False
     if _headed_no_viewport(pw_kwargs):  # no_viewport IS a valid persistent-context option
         pw_kwargs["no_viewport"] = True
+        headed_fit = _headed_linux_fit(args)  # Xvfb/Docker headful: maximize on the first page too
     else:  # headless: persona owns screen -> fit the window; no persona -> set the display too
         geom = apply_headless_geometry(pw_kwargs, seed, args)
     if engine_decides_color_scheme(exe):  # r32+: the persona's colour scheme, not Playwright's light
@@ -1183,7 +1197,7 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
                 _lease.stop()
             _lt[1]()
         context.on("close", _on_close)
-    if geom:
+    if geom or headed_fit:
         _install_window_fixup(context, args)
     install_humanize_on_context(context, humanize, show_cursor, seed=seed)
     return context

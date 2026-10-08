@@ -25,7 +25,10 @@ const stub = vi.hoisted(() => ({
   browser: {
     onLaunch: null as null | ((userDataDir: string) => void),
     shutdown: null as null | ((userDataDir: string) => Promise<void>),
+    newPage: null as null | (() => unknown),  // what an incognito browser's newPage() hands back
+    pages: [] as unknown[],                   // what a persistent context already owns
   },
+  fits: [] as unknown[][],  // the arguments of every fitServedWindow call serve() made
   host: {
     os_family: "windows", browser_major: 153, gpu_vendor: "intel",
     screen_width: 1920, screen_height: 1080, device_pixel_ratio: 1,
@@ -39,7 +42,7 @@ vi.mock("playwright-core", async (importOriginal) => {
   const { EventEmitter } = await import("node:events");
   const fakeContext = (userDataDir?: string) => {
     const ctx = new EventEmitter() as EventEmitter & Record<string, unknown>;
-    ctx.pages = () => [];
+    ctx.pages = () => stub.browser.pages;
     ctx.browser = () => null;
     // As real Playwright does: "close" is emitted when the browser's pipe drops, and close() resolves
     // only once the browser process has exited — which on Linux is ~100 ms later, and Chrome keeps
@@ -61,7 +64,7 @@ vi.mock("playwright-core", async (importOriginal) => {
       stub.launches.push({ kind: "incognito", opts });
       if (stub.failLaunch) throw stub.failLaunch;
       const browser = new EventEmitter() as EventEmitter & Record<string, unknown>;
-      browser.newPage = async () => ({});
+      browser.newPage = async () => stub.browser.newPage?.() ?? {};
       browser.newContext = async () => fakeContext();
       browser.close = async () => {};
       return browser;
@@ -97,6 +100,15 @@ vi.mock("../src/fonts.js", async (importOriginal) => {
       stub.fontDirs.push(a[3]);
       return actual.fontLaunchEnv(...a);
     },
+  };
+});
+
+// The served-window fit is recorded, not run: it would open a WebSocket to the stand-in endpoint.
+vi.mock("../src/geometry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/geometry.js")>();
+  return {
+    ...actual,
+    fitServedWindow: async (...a: unknown[]) => { stub.fits.push(a); return null; },
   };
 });
 
@@ -150,6 +162,9 @@ beforeEach(() => {
   stub.failLaunch = null;
   stub.browser.onLaunch = null;
   stub.browser.shutdown = null;
+  stub.browser.newPage = null;
+  stub.browser.pages = [];
+  stub.fits.length = 0;
 });
 
 afterEach(() => {
@@ -580,5 +595,142 @@ describe("fontDirs reaches the font wiring on every entry point", () => {
     const browser = await launch(base());
     expect(stub.fontDirs.at(-1)).toEqual([]);
     await browser.close();
+  });
+});
+
+// SC 180: a headed Linux launch (Xvfb/Docker: no window manager, so Chrome's 945x1060 default window
+// stays at (10,10)) gets the same first-page window fit as headless; other headed platforms keep
+// viewport: null alone. serve() keeps a caller's own --window-position and still sets the display.
+describe("the window fit on headed launches and on serve()", () => {
+  /** A page as the fit sees it: a plausible work area, a window that reports the bounds it was given. */
+  function fakePage() {
+    const calls: string[] = [];
+    let outer = [945, 1060];
+    const cdp = {
+      send: async (method: string, params?: Record<string, unknown>) => {
+        calls.push(method);
+        if (method === "Browser.getWindowForTarget") return { windowId: 1 };
+        if (method === "Browser.setWindowBounds") {
+          const b = params!.bounds as { width: number; height: number };
+          outer = [b.width, b.height];
+        }
+        return {};
+      },
+    };
+    const page = {
+      evaluate: async (js: string) => (js.includes("availWidth") ? [1920, 1040] : outer),
+      context: () => ({ newCDPSession: async () => cdp }),
+    };
+    return { page, calls, fitted: () => calls.includes("Browser.setWindowBounds") };
+  }
+  const onLinux = process.platform === "linux";
+  /** Run `fn` with process.platform reporting `platform` (the headed fit reads it at launch time). */
+  async function pretending(platform: NodeJS.Platform, fn: () => Promise<void>): Promise<void> {
+    const real = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: platform, configurable: true });
+    try { await fn(); } finally { Object.defineProperty(process, "platform", real); }
+  }
+
+  it("harness: a headless launch fits the stand-in page on every platform (the path headed Linux shares)", async () => {
+    const fake = fakePage();
+    stub.browser.newPage = () => fake.page;
+    const browser = await launch({ ...base(), headless: true, ephemeralProfile: false });
+    await browser.newPage();
+    expect(fake.fitted()).toBe(true);
+    await browser.close();
+    const owned = fakePage();
+    stub.browser.pages = [owned.page];
+    const context = await launchPersistentContext(join(root, "p0"), { ...base(), headless: true });
+    expect(owned.fitted()).toBe(true);
+    await context.close();
+  });
+
+  it("launch(): the first page of a headed incognito browser is fitted on Linux only", async () => {
+    const fake = fakePage();
+    stub.browser.newPage = () => fake.page;
+    const browser = await launch({ ...base(), ephemeralProfile: false });
+    await browser.newPage();
+    expect(fake.fitted()).toBe(onLinux);
+    await browser.close();
+  });
+
+  it("launch(): the page a headed throwaway profile's context owns is fitted on Linux only", async () => {
+    const fake = fakePage();
+    stub.browser.pages = [fake.page];
+    const browser = await launch(base());
+    expect(stub.launches.at(-1)!.kind).toBe("persistent");
+    expect(fake.fitted()).toBe(onLinux);
+    await browser.close();
+  });
+
+  it.skipIf(onLinux)("a non-Linux host pretending to be Linux: both headed entry points fit the window", async () => {
+    await pretending("linux", async () => {
+      const fake = fakePage();
+      stub.browser.newPage = () => fake.page;
+      const browser = await launch({ ...base(), ephemeralProfile: false });
+      await browser.newPage();
+      expect(fake.fitted()).toBe(true);
+      await browser.close();
+      const owned = fakePage();
+      stub.browser.pages = [owned.page];
+      const context = await launchPersistentContext(join(root, "p3"), base());
+      expect(owned.fitted()).toBe(true);
+      await context.close();
+    });
+  });
+
+  it.skipIf(!onLinux)("Linux pretending to be Windows: a headed window is left to the window manager", async () => {
+    await pretending("win32", async () => {
+      const fake = fakePage();
+      stub.browser.newPage = () => fake.page;
+      const browser = await launch({ ...base(), ephemeralProfile: false });
+      await browser.newPage();
+      expect(fake.calls).toEqual([]);
+      await browser.close();
+    });
+  });
+
+  it("launchPersistentContext(): the same, and a placed window stays the caller's on every platform", async () => {
+    const fake = fakePage();
+    stub.browser.pages = [fake.page];
+    const context = await launchPersistentContext(join(root, "p1"), base());
+    expect(fake.fitted()).toBe(onLinux);
+    await context.close();
+    const own = fakePage();
+    stub.browser.pages = [own.page];
+    const placed = await launchPersistentContext(join(root, "p2"), { ...base(), args: ["--window-position=10,10"] });
+    expect(own.calls).toEqual([]);
+    await placed.close();
+  });
+
+  it("launch(): a caller's own window switch keeps a headed incognito window theirs on every platform", async () => {
+    const fake = fakePage();
+    stub.browser.newPage = () => fake.page;
+    const browser = await launch({ ...base(), ephemeralProfile: false, args: ["--start-maximized"] });
+    await browser.newPage();
+    expect(fake.calls).toEqual([]);
+    await browser.close();
+  });
+
+  it("serve(): fits the window unless the caller placed it, and sets the display either way", async () => {
+    const { port, close } = await fakeCdpEndpoint();
+    try {
+      const fitted = await serve({ ...base(), headless: true, port, fingerprint: "s1" });
+      expect(stub.fits).toHaveLength(1);
+      expect((stub.fits[0][1] as { persona: boolean }).persona).toBe(true);
+      const fittedArgs = stub.spawns.at(-1)!;
+      expect(fittedArgs.some((a) => a.startsWith("--screen-info="))).toBe(true);  // the fallback row under a persona
+      expect(fittedArgs).toContain("--window-position=0,0");
+      await fitted.close();
+      stub.fits.length = 0;
+      const placed = await serve({ ...base(), headless: true, port, args: ["--window-position=10,10"] });
+      expect(stub.fits).toEqual([]);  // their position holds
+      const placedArgs = stub.spawns.at(-1)!;
+      expect(placedArgs.some((a) => a.startsWith("--screen-info="))).toBe(true);  // with a real display under it
+      expect(placedArgs.filter((a) => a.startsWith("--window-position"))).toEqual(["--window-position=10,10"]);
+      await placed.close();
+    } finally {
+      await close();
+    }
   });
 });

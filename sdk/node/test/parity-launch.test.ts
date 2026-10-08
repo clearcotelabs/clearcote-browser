@@ -61,21 +61,23 @@ describe("GPU launch defaults (#1 + #2)", () => {
     expect(gpuBackendArgs("windows", false, "linux")).toEqual(["--use-angle=swiftshader-webgl"]);
   });
 
-  it("gives a headless Linux claim Mesa over the X display, else over EGL when the host has it", () => {
-    for (const egl of [true, false]) {
-      expect(gpuBackendArgs("linux", false, "linux", [], remote, egl)).toEqual(["--use-angle=gl", "--ignore-gpu-blocklist"]);
+  it("gives a Linux claim Mesa over EGL in both modes, else over the X display", () => {
+    // Real Linux Chrome shows the "OpenGL ES 3.2" (EGL) form 4:1 over desktop GL, and gl-egl renders
+    // headed under Xvfb too (SC 180), so one backend serves both modes: one WebGL surface, headless or headed.
+    for (const env of [remote, {}] as NodeJS.ProcessEnv[]) {
+      expect(gpuBackendArgs("linux", false, "linux", [], env, true)).toEqual(["--use-angle=gl-egl", "--ignore-gpu-blocklist"]);
+      expect(gpuBackendArgs("linux", true, "linux", [], env, true)).toEqual(["--use-angle=gl-egl"]); // headed: gpuBlocklistArgs already carries the override
     }
+    // no EGL: a reachable display still gives Mesa (desktop GL, the rarer real form)
+    expect(gpuBackendArgs("linux", false, "linux", [], remote, false)).toEqual(["--use-angle=gl", "--ignore-gpu-blocklist"]);
+    expect(gpuBackendArgs("linux", true, "linux", [], remote, false)).toEqual(["--use-angle=gl"]);
     for (const env of [{}, { DISPLAY: ":4242" }] as NodeJS.ProcessEnv[]) { // none, or no such socket
       expect(gpuBackendArgs("linux", false, "linux", [], env, true)).toEqual(["--use-angle=gl-egl", "--ignore-gpu-blocklist"]);
       expect(gpuBackendArgs("linux", false, "linux", [], env, false)).toEqual([]); // stays on SwiftShader
+      expect(gpuBackendArgs("linux", true, "linux", [], env, false)).toEqual([]);
     }
     expect(gpuBackendArgs("linux", false, "linux", ["--ignore-gpu-blocklist"], {}, true)).toEqual(["--use-angle=gl-egl"]);
-    expect(gpuBackendArgs("linux", false, "linux", ["--use-angle=swiftshader"], {}, true)).toEqual([]);
     expect(gpuBackendArgs("windows", false, "linux", [], {}, true)).toEqual(["--use-angle=swiftshader-webgl"]);
-  });
-
-  it("leaves a headed Linux claim on the default GL path", () => {
-    expect(gpuBackendArgs("linux", true, "linux", [], remote, true)).toEqual([]);
   });
 
   it("mesaEglAvailable needs libEGL, Mesa's EGL vendor and a software rasterizer", () => {
@@ -101,13 +103,22 @@ describe("GPU launch defaults (#1 + #2)", () => {
     expect(mesaEglAvailable([join(root, "missing")])).toBe(false);
   });
 
-  it("never overrides the caller's backend, other hosts, pass-through or android", () => {
+  it("keeps the caller's backend (headless: plus the blocklist override), and never touches other hosts, pass-through or android", () => {
     expect(gpuBackendArgs("windows", true, "linux", ["--use-angle=vulkan"])).toEqual([]);
-    expect(gpuBackendArgs("linux", false, "linux", ["--use-gl=egl"], remote)).toEqual([]);
-    expect(gpuBackendArgs("linux", false, "linux", ["--ignore-gpu-blocklist"], remote)).toEqual(["--use-angle=gl"]);
+    // a caller's own backend is kept; headless on a GPU-less host it still needs the blocklist override
+    // (measured: without it a headless launch with the caller's gl-egl or gl had no WebGL context at all)
+    expect(gpuBackendArgs("linux", false, "linux", ["--use-gl=egl"], remote)).toEqual(["--ignore-gpu-blocklist"]);
+    expect(gpuBackendArgs("linux", false, "linux", ["--use-angle=gl-egl"], {}, true)).toEqual(["--ignore-gpu-blocklist"]);
+    expect(gpuBackendArgs("linux", false, "linux", ["--use-angle=gl", "--ignore-gpu-blocklist"], remote)).toEqual([]);
+    expect(gpuBackendArgs("linux", true, "linux", ["--use-angle=gl"], remote)).toEqual([]); // headed has it already
+    expect(gpuBackendArgs("linux", false, "linux", ["--ignore-gpu-blocklist"], remote, false)).toEqual(["--use-angle=gl"]);
+    expect(gpuBackendArgs("linux", false, "linux", ["--use-angle=swiftshader"], {}, true)).toEqual(["--ignore-gpu-blocklist"]);
+    expect(gpuBackendArgs("windows", false, "linux", ["--use-angle=vulkan"])).toEqual(["--ignore-gpu-blocklist"]); // the override is backend-agnostic
     expect(gpuBackendArgs("windows", true, "win32")).toEqual([]);
     expect(gpuBackendArgs("windows", true, "darwin")).toEqual([]);
+    expect(gpuBackendArgs("linux", false, "darwin", ["--use-angle=gl"])).toEqual([]);
     expect(gpuBackendArgs(undefined, false, "linux", [], remote)).toEqual([]);
+    expect(gpuBackendArgs(undefined, false, "linux", ["--use-angle=gl"], remote)).toEqual([]); // pass-through: nothing, backend or not
     expect(gpuBackendArgs("android", false, "linux", [], remote)).toEqual([]);
   });
 
