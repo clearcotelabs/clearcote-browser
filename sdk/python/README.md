@@ -189,6 +189,23 @@ On an older engine each of these is skipped with a warning; the launch still wor
 
 `stock_runtime=True` (or `CLEARCOTE_STOCK_RUNTIME=1`) gives Playwright the browser's stock DevTools behaviour back: `page.on("console")` and `page.on("pageerror")` receive events, `page.set_content()` works, and `expose_function()` / `expose_binding()` keep working after a navigation. It is off by default because pages can observe some of what it restores. It needs an engine from r32 on; an older engine launches without it and the SDK warns once. It applies to local and Docker launches, not to cloud browsers.
 
+### On engines from r32 (`persona_env`, light or dark)
+
+Two more things change on an engine that supports them (the licensed build from r32). The SDK checks the binary
+for each one first, so an older engine launches exactly as before.
+
+- **The persona stays off the command line** (`persona_env`, on by default). The seed, every persona override,
+  proxy credentials and the canvas-bridge token reach the browser in the `CLEARCOTE_PERSONA_ARGS` environment
+  variable instead of on its command line, which any local user can read (`/proc/<pid>/cmdline` on Linux, the
+  process details on Windows). `persona_env=False` or `CLEARCOTE_PERSONA_ENV=0` keeps them on the command line. A
+  Docker launch hands the choice to the container.
+- **Light or dark comes from the persona.** The engine picks the persona's colour scheme (about one persona in
+  three is dark; `--fingerprint-color-scheme=light|dark` in `args` forces one), and CSS, `matchMedia`, the
+  `Sec-CH-Prefers-Color-Scheme` header and system colours follow it. Playwright emulates light in every context it
+  creates, which a dark persona would contradict, so on such an engine `launch()` and
+  `launch_persistent_context()` leave the colour scheme unemulated (`color_scheme="null"`). Pass `color_scheme=`
+  yourself to emulate one anyway. Docker and cloud launches are unchanged.
+
 Also: `license_through_proxy=True` (or `CLEARCOTE_LICENSE_THROUGH_PROXY=1`) sends the licence calls through the launch proxy; `release_channel="preview"` (or `CLEARCOTE_RELEASE_CHANNEL`) picks up PRO preview builds; `get_session_seats()` reports seats in use.
 
 ### Through a proxy (report the proxy's IP, not your host's)
@@ -305,7 +322,43 @@ Every `launch()` already does, with no extra options:
 - **disables QUIC/HTTP-3 when a proxy is set**, so no UDP egresses around the proxy (a SOCKS5/HTTP
   proxy carries only TCP) — coherent with proxied Chrome.
 - prints a one-line **coherence warning** to stderr for incoherent option combos it can't auto-fix
-  (silence with `quiet=True` or `CLEARCOTE_NO_WARN=1`).
+  (silence with `quiet=True` or `CLEARCOTE_NO_WARN=1`). That includes a one-time warning when a launch claims
+  Linux on a Windows host: Direct3D caps the WebGL and WebGPU limits there, and a persona can lower a limit but never
+  raise one past the driver's, so a Linux persona reports limits no Linux machine has. Claim `platform="windows"` on
+  Windows, or run Linux personas on Linux or in Docker (`docker=True`).
+- on Linux, sizes a **headless display to the persona's screen** (`--screen-info`), so full-screen, pop-ups and
+  moved windows stay inside the screen the page is told about. Your own `--screen-info` wins.
+
+### Your own fonts on Linux (`font_dirs`)
+
+On Linux the browser sees only the fonts the SDK points it at: the release's bundle of Windows metric-compatible
+lookalikes (Arial→Arimo, Segoe UI→Selawik, Times New Roman→Tinos, …). Fonts installed on the host never reach it,
+so nothing on the machine changes what a page measures. Two settings add directories (`launch()`, persistent
+contexts and `serve()`):
+
+- `font_dirs=[...]`, or `CLEARCOTE_FONT_DIRS` (directories separated by `:`): your own fonts, typically a copy of a
+  Windows machine's `C:\Windows\Fonts`, listed ahead of the bundle. On an engine that lets a genuine face win over
+  its lookalike (the licensed build from r32), every family they provide renders as itself, and the names that
+  stand for it on Windows follow: Helvetica, Times and Courier, and the CSS generics (`sans-serif` → Arial, `serif` →
+  Times New Roman, `monospace` → Consolas, `system-ui` → Segoe UI). An older engine keeps its lookalikes for the
+  families a persona lists and uses the directories only for characters nothing else covers. A path that is not a
+  directory raises before the licence lease.
+- `CLEARCOTE_FALLBACK_FONT_DIRS`: fonts used only for characters nothing else covers (CJK, Indic scripts, emoji,
+  …), listed after the bundle; they take no family over. The Docker image sets it to the script fonts it ships.
+
+```python
+from clearcote import launch
+
+# a copy of a Windows machine's C:\Windows\Fonts on the Linux host
+browser = launch(fingerprint="acct-1", platform="windows", font_dirs=["/srv/windows-fonts"])
+```
+
+`clearcote info` reports which of 29 writing systems the fonts a launch would see can draw, your font directories,
+and which of the key Windows families they provide for real. Never point either setting at all of
+`/usr/share/fonts`: the host's Latin families then compete with the bundle and change the widths a Windows persona
+reports. `--disable-genuine-font-faces` in `args` (r32+) keeps the lookalikes even with your fonts listed, and the
+SDK then leaves its font rules alone. Ignored on Windows and macOS, which use their own fonts; refused for cloud and
+Docker launches (in your own container, set `CLEARCOTE_FONT_DIRS` there). Only use fonts you are licensed to use.
 
 ### Persistent profile
 
@@ -345,6 +398,10 @@ ctx.close()
 
 - Requires a **persistent** context (the CDM lives in `user_data_dir`) — not the incognito `launch()`.
 - The CDM is cached under `~/.clearcote/WidevineCdm`; fetch it ahead of time with `fetch_widevine()`.
+- On an engine from r32 the SDK also passes `--widevine-cdm-path`, pointing at the fetched CDM, so the browser
+  registers it at startup in every profile without waiting for the component updater. Older engines keep the
+  seeded-profile route. For a launch the option does not cover, add `--widevine-cdm-path=<dir>` to `args` yourself,
+  with the directory `fetch_widevine()` returns.
 - It's **opt-in**: the clearcote package never distributes Google's CDM — *you* trigger the download.
 - Software-secure (L3) playback. Hardware-secure (L1) paths are out of scope.
 

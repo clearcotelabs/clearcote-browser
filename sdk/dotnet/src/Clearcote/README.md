@@ -211,6 +211,10 @@ Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the 
 | `CanvasBridge` | forward canvas/WebGL readback to a remote real-GPU host |
 | `Proxy`, `Args`, `Extensions`, `Headless`, `Channel`, `Env` | Playwright pass-through + SDK arg handling |
 | `ViewportSize`, `ScreenSize` | override the context geometry (opts out of the headless default below) |
+| `ColorScheme` | the `prefers-color-scheme` Playwright emulates; unset = none on an engine from r32 (see below) |
+| `FontDirs` | Linux: your own fonts, listed ahead of the bundled lookalikes (see below) |
+| `PersonaEnv = false` | keep the persona switches on the browser's command line (see below) |
+| `StockRuntime = true` | stock DevTools behaviour for debugging (see below) |
 
 ## Window geometry
 
@@ -220,7 +224,9 @@ window geometry by default (0.24.0+), so `screen`, `availWidth/Height`, `innerWi
 engine's own screen and work area are used and the window is sized to them; without a seed the SDK
 sets the headless display to a screen size drawn from real captured desktops (with a taskbar on
 Windows) and sizes the window to its work area the same way. It is applied at launch, before your
-first navigation. Set `ViewportSize` or `ScreenSize` to opt out.
+first navigation. Set `ViewportSize` or `ScreenSize` to opt out. On Linux a seeded headless launch also gets a
+display the persona's size (`--screen-info`; your own in `Args` wins), so full-screen, pop-ups and moved windows
+stay inside the screen the page is told about.
 
 `LaunchAsync` can only do half of this: it sets the display, but it returns an `IBrowser` whose
 `NewPageAsync`/`NewContextAsync` you call yourself, and a page with Playwright's default emulated
@@ -235,8 +241,9 @@ await Geometry.FitWindowToWorkAreaAsync(page);
 ## Environment variables
 
 `CLEARCOTE_LICENSE_KEY`, `CLEARCOTE_LICENSE_API`, `CLEARCOTE_INSTANCE_ID`, `CLEARCOTE_BINARY`,
-`CLEARCOTE_CACHE`, `CLEARCOTE_AUTO_UPDATE`; for the cloud, `CLEARCOTE_CLOUD`, `CLEARCOTE_API_KEY` and
-`CLEARCOTE_API_URL`.
+`CLEARCOTE_CACHE`, `CLEARCOTE_AUTO_UPDATE`, `CLEARCOTE_STOCK_RUNTIME`, `CLEARCOTE_PERSONA_ENV`,
+`CLEARCOTE_FONT_DIRS`, `CLEARCOTE_FALLBACK_FONT_DIRS`, `CLEARCOTE_NO_WARN`; for the cloud, `CLEARCOTE_CLOUD`,
+`CLEARCOTE_API_KEY` and `CLEARCOTE_API_URL`.
 
 Downloaded browsers are cached per build, in the same place the Python and Node SDKs use (`CLEARCOTE_CACHE`
 overrides it). Processes that share this cache take turns installing a build: the first one downloads it, the
@@ -264,6 +271,45 @@ back: the page's `Console` and `PageError` events fire, `SetContentAsync` works,
 `ExposeBindingAsync` keep working after a navigation. It is off by default because pages can observe some of what
 it restores. It needs an engine from r32 on; an older engine launches without it and the SDK warns once. It applies
 to local and Docker launches, not to cloud browsers.
+
+On an engine from r32 two more things change; the SDK checks the binary first, so an older engine launches
+exactly as before:
+
+- **The persona stays off the command line** (`PersonaEnv`, on by default). The seed, every persona override,
+  proxy credentials and the canvas-bridge token reach the browser in the `CLEARCOTE_PERSONA_ARGS` environment
+  variable instead of on its command line, which any local user can read. `PersonaEnv = false` or
+  `CLEARCOTE_PERSONA_ENV=0` keeps them on the command line; a Docker launch hands the choice to the container.
+- **Light or dark comes from the persona.** The engine picks the persona's colour scheme (about one in three is
+  dark; `--fingerprint-color-scheme=light|dark` in `Args` forces one), and CSS, `matchMedia`, the
+  `Sec-CH-Prefers-Color-Scheme` header and system colours follow it. `LaunchPersistentContextAsync` and
+  `LaunchEphemeralProfileAsync` then leave Playwright's colour-scheme emulation off (`ColorScheme.Null`) unless you
+  set `ColorScheme`. With `LaunchAsync`, pass `ColorScheme = ColorScheme.Null` to the contexts you create.
+
+A launch that claims Linux on a Windows host warns once per process: Direct3D caps the WebGL and WebGPU limits
+there, and a persona can lower a limit but never raise one past the driver's, so a Linux persona reports limits no
+Linux machine has. Claim `Platform = "windows"` on Windows, or run Linux personas on Linux or in Docker.
+
+**Your own fonts on Linux (`FontDirs`).** On Linux the browser sees only the fonts the SDK points it at: the
+release's bundle of Windows metric-compatible lookalikes (Arial→Arimo, Segoe UI→Selawik, …), never the host's
+(before 0.41.0 the .NET SDK did not point it at the bundle at all, so a .NET launch on Linux used the host's fonts
+and none of the lookalikes). `FontDirs` (or `CLEARCOTE_FONT_DIRS`, directories separated by `:`) adds your own
+fonts, typically a copy of a Windows machine's `C:\Windows\Fonts`, ahead of the bundle. On an engine that lets a
+genuine face win over its lookalike (the licensed build from r32) every family they provide renders as itself, and
+Helvetica, Times, Courier and the CSS generics follow; an older engine keeps its lookalikes for the families a
+persona lists and uses the directories only for characters nothing else covers. `CLEARCOTE_FALLBACK_FONT_DIRS`
+adds fonts used only for characters nothing else covers (CJK, Indic scripts, emoji). A path that is not a directory
+throws before the licence lease. Never list all of `/usr/share/fonts`: its Latin families change the widths a
+Windows persona reports. Ignored on Windows and macOS; refused for cloud and Docker launches. Only use fonts you
+are licensed to use.
+
+```csharp
+var ctx = await Clearcote.Clearcote.LaunchEphemeralProfileAsync(new LaunchOptions
+{
+    Fingerprint = "acct-1",
+    Platform = "windows",
+    FontDirs = new[] { "/srv/windows-fonts" },
+});
+```
 
 ## License
 
