@@ -774,3 +774,13 @@ def test_live_explicit_viewport_is_still_honored_exactly(tmp_path):
                       screen={"width": 1280, "height": 1024})
     assert m["inner"] == [1024, 768]
     assert m["screen"] == [1280, 1024]
+
+def test_window_fixup_tolerates_a_container_without_pages_or_new_page():
+    """CI 2026-10-09: the headed-Linux fit installed itself on a stand-in context (a test's fake
+    Playwright driver) that had neither ``pages`` nor ``new_page`` and raised AttributeError out of
+    ``launch()``. Nothing to fit there: the installer must return without touching the object."""
+    class Bare:
+        pass
+    bare = Bare()
+    assert clearcote._install_window_fixup(bare, []) is None
+    assert not hasattr(bare, "new_page")

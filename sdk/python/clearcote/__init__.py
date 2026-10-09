@@ -634,7 +634,9 @@ def _install_window_fixup(container, args):
     pages = getattr(container, "pages", None)
     if pages:
         return fit(pages[0])
-    orig_new_page = container.new_page
+    orig_new_page = getattr(container, "new_page", None)
+    if orig_new_page is None:  # a stand-in driver (tests) with neither pages nor new_page: nothing to fit
+        return None
 
     def new_page(**kw):
         return fit(orig_new_page(**kw))
