@@ -60,8 +60,12 @@ jobs:
           #      is wrong),
           #   2. wait for pip on THIS runner to resolve it from the index (what the install below,
           #      and the Docker build's own `pip install` a minute later, actually read),
-          #   3. install it ONCE, outside the loop, so a real install error fails with pip's own
-          #      message instead of being retried for half an hour and reported as lag.
+          #   3. install it, waiting again only while the index page pip gets does not offer the
+          #      release at all: Fastly's cache nodes go stale independently, so the install right
+          #      after a good resolve can still get the pre-upload page (SDK 0.43.0: resolved on the
+          #      third try, then the install a second later listed only up to 0.42.0). Any other
+          #      install error fails at once with pip's own message instead of being retried for
+          #      half an hour and reported as lag.
           deadline=$(( SECONDS + WAIT_MINUTES * 60 )); delay=10
           wait_or_fail() {  # $1 = what we are waiting for, $2 = error once the deadline has passed
             left=$(( deadline - SECONDS ))
@@ -70,22 +74,44 @@ jobs:
             echo "waiting ${delay}s: $1 ($(( (left + 59) / 60 )) min left)"
             sleep "$delay"; delay=$(( delay * 3 / 2 > 60 ? 60 : delay * 3 / 2 ))
           }
+          err="$RUNNER_TEMP/pip.err"
+          pip_failed() {  # show pip's last error; $newest = the newest version its index page listed
+            last=$(grep '^ERROR:' "$err" | tail -n1)
+            newest=$(grep -oP 'from versions: \K[^)]*' "$err" | awk -F', ' '{print $NF}')
+            echo "  pip: ${last:-$(tail -n1 "$err")}"
+          }
+          # Lag, not a broken release: pip found no clearcote==$SDK, and its index page did not
+          # offer $SDK at all, neither in "(from versions: ...)" nor in an "Ignored the following
+          # ... versions" line (offered but filtered out, e.g. by Requires-Python: no wait fixes that).
+          index_lacks_sdk() {
+            awk -v want="$SDK" '
+              /^ERROR: No matching distribution found for / && $NF == ("clearcote==" want) { nomatch = 1 }
+              /^ERROR: (Could not find a version that satisfies the requirement clearcote==|Ignored the following )/ {
+                n = split($0, t, /[ ,;()]+/); for (i = 1; i <= n; i++) if (t[i] == want) offered = 1
+              }
+              END { exit !(nomatch && !offered) }' "$err"
+          }
           json="$PYPI/pypi/clearcote/$SDK/json"
           until curl -fsS -o /dev/null "$json"; do
             wait_or_fail "the PyPI JSON API does not list clearcote $SDK yet" \
               "clearcote $SDK is not on PyPI: $json still fails after $WAIT_MINUTES min. Did \"Publish PyPI SDK\" upload it, and is the version right?"
           done
-          err="$RUNNER_TEMP/pip-download.err"
           until pip download --quiet --disable-pip-version-check --no-cache-dir --no-deps \
                   --index-url "$PYPI/simple/" --dest "$RUNNER_TEMP/clearcote-dl" "clearcote==$SDK" 2>"$err"; do
-            last=$(grep '^ERROR:' "$err" | tail -n1)
-            newest=$(grep -oP 'from versions: \K[^)]*' "$err" | awk -F', ' '{print $NF}')
-            echo "  pip: ${last:-$(tail -n1 "$err")}"
+            pip_failed
             wait_or_fail "pip's index does not offer clearcote $SDK yet (newest it lists: ${newest:-?})" \
               "clearcote $SDK is on PyPI ($json) but pip on this runner still cannot resolve it from $PYPI/simple/ after $WAIT_MINUTES min (newest it lists: ${newest:-?}; last pip error: ${last:-see above}). If that newest version is the previous release, this is PyPI CDN lag: re-run the failed job."
           done
-          pip install --quiet --disable-pip-version-check --no-cache-dir --index-url "$PYPI/simple/" "clearcote==$SDK" ||
-            { echo "::error::pip resolves clearcote $SDK from the index, but installing it failed (see pip's output above). This is not PyPI lag."; exit 1; }
+          until pip install --quiet --disable-pip-version-check --no-cache-dir --index-url "$PYPI/simple/" "clearcote==$SDK" 2>"$err"; do
+            if ! index_lacks_sdk; then
+              cat "$err" >&2
+              echo "::error::pip's index offers clearcote $SDK, but installing it failed (see pip's output above). This is not PyPI lag."; exit 1
+            fi
+            pip_failed
+            wait_or_fail "pip install got a stale index page without clearcote $SDK (newest it lists: ${newest:-?})" \
+              "pip resolved clearcote $SDK from $PYPI/simple/, but pip install kept getting an index page without it until the $WAIT_MINUTES min deadline (newest it lists: ${newest:-?}). This is PyPI CDN lag: re-run the failed job."
+          done
+          cat "$err" >&2  # pip's warnings, if any
           # The browser tag MUST come from the SDK we just installed (so the image tag == the baked
           # binary), not the repo checkout (which may be ahead of the published SDK).
           BROWSER=$(python -c "from clearcote.release import platform_release; print(platform_release('linux')['tag'][1:])")
