@@ -295,7 +295,11 @@ def _light_stealth_values(seed):
     spoof screen / avail dimensions -- a faked screen size cannot be reconciled with the real
     window/render surface and is a reliable block trigger -- so screen stays REAL by default.
     Opt into a screen spoof by passing screen_width=/screen_height=/avail_width=/avail_height=
-    explicitly (best when the host's real display actually matches)."""
+    explicitly. Without a persona it stays coherent only when it equals the host's real display in
+    CSS px at the reported device_pixel_ratio (physical px / DPR). With a seed (fingerprint=) or a
+    fingerprint_profile, leave the screen unset: the persona already carries a coherent one, and up
+    to PRO r35 and on the free builds the CSS device-width/device-height media features keep the
+    persona's size, so an override makes screen.width and matchMedia disagree."""
     _sw, _sh, _aw, _ah, dpr, depth, mem, hw = _light_stealth_row(seed)
     # Present the browser's REAL version -- do NOT spoof brand_version. A Chrome-major lie moves
     # the UA-CH version AND (via tls_profile="match-persona") the TLS ClientHello off the genuine

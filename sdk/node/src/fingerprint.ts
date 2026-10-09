@@ -59,7 +59,13 @@ export interface FingerprintOptions {
   /**
    * screen.width in CSS px. NOTE: spoofing screen dimensions is a reliable block trigger on strict
    * anti-bots (a faked screen cannot be reconciled with the real window/render surface), so this is
-   * opt-in and is NOT part of the `lightStealth` preset. Best when the host's real display matches.
+   * opt-in and is NOT part of the `lightStealth` preset.
+   * - With `fingerprint` (a seed) or `fingerprintProfile`, leave it unset: the persona already carries
+   *   a coherent screen. Up to PRO r35 and on the free builds, the CSS `device-width`/`device-height`
+   *   media features keep the persona's size, so an override makes `screen.width` and `matchMedia`
+   *   disagree, even when it matches the host's real display.
+   * - Without a persona (e.g. `lightStealth`), it stays coherent only when it equals the host's real
+   *   display in CSS px at the reported `devicePixelRatio` (physical px / DPR).
    */
   screenWidth?: number;
   /** screen.height in CSS px (see the caveat on `screenWidth`). */

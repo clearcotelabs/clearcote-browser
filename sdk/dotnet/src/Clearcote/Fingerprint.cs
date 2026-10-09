@@ -55,7 +55,13 @@ public class FingerprintOptions
     public int? DeviceMemory { get; set; }
     /// screen.width in CSS px. NOTE: spoofing screen dimensions is a reliable block trigger on strict
     /// anti-bots (a faked screen cannot be reconciled with the real window/render surface), so this is
-    /// opt-in and is NOT part of the LightStealth preset. Best when the host's real display matches.
+    /// opt-in and is NOT part of the LightStealth preset.
+    /// With a seed (Fingerprint) or FingerprintProfile, leave it unset: the persona already carries a
+    /// coherent screen. Up to PRO r35 and on the free builds, the CSS device-width/device-height media
+    /// features keep the persona's size, so an override makes screen.width and matchMedia disagree,
+    /// even when it matches the host's real display. Without a persona (e.g. LightStealth), it stays
+    /// coherent only when it equals the host's real display in CSS px at the reported
+    /// devicePixelRatio (physical px / DPR).
     public int? ScreenWidth { get; set; }
     /// screen.height in CSS px (see the caveat on <see cref="ScreenWidth"/>).
     public int? ScreenHeight { get; set; }
