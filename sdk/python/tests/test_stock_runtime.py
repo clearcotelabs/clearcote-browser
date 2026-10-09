@@ -359,7 +359,7 @@ def test_a_cloud_launch_does_not_take_it_and_says_so_once(api, driver, capsys, m
     clearcote.launch(cloud=True, stock_runtime=True, country="us").close()
     clearcote.launch_persistent_context(cloud=True, profile="acct-1", stock_runtime=True).close()
     bodies = [r["body"] for r in api.requests("POST", "/api/v1/browsers")]
-    assert bodies[0] == {"country": "us"}  # nothing about it reaches the API
+    assert bodies[0] == {"country": "us", "humanize": False}  # nothing about it reaches the API (humanize: the SDK's, on by default)
     assert not [k for b in bodies for k in b if "runtime" in k.lower()]
     err = capsys.readouterr().err
     assert err.count(CLOUD_ONLY_LOCAL) == 1, err

@@ -45,7 +45,8 @@ describe.skipIf(!findChromium())("cloud launch against a real browser", () => {
       const direct = await chromium.connectOverCDP(browserProc.wsUrl);
       expect(browser.constructor).toBe(direct.constructor);
       await direct.close();
-      expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ country: "us", identity: "acct-1" });
+      // the SDK humanizes, so the session switches the server's own mouse humanizer off (stale since 0.43.0)
+      expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ country: "us", identity: "acct-1", humanize: false });
       expect(cloudSessionOf(browser).id).toBe("bs_1");
       const ctx = browser.contexts()[0];
       const first = ctx.pages()[0] ?? (await ctx.newPage());
@@ -64,12 +65,48 @@ describe.skipIf(!findChromium())("cloud launch against a real browser", () => {
     expect(browserProc.alive()).toBe(true); // close() only disconnects: ending the browser is the gateway's job
   }, 60_000);
 
-  it("follows CLEARCOTE_CLOUD", async () => {
+  it("follows CLEARCOTE_CLOUD, humanized by default like any cloud launch", async () => {
     process.env.CLEARCOTE_CLOUD = "true";
     const browser = await launch({ note: "from env" } as never);
-    expect(browser.isConnected() && browser.version()).toBeTruthy();
-    await browser.close();
-    expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ note: "from env" });
+    try {
+      expect(browser.isConnected() && browser.version()).toBeTruthy();
+      expect(humanized(await browser.newPage())).toBe(true);
+    } finally {
+      await browser.close();
+    }
+    expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ note: "from env", humanize: false });
+  }, 60_000);
+
+  // One launch per test: each test gets its own fresh local Chromium, as each cloud launch gets its own
+  // fresh hosted browser (a second connect to a browser the first left tabs in races Playwright's attach).
+  it("no humanize option: every page is humanized and a click still lands", async () => {
+    const browser = await launch({ cloud: true, country: "us" });
+    try {
+      const ctx = browser.contexts()[0];
+      expect(humanized(ctx.pages()[0] ?? (await ctx.newPage()))).toBe(true); // the session's own tab
+      const page = await browser.newPage();
+      expect(humanized(page)).toBe(true);
+      await page.setContent(BUTTON);
+      await page.click("#b"); // the SDK's humanized click on a real engine
+      expect(await page.title()).toBe("clicked");
+    } finally {
+      await browser.close();
+    }
+    expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ country: "us", humanize: false });
+  }, 60_000);
+
+  it("humanize: false leaves pages plain", async () => {
+    const browser = await launch({ cloud: true, country: "us", humanize: false });
+    try {
+      const page = await browser.newPage();
+      expect(humanized(page)).toBe(false);
+      await page.setContent(BUTTON);
+      await page.click("#b");
+      expect(await page.title()).toBe("clicked");
+    } finally {
+      await browser.close();
+    }
+    expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ country: "us", humanize: false });
   }, 60_000);
 
   it("a persistent cloud context", async () => {

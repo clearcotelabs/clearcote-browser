@@ -274,7 +274,8 @@ full notch: the requested distance is rounded to the nearest notch (at least one
 short flicks with the occasional reading pause.
 
 `show_cursor=True` injects a red cursor dot that follows the real mouse, handy for watching a
-headed run. Both default to off; everything stays standard Playwright when `humanize=False`.
+headed run. Both default to off for a local launch (a cloud launch defaults `humanize` to on); everything
+stays standard Playwright when `humanize=False`.
 
 ### Render-backend coherence check (`check_render_coherence`)
 
@@ -469,7 +470,7 @@ and both return the same Playwright `Browser`:
 ```python
 from clearcote import launch
 
-browser = launch(cloud=True, country="us", identity="acct-1", humanize=True)
+browser = launch(cloud=True, country="us", identity="acct-1")
 page = browser.new_page()
 page.goto("https://example.com")
 browser.close()                      # disconnects and ends the hosted session
@@ -490,6 +491,10 @@ What changes in the cloud:
   `solve_checkboxes`, `challenge_service`, `keep_alive`, `record`, `note`, `worker`. `humanize` and `show_cursor` run in the SDK, exactly as for
   a local browser. `timeout` and `slow_mo` go to the CDP connect, where `timeout` defaults to 120 s (the
   browser starts as you connect).
+- **Input is humanized by default.** A cloud launch types, clicks and scrolls the way
+  `humanize=True` does locally ([Humanized input](#humanized-input-humanize-show_cursor)), and switches
+  the hosted browser's own mouse humanization off so the two never fight over the cursor.
+  `humanize=False` turns humanizing off altogether.
 - **Slider challenges are solved for you.** A cloud browser drags slide-to-verify challenges (a handle
   to the end of a bar, or a puzzle piece into its gap) by itself, in any tab or frame. Pass
   `solve_sliders=False` when your script handles them.

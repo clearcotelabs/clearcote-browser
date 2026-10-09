@@ -4,10 +4,10 @@ The same SDK runs a browser on this machine or on Clearcote's servers, and one f
 
     from clearcote import launch
 
-    browser = launch(cloud=True, country="us", humanize=True)   # or leave cloud unset and export
-    page = browser.new_page()                                   # CLEARCOTE_CLOUD=1
-    ...                                                         # the same Playwright Browser
-    browser.close()                                             # disconnects and ends the session
+    browser = launch(cloud=True, country="us")   # or leave cloud unset and export CLEARCOTE_CLOUD=1;
+    page = browser.new_page()                    # humanized by default (humanize=False: not at all)
+    ...                                          # the same Playwright Browser
+    browser.close()                              # disconnects and ends the session
 
 Everything else the hosted API does is on :class:`Cloud` (and :class:`AsyncCloud`)::
 
@@ -191,7 +191,7 @@ RUN_FIELDS = {
 }
 
 # Options a cloud launch() handles on THIS side and never sends as such: input humanization runs in the
-# SDK exactly as it does for a local browser (and, when the caller sets it at all, switches the server's
+# SDK exactly as it does for a local browser (on by default for a cloud launch, which switches the server's
 # own mouse humanization off, see _prepare_launch), timeout/slow_mo are Playwright's connect_over_cdp options
 # (in its units, milliseconds), and api_key/api_url pick the account and server. stock_runtime (engine r32+) is
 # a local and Docker option: a cloud launch only says once that it was not applied.
@@ -1149,11 +1149,13 @@ def _prepare_launch(kwargs, persistent=False, user_data_dir=None):
         opts["profile"] = ({"name": profile, "persist": True} if isinstance(profile, str)
                            else dict({"persist": True}, **profile) if isinstance(profile, dict) else profile)
     body = session_body(opts)
-    # The hosted browser moves a client's mouse along human paths by itself (cc-gateway 0.9.0) unless the
-    # session says humanize: false. A caller who set humanize either wants the SDK's own (True: it moves
-    # the mouse itself, and two humanizers would fight over the cursor) or none at all (False).
-    if sdk.get("humanize") is not None:
-        body["humanize"] = False
+    # A cloud launch humanizes in the SDK by default, exactly as a local launch with humanize: typing at the
+    # persona's cadence with key rollover, clicks and the wheel. The hosted browser would also move the
+    # client's mouse along human paths by itself (cc-gateway 0.9.0), so the session says humanize: false: two
+    # humanizers would fight over the cursor. humanize=False turns the SDK's off as well (none at all).
+    if sdk.get("humanize") is None:
+        sdk["humanize"] = True
+    body["humanize"] = False
     return sdk, body
 
 
@@ -1229,7 +1231,7 @@ def launch_cloud(cloud, kwargs, persistent=False, user_data_dir=None):
         # real window: the impossible-window tell a local launch avoids the same way.
         _install_headed_viewport(browser)
         seed = _motor_seed(body)
-        humanize, show_cursor = sdk.get("humanize", False), sdk.get("show_cursor", False)
+        humanize, show_cursor = sdk.get("humanize", True), sdk.get("show_cursor", False)
         for ctx in browser.contexts:  # the session's default context, and any tab already open in it
             install_humanize_on_context(ctx, humanize, show_cursor, browser, seed)
         install_humanize(browser, humanize, show_cursor, seed=seed)
@@ -1287,7 +1289,7 @@ async def launch_cloud_async(cloud, kwargs, persistent=False, user_data_dir=None
         browser.close = close
         _install_headed_viewport(browser)
         seed = _motor_seed(body)
-        humanize, show_cursor = sdk.get("humanize", False), sdk.get("show_cursor", False)
+        humanize, show_cursor = sdk.get("humanize", True), sdk.get("show_cursor", False)
         for ctx in browser.contexts:
             await install_humanize_on_context(ctx, humanize, show_cursor, browser, seed)
         await install_humanize(browser, humanize, show_cursor, seed=seed)

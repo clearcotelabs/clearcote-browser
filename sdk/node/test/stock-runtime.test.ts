@@ -336,7 +336,7 @@ describe("cloud", () => {
     await (await launch({ cloud: true, stockRuntime: true, country: "us" } as never)).close();
     await (await launchPersistentContext({ cloud: true, profile: "acct-1", stockRuntime: true } as never)).close();
     const bodies = api.requests("POST", "/api/v1/browsers").map((r) => r.body as Record<string, unknown>);
-    expect(bodies[0]).toEqual({ country: "us" }); // nothing about it reaches the API
+    expect(bodies[0]).toEqual({ country: "us", humanize: false }); // nothing about it reaches the API (humanize: the SDK's, on by default)
     expect(bodies.flatMap((b) => Object.keys(b)).filter((k) => k.toLowerCase().includes("runtime"))).toEqual([]);
     expect(said(CLOUD_ONLY_LOCAL)).toBe(1);
     expect(stderr.join("").split("\n").find((l) => l.includes(CLOUD_ONLY_LOCAL))!.startsWith("clearcote: warning: stockRuntime")).toBe(true);

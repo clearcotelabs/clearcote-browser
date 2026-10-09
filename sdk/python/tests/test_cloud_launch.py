@@ -54,7 +54,8 @@ def test_cloud_launch_is_a_working_humanized_browser(api, chromium):
     try:
         assert browser.is_connected()
         assert type(browser).__name__ == "Browser"  # the same Playwright type a local launch returns
-        assert api.requests("POST", "/api/v1/browsers")[0]["body"] == {"country": "us", "identity": "acct-1"}
+        # the SDK humanizes, so the session switches the server's own mouse humanizer off (stale since 0.43.0)
+        assert api.requests("POST", "/api/v1/browsers")[0]["body"] == {"country": "us", "identity": "acct-1", "humanize": False}
         assert browser.cloud_session["id"] == "bs_1"
         # the session's own context: its open tab and any new one are humanized
         ctx = browser.contexts[0]
@@ -80,9 +81,41 @@ def test_cloud_launch_with_cloud_env(api, chromium, monkeypatch):
     browser = clearcote.launch(note="from env")
     try:
         assert browser.is_connected() and browser.version
+        assert getattr(browser.new_page(), "_clearcote_persona", None) is not None  # humanized by default
     finally:
         browser.close()
-    assert api.requests("POST", "/api/v1/browsers")[0]["body"] == {"note": "from env"}
+    assert api.requests("POST", "/api/v1/browsers")[0]["body"] == {"note": "from env", "humanize": False}
+
+
+def test_cloud_launch_without_humanize_is_humanized(api, chromium):
+    """No humanize option: every page is humanized and a click still lands on a real engine, and the
+    session says humanize: false (the server's own mouse humanizer is off)."""
+    browser = clearcote.launch(cloud=True, country="us")
+    try:
+        ctx = browser.contexts[0]
+        first = ctx.pages[0] if ctx.pages else ctx.new_page()
+        assert getattr(first, "_clearcote_persona", None) is not None  # the session's own tab
+        page = browser.new_page()
+        assert getattr(page, "_clearcote_persona", None) is not None
+        page.set_content(BUTTON)
+        page.click("#b")  # the SDK's humanized click
+        assert page.title() == "clicked"
+    finally:
+        browser.close()
+    assert api.requests("POST", "/api/v1/browsers")[0]["body"] == {"country": "us", "humanize": False}
+
+
+def test_cloud_launch_with_humanize_false_leaves_pages_plain(api, chromium):
+    browser = clearcote.launch(cloud=True, country="us", humanize=False)
+    try:
+        page = browser.new_page()
+        assert getattr(page, "_clearcote_persona", None) is None
+        page.set_content(BUTTON)
+        page.click("#b")
+        assert page.title() == "clicked"
+    finally:
+        browser.close()
+    assert api.requests("POST", "/api/v1/browsers")[0]["body"] == {"country": "us", "humanize": False}
 
 
 def test_cloud_persistent_context(api, chromium):

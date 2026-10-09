@@ -3,9 +3,9 @@
 // The same SDK runs a browser on this machine or on Clearcote's servers, and one flag picks which:
 //
 //   import { launch } from "clearcote";
-//   const browser = await launch({ cloud: true, country: "us", humanize: true }); // or CLEARCOTE_CLOUD=1
-//   const page = await browser.newPage();                                         // the same Playwright Browser
-//   await browser.close();                                                        // disconnects, ends the session
+//   const browser = await launch({ cloud: true, country: "us" }); // or CLEARCOTE_CLOUD=1; humanized by default
+//   const page = await browser.newPage();                         // the same Playwright Browser
+//   await browser.close();                                        // disconnects, ends the session
 //
 // Everything else the hosted API does is on `Cloud`:
 //
@@ -353,7 +353,7 @@ export interface CloudSessionOptions {
   /** Default true: the server clicks "verify you are human" checkboxes for you. false leaves them to your script. */
   solveCheckboxes?: boolean;
   /** Default true: the server moves your mouse along human paths and holds clicks for a human press time
-   *  (any client). false turns it off. A `launch({ cloud })` that sets `humanize` at all turns it off for you. */
+   *  (any client). false turns it off. A `launch({ cloud })` humanizes in the SDK instead and turns this off for you. */
   humanize?: boolean;
   /** Default off: challenges the free actions cannot clear go to a solving service, with your key or ours. */
   challengeService?: CloudChallengeService;
@@ -371,7 +371,10 @@ export interface CloudLaunchOptions extends CloudSessionOptions {
   apiKey?: string;
   /** API base URL; defaults to CLEARCOTE_API_URL, then https://www.clearcotelabs.com. */
   apiUrl?: string;
-  /** Humanize all input, in the SDK, exactly as for a local browser. */
+  /** Default true on a cloud launch: humanize all input in the SDK exactly as for a local browser (typing at
+   *  the persona's cadence with key rollover, clicks, the wheel in whole notches; a coordinate mouse.click goes
+   *  to the engine's own pointer path), and switch the hosted browser's own mouse humanizer off. false: no
+   *  humanizing at all. (Only the server's: create the session with `cloud.browsers.create()`.) */
   humanize?: boolean;
   showCursor?: boolean;
   quiet?: boolean;
@@ -1074,10 +1077,12 @@ function prepareLaunch(options: Record<string, unknown>, persistent: boolean, us
         : profile;
   }
   const body = sessionBody(opts);
-  // The hosted browser moves a client's mouse along human paths by itself (cc-gateway 0.9.0) unless the
-  // session says humanize: false. A caller who set humanize either wants the SDK's own (true: it moves the
-  // mouse itself, and two humanizers would fight over the cursor) or none at all (false).
-  if (sdk.humanize !== undefined && sdk.humanize !== null) body.humanize = false;
+  // A cloud launch humanizes in the SDK by default, exactly as a local launch with humanize: typing at the
+  // persona's cadence with key rollover, clicks and the wheel. The hosted browser would also move the
+  // client's mouse along human paths by itself (cc-gateway 0.9.0), so the session says humanize: false: two
+  // humanizers would fight over the cursor. humanize: false turns the SDK's off as well (none at all).
+  if (sdk.humanize === undefined || sdk.humanize === null) sdk.humanize = true;
+  body.humanize = false;
   return { sdk, body };
 }
 

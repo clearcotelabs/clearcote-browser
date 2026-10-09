@@ -67,7 +67,8 @@ describe("local or cloud", () => {
     process.env.CLEARCOTE_CLOUD = "1";
     await launch({ country: "us" } as never);
     expect(connect).toHaveBeenCalledTimes(1);
-    expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ country: "us" });
+    // a cloud launch humanizes in the SDK by default, so it switches the server's own mouse humanizer off
+    expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ country: "us", humanize: false });
     // local: refused on the missing binary before any browser starts, without ever talking to the API
     const local = vi.spyOn(chromium, "launchPersistentContext");
     await expect(launch({ cloud: false, executablePath: join(tmp, "missing", "chrome"), apiKey: "k", quiet: true })).rejects.toThrow(/Clearcote binary not found/);
@@ -202,7 +203,10 @@ describe("option mapping", () => {
 // ── launch({ cloud: true }) with a stand-in Playwright ───────────────────────────────────────────
 
 function fakeBrowser() {
-  const ctx = { pages: () => [], on: () => {}, addInitScript: async () => {} };
+  // `listens` records the context events registered on the session's own context: the SDK's humanize
+  // (installHumanizeOnContext) adds a "page" listener, and only when it is on.
+  const listens: string[] = [];
+  const ctx = { pages: () => [], on: (ev: string) => { listens.push(ev); }, addInitScript: async () => {}, listens };
   const b = {
     closed: false,
     contexts: () => [ctx],
@@ -218,27 +222,59 @@ describe("launch({ cloud: true })", () => {
   it("creates, connects, and closes", async () => {
     api.connectUrl = "wss://w1.example/v1/connect/bs_1?token=t";
     const fb = fakeBrowser();
+    const origNewPage = vi.fn(async (o: unknown) => ({ ...(o as object) })); // a fresh "page": humanize stamps it, not the options
+    fb.newPage = origNewPage;
     const connect = vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fb as never);
     const b = await launch({ cloud: true, country: "us", identity: "acct-1", timeout: 5000, slowMo: 10 });
     expect(connect).toHaveBeenCalledWith(api.connectUrl, { timeout: 5000, slowMo: 10 });
-    expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ country: "us", identity: "acct-1" });
+    expect(api.requests("POST", "/api/v1/browsers")[0].body).toEqual({ country: "us", identity: "acct-1", humanize: false });
     expect(cloudSessionOf(b).id).toBe("bs_1");
     expect(cloudSessionOf(b).connectUrl).toBeUndefined();
-    expect(await b.newPage()).toEqual({ viewport: null }); // no emulated viewport, as a local launch
+    // The SDK's humanize (on by default) then attaches to the page; this fake page has no mouse to attach to.
+    await b.newPage().catch(() => {});
+    expect(origNewPage).toHaveBeenCalledWith({ viewport: null }); // no emulated viewport, as a local launch
     await b.close();
     expect(fb.closed).toBe(true);
     expect(api.requests("DELETE", "/api/v1/browsers/bs_1")).toHaveLength(1);
   });
 
-  it("a launch that sets humanize switches the server's own mouse humanization off; unset leaves it on", async () => {
-    // humanize: true = the SDK moves the mouse itself (two humanizers would fight over the cursor); false = none.
-    vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fakeBrowser() as never);
-    await launch({ cloud: true, identity: "a", humanize: true });
-    await launch({ cloud: true, identity: "a", humanize: false });
-    await launch({ cloud: true, identity: "a" });
+  it("a cloud launch humanizes in the SDK by default and always switches the server's own mouse humanizer off", async () => {
+    // unset or true = the SDK humanizes typing, clicks and the wheel (two humanizers would fight over the
+    // cursor, so the session says humanize: false); false = no humanizing at all, the server's off too.
+    const humanized: boolean[] = [];
+    for (const humanize of [undefined, true, false]) {
+      const fb = fakeBrowser();
+      vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fb as never);
+      await launch({ cloud: true, identity: "a", ...(humanize === undefined ? {} : { humanize }) });
+      humanized.push((fb.contexts()[0] as { listens: string[] }).listens.includes("page"));
+    }
     expect(api.requests("POST", "/api/v1/browsers").slice(-3).map((r) => r.body)).toEqual([
-      { identity: "a", humanize: false }, { identity: "a", humanize: false }, { identity: "a" },
+      { identity: "a", humanize: false }, { identity: "a", humanize: false }, { identity: "a", humanize: false },
     ]);
+    expect(humanized).toEqual([true, true, false]); // unset -> the SDK's humanize is ON
+  });
+
+  it("CLEARCOTE_CLOUD=1 moves an unedited script to the cloud humanized too", async () => {
+    const fb = fakeBrowser();
+    vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fb as never);
+    process.env.CLEARCOTE_CLOUD = "1";
+    try {
+      await launch({ identity: "a" } as never);
+    } finally {
+      delete process.env.CLEARCOTE_CLOUD;
+    }
+    expect(api.requests("POST", "/api/v1/browsers").at(-1)!.body).toEqual({ identity: "a", humanize: false });
+    expect((fb.contexts()[0] as { listens: string[] }).listens).toContain("page");
+  });
+
+  it("showCursor alone (humanize: false) draws the cursor without humanizing", async () => {
+    const fb = fakeBrowser();
+    const init = vi.fn(async () => {});
+    (fb.contexts()[0] as { addInitScript: unknown }).addInitScript = init;
+    vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fb as never);
+    await launch({ cloud: true, identity: "a", humanize: false, showCursor: true });
+    expect(init).toHaveBeenCalledTimes(1);
+    expect(api.requests("POST", "/api/v1/browsers").at(-1)!.body).toEqual({ identity: "a", humanize: false });
   });
 
   it("waits up to 120 s for the connect unless the caller says otherwise", async () => {
@@ -388,6 +424,9 @@ describe("browsers", () => {
     // humanize is the hosted browser's own option since 0.43.0 (the server moves the mouse); showCursor stays SDK-side.
     await c.browsers.create({ humanize: false });
     expect(api.log.at(-1)!.body).toEqual({ humanize: false });
+    // lock: the API client is NOT a launch; it leaves the server's own humanizer at its default (on)
+    await c.browsers.create({ identity: "a" });
+    expect(api.log.at(-1)!.body).toEqual({ identity: "a" });
     expect(() => c.browsers.create({ showCursor: true } as never)).toThrow("showCursor is not available for cloud browsers");
   });
 

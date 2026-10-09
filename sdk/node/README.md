@@ -373,7 +373,7 @@ and both resolve to the same Playwright `Browser`:
 ```ts
 import { launch } from "clearcote";
 
-const browser = await launch({ cloud: true, country: "us", identity: "acct-1", humanize: true });
+const browser = await launch({ cloud: true, country: "us", identity: "acct-1" });
 const page = await browser.newPage();
 await page.goto("https://example.com");
 await browser.close();               // disconnects and ends the hosted session
@@ -392,6 +392,9 @@ What changes in the cloud:
   `idleTimeoutSec`, `maxGb`, `version`, `profile`, `url`, `adblock`, `solveSliders`, `solveCheckboxes`,
   `challengeService`, `keepAlive`, `record`, `note`, `worker`. `humanize` and `showCursor` run in the SDK, exactly as for a local browser.
   `timeout` and `slowMo` go to the CDP connect, where `timeout` defaults to 120 s (the browser starts as you connect).
+- **Input is humanized by default.** A cloud launch types, clicks and scrolls the way `humanize: true`
+  does locally, and switches the hosted browser's own mouse humanization off so the two never fight
+  over the cursor. `humanize: false` turns humanizing off altogether.
 - **Slider challenges are solved for you.** A cloud browser drags slide-to-verify challenges (a handle
   to the end of a bar, or a puzzle piece into its gap) by itself, in any tab or frame. Pass
   `solveSliders: false` when your script handles them.

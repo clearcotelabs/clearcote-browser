@@ -172,17 +172,19 @@ def test_every_documented_option_maps_to_its_api_field():
     }
 
 
-def test_a_cloud_launch_that_sets_humanize_switches_the_servers_own_off():
-    """The hosted browser humanizes the mouse by itself unless told humanize: false. humanize=True means the
-    SDK does it (two humanizers would fight over the cursor), humanize=False means none; unset leaves the
-    server's default on and the SDK's off."""
+def test_a_cloud_launch_humanizes_in_the_sdk_by_default_and_switches_the_servers_own_off():
+    """A cloud launch humanizes in the SDK unless told humanize=False, so the session always says
+    humanize: false (the hosted browser's own mouse humanizer would fight the SDK's over the cursor).
+    humanize=False means no humanizing at all."""
     from clearcote.cloud import _prepare_launch
     sdk, body = _prepare_launch({"identity": "a", "humanize": True})
     assert sdk["humanize"] is True and body == {"identity": "a", "humanize": False}
     sdk, body = _prepare_launch({"identity": "a", "humanize": False})
     assert sdk["humanize"] is False and body == {"identity": "a", "humanize": False}
     sdk, body = _prepare_launch({"identity": "a"})
-    assert "humanize" not in sdk and "humanize" not in body
+    assert sdk["humanize"] is True and body == {"identity": "a", "humanize": False}  # unset -> the SDK's ON
+    sdk, body = _prepare_launch({"identity": "a", "humanize": None})
+    assert sdk["humanize"] is True and body == {"identity": "a", "humanize": False}
 
 
 def test_challenge_service_takes_true_or_a_dict_in_either_casing():
@@ -300,8 +302,10 @@ class _FakeBrowser:
     def __init__(self):
         self.contexts = [_FakeContext()]
         self.closed = False
+        self.new_page_kw = []
 
     def new_page(self, **kw):
+        self.new_page_kw.append(kw)
         return kw
 
     def new_context(self, **kw):
@@ -338,12 +342,34 @@ def test_cloud_launch_creates_connects_and_closes(api, fake_pw):
     b = clearcote.launch(cloud=True, country="us", identity="acct-1", timeout=5000, slow_mo=10)
     assert fake_pw["url"] == api.connect_url
     assert fake_pw["kw"] == {"timeout": 5000, "slow_mo": 10}
-    assert api.requests("POST", "/api/v1/browsers")[0]["body"] == {"country": "us", "identity": "acct-1"}
+    # the SDK humanizes (on by default), so the session switches the server's own mouse humanizer off
+    assert api.requests("POST", "/api/v1/browsers")[0]["body"] == {"country": "us", "identity": "acct-1", "humanize": False}
     assert b.cloud_session["id"] == "bs_1" and "connectUrl" not in b.cloud_session
-    # new pages/contexts default to no emulated viewport, as a local launch does
-    assert b.new_page() == {"no_viewport": True}
+    # new pages/contexts default to no emulated viewport, as a local launch does. The SDK's humanize then
+    # attaches to the page; this fake page (a dict) has no mouse for it to wrap.
+    with pytest.raises(AttributeError):
+        b.new_page()
+    assert fake_pw["browser"].new_page_kw == [{"no_viewport": True}]
     b.close()
     assert b.closed and api.requests("DELETE", "/api/v1/browsers/bs_1")
+
+
+@pytest.mark.parametrize("given,installed", [({}, True), ({"humanize": True}, True), ({"humanize": False}, False)])
+def test_cloud_launch_installs_the_sdks_humanize_by_default(api, fake_pw, given, installed):
+    """Unset or True: the SDK's humanize goes onto the session's own context (a "page" listener);
+    False: nothing. The session says humanize: false either way."""
+    b = clearcote.launch(cloud=True, identity="a", **given)
+    assert ("page" in fake_pw["browser"].contexts[0].handlers) is installed
+    assert api.requests("POST", "/api/v1/browsers")[-1]["body"] == {"identity": "a", "humanize": False}
+    b.close()
+
+
+def test_clearcote_cloud_env_moves_an_unedited_script_to_the_cloud_humanized(api, fake_pw, monkeypatch):
+    monkeypatch.setenv("CLEARCOTE_CLOUD", "1")
+    b = clearcote.launch(identity="a")
+    assert "page" in fake_pw["browser"].contexts[0].handlers
+    assert api.requests("POST", "/api/v1/browsers")[-1]["body"] == {"identity": "a", "humanize": False}
+    b.close()
 
 
 # The browser starts as the client connects (a launch with a country can take over 30 s), so the
@@ -425,8 +451,15 @@ def test_persistent_cloud_context(api, fake_pw):
 async def test_async_cloud_launch(api, monkeypatch):
     seen = {}
 
+    class Ctx:
+        pages = []
+        handlers = []
+
+        def on(self, event, *_a):
+            Ctx.handlers.append(event)
+
     class B:
-        contexts = ()
+        contexts = (Ctx(),)
 
         async def close(self):
             seen["closed"] = True
@@ -435,6 +468,7 @@ async def test_async_cloud_launch(api, monkeypatch):
             pass
 
         async def new_page(self, **kw):
+            seen.setdefault("new_page_kw", []).append(kw)
             return kw
 
         async def new_context(self, **kw):
@@ -457,7 +491,11 @@ async def test_async_cloud_launch(api, monkeypatch):
     monkeypatch.setattr(async_api, "_start_driver", start)
     b = await async_api.launch(cloud=True, country="de")
     assert seen["url"] == api.connect_url
-    assert await b.new_page() == {"no_viewport": True}
+    assert "page" in Ctx.handlers  # the SDK's humanize is on by default for a cloud launch
+    assert api.requests("POST", "/api/v1/browsers")[-1]["body"] == {"country": "de", "humanize": False}
+    with pytest.raises(AttributeError):  # the humanize attach on this fake page (a dict)
+        await b.new_page()
+    assert seen["new_page_kw"] == [{"no_viewport": True}]
     await b.close()
     assert seen["closed"] and seen["stopped"]
     assert api.requests("DELETE", "/api/v1/browsers/bs_1")
@@ -467,8 +505,14 @@ async def test_async_cloud_launch(api, monkeypatch):
 async def test_async_cloud_launch_waits_120_s_for_the_connect_by_default(api, monkeypatch, given, connect):
     seen = []
 
-    class Ctx:
-        pass
+    class Ctx:  # the SDK's humanize (on by default) registers on a new context
+        pages = []
+
+        def on(self, *_a):
+            pass
+
+        def add_init_script(self, *_a):
+            pass
 
     class B:
         contexts = ()
@@ -662,6 +706,9 @@ def test_browsers_resource(client, api):
     # stays SDK-side.
     client.browsers.create(humanize=False)
     assert api.log[-1]["body"] == {"humanize": False}
+    # lock: the API client is NOT a launch; it leaves the server's own humanizer at its default (on)
+    client.browsers.create(identity="a")
+    assert api.log[-1]["body"] == {"identity": "a"}
     with pytest.raises(ValueError, match="show_cursor is not available"):
         client.browsers.create(show_cursor=True)
 
