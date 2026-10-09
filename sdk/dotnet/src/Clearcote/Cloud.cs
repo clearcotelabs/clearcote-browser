@@ -120,6 +120,9 @@ public class CloudSessionOptions
     public bool? SolveSliders { get; set; }
     /// Click "verify you are human" checkboxes automatically (the server's default is on); false turns it off.
     public bool? SolveCheckboxes { get; set; }
+    /// Move the mouse along human paths and hold clicks for a human press time, on the server, for any
+    /// client (the server's default is on); false turns it off.
+    public bool? Humanize { get; set; }
     /// The challenge service (default off): <c>true</c>, or what it may do.
     public CloudChallengeService? ChallengeService { get; set; }
     /// Keep the session running after the client disconnects (stop it with Browsers.StopAsync).
@@ -714,6 +717,7 @@ public sealed class Cloud
         Put("adblock", o.Adblock);
         Put("solveSliders", o.SolveSliders);
         Put("solveCheckboxes", o.SolveCheckboxes);
+        Put("humanize", o.Humanize);
         if (o.ChallengeService is not null) b["challengeService"] = ChallengeServiceNode(o.ChallengeService);
         Put("keepAlive", o.KeepAlive);
         Put("record", o.Record);

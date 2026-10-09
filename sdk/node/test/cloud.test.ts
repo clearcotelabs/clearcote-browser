@@ -118,7 +118,7 @@ describe("option mapping", () => {
       geoip: false, headless: false, lightStealth: true, country: "us", state: "ca", city: "los angeles",
       proxySession: "sticky-1", timeoutSec: 600, idleTimeoutSec: 120, maxGb: 0.5, version: "153", profile: "acct-1",
       url: "https://example.com", adblock: true, solveSliders: false, solveCheckboxes: false, keepAlive: true, record: true, note: "n", worker: "w1",
-      identity: "acct-1", proxy: "managed", challengeService: { categories: ["token"], key: "own" as const },
+      identity: "acct-1", proxy: "managed", challengeService: { categories: ["token"], key: "own" as const }, humanize: false,
     };
     const { acceptLanguage, ...same } = opts;
     expect(sessionBody(opts)).toEqual({ ...same, locale: acceptLanguage });
@@ -228,6 +228,17 @@ describe("launch({ cloud: true })", () => {
     await b.close();
     expect(fb.closed).toBe(true);
     expect(api.requests("DELETE", "/api/v1/browsers/bs_1")).toHaveLength(1);
+  });
+
+  it("a launch that sets humanize switches the server's own mouse humanization off; unset leaves it on", async () => {
+    // humanize: true = the SDK moves the mouse itself (two humanizers would fight over the cursor); false = none.
+    vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fakeBrowser() as never);
+    await launch({ cloud: true, identity: "a", humanize: true });
+    await launch({ cloud: true, identity: "a", humanize: false });
+    await launch({ cloud: true, identity: "a" });
+    expect(api.requests("POST", "/api/v1/browsers").slice(-3).map((r) => r.body)).toEqual([
+      { identity: "a", humanize: false }, { identity: "a", humanize: false }, { identity: "a" },
+    ]);
   });
 
   it("waits up to 120 s for the connect unless the caller says otherwise", async () => {
@@ -374,7 +385,10 @@ describe("browsers", () => {
     const share = await c.browsers.share("bs_1", { recording: true, minutes: 30 });
     expect(share.url).toContain("/replay/");
     expect(api.log.at(-1)!.body).toEqual({ minutes: 30, recording: true });
-    expect(() => c.browsers.create({ humanize: true } as never)).toThrow("humanize is not available for cloud browsers");
+    // humanize is the hosted browser's own option since 0.43.0 (the server moves the mouse); showCursor stays SDK-side.
+    await c.browsers.create({ humanize: false });
+    expect(api.log.at(-1)!.body).toEqual({ humanize: false });
+    expect(() => c.browsers.create({ showCursor: true } as never)).toThrow("showCursor is not available for cloud browsers");
   });
 
   it("hand-off: request, wait, done", async () => {

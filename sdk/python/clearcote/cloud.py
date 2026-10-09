@@ -175,6 +175,7 @@ SESSION_FIELDS = {
     "adblock": "adblock",
     "solve_sliders": "solveSliders",
     "solve_checkboxes": "solveCheckboxes",
+    "humanize": "humanize",
     "challenge_service": "challengeService",
     "keep_alive": "keepAlive",
     "record": "record",
@@ -189,8 +190,9 @@ RUN_FIELDS = {
     "handoff_timeout_sec": "handoffTimeoutSec",
 }
 
-# Options a cloud launch() handles on THIS side and never sends: input humanization runs in the SDK
-# exactly as it does for a local browser, timeout/slow_mo are Playwright's connect_over_cdp options
+# Options a cloud launch() handles on THIS side and never sends as such: input humanization runs in the
+# SDK exactly as it does for a local browser (and, when the caller sets it at all, switches the server's
+# own mouse humanization off, see _prepare_launch), timeout/slow_mo are Playwright's connect_over_cdp options
 # (in its units, milliseconds), and api_key/api_url pick the account and server. stock_runtime (engine r32+) is
 # a local and Docker option: a cloud launch only says once that it was not applied.
 _CONNECT_OPTIONS = ("timeout", "slow_mo")
@@ -1146,7 +1148,13 @@ def _prepare_launch(kwargs, persistent=False, user_data_dir=None):
                              "whose cookies it loads and saves back when it closes")
         opts["profile"] = ({"name": profile, "persist": True} if isinstance(profile, str)
                            else dict({"persist": True}, **profile) if isinstance(profile, dict) else profile)
-    return sdk, session_body(opts)
+    body = session_body(opts)
+    # The hosted browser moves a client's mouse along human paths by itself (cc-gateway 0.9.0) unless the
+    # session says humanize: false. A caller who set humanize either wants the SDK's own (True: it moves
+    # the mouse itself, and two humanizers would fight over the cursor) or none at all (False).
+    if sdk.get("humanize") is not None:
+        body["humanize"] = False
+    return sdk, body
 
 
 def _client_for(cloud, sdk):

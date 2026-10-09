@@ -159,7 +159,7 @@ def test_every_documented_option_maps_to_its_api_field():
         "timeout_sec": 600, "idle_timeout_sec": 120, "max_gb": 0.5, "version": "153", "profile": "acct-1",
         "url": "https://example.com", "adblock": True, "solve_sliders": False, "solve_checkboxes": False, "keep_alive": True, "record": True,
         "note": "n", "worker": "w1", "identity": "acct-1", "proxy": "managed",
-        "challenge_service": {"categories": ["token"], "key": "own"},
+        "challenge_service": {"categories": ["token"], "key": "own"}, "humanize": False,
     })
     assert body == {
         "fingerprint": "seed-1", "platform": "windows", "brand": "Chrome", "timezone": "Europe/Amsterdam",
@@ -168,8 +168,21 @@ def test_every_documented_option_maps_to_its_api_field():
         "idleTimeoutSec": 120, "maxGb": 0.5, "version": "153", "profile": "acct-1",
         "url": "https://example.com", "adblock": True, "solveSliders": False, "solveCheckboxes": False, "keepAlive": True, "record": True,
         "note": "n", "worker": "w1", "identity": "acct-1", "proxy": "managed",
-        "challengeService": {"categories": ["token"], "key": "own"},
+        "challengeService": {"categories": ["token"], "key": "own"}, "humanize": False,
     }
+
+
+def test_a_cloud_launch_that_sets_humanize_switches_the_servers_own_off():
+    """The hosted browser humanizes the mouse by itself unless told humanize: false. humanize=True means the
+    SDK does it (two humanizers would fight over the cursor), humanize=False means none; unset leaves the
+    server's default on and the SDK's off."""
+    from clearcote.cloud import _prepare_launch
+    sdk, body = _prepare_launch({"identity": "a", "humanize": True})
+    assert sdk["humanize"] is True and body == {"identity": "a", "humanize": False}
+    sdk, body = _prepare_launch({"identity": "a", "humanize": False})
+    assert sdk["humanize"] is False and body == {"identity": "a", "humanize": False}
+    sdk, body = _prepare_launch({"identity": "a"})
+    assert "humanize" not in sdk and "humanize" not in body
 
 
 def test_challenge_service_takes_true_or_a_dict_in_either_casing():
@@ -645,8 +658,12 @@ def test_browsers_resource(client, api):
     assert client.browsers.live("bs_1")["interactive"] is False
     share = client.browsers.share("bs_1", recording=True, minutes=30)
     assert "/replay/" in share["url"] and api.log[-1]["body"] == {"minutes": 30, "recording": True}
-    with pytest.raises(ValueError, match="humanize is not available"):
-        client.browsers.create(humanize=True)
+    # humanize is the hosted browser's own option since 0.43.0 (the server moves the mouse); show_cursor
+    # stays SDK-side.
+    client.browsers.create(humanize=False)
+    assert api.log[-1]["body"] == {"humanize": False}
+    with pytest.raises(ValueError, match="show_cursor is not available"):
+        client.browsers.create(show_cursor=True)
 
 
 def test_handoff_request_wait_and_done(client, api):

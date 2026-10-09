@@ -163,6 +163,7 @@ export const SESSION_FIELDS: Readonly<Record<string, string>> = {
   adblock: "adblock",
   solveSliders: "solveSliders",
   solveCheckboxes: "solveCheckboxes",
+  humanize: "humanize",
   challengeService: "challengeService",
   keepAlive: "keepAlive",
   record: "record",
@@ -351,6 +352,9 @@ export interface CloudSessionOptions {
   solveSliders?: boolean;
   /** Default true: the server clicks "verify you are human" checkboxes for you. false leaves them to your script. */
   solveCheckboxes?: boolean;
+  /** Default true: the server moves your mouse along human paths and holds clicks for a human press time
+   *  (any client). false turns it off. A `launch({ cloud })` that sets `humanize` at all turns it off for you. */
+  humanize?: boolean;
   /** Default off: challenges the free actions cannot clear go to a solving service, with your key or ours. */
   challengeService?: CloudChallengeService;
   keepAlive?: boolean;
@@ -1069,7 +1073,12 @@ function prepareLaunch(options: Record<string, unknown>, persistent: boolean, us
       : profile && typeof profile === "object" && Object.getPrototypeOf(profile) === Object.prototype ? { persist: true, ...(profile as object) }
         : profile;
   }
-  return { sdk, body: sessionBody(opts) };
+  const body = sessionBody(opts);
+  // The hosted browser moves a client's mouse along human paths by itself (cc-gateway 0.9.0) unless the
+  // session says humanize: false. A caller who set humanize either wants the SDK's own (true: it moves the
+  // mouse itself, and two humanizers would fight over the cursor) or none at all (false).
+  if (sdk.humanize !== undefined && sdk.humanize !== null) body.humanize = false;
+  return { sdk, body };
 }
 
 function connectUrlOf(created: Json): string {
