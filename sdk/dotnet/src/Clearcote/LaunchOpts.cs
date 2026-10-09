@@ -503,9 +503,15 @@ public static class LaunchOpts
     {
         ["--fingerprint-passthrough"] = "Fingerprint = \"off\" (pass-through debug mode)",
         ["--disable-fingerprint-voices"] = "FingerprintVoices = false",
-        ["--allow-third-party-cookies"] = "AllowThirdPartyCookies = true",
         ["--transparent-proxy"] = "TransparentProxy = true",
     };
+
+    /// Third-party cookie switches, dropped WITHOUT a warning on an engine that lacks them. Every
+    /// launch sends one (cookies are allowed unless <c>AllowThirdPartyCookies = false</c>), so a
+    /// warning would fire on every launch of an older build, and dropping them keeps that build's
+    /// own behaviour: an engine before 152 r22 cannot allow them, and one before 154 r36 blocks by
+    /// default, which is what the block switch asks for anyway.
+    public static readonly IReadOnlyList<string> QuietGatedEngineSwitches = new[] { "--allow-third-party-cookies", "--block-third-party-cookies" };
 
     /// Drop any 152 r22+ switch the engine that will run does not implement, with a warning.
     /// Chromium ignores unknown switches silently, so an older engine would otherwise launch without
@@ -517,6 +523,11 @@ public static class LaunchOpts
         foreach (var a in args)
         {
             var name = a.Split('=', 2)[0];
+            if (QuietGatedEngineSwitches.Contains(name))
+            {
+                if (EngineSupportsSwitch(exe, name[2..])) outArgs.Add(a);
+                continue;
+            }
             if (!GatedEngineSwitches.TryGetValue(name, out var what) || EngineSupportsSwitch(exe, name[2..]))
             {
                 outArgs.Add(a);
@@ -528,13 +539,17 @@ public static class LaunchOpts
         return (outArgs, warnings);
     }
 
-    /// Launch switches for the non-fingerprint engine options. <c>TransparentProxy</c> is only
-    /// meaningful with a proxy (it hides the <c>Proxy-Connection</c> header and proxy-shaped timing);
-    /// without one it is dropped with a note.
+    /// Launch switches for the non-fingerprint engine options. Third-party cookies are allowed, as in
+    /// stock Chrome, unless <c>allowThirdPartyCookies</c> is <c>false</c>: the engine allows them on its
+    /// own from 154 r36, 152 r22 to r35 block by default and allow only with
+    /// <c>--allow-third-party-cookies</c>, so that switch goes on every launch that does not block, and
+    /// <c>false</c> sends <c>--block-third-party-cookies</c> (154 r36+; older builds already block).
+    /// <c>TransparentProxy</c> is only meaningful with a proxy (it hides the <c>Proxy-Connection</c>
+    /// header and proxy-shaped timing); without one it is dropped with a note.
     public static List<string> EngineExtrasArgs(bool? allowThirdPartyCookies, bool? transparentProxy, ProxyOptions? proxy, bool quiet = false)
     {
         var args = new List<string>();
-        if (allowThirdPartyCookies == true) args.Add("--allow-third-party-cookies");
+        args.Add(allowThirdPartyCookies == false ? "--block-third-party-cookies" : "--allow-third-party-cookies");
         if (transparentProxy == true)
         {
             if (!string.IsNullOrEmpty(proxy?.Server)) args.Add("--transparent-proxy");

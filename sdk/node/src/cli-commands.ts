@@ -37,7 +37,7 @@ import { CATALOG_FALLBACK } from "./release.js";
 import { DeviceLoginError, pollForKey, requestDeviceCode } from "./devicelogin.js";
 import { licenseExpiry, removeLicenseMeta, saveLicenseMeta, type LicenseExpiry } from "./license.js";
 import { geoCacheRoot } from "./geoip.js";
-import { GATED_ENGINE_SWITCHES } from "./launchopts.js";
+import { GATED_ENGINE_SWITCHES, QUIET_GATED_ENGINE_SWITCHES } from "./launchopts.js";
 import { fontLines, linuxFontReport, type FontReport } from "./fonts.js";
 import { toProxySpec } from "./net.js";
 import { clearRecovered, recoverRoot } from "./winlaunch.js";
@@ -245,7 +245,8 @@ export async function buildInfo(
 
   if (pick && existsSync(pick.path)) {
     report.engineFeatures = Object.fromEntries(
-      ["proxy-auth", "socks5-credentials", "socks5-udp", ...Object.keys(GATED_ENGINE_SWITCHES).map((s) => s.slice(2))]
+      ["proxy-auth", "socks5-credentials", "socks5-udp",
+        ...[...Object.keys(GATED_ENGINE_SWITCHES), ...QUIET_GATED_ENGINE_SWITCHES].map((s) => s.slice(2))]
         .map((name) => [name, engineSupportsSwitch(pick.path, name)]),
     );
   }

@@ -263,8 +263,9 @@ underlying engine switches are all reachable today via `Args`.
 Also available (0.29.0): `Geoip = true` (through the proxy, incl. SOCKS5; one
 `CLEARCOTE_GEOIP_TIMEOUT_SECONDS` deadline; throws `GeoipException` before launch if unresolved unless
 `Timezone` and `AcceptLanguage` are both set), `Fingerprint = "off"` (no persona), `FingerprintVoices = false`,
-`AllowThirdPartyCookies = true`, `TransparentProxy = true` (engine 152 r22+; skipped with a warning on older
-engines), `LicenseThroughProxy`, `ReleaseChannel`, and `License.GetSessionSeatsAsync()`.
+`TransparentProxy = true` (engine 152 r22+; skipped with a warning on older engines), `LicenseThroughProxy`,
+`ReleaseChannel`, and `License.GetSessionSeatsAsync()`. Third-party cookies are allowed by default since 0.45.0,
+as in Chrome; `AllowThirdPartyCookies = false` blocks them (an engine before 152 r22 always blocks them).
 
 `StockRuntime = true` (or `CLEARCOTE_STOCK_RUNTIME=1`) gives Playwright the browser's stock DevTools behaviour
 back: the page's `Console` and `PageError` events fire, `SetContentAsync` works, and `ExposeFunctionAsync` /

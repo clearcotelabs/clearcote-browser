@@ -192,7 +192,7 @@ def build_info(quick=False, proxy=None, launch_fn=None):
     """What ``clearcote info`` reports; also the ``--json`` shape (same keys as the Node CLI)."""
     import platform as _platform
 
-    from ._launchopts import GATED_ENGINE_SWITCHES, engine_supports_switch
+    from ._launchopts import GATED_ENGINE_SWITCHES, QUIET_GATED_ENGINE_SWITCHES, engine_supports_switch
     from ._license import get_session_seats, license_expiry, license_key_source, resolve_license_key
     from .download import _auto_update_requested, list_cached_builds, resolve_release_channel
     from .release import RELEASE
@@ -228,7 +228,8 @@ def build_info(quick=False, proxy=None, launch_fn=None):
     }
 
     if pick and os.path.exists(pick["path"]):
-        names = ["proxy-auth", "socks5-credentials", "socks5-udp"] + [s[2:] for s in GATED_ENGINE_SWITCHES]
+        names = ["proxy-auth", "socks5-credentials", "socks5-udp"] + [
+            s[2:] for s in [*GATED_ENGINE_SWITCHES, *QUIET_GATED_ENGINE_SWITCHES]]
         report["engineFeatures"] = {n: engine_supports_switch(pick["path"], n) for n in names}
 
     if sys.platform.startswith("linux") and pick:

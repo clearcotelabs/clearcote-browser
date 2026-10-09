@@ -573,9 +573,17 @@ export function gpuBackendArgs(
 export const GATED_ENGINE_SWITCHES: Readonly<Record<string, string>> = {
   "--fingerprint-passthrough": "fingerprint: \"off\" (pass-through debug mode)",
   "--disable-fingerprint-voices": "fingerprintVoices: false",
-  "--allow-third-party-cookies": "allowThirdPartyCookies: true",
   "--transparent-proxy": "transparentProxy: true",
 };
+
+/**
+ * Third-party cookie switches, dropped WITHOUT a warning on an engine that lacks them. Every launch
+ * sends one (cookies are allowed unless `allowThirdPartyCookies: false`), so a warning would fire on
+ * every launch of an older build, and dropping them keeps that build's own behaviour: an engine
+ * before 152 r22 cannot allow them, and one before 154 r36 blocks by default, which is what the
+ * block switch asks for anyway.
+ */
+export const QUIET_GATED_ENGINE_SWITCHES: readonly string[] = ["--allow-third-party-cookies", "--block-third-party-cookies"];
 
 /**
  * Drop any 152 r22+ switch the engine that will run does not implement, with a warning.
@@ -587,6 +595,7 @@ export function gateEngineSwitches(exe: string | undefined, args: string[], quie
   const warnings: string[] = [];
   const out = args.filter((a) => {
     const name = a.split("=")[0];
+    if (QUIET_GATED_ENGINE_SWITCHES.includes(name)) return engineSupportsSwitch(exe, name.slice(2));
     const what = GATED_ENGINE_SWITCHES[name];
     if (!what) return true;
     if (engineSupportsSwitch(exe, name.slice(2))) return true;
@@ -600,6 +609,11 @@ export function gateEngineSwitches(exe: string | undefined, args: string[], quie
 /**
  * Launch switches for the non-fingerprint engine options.
  *
+ * Third-party cookies are allowed, as in stock Chrome, unless `allowThirdPartyCookies: false`. The
+ * engine allows them on its own from 154 r36; 152 r22 to r35 block by default and allow only with
+ * `--allow-third-party-cookies`, so that switch goes on every launch that does not block, and
+ * `false` sends `--block-third-party-cookies` (154 r36+; older builds already block). Exactly one.
+ *
  * `transparentProxy` is only meaningful with a proxy: it removes what an origin or page can observe
  * about the proxy (the `Proxy-Connection` header on plain-HTTP requests, and proxy-shaped
  * DNS/connect/TLS timing). Without a proxy it is dropped with a note.
@@ -610,7 +624,7 @@ export function engineExtrasArgs(
   quiet?: boolean,
 ): string[] {
   const args: string[] = [];
-  if (o.allowThirdPartyCookies === true) args.push("--allow-third-party-cookies");
+  args.push(o.allowThirdPartyCookies === false ? "--block-third-party-cookies" : "--allow-third-party-cookies");
   if (o.transparentProxy === true) {
     if (proxy?.server) args.push("--transparent-proxy");
     else if (!quiet) console.warn("clearcote: transparentProxy has no effect without a proxy; ignored.");

@@ -30,8 +30,11 @@ public class LaunchOptions : FingerprintOptions
     public bool Geoip { get; set; }
 
     // ── engine behaviour switches (engine 152 r22+; dropped with a warning on older engines) ──
-    /// Allow third-party cookies, as stock Chrome does. The de-Googled base blocks them by default,
-    /// which breaks embedded flows (reCAPTCHA, SSO sign-in, payment challenges). Default off.
+    /// Third-party cookies. Allowed by default (null or true), as in stock Chrome: embedded
+    /// reCAPTCHA, SSO sign-in and payment challenges rely on them. <c>false</c> blocks them. Since
+    /// 0.45.0; before that they were blocked unless this was true, because the de-Googled base blocks
+    /// them (engine 152 r22 to r35; from 154 r36 the engine allows them on its own). An engine before
+    /// 152 r22 always blocks them.
     public bool? AllowThirdPartyCookies { get; set; }
     /// Hide proxy use from origins and pages: send <c>Connection</c> instead of
     /// <c>Proxy-Connection</c> on plain-HTTP requests through an HTTP proxy, and report proxied

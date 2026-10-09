@@ -620,9 +620,15 @@ def gpu_backend_args(claimed_platform, headed, platform=None, user_args=(), envi
 GATED_ENGINE_SWITCHES = {
     "--fingerprint-passthrough": 'fingerprint="off" (pass-through debug mode)',
     "--disable-fingerprint-voices": "fingerprint_voices=False",
-    "--allow-third-party-cookies": "allow_third_party_cookies=True",
     "--transparent-proxy": "transparent_proxy=True",
 }
+
+# Third-party cookie switches, dropped WITHOUT a warning on an engine that lacks them. Every launch
+# sends one (cookies are allowed unless allow_third_party_cookies=False), so a warning would fire on
+# every launch of an older build, and dropping them keeps that build's own behaviour: an engine
+# before 152 r22 cannot allow them, and one before 154 r36 blocks by default, which is what the
+# block switch asks for anyway.
+QUIET_GATED_ENGINE_SWITCHES = ("--allow-third-party-cookies", "--block-third-party-cookies")
 
 
 def gate_engine_switches(exe, args, quiet=False):
@@ -635,6 +641,10 @@ def gate_engine_switches(exe, args, quiet=False):
     out, notes = [], []
     for a in args:
         name = str(a).split("=", 1)[0]
+        if name in QUIET_GATED_ENGINE_SWITCHES:
+            if engine_supports_switch(exe, name[2:]):
+                out.append(a)
+            continue
         what = GATED_ENGINE_SWITCHES.get(name)
         if what is None or engine_supports_switch(exe, name[2:]):
             out.append(a)
@@ -650,14 +660,16 @@ def gate_engine_switches(exe, args, quiet=False):
 def engine_extras_args(allow_third_party_cookies=None, transparent_proxy=None, proxy=None, quiet=False):
     """Launch switches for the non-fingerprint engine options.
 
-    ``allow_third_party_cookies=True`` allows third-party cookies as stock Chrome does (the
-    de-Googled base blocks them, breaking reCAPTCHA / SSO / payment challenge iframes).
+    Third-party cookies are allowed, as in stock Chrome, unless ``allow_third_party_cookies=False``.
+    The engine allows them on its own from 154 r36; 152 r22 to r35 block by default and allow only
+    with ``--allow-third-party-cookies``, so that switch goes on every launch that does not block,
+    and ``False`` sends ``--block-third-party-cookies`` (154 r36+; older builds already block).
     ``transparent_proxy=True`` removes what an origin or page can observe about the proxy (the
     ``Proxy-Connection`` header on plain-HTTP requests, and proxy-shaped DNS/connect/TLS timing); it
     is only meaningful with a proxy, so without one it is dropped with a note."""
     args = []
-    if allow_third_party_cookies is True:
-        args.append("--allow-third-party-cookies")
+    args.append("--block-third-party-cookies" if allow_third_party_cookies is False
+                else "--allow-third-party-cookies")
     if transparent_proxy is True:
         server = (proxy or {}).get("server") if isinstance(proxy, dict) else proxy
         if server:

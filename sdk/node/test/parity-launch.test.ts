@@ -148,11 +148,26 @@ describe("gateEngineSwitches", () => {
   it("drops each unsupported switch with a warning on an older engine, keeping everything else", () => {
     const exe = fakeEngine(["proxy-auth"]);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const r = gateEngineSwitches(exe, ["--foo=1", "--allow-third-party-cookies", "--transparent-proxy", "--disable-fingerprint-voices", "--fingerprint-passthrough"], false);
+    const r = gateEngineSwitches(exe, ["--foo=1", "--transparent-proxy", "--disable-fingerprint-voices", "--fingerprint-passthrough"], false);
     expect(r.args).toEqual(["--foo=1"]);
-    expect(r.warnings).toHaveLength(4);
-    expect(warn).toHaveBeenCalledTimes(4);
-    expect(r.warnings.join("\n")).toMatch(/allowThirdPartyCookies: true needs engine 152 r22/);
+    expect(r.warnings).toHaveLength(3);
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(r.warnings.join("\n")).toMatch(/transparentProxy: true needs engine 152 r22/);
+  });
+
+  it("drops the third-party cookie switches an older engine lacks WITHOUT a warning", () => {
+    // Every launch carries one of them, so a warning would fire on every launch of an old build.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const old = gateEngineSwitches(fakeEngine(["proxy-auth"]), ["--foo", "--allow-third-party-cookies", "--block-third-party-cookies"], false);
+    expect(old.args).toEqual(["--foo"]);
+    expect(old.warnings).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    // r22..r35 know allow but not block (they block by default, so dropping block keeps its meaning).
+    const r35 = gateEngineSwitches(fakeEngine(["allow-third-party-cookies"]), ["--allow-third-party-cookies", "--block-third-party-cookies"], false);
+    expect(r35.args).toEqual(["--allow-third-party-cookies"]);
+    // r36 knows both.
+    const r36 = gateEngineSwitches(fakeEngine(["allow-third-party-cookies", "block-third-party-cookies"]), ["--block-third-party-cookies"], false);
+    expect(r36.args).toEqual(["--block-third-party-cookies"]);
   });
 
   it("is silent under quiet but still reports the warnings", () => {
@@ -172,15 +187,16 @@ describe("gateEngineSwitches", () => {
 });
 
 describe("engineExtrasArgs", () => {
-  it("allowThirdPartyCookies emits its switch", () => {
+  it("third-party cookies are allowed unless allowThirdPartyCookies is false", () => {
+    expect(engineExtrasArgs({}, undefined)).toEqual(["--allow-third-party-cookies"]);
     expect(engineExtrasArgs({ allowThirdPartyCookies: true }, undefined)).toEqual(["--allow-third-party-cookies"]);
-    expect(engineExtrasArgs({ allowThirdPartyCookies: false }, undefined)).toEqual([]);
+    expect(engineExtrasArgs({ allowThirdPartyCookies: false }, undefined)).toEqual(["--block-third-party-cookies"]);
   });
 
   it("transparentProxy needs a proxy; without one it is dropped with a note", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(engineExtrasArgs({ transparentProxy: true }, { server: "http://p:8080" })).toEqual(["--transparent-proxy"]);
-    expect(engineExtrasArgs({ transparentProxy: true }, undefined)).toEqual([]);
+    expect(engineExtrasArgs({ transparentProxy: true }, { server: "http://p:8080" })).toContain("--transparent-proxy");
+    expect(engineExtrasArgs({ transparentProxy: true }, undefined)).not.toContain("--transparent-proxy");
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/no effect without a proxy/));
   });
 });

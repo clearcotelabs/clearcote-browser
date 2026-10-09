@@ -12,6 +12,7 @@ from clearcote._fingerprint import FINGERPRINT_KEYS, fingerprint_args, is_finger
 from clearcote._launchopts import (
     DEFAULT_IGNORED_ARGS,
     GATED_ENGINE_SWITCHES,
+    QUIET_GATED_ENGINE_SWITCHES,
     _SWITCH_CACHE,
     engine_extras_args,
     gate_engine_switches,
@@ -175,12 +176,28 @@ def test_gate_drops_each_unsupported_switch_with_warning(tmp_path):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         args, notes = gate_engine_switches(exe, [
-            "--foo=1", "--allow-third-party-cookies", "--transparent-proxy",
+            "--foo=1", "--transparent-proxy",
             "--disable-fingerprint-voices", "--fingerprint-passthrough"], quiet=False)
     assert args == ["--foo=1"]
-    assert len(notes) == 4
-    assert len(caught) == 4
-    assert "allow_third_party_cookies=True needs engine 152 r22 or newer; this engine ignores it, so it was not applied." in "\n".join(notes)
+    assert len(notes) == 3
+    assert len(caught) == 3
+    assert "transparent_proxy=True needs engine 152 r22 or newer; this engine ignores it, so it was not applied." in "\n".join(notes)
+
+
+def test_gate_drops_third_party_cookie_switches_without_warning(tmp_path):
+    # Every launch carries one of them, so a warning would fire on every launch of an old build.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        old, notes = gate_engine_switches(fake_engine(tmp_path, ["proxy-auth"]), [
+            "--foo", "--allow-third-party-cookies", "--block-third-party-cookies"], quiet=False)
+    assert old == ["--foo"] and notes == [] and not caught
+    # r22..r35 know allow but not block (they block by default, so dropping block keeps its meaning).
+    r35, _ = gate_engine_switches(fake_engine(tmp_path, ["allow-third-party-cookies"]), [
+        "--allow-third-party-cookies", "--block-third-party-cookies"], quiet=True)
+    assert r35 == ["--allow-third-party-cookies"]
+    r36, _ = gate_engine_switches(fake_engine(tmp_path, ["allow-third-party-cookies", "block-third-party-cookies"]),
+                                  ["--block-third-party-cookies"], quiet=True)
+    assert r36 == ["--block-third-party-cookies"]
 
 
 def test_gate_silent_under_quiet_but_reports(tmp_path):
@@ -201,16 +218,17 @@ def test_gate_does_not_mistake_longer_literal(tmp_path):
 
 # -- engine_extras_args -------------------------------------------------------------------------
 
-def test_allow_third_party_cookies_switch():
+def test_third_party_cookies_allowed_unless_false():
+    assert engine_extras_args() == ["--allow-third-party-cookies"]
     assert engine_extras_args(allow_third_party_cookies=True) == ["--allow-third-party-cookies"]
-    assert engine_extras_args(allow_third_party_cookies=False) == []
+    assert engine_extras_args(allow_third_party_cookies=False) == ["--block-third-party-cookies"]
 
 
 def test_transparent_proxy_needs_a_proxy():
-    assert engine_extras_args(transparent_proxy=True, proxy={"server": "http://p:8080"}) == ["--transparent-proxy"]
+    assert "--transparent-proxy" in engine_extras_args(transparent_proxy=True, proxy={"server": "http://p:8080"})
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        assert engine_extras_args(transparent_proxy=True, proxy=None) == []
+        assert "--transparent-proxy" not in engine_extras_args(transparent_proxy=True, proxy=None)
     assert any("no effect without a proxy" in str(w.message) for w in caught)
 
 
@@ -417,7 +435,8 @@ def prepared(monkeypatch, tmp_path):
     return run
 
 
-NEW = [s[2:] for s in ALL] + ["proxy-auth"]
+# A 154 r36+ engine: every gated switch, both cookie switches, proxy auth.
+NEW = [s[2:] for s in ALL] + [s[2:] for s in QUIET_GATED_ENGINE_SWITCHES] + ["proxy-auth"]
 
 
 def test_prepare_defaults_ignore_args_and_gpu_blocklist(prepared):
@@ -470,7 +489,8 @@ def test_prepare_old_engine_drops_new_switches(prepared):
         _exe, args, *_ = prepared(["proxy-auth"], fingerprint="off", fingerprint_voices=False,
                                   allow_third_party_cookies=True, quiet=False)
     assert not any(a in args for a in ALL)
-    assert sum("needs engine 152 r22" in str(w.message) for w in caught) == 2  # passthrough + cookies
+    # passthrough only: the cookie switch is dropped quietly (it is sent on every launch now)
+    assert sum("needs engine 152 r22" in str(w.message) for w in caught) == 1
 
 
 def test_prepare_passthrough_skips_auto_profile(prepared, monkeypatch):

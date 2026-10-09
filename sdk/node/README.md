@@ -148,7 +148,7 @@ Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the 
 |---|---|
 | `fingerprint: "off"` | No persona at all — for telling whether a problem comes from the spoofing or from your environment. |
 | `fingerprintVoices: false` | Keep the host's own `speechSynthesis` voices under a persona. |
-| `allowThirdPartyCookies: true` | Allow third-party cookies (blocked by default), for embedded sign-in, payment and captcha frames. |
+| `allowThirdPartyCookies: false` | Block third-party cookies. Since 0.45.0 they are allowed by default, as in Chrome; embedded sign-in, payment and captcha frames rely on them. |
 | `transparentProxy: true` | With a proxy: send the headers a direct connection sends, and report connection timing as a reused connection. |
 
 On an older engine each of these is skipped with a warning; the launch still works.

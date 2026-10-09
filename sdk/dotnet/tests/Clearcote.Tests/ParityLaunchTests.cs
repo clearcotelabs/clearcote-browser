@@ -163,12 +163,31 @@ public class ParityLaunchTests : IDisposable
         var exe = FakeEngine(new[] { "proxy-auth" });
         using var err = new StderrCapture();
         var (args, warnings) = LaunchOpts.GateEngineSwitches(exe,
-            new[] { "--foo=1", "--allow-third-party-cookies", "--transparent-proxy", "--disable-fingerprint-voices", "--fingerprint-passthrough" }, quiet: false);
+            new[] { "--foo=1", "--transparent-proxy", "--disable-fingerprint-voices", "--fingerprint-passthrough" }, quiet: false);
         Assert.Equal(new[] { "--foo=1" }, args);
-        Assert.Equal(4, warnings.Count);
-        Assert.Contains("clearcote: AllowThirdPartyCookies = true needs engine 152 r22 or newer; this engine ignores it, so it was not applied.", warnings);
+        Assert.Equal(3, warnings.Count);
+        Assert.Contains("clearcote: TransparentProxy = true needs engine 152 r22 or newer; this engine ignores it, so it was not applied.", warnings);
         Assert.All(warnings, w => Assert.EndsWith("needs engine 152 r22 or newer; this engine ignores it, so it was not applied.", w));
-        Assert.Equal(4, err.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+        Assert.Equal(3, err.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+    }
+
+    [Fact]
+    public void Gate_drops_third_party_cookie_switches_without_a_warning()
+    {
+        // Every launch carries one of them, so a warning would fire on every launch of an old build.
+        using var err = new StderrCapture();
+        var (old, warnings) = LaunchOpts.GateEngineSwitches(FakeEngine(new[] { "proxy-auth" }),
+            new[] { "--foo", "--allow-third-party-cookies", "--block-third-party-cookies" }, quiet: false);
+        Assert.Equal(new[] { "--foo" }, old);
+        Assert.Empty(warnings);
+        Assert.Equal("", err.Text);
+        // r22..r35 know allow but not block (they block by default, so dropping block keeps its meaning).
+        var (r35, _) = LaunchOpts.GateEngineSwitches(FakeEngine(new[] { "allow-third-party-cookies" }),
+            new[] { "--allow-third-party-cookies", "--block-third-party-cookies" }, quiet: true);
+        Assert.Equal(new[] { "--allow-third-party-cookies" }, r35);
+        var (r36, _) = LaunchOpts.GateEngineSwitches(FakeEngine(new[] { "allow-third-party-cookies", "block-third-party-cookies" }),
+            new[] { "--block-third-party-cookies" }, quiet: true);
+        Assert.Equal(new[] { "--block-third-party-cookies" }, r36);
     }
 
     [Fact]
@@ -185,21 +204,21 @@ public class ParityLaunchTests : IDisposable
     // ── engine extras ────────────────────────────────────────────────────────
 
     [Fact]
-    public void AllowThirdPartyCookies_emits_its_switch()
+    public void Third_party_cookies_are_allowed_unless_AllowThirdPartyCookies_is_false()
     {
+        Assert.Equal(new[] { "--allow-third-party-cookies" }, LaunchOpts.EngineExtrasArgs(null, null, null));
         Assert.Equal(new[] { "--allow-third-party-cookies" }, LaunchOpts.EngineExtrasArgs(true, null, null));
-        Assert.Empty(LaunchOpts.EngineExtrasArgs(false, null, null));
-        Assert.Empty(LaunchOpts.EngineExtrasArgs(null, null, null));
+        Assert.Equal(new[] { "--block-third-party-cookies" }, LaunchOpts.EngineExtrasArgs(false, null, null));
     }
 
     [Fact]
     public void TransparentProxy_needs_a_proxy_else_dropped_with_a_note()
     {
         using var err = new StderrCapture();
-        Assert.Equal(new[] { "--transparent-proxy" },
+        Assert.Contains("--transparent-proxy",
             LaunchOpts.EngineExtrasArgs(null, true, new ProxyOptions { Server = "http://p:8080" }));
         Assert.Equal("", err.Text);
-        Assert.Empty(LaunchOpts.EngineExtrasArgs(null, true, null));
+        Assert.DoesNotContain("--transparent-proxy", LaunchOpts.EngineExtrasArgs(null, true, null));
         Assert.Contains("clearcote: transparentProxy has no effect without a proxy; ignored.", err.Text);
     }
 
@@ -208,7 +227,8 @@ public class ParityLaunchTests : IDisposable
     {
         var userArgs = new[] { "--allow-third-party-cookies" };  // gated wherever it came from
         var proxy = new ProxyOptions { Server = "http://127.0.0.1:3128" };
-        var newExe = FakeEngine(AllGated.Select(s => s[2..]));
+        // A 154 r36+ engine: every gated switch and both cookie switches.
+        var newExe = FakeEngine(AllGated.Concat(LaunchOpts.QuietGatedEngineSwitches).Select(s => s[2..]));
         var oldExe = FakeEngine(new[] { "proxy-auth" });
         using var err = new StderrCapture();
 
@@ -221,7 +241,7 @@ public class ParityLaunchTests : IDisposable
 
         var onOld = Clearcote.AssembleArgs(Fingerprint.Args(new FingerprintOptions { Fingerprint = "off" }), new(), new(), null, null,
             userArgs, proxy, false, new Clearcote.EngineExtras(oldExe, false, true, true, true));
-        Assert.DoesNotContain(onOld, a => AllGated.Contains(a.Split('=')[0]));
+        Assert.DoesNotContain(onOld, a => AllGated.Contains(a.Split('=')[0]) || LaunchOpts.QuietGatedEngineSwitches.Contains(a.Split('=')[0]));
         Assert.DoesNotContain(onOld, a => a.StartsWith("--fingerprint"));
         Assert.Contains("--disable-quic", onOld);
         Assert.Equal(Native.IsWindows, onOld.Contains("--ignore-gpu-blocklist"));

@@ -47,6 +47,7 @@ from ._humanize import install_humanize, install_humanize_on_context
 from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
     DEFAULT_IGNORED_ARGS,
     GATED_ENGINE_SWITCHES,
+    QUIET_GATED_ENGINE_SWITCHES,
     STOCK_RUNTIME_SWITCH,
     engine_extras_args,
     engine_supports_switch,
