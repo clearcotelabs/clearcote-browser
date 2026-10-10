@@ -51,9 +51,12 @@ FINGERPRINT_KEYS = (
     "storage_quota",
     "canvas_bridge",
     "tls_profile",
-    # Persona schema version (engine >= 151 r19): 1 = the frozen original derivation (default),
-    # 2 = tier-coupled screen/GPU class + RAM-sized heap limit. A seed's schema-1 identity never
-    # changes; schema 2 is a separate identity space you opt into.
+    # Persona schema version: which derivation a seed gets. Unset = the engine's current default (4 from
+    # 154 r37, 3 on r36, 2 on 153 r29 to 154 r35). Pin one to keep identities across upgrades: 1 = the
+    # frozen original derivation; 2 = tier-coupled screen/GPU class + RAM-sized heap limit; 3 = schema 2
+    # plus a GPU model drawn from a per-vendor pool (154 r36); 4 = schema 3 with the pool re-drawn from
+    # real Windows Chrome traffic and Intel or AMD integrated graphics on a host without a GPU vendor
+    # (154 r37). A seed's identity under a given schema never changes.
     "persona_schema",
     # Declare that this host renders with a real GPU (or a canvas bridge backs the pixels), so a
     # schema-2 persona may claim a discrete GPU class. Off by default: on a software rasteriser the
