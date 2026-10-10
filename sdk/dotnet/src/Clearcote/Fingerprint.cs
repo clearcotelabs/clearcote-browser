@@ -110,6 +110,22 @@ public class FingerprintOptions
     public bool? GpuStringSpoof { get; set; }
 
     /// <summary>
+    /// Which identity model a seed derives (<c>--fingerprint-schema</c>, licensed build 151 r19+): 4, the default
+    /// from engine 154 r37, draws the graphics card from a range of real models as common as in real browser
+    /// traffic; 3 derives exactly what 154 r36 did; 2 what 153 r29 to 154 r35 did; 1 the original model from
+    /// before r29. A seed's identity under a given schema never changes; set 3 or 2 to keep identities created on
+    /// those builds. An engine knows nothing of a schema past its own newest and derives that one instead.
+    /// </summary>
+    public int? PersonaSchema { get; set; }
+
+    /// <summary>
+    /// Declare that this host renders with a real GPU (or a canvas bridge backs the pixels), so a schema-2
+    /// persona may claim a discrete GPU class (<c>--fingerprint-gpu-backend-real</c>). Off by default: on a
+    /// software rasteriser the persona stays on the iGPU claim whatever its tier. Inert on schema 1.
+    /// </summary>
+    public bool? RealGpuHost { get; set; }
+
+    /// <summary>
     /// <c>false</c> turns off the per-eTLD+1 farble on CANVAS 2D readback only (getImageData, and
     /// toDataURL of a 2D canvas). WebGL readPixels and every other farbled surface are unchanged.
     /// Requires engine &gt;= Chromium 150 r12; inert on older builds.
@@ -426,6 +442,12 @@ public static class Fingerprint
         if (o.CanvasNoise == false) args.Add("--disable-canvas-noise");
         // FingerprintVoices=false keeps the host's own speech voices under a persona (engine 152 r22+).
         if (o.FingerprintVoices == false) args.Add("--disable-fingerprint-voices");
+        // Persona schema (see PersonaSchema); the real-GPU declaration gates a schema-2 persona's discrete-GPU
+        // draw and is inert on schema 1.
+        if (o.PersonaSchema is int schema && (schema < 1 || schema > 4))
+            throw new ArgumentException("PersonaSchema must be 1, 2, 3 or 4");
+        Set("fingerprint-schema", o.PersonaSchema);
+        if (o.RealGpuHost == true) args.Add("--fingerprint-gpu-backend-real");
         if (o.FingerprintProfile is not null) args.Add($"--fingerprint-profile={EncodeProfile(o.FingerprintProfile)}");
 
         if (o.CanvasBridge?.Url is { Length: > 0 } cbUrl)

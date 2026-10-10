@@ -205,6 +205,8 @@ Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the 
 | `Timezone` / `AcceptLanguage` | IANA tz + `navigator.languages` (+ coherent `Intl` locale) |
 | `WebrtcIp` | WebRTC egress IP (fabricated srflx; no real STUN leaks) |
 | `DisableGpuFingerprint` | report the host's real GPU (most coherent vs strict classifiers) |
+| `PersonaSchema` | `--fingerprint-schema` — which identity model a seed derives: 4 (engine 154 r37, the default), 3 (154 r36), 2 (153 r29 to 154 r35), 1 (before r29); a seed's identity under a schema never changes |
+| `RealGpuHost` | `--fingerprint-gpu-backend-real` — this host renders on a real GPU, so a schema-2 persona may claim a dedicated card |
 | `FingerprintNoise = false` | turn OFF farbling noise (canvas/WebGL/audio) |
 | `FingerprintProfile` | import a real captured fingerprint (path / JSON string / object) |
 | `StorageQuota` | `navigator.storage.estimate().quota` in MB |

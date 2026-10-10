@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
+  SCHEMA4_ENGINE_MARKER,
   extensionArgs,
   resolveProxy,
   engineSupportsSwitch,
@@ -191,6 +192,31 @@ describe("resolveProxy", () => {
     expect(oldMsgs.some((m) => m.includes("SOCKS5"))).toBe(false);
     expect(warnUnsupportedEngineOptions(newExe, fp, socks, true)).toEqual([]);
     expect(warnUnsupportedEngineOptions(oldExe, { personaSchema: 1 }, undefined, true)).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("warnUnsupportedEngineOptions knows which engine each persona schema needs", async () => {
+    // Schema 2 came with 151 r19 (the switch itself), 3 with 154 r36 (--block-third-party-cookies too), 4 with 154 r37,
+    // whose schema-4 GPU pool is the first to carry the Intel Arc row; r36's table names that chip "Arc(TM) Pro".
+    const fs = await import("node:fs"); const os = await import("node:os"); const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-warn-"));
+    const bin = (name: string, ...literals: string[]) => {
+      const p = path.join(dir, name);
+      fs.writeFileSync(p, Buffer.from(literals.map((l) => `\0${l}\0`).join(""), "latin1"));
+      return p;
+    };
+    const r35 = bin("r35", "fingerprint-schema");
+    const r36 = bin("r36", "fingerprint-schema", "block-third-party-cookies", "ANGLE (Intel, Intel(R) Arc(TM) Pro Graphics (0x00007D55) Direct3D11 vs_5_0 ps_5_0, D3D11)");
+    const r37 = bin("r37", "fingerprint-schema", "block-third-party-cookies", SCHEMA4_ENGINE_MARKER);
+    const warns = (exe: string, personaSchema: number) => warnUnsupportedEngineOptions(exe, { personaSchema }, undefined, true);
+    expect(warns(r35, 3).some((m) => m.includes("personaSchema: 3 (engine 154 r36+)"))).toBe(true);
+    expect(warns(r35, 4).some((m) => m.includes("personaSchema: 4 (engine 154 r37+)"))).toBe(true);
+    expect(warns(r36, 3)).toEqual([]);
+    expect(warns(r36, 4).some((m) => m.includes("personaSchema: 4"))).toBe(true);
+    expect(warns(r37, 3)).toEqual([]);
+    expect(warns(r37, 4)).toEqual([]);
+    expect(warns(r35, 2)).toEqual([]);
+    expect(SCHEMA4_ENGINE_MARKER).toContain("Arc(TM) Graphics (0x00007D55)");
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

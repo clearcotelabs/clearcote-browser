@@ -65,6 +65,20 @@ public class FingerprintTests
     }
 
     [Fact]
+    public void PersonaSchema_and_RealGpuHost_map_to_their_switches()
+    {
+        var args = Fingerprint.Args(new FingerprintOptions { Fingerprint = "seed", PersonaSchema = 3, RealGpuHost = true });
+        Assert.Contains("--fingerprint-schema=3", args);
+        Assert.Contains("--fingerprint-gpu-backend-real", args);
+        var none = Fingerprint.Args(new FingerprintOptions { Fingerprint = "seed", RealGpuHost = false });
+        Assert.DoesNotContain(none, a => a.StartsWith("--fingerprint-schema="));
+        Assert.DoesNotContain("--fingerprint-gpu-backend-real", none);
+        Assert.Contains("--fingerprint-schema=4", Fingerprint.Args(new FingerprintOptions { PersonaSchema = 4 }));
+        Assert.Contains("PersonaSchema", Assert.Throws<ArgumentException>(() => Fingerprint.Args(new FingerprintOptions { PersonaSchema = 5 })).Message);
+        Assert.Contains("PersonaSchema", Assert.Throws<ArgumentException>(() => Fingerprint.Args(new FingerprintOptions { PersonaSchema = 0 })).Message);
+    }
+
+    [Fact]
     public void DisableFingerprintNoise_only_when_false()
     {
         Assert.Contains("--disable-fingerprint-noise", Fingerprint.Args(new FingerprintOptions { FingerprintNoise = false }));

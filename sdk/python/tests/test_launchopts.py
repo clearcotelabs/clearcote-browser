@@ -334,6 +334,28 @@ def test_warn_unsupported_engine_options_warns_only_for_missing_switches(tmp_pat
     assert not caught                                                  # schema 1 is the default: nothing to warn
 
 
+def test_warn_unsupported_engine_options_knows_which_engine_each_schema_needs(tmp_path):
+    # Schema 2 came with 151 r19 (the switch itself), 3 with 154 r36 (--block-third-party-cookies too), 4 with 154 r37,
+    # whose schema-4 GPU pool is the first to carry the Intel Arc row; r36's table names that chip "Arc(TM) Pro".
+    from clearcote._launchopts import SCHEMA4_ENGINE_MARKER, warn_unsupported_engine_options
+    lits = lambda *ls: b"".join(b"\x00" + l.encode("ascii") + b"\x00" for l in ls)
+    r35 = tmp_path / "r35"; r35.write_bytes(lits("fingerprint-schema"))
+    r36 = tmp_path / "r36"; r36.write_bytes(lits("fingerprint-schema", "block-third-party-cookies", "ANGLE (Intel, Intel(R) Arc(TM) Pro Graphics (0x00007D55) Direct3D11 vs_5_0 ps_5_0, D3D11)"))
+    r37 = tmp_path / "r37"; r37.write_bytes(lits("fingerprint-schema", "block-third-party-cookies", SCHEMA4_ENGINE_MARKER))
+
+    def msgs(exe, schema):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            warn_unsupported_engine_options(str(exe), {"persona_schema": schema}, None)
+        return [str(w.message) for w in caught]
+
+    assert any("persona_schema=3 (engine 154 r36+)" in m for m in msgs(r35, 3))
+    assert any("persona_schema=4 (engine 154 r37+)" in m for m in msgs(r35, 4))
+    assert msgs(r36, 3) == [] and any("persona_schema=4" in m for m in msgs(r36, 4))
+    assert msgs(r37, 3) == [] and msgs(r37, 4) == [] and msgs(r35, 2) == []
+    assert "Arc(TM) Graphics (0x00007D55)" in SCHEMA4_ENGINE_MARKER
+
+
 PW157 = ("AcceptCHFrame", "AvoidUnnecessaryBeforeUnloadCheckSync", "HttpsUpgrades", "MediaRouter",
          "PaintHolding", "ThirdPartyStoragePartitioning", "RenderDocument")
 

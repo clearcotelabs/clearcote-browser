@@ -383,9 +383,20 @@ def engine_supports_switch(exe, name):
 
 # Options that only exist from a given engine revision. An unknown switch is ignored by Chromium,
 # so an older engine launches fine -- but silently, which is worse than a warning.
+# A string literal only engines from 154 r37 carry: the persona schema-4 GPU pool's Intel Arc row. Pool tables are
+# frozen with their schema (3 keeps r36's rows, which name this chip "Arc(TM) Pro"), so the literal stays in every
+# later engine, and engine_supports_switch's NUL-delimited search finds it like a switch name.
+SCHEMA4_ENGINE_MARKER = "ANGLE (Intel, Intel(R) Arc(TM) Graphics (0x00007D55) Direct3D11 vs_5_0 ps_5_0, D3D11)"
+
+# (option, the value it matters at or None for "truthy", the switch or literal the engine must carry, label).
+# Each schema arrived with an engine: 2 with 151 r19 (--fingerprint-schema itself), 3 with 154 r36 (which also
+# introduced --block-third-party-cookies) and 4 with 154 r37. An engine knows nothing of a schema past its own
+# newest and derives that one instead, silently.
 _ENGINE_OPTION_SWITCHES = (
-    ("persona_schema", "fingerprint-schema", "persona_schema=2 (engine r19+)"),
-    ("real_gpu_host", "fingerprint-gpu-backend-real", "real_gpu_host (engine r19+)"),
+    ("persona_schema", "2", "fingerprint-schema", "persona_schema=2 (engine r19+)"),
+    ("persona_schema", "3", "block-third-party-cookies", "persona_schema=3 (engine 154 r36+)"),
+    ("persona_schema", "4", SCHEMA4_ENGINE_MARKER, "persona_schema=4 (engine 154 r37+)"),
+    ("real_gpu_host", None, "fingerprint-gpu-backend-real", "real_gpu_host (engine r19+)"),
 )
 
 
@@ -397,16 +408,18 @@ def warn_unsupported_engine_options(exe, fp, proxy, quiet=False):
     if quiet or os.environ.get("CLEARCOTE_NO_WARN"):
         return
     try:
-        for key, switch, label in _ENGINE_OPTION_SWITCHES:
+        for key, at, switch, label in _ENGINE_OPTION_SWITCHES:
             v = (fp or {}).get(key)
-            # persona_schema matters only at 2; real_gpu_host only when truthy (note True == 1 in
+            # persona_schema matters at one value per row; real_gpu_host when truthy (note True == 1 in
             # Python, so the two are tested separately rather than through one membership check)
-            wanted = (str(v) == "2") if key == "persona_schema" else bool(v)
+            wanted = (str(v) == at) if at is not None else bool(v)
             if not wanted:
                 continue
             if not engine_supports_switch(exe, switch):
-                warnings.warn(f"clearcote: {label} is not supported by this engine build and is ignored; "
-                              "upgrade the engine to use it.", stacklevel=3)
+                what = ("is not supported by this engine build, which derives its own newest identity model instead"
+                        if key == "persona_schema" and at != "2" else
+                        "is not supported by this engine build and is ignored")
+                warnings.warn(f"clearcote: {label} {what}; upgrade the engine to use it.", stacklevel=3)
         server, username, password = proxy_credentials(proxy) if isinstance(proxy, dict) else ("", "", "")
         has_creds = bool(username or password)
         if server and has_creds and _SOCKS.match(server) and not engine_supports_switch(exe, "socks5-credentials"):

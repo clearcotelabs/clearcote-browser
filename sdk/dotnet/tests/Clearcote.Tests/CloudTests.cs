@@ -288,6 +288,8 @@ public sealed class CloudTests : IAsyncLifetime
         new object[] { "Extensions", new LaunchOptions { Extensions = new[] { "/ext" } } },
         new object[] { "IgnoreDefaultArgs", new LaunchOptions { IgnoreDefaultArgs = Array.Empty<string>() } },
         new object[] { "GpuVendor", new LaunchOptions { GpuVendor = "NVIDIA" } },
+        new object[] { "PersonaSchema", new LaunchOptions { PersonaSchema = 3 } },
+        new object[] { "RealGpuHost", new LaunchOptions { RealGpuHost = true } },
         new object[] { "HardwareConcurrency", new LaunchOptions { HardwareConcurrency = 8 } },
         new object[] { "WebrtcIp", new LaunchOptions { WebrtcIp = "1.2.3.4" } },
         new object[] { "LicenseKey", new LaunchOptions { LicenseKey = "cc_lic_x" } },
