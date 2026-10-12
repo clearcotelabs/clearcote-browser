@@ -52,6 +52,15 @@ class LicenseRevokedError(LicenseError):
     code = "LICENSE_REVOKED"
 
 
+class LicenseServerChallengeError(LicenseError):
+    """The licence server never answered: something in front of it (a CDN firewall or bot check, e.g. the
+    "Vercel Security Checkpoint") returned a challenge page instead of a licence verdict. Says nothing about
+    the licence itself, which is NOT revoked or over its limit. Retryable: such challenges are usually
+    temporary and tied to this machine's network; ``license_through_proxy`` sends the calls another way."""
+    code = "LICENSE_SERVER_CHALLENGE"
+    retryable = True
+
+
 def resolve_license_key(explicit: str | None = None) -> str | None:
     """explicit > CLEARCOTE_LICENSE_KEY env > ~/.clearcote/license.key."""
     if explicit and explicit.strip():
@@ -212,6 +221,32 @@ def _user_agent() -> str:
     return f"clearcote-sdk-python/{__version__}"
 
 
+# The key _post puts in the payload it returns when the answer was a challenge page, not the licence
+# server's own JSON. Private: the licence server never sends it.
+_CHALLENGE = "_challenge"
+
+
+def _challenge_reason(status: int, content_type: str, text: str, mitigated: str = "") -> str | None:
+    """Why an error answer is a firewall/bot challenge rather than the licence server's verdict, or None.
+
+    The licence server answers every error with JSON. A Vercel challenge sets ``x-vercel-mitigated`` and
+    serves an HTML page titled "Vercel Security Checkpoint"; any other HTML (or non-JSON) 403/429 comes
+    from something in front of the server too, so it is not a revoke or a concurrency verdict either."""
+    if status < 400:
+        return None
+    if mitigated:
+        return f"x-vercel-mitigated: {mitigated}"
+    if "Vercel Security Checkpoint" in text:
+        return "Vercel Security Checkpoint"
+    if status in (403, 429) and text.strip():
+        try:
+            json.loads(text)
+            return None
+        except ValueError:
+            return f"non-JSON {content_type.split(';')[0].strip() or 'body'}"
+    return None
+
+
 def _post(url: str, license_key: str, body: dict, timeout: float = 15.0, proxy=None):
     if proxy:
         # license_through_proxy: through the launch proxy (HTTP CONNECT or SOCKS5). The direct path
@@ -220,6 +255,10 @@ def _post(url: str, license_key: str, body: dict, timeout: float = 15.0, proxy=N
                               headers={"authorization": f"Bearer {license_key}",
                                        "content-type": "application/json",
                                        "User-Agent": _user_agent()})
+        h = getattr(res, "headers", None) or {}
+        why = _challenge_reason(res.status, h.get("content-type", ""), res.text(), h.get("x-vercel-mitigated", ""))
+        if why:
+            return res.status, {_CHALLENGE: why}
         try:
             payload = res.json() if res.text().strip() else {}
         except ValueError:
@@ -235,14 +274,26 @@ def _post(url: str, license_key: str, body: dict, timeout: float = 15.0, proxy=N
         with request.urlopen(req, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read().decode() or "{}")
     except error.HTTPError as e:  # non-2xx
+        text = e.read().decode(errors="replace")
+        why = _challenge_reason(e.code, e.headers.get("content-type") or "", text,
+                                e.headers.get("x-vercel-mitigated") or "")
+        if why:
+            return e.code, {_CHALLENGE: why}
         try:
-            payload = json.loads(e.read().decode() or "{}")
+            payload = json.loads(text or "{}")
         except ValueError:
             payload = {}
-        return e.code, payload
+        return e.code, payload if isinstance(payload, dict) else {}
 
 
 def _raise_for_status(status: int, body: dict):
+    if body.get(_CHALLENGE):
+        raise LicenseServerChallengeError(
+            f"The licence server could not be reached: a firewall in front of it answered with a security "
+            f"challenge (HTTP {status}, {body[_CHALLENGE]}) instead of a licence verdict, so your licence "
+            f"was not checked (it is not revoked). This is usually temporary and tied to this machine's network: retry later, or send "
+            f"the licence calls through your proxy (license_through_proxy=True).",
+            "LICENSE_SERVER_CHALLENGE")
     msg = body.get("error") or f"License request failed ({status})."
     code = body.get("code")
     if status == 429 or code == "CONCURRENCY_LIMIT_EXCEEDED":
@@ -441,6 +492,18 @@ class _MachineLease:
         launch_id = new_launch_id()
         try:
             body = self.checkout_for(launch_id)
+        except LicenseServerChallengeError as e:
+            # Not a verdict: the server was never reached. Offline grace like a network error, and the
+            # challenge itself surfaces when there is no cached token.
+            cached = _read_cache(self._key)
+            if cached and cached["exp"] > time.time() + _SKEW_SEC:
+                if not self._quiet:
+                    sys.stderr.write(f"[clearcote] [license] {e} Using the cached run-token.\n")
+                self.token = cached["token"]
+                self.exp = float(cached["exp"])
+                self.lease_id = cached.get("lease_id")
+                return
+            raise
         except LicenseError:
             raise  # a definitive verdict must surface (never silently downgrade)
         except Exception as e:  # noqa: BLE001 — network/other: offline grace on a cached token
@@ -822,6 +885,10 @@ def get_session_seats(license_key: str | None = None, api_base: str | None = Non
             if body.get("plan") is not None:
                 out["plan"] = body["plan"]
             return out
+        h = getattr(res, "headers", None) or {}
+        why = _challenge_reason(res.status, h.get("content-type", ""), res.text(), h.get("x-vercel-mitigated", ""))
+        if why:
+            return {"state": "unavailable", "reason": f"licence server behind a security challenge ({why})"}
         if res.status in (401, 403):
             return {"state": "invalid", "reason": body.get("error") or f"HTTP {res.status}"}
         if res.status == 404:

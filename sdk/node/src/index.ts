@@ -178,6 +178,7 @@ export {
   LicenseError,
   ConcurrencyLimitError,
   LicenseRevokedError,
+  LicenseServerChallengeError,
   type LicenseOptions,
   type LeaseSession,
 } from "./license.js";

@@ -80,6 +80,19 @@ export class LicenseRevokedError extends LicenseError {
     this.name = "LicenseRevokedError";
   }
 }
+/**
+ * The licence server never answered: something in front of it (a CDN firewall or bot check, e.g. the
+ * "Vercel Security Checkpoint") returned a challenge page instead of a licence verdict. Says nothing about
+ * the licence itself, which is NOT revoked or over its limit. Retryable: such challenges are usually
+ * temporary and tied to this machine's network; `licenseThroughProxy` sends the calls another way.
+ */
+export class LicenseServerChallengeError extends LicenseError {
+  readonly retryable = true;
+  constructor(message: string) {
+    super(message, "LICENSE_SERVER_CHALLENGE");
+    this.name = "LicenseServerChallengeError";
+  }
+}
 
 /** Resolve a license key: explicit > CLEARCOTE_LICENSE_KEY env > ~/.clearcote/license.key. */
 export function resolveLicenseKey(explicit?: string): string | undefined {
@@ -254,6 +267,56 @@ async function postJson(url: string, licenseKey: string, body: unknown, proxy?: 
   return fetch(url, init);
 }
 
+function headerOf(res: Response | SimpleResponse, name: string): string {
+  const h = res.headers as Headers | Record<string, string> | undefined;
+  if (!h) return "";
+  if (typeof (h as Headers).get === "function") return (h as Headers).get(name) ?? "";
+  return (h as Record<string, string>)[name] ?? "";
+}
+
+/**
+ * Why an error answer is a firewall/bot challenge rather than the licence server's verdict, or null.
+ * The licence server answers every error with JSON. A Vercel challenge sets `x-vercel-mitigated` and serves
+ * an HTML page titled "Vercel Security Checkpoint"; any other non-JSON 403/429 comes from something in
+ * front of the server too, so it is not a revoke or a concurrency verdict either.
+ */
+export function challengeReason(status: number, contentType: string, text: string, mitigated = ""): string | null {
+  if (status < 400) return null;
+  if (mitigated) return `x-vercel-mitigated: ${mitigated}`;
+  if (text.includes("Vercel Security Checkpoint")) return "Vercel Security Checkpoint";
+  if ((status === 403 || status === 429) && text.trim()) {
+    try {
+      JSON.parse(text);
+      return null;
+    } catch {
+      return `non-JSON ${contentType.split(";")[0].trim() || "body"}`;
+    }
+  }
+  return null;
+}
+
+/** Read an error response once: a challenge page's reason, or the licence server's JSON body. */
+async function readError(res: Response | SimpleResponse): Promise<{ challenge: string | null; body: { error?: string; code?: string } }> {
+  const text = await res.text().catch(() => "");
+  const challenge = challengeReason(res.status, headerOf(res, "content-type"), text, headerOf(res, "x-vercel-mitigated"));
+  if (challenge) return { challenge, body: {} };
+  try {
+    const body = JSON.parse(text || "{}");
+    return { challenge: null, body: body && typeof body === "object" ? body : {} };
+  } catch {
+    return { challenge: null, body: {} };
+  }
+}
+
+function challengeError(status: number, why: string): LicenseServerChallengeError {
+  return new LicenseServerChallengeError(
+    `The licence server could not be reached: a firewall in front of it answered with a security challenge ` +
+      `(HTTP ${status}, ${why}) instead of a licence verdict, so your licence was not checked (it is not revoked). ` +
+      `This is usually temporary and tied to this machine's network: retry later, or send the licence calls ` +
+      `through your proxy (licenseThroughProxy: true).`,
+  );
+}
+
 function throwForStatus(status: number, body: { error?: string; code?: string }): never {
   const msg = body?.error || `License request failed (${status}).`;
   if (status === 429 || body?.code === "CONCURRENCY_LIMIT_EXCEEDED") throw new ConcurrencyLimitError(msg);
@@ -423,7 +486,8 @@ class MachineLease {
       engine_version: await this.engineVer(),
     }, this.proxy);
     if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+      const { challenge, body } = await readError(res);
+      if (challenge) throw challengeError(res.status, challenge);
       throwForStatus(res.status, body);
     }
     return (await res.json()) as CheckoutResponse;
@@ -450,7 +514,9 @@ class MachineLease {
       this.hbSec = Math.max(5, co.heartbeat_interval_sec || 270);
       writeCache(this.key, co.token, co.exp, co.lease_id);
     } catch (e) {
-      if (e instanceof LicenseError) throw e; // definitive verdict must surface
+      // A challenge is not a verdict (the server was never reached): offline grace like a network error,
+      // and the challenge itself surfaces when there is no cached token.
+      if (e instanceof LicenseError && !(e instanceof LicenseServerChallengeError)) throw e; // definitive verdict must surface
       const cached = readCache(this.key);
       const now = Math.floor(Date.now() / 1000);
       if (cached && cached.exp > now + SKEW_SEC) {
@@ -461,6 +527,7 @@ class MachineLease {
         this.leaseId = cached.lease_id ?? null;
         return;
       }
+      if (e instanceof LicenseServerChallengeError) throw e;
       throw new LicenseError(`Could not reach the license server and no valid cached token: ${String(e)}`);
     }
   }
@@ -837,7 +904,16 @@ export async function getSessionSeats(opts: LicenseOptions & { proxy?: string | 
       proxy: via,
       timeoutMs: 15_000,
     });
-    const body = (await res.json().catch(() => ({}))) as { used?: number; limit?: number | null; plan?: string; error?: string; code?: string };
+    const text = await res.text().catch(() => "");
+    const why = challengeReason(res.status, headerOf(res, "content-type"), text, headerOf(res, "x-vercel-mitigated"));
+    if (why) return { state: "unavailable", reason: `licence server behind a security challenge (${why})` };
+    let body: { used?: number; limit?: number | null; plan?: string; error?: string; code?: string } = {};
+    try {
+      const parsed = JSON.parse(text || "{}");
+      if (parsed && typeof parsed === "object") body = parsed;
+    } catch {
+      /* non-JSON: reported by status below */
+    }
     if (res.ok && typeof body.used === "number") {
       return { state: "ok", used: body.used, limit: body.limit ?? null, plan: body.plan };
     }

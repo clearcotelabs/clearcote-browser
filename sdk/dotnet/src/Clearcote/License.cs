@@ -24,6 +24,17 @@ public sealed class LicenseRevokedError : LicenseError
     public LicenseRevokedError(string message) : base(message, "LICENSE_REVOKED") { }
 }
 
+/// The licence server never answered: something in front of it (a CDN firewall or bot check, e.g. the
+/// "Vercel Security Checkpoint") returned a challenge page instead of a licence verdict. Says nothing about
+/// the licence itself, which is NOT revoked or over its limit. Retryable: such challenges are usually
+/// temporary and tied to this machine's network; <see cref="LicenseOptions.LicenseThroughProxy"/> sends
+/// the calls another way.
+public sealed class LicenseServerChallengeError : LicenseError
+{
+    public bool Retryable => true;
+    public LicenseServerChallengeError(string message) : base(message, "LICENSE_SERVER_CHALLENGE") { }
+}
+
 /// Options for resolving a license + reaching the backend.
 public class LicenseOptions
 {
@@ -367,17 +378,53 @@ public static class License
         return await client.SendAsync(req).ConfigureAwait(false);
     }
 
+    /// Why an error answer is a firewall/bot challenge rather than the licence server's verdict, or null.
+    /// The licence server answers every error with JSON. A Vercel challenge sets <c>x-vercel-mitigated</c> and
+    /// serves an HTML page titled "Vercel Security Checkpoint"; any other non-JSON 403/429 comes from
+    /// something in front of the server too, so it is not a revoke or a concurrency verdict either.
+    internal static string? ChallengeReason(int status, string? contentType, string text, string? mitigated = null)
+    {
+        if (status < 400) return null;
+        if (!string.IsNullOrEmpty(mitigated)) return $"x-vercel-mitigated: {mitigated}";
+        if (text.Contains("Vercel Security Checkpoint", StringComparison.Ordinal)) return "Vercel Security Checkpoint";
+        if ((status == 403 || status == 429) && !string.IsNullOrWhiteSpace(text))
+        {
+            try { using var _ = JsonDocument.Parse(text); return null; }
+            catch (JsonException)
+            {
+                var ct = (contentType ?? "").Split(';')[0].Trim();
+                return $"non-JSON {(ct.Length > 0 ? ct : "body")}";
+            }
+        }
+        return null;
+    }
+
+    internal static string? ChallengeReason(HttpResponseMessage res, string text)
+    {
+        var mitigated = res.Headers.TryGetValues("x-vercel-mitigated", out var v) ? string.Join(",", v) : null;
+        return ChallengeReason((int)res.StatusCode, res.Content.Headers.ContentType?.ToString(), text, mitigated);
+    }
+
     private static async Task ThrowForStatusAsync(HttpResponseMessage res)
     {
         string? error = null, code = null;
+        var text = "";
+        try { text = await res.Content.ReadAsStringAsync().ConfigureAwait(false); }
+        catch { /* no body */ }
+        var status = (int)res.StatusCode;
+        if (ChallengeReason(res, text) is { } why)
+            throw new LicenseServerChallengeError(
+                "The licence server could not be reached: a firewall in front of it answered with a security challenge " +
+                $"(HTTP {status}, {why}) instead of a licence verdict, so your licence was not checked (it is not revoked). " +
+                "This is usually temporary and tied to this machine's network: retry later, or send the licence calls " +
+                "through your proxy (LicenseThroughProxy = true).");
         try
         {
-            using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
+            using var doc = JsonDocument.Parse(text);
             if (doc.RootElement.TryGetProperty("error", out var e)) error = e.GetString();
             if (doc.RootElement.TryGetProperty("code", out var c)) code = c.GetString();
         }
         catch { /* ignore */ }
-        var status = (int)res.StatusCode;
         var msg = error ?? $"License request failed ({status}).";
         if (status == 429 || code == "CONCURRENCY_LIMIT_EXCEEDED") throw new ConcurrencyLimitError(msg);
         if (status == 403 || code == "LICENSE_REVOKED" || code == "LICENSE_EXPIRED")
@@ -601,6 +648,19 @@ public static class License
                 _hbSec = d.HeartbeatSec;
                 WriteCache(_key, _token!, _exp, _leaseId);
                 return null;
+            }
+            catch (LicenseServerChallengeError e)
+            {
+                // Not a verdict: the server was never reached. Offline grace like a network error, and the
+                // challenge itself surfaces when there is no cached token.
+                var cached = ReadCache(_key);
+                if (cached is { } c && c.exp > NowSec() + 60)
+                {
+                    if (!_quiet) Console.Error.WriteLine($"[clearcote] [license] {e.Message} Using the cached run-token.");
+                    SetToken(c.token); _exp = c.exp; _leaseId = c.leaseId;
+                    return null;
+                }
+                throw;
             }
             catch (LicenseError) { throw; } // a definitive verdict must surface (never silently downgrade)
             catch (Exception e)
@@ -917,9 +977,12 @@ public static class License
             int? used = null, limit = null;
             string? plan = null, error = null;
             var hasUsed = false;
+            var text = await res.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
+            if (ChallengeReason(res, text) is { } why)
+                return new SessionSeats(SeatsState.Unavailable, Reason: $"licence server behind a security challenge ({why})");
             try
             {
-                using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false));
+                using var doc = JsonDocument.Parse(text);
                 var r = doc.RootElement;
                 if (r.ValueKind == JsonValueKind.Object)
                 {
