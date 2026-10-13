@@ -341,7 +341,7 @@ const browser = await chromium.connectOverCDP(connectUrl);
 - **The dashboard [Playground](https://www.clearcotelabs.com/dashboard/playground?utm_source=github&utm_medium=readme&utm_content=run-it-in-the-cloud)** runs a task or a script in a cloud browser and shows the live view, every step and the result.
 
 New accounts that sign in with a GitHub account at least 30 days old get a one-time welcome credit.
-API keys: [dashboard](https://www.clearcotelabs.com/dashboard/api-keys?utm_source=github&utm_medium=readme&utm_content=run-it-in-the-cloud) · Docs: [hosted browsers](https://www.clearcotelabs.com/docs/hosted-browsers?utm_source=github&utm_medium=readme&utm_content=run-it-in-the-cloud).
+API keys: [dashboard](https://www.clearcotelabs.com/dashboard/api-keys?utm_source=github&utm_medium=readme&utm_content=run-it-in-the-cloud) · Docs: [hosted browsers](https://www.clearcotelabs.com/docs/hosted-browsers?utm_source=github&utm_medium=readme&utm_content=run-it-in-the-cloud) · Site status: [Clearcote Tracker](https://github.com/clearcotelabs/clearcote-tracker).
 
 ---
 
@@ -514,7 +514,7 @@ Privacy, QA and testing, research and lawful automation. Respect site terms and 
 | **Website** | [clearcotelabs.com](https://www.clearcotelabs.com/?utm_source=github&utm_medium=readme&utm_content=more) · [Docs](https://www.clearcotelabs.com/docs?utm_source=github&utm_medium=readme&utm_content=more) · [Pricing](https://www.clearcotelabs.com/pricing?utm_source=github&utm_medium=readme&utm_content=more) · [Compare alternatives](https://www.clearcotelabs.com/alternatives?utm_source=github&utm_medium=readme&utm_content=more) · [Blog](https://www.clearcotelabs.com/blog?utm_source=github&utm_medium=readme&utm_content=more) |
 | **SDK references** | [Python](sdk/python/README.md) · [Node](sdk/node/README.md) · [.NET](sdk/dotnet) |
 | **Docs** | [VERIFY](docs/VERIFY.md) · [BUILDING](docs/BUILDING.md) · [PATCHES](docs/PATCHES.md) · [UPGRADING](docs/UPGRADING.md) · [CANVAS-BRIDGE](docs/CANVAS-BRIDGE.md) · [STEALTH-COHERENCE](docs/STEALTH-COHERENCE.md) |
-| **Hosted** | [Hosted browsers](https://www.clearcotelabs.com/docs/hosted-browsers?utm_source=github&utm_medium=readme&utm_content=more) · [Agent runs](https://www.clearcotelabs.com/docs/runs?utm_source=github&utm_medium=readme&utm_content=more) · [Playground](https://www.clearcotelabs.com/dashboard/playground?utm_source=github&utm_medium=readme&utm_content=more) |
+| **Hosted** | [Hosted browsers](https://www.clearcotelabs.com/docs/hosted-browsers?utm_source=github&utm_medium=readme&utm_content=more) · [Agent runs](https://www.clearcotelabs.com/docs/runs?utm_source=github&utm_medium=readme&utm_content=more) · [Playground](https://www.clearcotelabs.com/dashboard/playground?utm_source=github&utm_medium=readme&utm_content=more) · [Site status](https://github.com/clearcotelabs/clearcote-tracker) |
 | **Profiles** | [clearcote-profiles](https://github.com/clearcotelabs/clearcote-profiles) · [collector](tools/fingerprint-collect) · [Profile Manager app](https://github.com/clearcotelabs/clearcote-profile-manager) |
 | **For agents** | [llms.txt](llms.txt) · [AGENTS.md](AGENTS.md) |
 | **Project** | [ROADMAP](ROADMAP.md) · [CONTRIBUTING](CONTRIBUTING.md) · [SECURITY](SECURITY.md) · [Discord](https://discord.gg/WxvCjAnXZm) |
