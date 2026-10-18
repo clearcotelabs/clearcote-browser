@@ -1,0 +1,75 @@
+clearcote-957: a Windows persona must not keep serving the host's Helvetica on macOS.
+
+MEASURED on the native macOS arm64 build of 150.0.7871.114, platform="windows": every other
+macOS-only family was correctly hidden -- Lucida Grande, Menlo, Geneva, Optima, Apple Chancery,
+Hiragino Sans all absent -- and `Helvetica Neue` alone still rendered. That makes it a sharper
+tell than it would be on a browser that hid nothing: the one macOS font left standing in an
+otherwise Windows-shaped font list.
+
+CAUSE. IsBasicFont() waves a short list of families past the cross-OS filter unconditionally.
+On a Linux host that is harmless: none of "Helvetica", "Helvetica Neue", "Roboto" or "Sans" is
+installed there, and fonts.conf.template maps Helvetica onto Arimo in any case. On macOS,
+"Helvetica" and "Helvetica Neue" are genuine system families
+(/System/Library/Fonts/Helvetica.ttc and HelveticaNeue.ttc), so the bypass handed a Windows
+persona two macOS fonts.
+
+WHAT WINDOWS ANSWERS -- read from the HKLM ...\FontSubstitutes registry key, NOT measured on a
+Windows host. Flagged for verification on the next Windows run:
+  * "Helvetica" has a substitution entry to Arial which DirectWrite honours, so it is PRESENT
+    with Arial's metrics. Resolved here as "Arial", which puts it on the ordinary substitution
+    path and lands on Arimo -- the same answer fonts.conf.template gives the Linux build
+    (`<match><test name="family">Helvetica</test><edit>Arimo</edit></match>`), so the two
+    artifacts still agree.
+  * "Helvetica Neue" has no entry and ships with no Windows edition: ABSENT.
+The other IsBasicFont names absent from the Windows list -- Roboto, Sans, BlinkMacSystemFont --
+are not macOS families either, so they already resolve to nothing and are left on the stock
+path.
+
+Scoped to IS_MAC on purpose. The Linux build has the same IsBasicFont bypass; there it is
+covered by fonts.conf.template for Helvetica and is a genuine but separate question for
+Helvetica Neue, which should be settled with a measurement on the Linux artifact rather than
+changed inside a macOS port.
+
+diff -u a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -693,7 +693,39 @@
+         }
+         return font_platform_data_cache_.GetOrCreateFontPlatformData(
+             this, font_description, creation_params, alternate_font_name);
++      }
++#if BUILDFLAG(IS_MAC)
++      // clearcote-957: IsBasicFont() waves a short list of families past the cross-OS
++      // filter. On a Linux host that is harmless -- none of "Helvetica", "Helvetica Neue",
++      // "Roboto" or "Sans" is installed there, and fonts.conf.template maps Helvetica onto
++      // Arimo anyway. On macOS "Helvetica" and "Helvetica Neue" are genuine system families
++      // (/System/Library/Fonts/Helvetica.ttc, HelveticaNeue.ttc), so the bypass handed a
++      // Windows persona two macOS fonts. MEASURED on the native 150.0.7871.114 arm64 build
++      // before this patch: under platform="windows", every other macOS family was correctly
++      // hidden and Helvetica Neue alone still rendered -- which makes it a sharper tell than
++      // it would be on a browser that hid nothing.
++      //
++      // Windows' own answers, from the HKLM FontSubstitutes registry key rather than from a
++      // measurement on a Windows host (flagged for verification):
++      //  * "Helvetica" has a substitution entry to Arial, which DirectWrite honours, so it
++      //    is PRESENT with Arial's metrics. Resolved as "Arial" here so it takes the
++      //    ordinary substitution path and lands on Arimo -- the same answer
++      //    fonts.conf.template gives the Linux build, so the two artifacts still agree.
++      //  * "Helvetica Neue" has no entry and ships with no Windows edition: ABSENT.
++      // The other IsBasicFont names absent from the Windows list -- Roboto, Sans,
++      // BlinkMacSystemFont -- are not macOS families either, so they already resolve to
++      // nothing and are left on the stock path.
++      if (spoofed_platform == "windows") {
++        if (base::EqualsCaseInsensitiveASCII(requested_family, "Helvetica Neue")) {
++          return nullptr;
++        }
++        if (base::EqualsCaseInsensitiveASCII(requested_family, "Helvetica")) {
++          return GetFontPlatformData(font_description,
++                                     FontFaceCreationParams(AtomicString("Arial")),
++                                     alternate_font_name);
++        }
+       }
++#endif
+       // Basic cross-platform families (Arial/Times/Courier/CSS generics) exist on every OS
+       // and resolve to the correct metric clone via fontconfig -- let them through.
+       if (IsBasicFont(requested_family)) {

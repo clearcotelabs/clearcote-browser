@@ -1,0 +1,336 @@
+clearcote-956: carry the metric-compatible substitution fonts on macOS, so a cross-OS persona
+has something to resolve to.
+
+MEASURED on the native macOS arm64 build of 150.0.7871.114, canvas TextMetrics signature of
+"WgQmil" at 32px against a guaranteed-absent family (document.fonts.check() answers true for
+almost any name and is useless here):
+
+                       platform='macos'   platform='windows'   a real Windows Chrome
+  Segoe UI                 absent             absent              present
+  Calibri                  absent             absent              present
+  Consolas                 absent             absent              present
+  Cambria / Candara         absent             absent              present
+  Helvetica Neue           present            present              absent
+  Lucida Grande / Menlo    present            ABSENT (correct)     absent
+
+So 040-fonts was doing half the job on macOS: its same-OS and cross-OS hiding worked -- Lucida
+Grande and Menlo were correctly gone under a Windows persona -- but not one Windows family was
+ever substituted in, so the persona's font list was empty where a real Windows machine has
+~230 families. An enumeration probe saw a machine with no Windows fonts claiming to be Windows,
+which is a sharper signal than a browser that hides nothing.
+
+WHY. MetricCompatibleSubstitute() returned "" for every host that is not Linux, on the
+reasoning that "Windows/macOS hosts already have the real fonts". That holds for a Windows
+host. It does not hold for a macOS host under a Windows persona: a stock macOS 27.0 machine
+has one file in /Library/Fonts and none of Arimo, Carlito, Caladea, Tinos, Cousine, Selawik or
+Gelasio. Unlike 971/1023 in the licensed line, this code is NOT in a Linux-only file -- it is
+in the platform-neutral font_cache.cc and was compiled here all along; it just returned early.
+
+WHAT THIS DOES. The clones in assets/fonts/ -- the same files the Linux release already
+bundles, where the SDK points FONTCONFIG_FILE at fonts.conf.template to the same end -- now
+also travel inside the macOS app bundle, at
+<Chromium Framework.framework>/Resources/clearcote_fonts/, and are registered with CoreText at
+kCTFontManagerScopeProcess the first time a cross-OS persona needs a substitute. Process scope:
+visible to this process only, never written to the user's font database, gone when the process
+exits; a launch with no persona, or a same-OS persona, registers nothing at all. The renderer
+sandbox already allows reading the bundle (`(allow file-read* (subpath (param bundle-path)))`
+in sandbox/policy/mac/common.sb), so no sandbox change is needed and none is made.
+
+No new font files and no new licences: assets/fonts/ and its ATTRIBUTION.md are unchanged, and
+scripts/provision-macos-fonts.sh copies them into the tree before gn gen, checked against
+assets/fonts/SHA256SUMS so the macOS build stays reproducible from the public repo.
+bundle_data sources are resolved at generation time, which is why provisioning has to happen
+before gn gen rather than at package time.
+
+ONE DIFFERENCE FROM LINUX, HANDLED. The kSubs table names more clones than assets/fonts/ ships
+(the Noto script and symbol faces, IPAGothic, WenQuanYi Zen Hei, Lato, Oswald, Liberation Sans
+Narrow). On Linux that is harmless, because fontconfig always answers with its best match. On
+macOS CoreText answers nothing, which would report those families ABSENT where Linux reports
+them present -- the two artifacts would disagree about the same persona. A substitute that
+does not resolve therefore falls back to the sans clone, which is already what
+MetricCompatibleSubstitute does for a family with no entry at all.
+
+diff -u a/third_party/blink/renderer/platform/fonts/mac/persona_font_registry.h b/third_party/blink/renderer/platform/fonts/mac/persona_font_registry.h
+--- /dev/null
++++ b/third_party/blink/renderer/platform/fonts/mac/persona_font_registry.h
+@@ -0,0 +1,31 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_MAC_PERSONA_FONT_REGISTRY_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_MAC_PERSONA_FONT_REGISTRY_H_
++
++#include "third_party/blink/renderer/platform/platform_export.h"
++
++namespace blink {
++
++// clearcote-956: register the bundled metric-compatible font clones with
++// CoreText, for this process only, so FontCache::MetricCompatibleSubstitute has
++// something to resolve to on a macOS host.
++//
++// These are the same files assets/fonts/ ships with the Linux release, where
++// the SDK points FONTCONFIG_FILE at fonts.conf.template to the same end. macOS
++// has no fontconfig, so the files travel inside the app bundle at
++// <Chromium Framework.framework>/Resources/clearcote_fonts/ and are registered
++// here instead. Same clones, same mapping, so one persona renders the same way
++// on the Linux and macOS artifacts.
++//
++// kCTFontManagerScopeProcess: visible to this process alone, never written to
++// the user's font database, and gone when the process exits. Idempotent and
++// thread-safe; the first call does the work, later calls take the lock and
++// return the stored result.
++PLATFORM_EXPORT bool EnsurePersonaSubstituteFontsRegistered();
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_FONTS_MAC_PERSONA_FONT_REGISTRY_H_
+diff -u a/third_party/blink/renderer/platform/fonts/mac/persona_font_registry.mm b/third_party/blink/renderer/platform/fonts/mac/persona_font_registry.mm
+--- /dev/null
++++ b/third_party/blink/renderer/platform/fonts/mac/persona_font_registry.mm
+@@ -0,0 +1,88 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/platform/fonts/mac/persona_font_registry.h"
++
++#import <CoreText/CoreText.h>
++
++#include <vector>
++
++#include "base/apple/bridging.h"
++#include "base/apple/bundle_locations.h"
++#include "base/apple/foundation_util.h"
++#include "base/apple/scoped_cftyperef.h"
++#include "base/files/file_enumerator.h"
++#include "base/files/file_path.h"
++#include "base/logging.h"
++#include "base/no_destructor.h"
++#include "base/synchronization/lock.h"
++
++namespace blink {
++
++namespace {
++
++// Where chrome/BUILD.gn's clearcote_persona_fonts bundle_data lands them.
++constexpr char kFontsSubdir[] = "clearcote_fonts";
++
++bool RegisterOnce() {
++  const base::FilePath dir =
++      base::apple::FrameworkBundlePath().Append("Resources").Append(
++          kFontsSubdir);
++
++  // Collect the files first: CTFontManagerRegisterFontsForURLs registers the
++  // whole array in one call, which is both faster than one call per file and
++  // the only form that reports per-file errors without aborting the rest.
++  std::vector<base::FilePath> files;
++  base::FileEnumerator e(dir, /*recursive=*/false,
++                         base::FileEnumerator::FILES);
++  for (base::FilePath p = e.Next(); !p.empty(); p = e.Next()) {
++    const std::string ext = p.Extension();
++    if (ext == ".ttf" || ext == ".otf" || ext == ".ttc") {
++      files.push_back(p);
++    }
++  }
++  if (files.empty()) {
++    LOG(ERROR) << "clearcote: no persona substitution fonts at "
++               << dir.value()
++               << " -- a cross-OS persona will report its fonts absent";
++    return false;
++  }
++
++  NSMutableArray<NSURL*>* urls =
++      [NSMutableArray arrayWithCapacity:files.size()];
++  for (const base::FilePath& p : files) {
++    [urls addObject:base::apple::FilePathToNSURL(p)];
++  }
++
++  base::apple::ScopedCFTypeRef<CFArrayRef> errors;
++  const bool ok = CTFontManagerRegisterFontsForURLs(
++      base::apple::NSToCFPtrCast(urls), kCTFontManagerScopeProcess,
++      errors.InitializeInto());
++  if (!ok) {
++    // Not fatal: CoreText registers every file it can and reports the rest.
++    // The commonest cause is a duplicate registration in a reused process.
++    LOG(WARNING) << "clearcote: CTFontManagerRegisterFontsForURLs reported "
++                 << (errors ? CFArrayGetCount(errors.get()) : 0)
++                 << " error(s) over " << files.size() << " font file(s)";
++  }
++  return ok;
++}
++
++}  // namespace
++
++bool EnsurePersonaSubstituteFontsRegistered() {
++  // Blink asks for fonts from the main thread and from worker threads, and the
++  // first substitution can come from either.
++  static base::NoDestructor<base::Lock> lock;
++  static bool done = false;
++  static bool result = false;
++  base::AutoLock auto_lock(*lock);
++  if (!done) {
++    result = RegisterOnce();
++    done = true;
++  }
++  return result;
++}
++
++}  // namespace blink
+diff -u a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -46,6 +46,9 @@
+ #include "base/trace_event/process_memory_dump.h"
+ #include "base/trace_event/trace_event.h"
+ #include "components/ungoogled/persona_profile.h"
++#if BUILDFLAG(IS_MAC)
++#include "third_party/blink/renderer/platform/fonts/mac/persona_font_registry.h"
++#endif
+ #include "components/ungoogled/ungoogled_switches.h"
+ #include "build/build_config.h"
+ #include "skia/ext/font_utils.h"
+@@ -401,8 +404,20 @@
+ // substitution is needed (the real host already has the fonts).
+ static std::string MetricCompatibleSubstitute(const std::string& family,
+                                               const std::string& host_os) {
+-  if (host_os != "linux")
+-    return std::string();  // Windows/macOS hosts already have the real fonts.
++  // clearcote-956: a macOS host needs the substitution just as a Linux host does. The
++  // reasoning behind the old "linux"-only gate -- "Windows/macOS hosts already have the
++  // real fonts" -- holds for Windows and not for macOS: a stock macOS 27.0 machine has
++  // one file in /Library/Fonts and none of Arimo, Carlito, Caladea, Tinos, Cousine,
++  // Selawik or Gelasio. MEASURED on the native 150.0.7871.114 arm64 build before this
++  // patch, platform="windows": not one Windows family resolved, while Helvetica Neue did.
++  //
++  // The clones are the same files assets/fonts/ already ships with the Linux release; on
++  // Linux the SDK points FONTCONFIG_FILE at fonts.conf.template, and on macOS
++  // EnsurePersonaSubstituteFontsRegistered() puts them in CoreText's process-scoped font
++  // set. The table below is therefore shared, not duplicated, so one persona resolves to
++  // the same clone and renders identically on both artifacts.
++  if (host_os != "linux" && host_os != "macos")
++    return std::string();  // A Windows host already has the real fonts.
+ 
+   struct Sub {
+     const char* persona_font;
+@@ -642,6 +657,13 @@
+       platform_fonts = persona_fonts;
+ 
+     if (spoofed_platform != current_os) {
++#if BUILDFLAG(IS_MAC)
++      // clearcote-956: macOS has no fontconfig and ships none of the clones, so the
++      // substitutes below only resolve once the bundled copies are in CoreText's
++      // process-scoped font set. Done here rather than at startup so a launch with no
++      // persona, and a same-OS persona, register nothing at all.
++      EnsurePersonaSubstituteFontsRegistered();
++#endif
+       // Cross-OS persona: this host physically lacks the persona OS's fonts, so a requested
+       // persona font would otherwise render absent/mismatched. Render each persona font
+       // through a metric-compatible clone that IS installed here, so the family is present
+@@ -650,8 +672,24 @@
+         std::string substitute = MetricCompatibleSubstitute(requested_family, current_os);
+         if (!substitute.empty()) {
+           FontFaceCreationParams substitute_params(AtomicString(substitute.c_str()));
+-          return font_platform_data_cache_.GetOrCreateFontPlatformData(
+-              this, font_description, substitute_params, alternate_font_name);
++          const FontPlatformData* substitute_data =
++              font_platform_data_cache_.GetOrCreateFontPlatformData(
++                  this, font_description, substitute_params, alternate_font_name);
++#if BUILDFLAG(IS_MAC)
++          // clearcote-956: the table names more clones than assets/fonts/ ships (the Noto
++          // script and symbol faces, IPAGothic, WenQuanYi Zen Hei, Lato, Oswald, Liberation
++          // Sans Narrow). On Linux that is harmless -- fontconfig always answers with its
++          // best match -- but CoreText answers nothing, which would report the family
++          // ABSENT on macOS where Linux reports it present, and the two artifacts would
++          // disagree about the same persona. Fall back to the sans clone, which is what
++          // MetricCompatibleSubstitute already does for a family with no entry at all.
++          if (!substitute_data) {
++            substitute_data = font_platform_data_cache_.GetOrCreateFontPlatformData(
++                this, font_description,
++                FontFaceCreationParams(AtomicString("Arimo")), alternate_font_name);
++          }
++#endif
++          return substitute_data;
+         }
+         return font_platform_data_cache_.GetOrCreateFontPlatformData(
+             this, font_description, creation_params, alternate_font_name);
+diff -u a/third_party/blink/renderer/platform/BUILD.gn b/third_party/blink/renderer/platform/BUILD.gn
+--- a/third_party/blink/renderer/platform/BUILD.gn
++++ b/third_party/blink/renderer/platform/BUILD.gn
+@@ -1714,6 +1714,9 @@
+       "fonts/mac/font_cache_mac.mm",
+       "fonts/mac/font_matcher_mac.h",
+       "fonts/mac/font_matcher_mac.mm",
++      # clearcote-956: CoreText registration of the bundled substitution fonts.
++      "fonts/mac/persona_font_registry.h",
++      "fonts/mac/persona_font_registry.mm",
+       "mac/color_mac.h",
+       "mac/color_mac.mm",
+       "mac/graphics_context_canvas.h",
+diff -u a/chrome/BUILD.gn b/chrome/BUILD.gn
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -982,6 +982,55 @@
+         sources += [ "$root_out_dir/snapshot_blob.bin" ]
+       }
+     }
++  }
++
++  # clearcote-956: the metric-compatible font clones a cross-OS persona needs.
++  # The same files assets/fonts/ ships with the Linux release, where the SDK points
++  # FONTCONFIG_FILE at fonts.conf.template; macOS has no fontconfig, so they travel
++  # inside the framework and are registered process-scoped by
++  # blink::EnsurePersonaSubstituteFontsRegistered(). Licences and attribution are in
++  # assets/fonts/ATTRIBUTION.md, which is copied alongside them.
++  bundle_data("clearcote_persona_fonts") {
++    sources = [
++      "//third_party/clearcote_fonts/Anton-Regular.ttf",
++      "//third_party/clearcote_fonts/Arimo-Bold.ttf",
++      "//third_party/clearcote_fonts/Arimo-BoldItalic.ttf",
++      "//third_party/clearcote_fonts/Arimo-Italic.ttf",
++      "//third_party/clearcote_fonts/Arimo-Regular.ttf",
++      "//third_party/clearcote_fonts/Caladea-Bold.ttf",
++      "//third_party/clearcote_fonts/Caladea-BoldItalic.ttf",
++      "//third_party/clearcote_fonts/Caladea-Italic.ttf",
++      "//third_party/clearcote_fonts/Caladea-Regular.ttf",
++      "//third_party/clearcote_fonts/Carlito-Bold.ttf",
++      "//third_party/clearcote_fonts/Carlito-BoldItalic.ttf",
++      "//third_party/clearcote_fonts/Carlito-Italic.ttf",
++      "//third_party/clearcote_fonts/Carlito-Regular.ttf",
++      "//third_party/clearcote_fonts/ComicNeue-Bold.otf",
++      "//third_party/clearcote_fonts/ComicNeue-Regular.otf",
++      "//third_party/clearcote_fonts/Cousine-Bold.ttf",
++      "//third_party/clearcote_fonts/Cousine-BoldItalic.ttf",
++      "//third_party/clearcote_fonts/Cousine-Italic.ttf",
++      "//third_party/clearcote_fonts/Cousine-Regular.ttf",
++      "//third_party/clearcote_fonts/DejaVuSans-Bold.ttf",
++      "//third_party/clearcote_fonts/DejaVuSans-BoldOblique.ttf",
++      "//third_party/clearcote_fonts/DejaVuSans-Oblique.ttf",
++      "//third_party/clearcote_fonts/DejaVuSans.ttf",
++      "//third_party/clearcote_fonts/DejaVuSansCondensed-Bold.ttf",
++      "//third_party/clearcote_fonts/DejaVuSansCondensed-Oblique.ttf",
++      "//third_party/clearcote_fonts/DejaVuSansCondensed.ttf",
++      "//third_party/clearcote_fonts/Gelasio.ttf",
++      "//third_party/clearcote_fonts/Inconsolata.otf",
++      "//third_party/clearcote_fonts/NotoSans-Bold.ttf",
++      "//third_party/clearcote_fonts/NotoSans-Italic.ttf",
++      "//third_party/clearcote_fonts/NotoSans-Regular.ttf",
++      "//third_party/clearcote_fonts/Selawik-Bold.ttf",
++      "//third_party/clearcote_fonts/Selawik-Regular.ttf",
++      "//third_party/clearcote_fonts/Tinos-Bold.ttf",
++      "//third_party/clearcote_fonts/Tinos-BoldItalic.ttf",
++      "//third_party/clearcote_fonts/Tinos-Italic.ttf",
++      "//third_party/clearcote_fonts/Tinos-Regular.ttf",
++    ]
++    outputs = [ "{{bundle_resources_dir}}/clearcote_fonts/{{source_file_part}}" ]
+   }
+ 
+   # Add the ANGLE .dylibs in the MODULE_DIR of Chromium.app
+@@ -1202,6 +1251,7 @@
+     bundle_deps = [
+       ":chrome_framework_helpers",
+       ":chrome_framework_resources",
++      ":clearcote_persona_fonts",  # clearcote-956
+       ":optimization_guide_library",
+       ":swiftshader_binaries",
+       ":widevine_cdm_library",
