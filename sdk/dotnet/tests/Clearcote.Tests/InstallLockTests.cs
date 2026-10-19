@@ -285,7 +285,7 @@ public class InstallLockTests : IDisposable
         var exe = await Download.ProEnsureBinaryAsync("test-key", new ProDownloadOptions { ApiBase = srv.Url, CacheDir = cache, Quiet = true });
         Assert.Equal(finished[0], exe);
         Assert.Equal(new string('0', 64) + "\n", File.ReadAllText(Path.Combine(@base, ".verified"))); // its marker
-        Assert.Equal(new string('y', 64), File.ReadAllText(exe)); // its files, not replaced by ours
+        Assert.Equal(new string('x', 64), File.ReadAllText(exe)); // its hash-valid files, not replaced by ours
         Assert.Equal(new[] { ".manifest.json", ".verified", "browser" }, FakeBuildServer.Entries(@base));
     }
 

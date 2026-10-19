@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Security.Cryptography;
 using Xunit;
 
 namespace Clearcote.Tests;
@@ -43,6 +44,18 @@ public class InstallIntegrityTests : IDisposable
         var (@base, browser) = Tree();
         Assert.Empty(Download.VerifyInstall(browser, @base, full: true));
         Assert.Equal(Path.Combine(browser, Binary), Download.CachedBinary(@base, Binary, quiet: true));
+    }
+
+    [Fact]
+    public void Same_size_protected_code_edit_is_detected_on_every_check()
+    {
+        var (@base, browser) = Tree();
+        var binary = Path.Combine(browser, Binary);
+        var expected = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(binary))).ToLowerInvariant();
+        Assert.Empty(Download.VerifyInstall(browser, @base, full: false, binary: Binary, binarySha256: expected));
+        File.WriteAllBytes(binary, Enumerable.Repeat((byte)1, 128).ToArray());
+        Assert.Equal(new[] { $"{Binary} — SHA-256 mismatch" },
+            Download.VerifyInstall(browser, @base, full: false, binary: Binary, binarySha256: expected));
     }
 
     [Fact]

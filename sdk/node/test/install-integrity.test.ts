@@ -5,6 +5,7 @@
 // the caller supplied.
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -35,6 +36,28 @@ afterEach(() => {
 });
 
 describe("install integrity", () => {
+  it("detects same-size protected-code edits on every check", () => {
+    const { base, browser } = tree();
+    const binary = path.join(browser, BINARY);
+    const binarySha256 = createHash("sha256").update(readFileSync(binary)).digest("hex");
+    expect(verifyInstall(browser, base, false, { binary: BINARY, binarySha256 })).toEqual([]);
+    writeFileSync(binary, Buffer.alloc(128, "y")); // unchanged size; the old manifest check misses this
+    expect(verifyInstall(browser, base, false, { binary: BINARY, binarySha256 })).toEqual([
+      `${BINARY} — SHA-256 mismatch`,
+    ]);
+  });
+
+  it.runIf(process.platform === "win32")("checks chrome.dll independently of the launcher", () => {
+    const { base, browser } = tree();
+    const dll = path.join(browser, "chrome.dll");
+    const chromeDllSha256 = createHash("sha256").update(readFileSync(dll)).digest("hex");
+    writeFileSync(dll, Buffer.alloc(128, "z"));
+    expect(verifyInstall(browser, base, false, { binary: BINARY, binarySha256: createHash("sha256")
+      .update(readFileSync(path.join(browser, BINARY))).digest("hex"), chromeDllSha256 })).toContain(
+      "chrome.dll — SHA-256 mismatch",
+    );
+  });
+
   it("verifies a healthy tree and returns it from cache", () => {
     const { base, browser } = tree();
     expect(verifyInstall(browser, base, true)).toEqual([]);

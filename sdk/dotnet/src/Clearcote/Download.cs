@@ -198,9 +198,28 @@ public static class Download
     /// Always checks the critical files (a few stats). When <paramref name="base"/> holds a manifest
     /// written at install time, also checks every recorded file's exact size — once per process per
     /// tree by default, since a full tree is ~700 files; pass <paramref name="full"/> to force it.
-    public static List<string> VerifyInstall(string browserDir, string? @base = null, bool? full = null)
+    public static List<string> VerifyInstall(string browserDir, string? @base = null, bool? full = null,
+        string? binary = null, string? binarySha256 = null, string? chromeDllSha256 = null)
     {
         var problems = CheckNames(browserDir, CriticalNames());
+        if (problems.Count > 0) return problems;
+
+        // Never memoise protected-code hashes. Size checks detect damaged installs; these hashes
+        // detect same-size edits immediately before a managed launch returns the executable path.
+        if (!string.IsNullOrEmpty(binarySha256) && !string.IsNullOrEmpty(binary))
+        {
+            var file = FindFile(browserDir, binary);
+            if (file is null) problems.Add($"{binary} — missing");
+            else if (!string.Equals(Sha256File(file), binarySha256, StringComparison.OrdinalIgnoreCase))
+                problems.Add($"{binary} — SHA-256 mismatch");
+        }
+        if (OperatingSystem.IsWindows() && !string.IsNullOrEmpty(chromeDllSha256))
+        {
+            var dll = FindFile(browserDir, "chrome.dll");
+            if (dll is null) problems.Add("chrome.dll — missing");
+            else if (!string.Equals(Sha256File(dll), chromeDllSha256, StringComparison.OrdinalIgnoreCase))
+                problems.Add("chrome.dll — SHA-256 mismatch");
+        }
         if (problems.Count > 0) return problems;
 
         var manifest = Path.Combine(@base ?? Path.GetDirectoryName(browserDir.TrimEnd(Path.DirectorySeparatorChar))!, Manifest);
@@ -271,13 +290,16 @@ public static class Download
 
     /// <paramref name="repair"/> also moves a damaged tree out of the way; false when not holding the
     /// install lock, so only the process that will re-install touches it.
-    private static string? Cached(string @base, string binary, bool quiet, bool repair, bool? full = null)
+    private static string? Cached(string @base, string binary, bool quiet, bool repair, bool? full = null,
+        ReleaseInfo? integrity = null)
     {
         if (!File.Exists(Path.Combine(@base, ".verified"))) return null;
         var browserDir = Path.Combine(@base, "browser");
         var cached = FindFile(browserDir, binary);
         // The binary itself can be gone too: antivirus quarantine, or browser/ deleted by hand.
-        var problems = cached is not null ? VerifyInstall(browserDir, @base, full) : new List<string> { $"{binary} — missing" };
+        var problems = cached is not null
+            ? VerifyInstall(browserDir, @base, full, integrity?.Binary, integrity?.ExeSha256, integrity?.ChromeDllSha256)
+            : new List<string> { $"{binary} — missing" };
         if (cached is not null && problems.Count == 0) return cached;
         if (!repair) return null;
 
@@ -296,6 +318,12 @@ public static class Download
         await using var fs = File.OpenRead(file);
         var hash = await SHA256.HashDataAsync(fs).ConfigureAwait(false);
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static string Sha256File(string file)
+    {
+        using var stream = File.OpenRead(file);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
     private static async Task DownloadToAsync(string url, string dest, long expectedSize, bool quiet)
@@ -1047,7 +1075,7 @@ public static class Download
         // so use it. One marked verified that fails the check is damaged, and moved aside (we hold the lock).
         held.Beat();
         if (!held.Held()) throw new LockLostException();
-        var done = Cached(@base, rel.Binary, quiet, repair: true, full: true);
+        var done = Cached(@base, rel.Binary, quiet, repair: true, full: true, integrity: rel);
         if (done is not null)
         {
             Log(quiet, $"installed by another process meanwhile: {done}");
@@ -1195,8 +1223,10 @@ public static class Download
         var resolvedChannel = Get("resolved_channel");
         if (channel == ReleaseChannel.Preview && !string.IsNullOrEmpty(resolvedChannel) && resolvedChannel != "preview")
             Log(opts.Quiet, $"release channel: preview requested, no newer preview for {plat} -> {resolvedChannel} {Get("tag")}".Trim());
-        var url = Get("url"); var sha = Get("sha256");
-        if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha))
+        var url = Get("url"); var sha = Get("sha256"); var exeSha = Get("exe_sha256");
+        var dllSha = Get("chrome_dll_sha256");
+        if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha) || string.IsNullOrEmpty(exeSha) ||
+            (plat == "windows" && string.IsNullOrEmpty(dllSha)))
             throw new Exception($"Clearcote PRO build is not currently available for {plat} (the server returned no download).");
 
         var version = Get("version") ?? "";
@@ -1207,7 +1237,8 @@ public static class Download
             Asset = Get("asset") ?? $"clearcote-pro-{version}-{plat}-{(plat == "macos" ? "arm64" : "x64")}.{(plat == "linux" ? "tar.xz" : "zip")}",
             Url = url!,
             Sha256 = sha!,
-            ExeSha256 = Get("exe_sha256") ?? "",
+            ExeSha256 = exeSha ?? "",
+            ChromeDllSha256 = dllSha ?? "",
             Size = meta.TryGetProperty("size", out var s) && s.TryGetInt64(out var sv) ? sv : 0,
             Os = plat,
             Archive = Get("archive") ?? (plat == "linux" ? "tar.xz" : "zip"),
@@ -1218,7 +1249,7 @@ public static class Download
 
         var @base = Path.Combine(opts.CacheDir ?? Native.CacheRoot(), rel.Tag);
         {
-            var cached = Cached(@base, rel.Binary, opts.Quiet, repair: false);
+            var cached = Cached(@base, rel.Binary, opts.Quiet, repair: false, integrity: rel);
             if (cached is not null) return cached;
         }
         return await FetchAndVerifyAsync(rel, @base, opts.Quiet).ConfigureAwait(false);
@@ -1377,7 +1408,7 @@ public static class Download
         var rel = plan.Rel!;
         var @base = Path.Combine(cacheDir ?? Native.CacheRoot(), rel.Tag);
         {
-            var cached = Cached(@base, rel.Binary, quiet, repair: false);
+            var cached = Cached(@base, rel.Binary, quiet, repair: false, integrity: rel);
             if (cached is not null) return cached;
         }
         return await FetchAndVerifyAsync(rel, @base, quiet).ConfigureAwait(false);
@@ -1415,7 +1446,7 @@ public static class Download
 
         var @base = Path.Combine(cacheRoot, rel.Tag);
         {
-            var cached = Cached(@base, rel.Binary, opts.Quiet, repair: false);
+            var cached = Cached(@base, rel.Binary, opts.Quiet, repair: false, integrity: rel);
             if (cached is not null) return cached;
         }
         return await FetchAndVerifyAsync(rel, @base, opts.Quiet).ConfigureAwait(false);

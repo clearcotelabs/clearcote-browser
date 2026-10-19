@@ -75,7 +75,7 @@ export const fakeArchive = (): Buffer => storedZip(Object.fromEntries(NAMES.map(
 export function verifiedTree(base: string): string {
   const browser = path.join(base, "browser");
   mkdirSync(browser, { recursive: true });
-  for (const name of NAMES) writeFileSync(path.join(browser, name), Buffer.alloc(64, "y"));
+  for (const name of NAMES) writeFileSync(path.join(browser, name), Buffer.alloc(64, "x"));
   writeManifest(base, browser);
   writeFileSync(path.join(base, ".verified"), `${"0".repeat(64)}\n`);
   return path.join(browser, BINARY);
@@ -96,6 +96,7 @@ export async function startFakeBuild(
 ): Promise<FakeBuild> {
   const archive = fakeArchive();
   const sha = opts.sha ?? createHash("sha256").update(archive).digest("hex");
+  const codeSha = createHash("sha256").update(Buffer.alloc(64, "x")).digest("hex");
   let archiveHits = 0;
   let seen!: () => void;
   const metaSeen = new Promise<void>((r) => { seen = r; });
@@ -109,7 +110,9 @@ export async function startFakeBuild(
       seen();
       const answer = () => {
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ tag: TAG, version: "0.0.0", url: `${url}/fake.zip`, sha256: sha, exe_sha256: opts.exeSha, asset: "fake.zip", archive: "zip", binary: BINARY, size: archive.length }));
+        res.end(JSON.stringify({ tag: TAG, version: "0.0.0", url: `${url}/fake.zip`, sha256: sha,
+          exe_sha256: opts.exeSha ?? codeSha, chrome_dll_sha256: codeSha,
+          asset: "fake.zip", archive: "zip", binary: BINARY, size: archive.length }));
       };
       waiting.push(answer);
       if (waiting.length >= (opts.metaBarrier ?? 1)) releaseAll();

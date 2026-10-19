@@ -24,6 +24,7 @@ internal sealed class FakeBuildServer : LocalServer
     private readonly int _metaBarrier;
     private readonly int _archiveDelayMs;
     private readonly string? _exeSha;
+    private readonly string _dllSha;
     private readonly Action? _onArchive;
     private readonly TaskCompletionSource _allAsked = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _asked;
@@ -34,7 +35,8 @@ internal sealed class FakeBuildServer : LocalServer
         _onArchive = onArchive;
         _metaBarrier = metaBarrier;
         _archiveDelayMs = archiveDelayMs;
-        _exeSha = exeSha;
+        _exeSha = exeSha ?? Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(new string('x', 64)))).ToLowerInvariant();
+        _dllSha = Convert.ToHexString(SHA256.HashData(Encoding.ASCII.GetBytes(new string('x', 64)))).ToLowerInvariant();
         Sha = sha ?? Convert.ToHexString(SHA256.HashData(_archive)).ToLowerInvariant();
     }
 
@@ -62,7 +64,7 @@ internal sealed class FakeBuildServer : LocalServer
     {
         var browser = Path.Combine(@base, "browser");
         Directory.CreateDirectory(browser);
-        foreach (var name in Names) File.WriteAllText(Path.Combine(browser, name), new string('y', 64));
+        foreach (var name in Names) File.WriteAllText(Path.Combine(browser, name), new string('x', 64));
         Download.WriteManifest(@base, browser);
         File.WriteAllText(Path.Combine(@base, ".verified"), new string('0', 64) + "\n");
         return Path.Combine(browser, Binary);
@@ -87,7 +89,8 @@ internal sealed class FakeBuildServer : LocalServer
             await Task.WhenAny(_allAsked.Task, Task.Delay(30_000, ct));
             body = JsonSerializer.SerializeToUtf8Bytes(new
             {
-                tag = Tag, version = "0.0.0", url = $"{Url}/fake.zip", sha256 = Sha, exe_sha256 = _exeSha, asset = "fake.zip",
+                tag = Tag, version = "0.0.0", url = $"{Url}/fake.zip", sha256 = Sha, exe_sha256 = _exeSha,
+                chrome_dll_sha256 = _dllSha, asset = "fake.zip",
                 archive = "zip", binary = Binary, size = _archive.Length,
             });
             type = "application/json";

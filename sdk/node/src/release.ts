@@ -17,6 +17,8 @@ export interface ReleaseInfo {
   sha256: string;
   /** SHA-256 of the inner browser binary — verified after extraction (defense in depth). */
   exeSha256: string;
+  /** SHA-256 of chrome.dll on Windows — verified before every managed launch when present. */
+  chromeDllSha256?: string;
   /** Expected archive size in bytes (for progress display only). */
   size: number;
   /** Platform the binary runs on. */

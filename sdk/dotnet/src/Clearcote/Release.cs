@@ -16,6 +16,8 @@ public sealed record ReleaseInfo
     public required string Sha256 { get; init; }
     /// SHA-256 of the inner browser binary — verified after extraction (defense in depth).
     public required string ExeSha256 { get; init; }
+    /// SHA-256 of chrome.dll on Windows — verified before every managed launch when present.
+    public string ChromeDllSha256 { get; init; } = "";
     /// Expected archive size in bytes (for progress display only).
     public required long Size { get; init; }
     /// Platform tag the binary runs on ("windows" | "linux").

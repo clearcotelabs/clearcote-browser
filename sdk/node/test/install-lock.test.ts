@@ -328,7 +328,7 @@ describe.runIf(proPlatform)("installs under the install lock", () => {
       const exe = await proEnsureBinary("test-key", { apiBase: srv.url, cacheDir: cache, quiet: true });
       expect(exe).toBe(finished[0]);
       expect(readFileSync(path.join(base, ".verified"), "utf8")).toBe(`${"0".repeat(64)}\n`); // its marker
-      expect(readFileSync(exe, "utf8")).toBe("y".repeat(64)); // its files, not replaced by ours
+      expect(readFileSync(exe, "utf8")).toBe("x".repeat(64)); // its hash-valid files, not replaced by ours
       expect(readdirSync(base).sort()).toEqual([".manifest.json", ".verified", "browser"]);
     } finally {
       await srv.close();

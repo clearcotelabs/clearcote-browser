@@ -174,13 +174,30 @@ def _check_names(browser_dir, names, sizes=None):
     return problems
 
 
-def verify_install(browser_dir, base=None, full=None):
+def verify_install(browser_dir, base=None, full=None, integrity=None):
     """Check an extracted browser tree and return a list of problems ([] when healthy).
 
     Always checks CRITICAL_FILES (a few stats). When ``base`` holds a manifest written at install
     time, also checks every recorded file's exact size — once per process per tree by default,
     since a full tree is ~700 files; pass ``full=True`` to force it."""
     problems = _check_names(browser_dir, _critical_names())
+    if problems:
+        return problems
+
+    # Protected-code hashes are deliberately never memoised. The manifest catches damaged files;
+    # these authoritative release hashes catch same-size edits before every managed launch.
+    if integrity and integrity.get("binary_sha256"):
+        binary = _find(browser_dir, integrity["binary"])
+        if not binary:
+            problems.append(f'{integrity["binary"]} — missing')
+        elif _sha256_file(binary).lower() != integrity["binary_sha256"].lower():
+            problems.append(f'{integrity["binary"]} — SHA-256 mismatch')
+    if integrity and integrity.get("chrome_dll_sha256") and sys.platform == "win32":
+        dll = _find(browser_dir, "chrome.dll")
+        if not dll:
+            problems.append("chrome.dll — missing")
+        elif _sha256_file(dll).lower() != integrity["chrome_dll_sha256"].lower():
+            problems.append("chrome.dll — SHA-256 mismatch")
     if problems:
         return problems
 
@@ -245,7 +262,7 @@ def check_install(exe):
         raise broken_install_error(browser_dir, problems, repairable=False)
 
 
-def _cached(base, binary, quiet=False, repair=True, full=None):
+def _cached(base, binary, quiet=False, repair=True, full=None, integrity=None):
     """The cached chrome path for an install base, or None when absent or damaged.
 
     A damaged tree returns None so the caller re-downloads: the ``.verified`` marker only records
@@ -257,7 +274,7 @@ def _cached(base, binary, quiet=False, repair=True, full=None):
         return None
     browser_dir = os.path.join(base, "browser")
     cached = _find(browser_dir, binary)
-    problems = verify_install(browser_dir, base, full) if cached else [f"{binary} — missing"]
+    problems = verify_install(browser_dir, base, full, integrity) if cached else [f"{binary} — missing"]
     if problems:
         if not repair:
             return None
@@ -280,6 +297,16 @@ def _sha256_file(path):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _launch_integrity(rel):
+    if not rel.get("exe_sha256"):
+        return None
+    return {
+        "binary": rel.get("binary", "chrome.exe"),
+        "binary_sha256": rel["exe_sha256"],
+        "chrome_dll_sha256": rel.get("chrome_dll_sha256"),
+    }
 
 
 def warm_files(dirpath):
@@ -916,7 +943,7 @@ def _fetch_and_verify(rel, base, quiet):
     binary = rel.get("binary", "chrome.exe")
     for _ in range(3):
         with _install_lock(base, quiet) as lock:
-            cached = _cached(base, binary, quiet)
+            cached = _cached(base, binary, quiet, integrity=_launch_integrity(rel))
             if cached:
                 _log(quiet, f"installed by another process meanwhile: {cached}")
                 return cached
@@ -1032,7 +1059,7 @@ def _install_into(rel, base, tmp, quiet, lock, breaker_seen=None):
         lock.beat()
         if not lock.held():
             raise _LockLost()
-    done = _cached(base, binary, quiet, repair=True, full=True)
+    done = _cached(base, binary, quiet, repair=True, full=True, integrity=_launch_integrity(rel))
     if done:
         _log(quiet, f"installed by another process meanwhile: {done}")
         return done
@@ -1268,7 +1295,8 @@ def ensure_binary(cache_dir=None, quiet=False, auto_update=None):
         rel = dict(RELEASE, unpinned=False)
 
     base = os.path.join(cache_root, rel["tag"])
-    cached = _cached(base, rel.get("binary", "chrome.exe"), quiet, repair=False)
+    cached = _cached(base, rel.get("binary", "chrome.exe"), quiet, repair=False,
+                     integrity=_launch_integrity(rel))
     if cached:
         return cached
     return _fetch_and_verify(rel, base, quiet)
@@ -1366,7 +1394,8 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     if channel == "preview" and resolved and resolved != "preview":
         _log(quiet, f"release channel: preview requested, no newer preview for {plat} -> "
                     f"{resolved} {meta.get('tag') or ''}".strip())
-    if not meta.get("url") or not meta.get("sha256"):
+    if (not meta.get("url") or not meta.get("sha256") or not meta.get("exe_sha256")
+            or (plat == "windows" and not meta.get("chrome_dll_sha256"))):
         raise RuntimeError(
             f"Clearcote PRO build is not currently available for {plat} "
             "(the server returned no download).")
@@ -1377,6 +1406,7 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
         "url": meta["url"],
         "sha256": meta["sha256"],
         "exe_sha256": meta.get("exe_sha256"),
+        "chrome_dll_sha256": meta.get("chrome_dll_sha256"),
         "asset": meta["asset"],
         "archive": meta.get("archive"),
         "binary": meta.get("binary") or {"windows": "chrome.exe", "macos": "Chromium"}.get(plat, "chrome"),
@@ -1384,7 +1414,7 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
         "unpinned": False,  # pinned -> sha256-only verify (no GPG), like the free pin
     }
     dst = os.path.join(cache_dir or _cache_root(), rel["tag"])
-    cached = _cached(dst, rel["binary"], quiet, repair=False)
+    cached = _cached(dst, rel["binary"], quiet, repair=False, integrity=_launch_integrity(rel))
     if cached:
         return cached
     return _fetch_and_verify(rel, dst, quiet)

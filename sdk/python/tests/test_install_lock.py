@@ -327,7 +327,7 @@ def test_a_verified_build_that_appears_during_the_install_is_used_not_replaced(t
     with open(os.path.join(base, ".verified"), encoding="utf-8") as f:
         assert f.read() == "0" * 64 + "\n"  # the other installer's marker, not rewritten
     with open(path, "rb") as f:
-        assert f.read() == b"y" * 64  # its files, not replaced by ours
+        assert f.read() == b"x" * 64  # its hash-valid files, not replaced by ours
     assert sorted(os.listdir(base)) == [".manifest.json", ".verified", "browser"]
 
 

@@ -5,6 +5,7 @@ can attach — so the SDK detects it itself: self-heal for trees we installed, c
 the caller supplied."""
 
 import json
+import hashlib
 import os
 
 import pytest
@@ -43,6 +44,19 @@ def test_healthy_tree_verifies_and_is_returned_from_cache(tmp_path):
     base, browser = _tree(str(tmp_path))
     assert verify_install(browser, base) == []
     assert _cached(base, "chrome.exe", quiet=True) == os.path.join(browser, "chrome.exe")
+
+
+def test_same_size_protected_code_edit_is_detected_on_every_check(tmp_path):
+    base, browser = _tree(str(tmp_path))
+    binary = os.path.join(browser, "chrome.exe")
+    expected = hashlib.sha256(open(binary, "rb").read()).hexdigest()
+    integrity = {"binary": "chrome.exe", "binary_sha256": expected}
+    assert verify_install(browser, base, full=False, integrity=integrity) == []
+    with open(binary, "wb") as f:
+        f.write(b"y" * 128)  # same size; the old manifest-only check misses this
+    assert verify_install(browser, base, full=False, integrity=integrity) == [
+        "chrome.exe — SHA-256 mismatch"]
+
 
 
 def test_manifest_records_every_file(tmp_path):

@@ -104,6 +104,12 @@ interface ResolvedRelease extends ReleaseInfo {
   keyUrl?: string;
 }
 
+function launchIntegrity(rel: ResolvedRelease): LaunchIntegrity | undefined {
+  if (!rel.exeSha256) return undefined;
+  return { binary: rel.binary || "chrome.exe", binarySha256: rel.exeSha256,
+           chromeDllSha256: rel.chromeDllSha256 };
+}
+
 function log(quiet: boolean | undefined, msg: string): void {
   if (!quiet) process.stderr.write(`[clearcote] ${msg}\n`);
 }
@@ -189,6 +195,23 @@ function sha256File(file: string): Promise<string> {
       .on("data", (d) => hash.update(d))
       .on("end", () => resolve(hash.digest("hex")));
   });
+}
+
+/** Synchronous on purpose: callers run this immediately before returning a launchable path. */
+function sha256FileSync(file: string): string {
+  const fd = openSync(file, "r");
+  const hash = createHash("sha256");
+  const buf = Buffer.allocUnsafe(1 << 20);
+  try {
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (!n) break;
+      hash.update(buf.subarray(0, n));
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest("hex");
 }
 
 async function downloadTo(url: string, dest: string, expectedSize: number, quiet: boolean | undefined): Promise<void> {
@@ -461,8 +484,30 @@ function checkNames(browserDir: string, names: string[], sizes?: Record<string, 
  * time, also checks every recorded file's exact size — once per process per tree by default, since
  * a full tree is ~700 files; pass `full: true` to force it.
  */
-export function verifyInstall(browserDir: string, base?: string, full?: boolean): string[] {
+export interface LaunchIntegrity {
+  binary: string;
+  binarySha256: string;
+  chromeDllSha256?: string;
+}
+
+export function verifyInstall(browserDir: string, base?: string, full?: boolean, integrity?: LaunchIntegrity): string[] {
   const problems = checkNames(browserDir, criticalNames());
+  if (problems.length) return problems;
+
+  // Never memoise protected-code hashes. Size checks detect damaged installs; these hashes detect
+  // same-size edits to the launcher or, on Windows, the DLL that contains the browser implementation.
+  if (integrity?.binarySha256) {
+    const binary = findFile(browserDir, integrity.binary);
+    if (!binary) problems.push(`${integrity.binary} — missing`);
+    else if (sha256FileSync(binary).toLowerCase() !== integrity.binarySha256.toLowerCase())
+      problems.push(`${integrity.binary} — SHA-256 mismatch`);
+  }
+  if (integrity?.chromeDllSha256 && process.platform === "win32") {
+    const dll = findFile(browserDir, "chrome.dll");
+    if (!dll) problems.push("chrome.dll — missing");
+    else if (sha256FileSync(dll).toLowerCase() !== integrity.chromeDllSha256.toLowerCase())
+      problems.push("chrome.dll — SHA-256 mismatch");
+  }
   if (problems.length) return problems;
 
   const manifest = path.join(base ?? path.dirname(browserDir), MANIFEST);
@@ -526,12 +571,13 @@ export function checkInstall(exe: string | undefined): void {
  * A damaged tree returns null (after wiping it) so the caller re-downloads: the `.verified` marker
  * only records that the archive hashed correctly AT INSTALL TIME, and files can be eaten later.
  */
-export function cachedBinary(base: string, binary: string, quiet?: boolean, repair = true, full?: boolean): string | null {
+export function cachedBinary(base: string, binary: string, quiet?: boolean, repair = true, full?: boolean,
+                             integrity?: LaunchIntegrity): string | null {
   if (!existsSync(path.join(base, ".verified"))) return null;
   const browserDir = path.join(base, "browser");
   const cached = findFile(browserDir, binary);
   // The binary itself can be gone too: antivirus quarantine, or browser/ deleted by hand.
-  const problems = cached ? verifyInstall(browserDir, base, full) : [`${binary} — missing`];
+  const problems = cached ? verifyInstall(browserDir, base, full, integrity) : [`${binary} — missing`];
   if (cached && !problems.length) return cached;
   // `repair` also moves the damaged tree out of the way; false when not holding the install lock, so
   // only the process that will re-install touches it.
@@ -1056,7 +1102,7 @@ async function fetchAndVerify(rel: ResolvedRelease, base: string, opts: Download
   for (let attempt = 0; attempt < 3; attempt++) {
     const lock = await acquireInstallLock(base, { quiet: opts.quiet ?? false });
     try {
-      const cached = cachedBinary(base, binary, opts.quiet);
+      const cached = cachedBinary(base, binary, opts.quiet, true, undefined, launchIntegrity(rel));
       if (cached) {
         log(opts.quiet, `installed by another process meanwhile: ${cached}`);
         return cached;
@@ -1172,7 +1218,7 @@ async function installInto(
   // so use it. One marked verified that fails the check is damaged, and moved aside (we hold the lock).
   lock.beat();
   if (!lock.held()) throw new LockLost();
-  const done = cachedBinary(base, binaryName, opts.quiet, true, true);
+  const done = cachedBinary(base, binaryName, opts.quiet, true, true, launchIntegrity(rel));
   if (done) {
     log(opts.quiet, `installed by another process meanwhile: ${done}`);
     return done;
@@ -1392,7 +1438,7 @@ export async function ensureVersion(
   }
   const base = path.join(opts.cacheDir || defaultCacheRoot(), plan.rel.tag);
   {
-    const cached = cachedBinary(base, plan.rel.binary || "chrome", opts.quiet, false);
+    const cached = cachedBinary(base, plan.rel.binary || "chrome", opts.quiet, false, undefined, launchIntegrity(plan.rel));
     if (cached) return cached;
   }
   return fetchAndVerify(plan.rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
@@ -1467,13 +1513,13 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
   }
   const meta = (await res.json()) as {
     tag?: string; version?: string; asset?: string; archive?: string; binary?: string;
-    url?: string; sha256?: string; exe_sha256?: string; size?: number;
+    url?: string; sha256?: string; exe_sha256?: string; chrome_dll_sha256?: string; size?: number;
     channel?: string; resolved_channel?: string;
   };
   if (channel === "preview" && meta.resolved_channel && meta.resolved_channel !== "preview") {
     log(opts.quiet, `release channel: preview requested, no newer preview for ${plat} -> ${meta.resolved_channel} ${meta.tag ?? ""}`.trim());
   }
-  if (!meta.url || !meta.sha256) {
+  if (!meta.url || !meta.sha256 || !meta.exe_sha256 || (plat === "windows" && !meta.chrome_dll_sha256)) {
     throw new Error(`Clearcote PRO build is not currently available for ${plat} (the server returned no download).`);
   }
 
@@ -1484,6 +1530,7 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
     url: meta.url,
     sha256: meta.sha256,
     exeSha256: meta.exe_sha256 || "",
+    chromeDllSha256: meta.chrome_dll_sha256 || "",
     size: meta.size || 0,
     os: process.platform,
     archive: (meta.archive as "zip" | "tar.xz") || (plat === "linux" ? "tar.xz" : "zip"),
@@ -1494,7 +1541,7 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
 
   const base = path.join(opts.cacheDir || defaultCacheRoot(), rel.tag);
   {
-    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet, false);
+    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet, false, undefined, launchIntegrity(rel));
     if (cached) return cached;
   }
   return fetchAndVerify(rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
@@ -1556,7 +1603,7 @@ export async function ensureBinary(opts: DownloadOptions = {}): Promise<string> 
 
   const base = path.join(cacheRoot, rel.tag);
   {
-    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet, false);
+    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet, false, undefined, launchIntegrity(rel));
     if (cached) return cached;
   }
   return fetchAndVerify(rel, base, opts);

@@ -35,7 +35,7 @@ def verified_tree(base):
     os.makedirs(browser, exist_ok=True)
     for name in NAMES:
         with open(os.path.join(browser, name), "wb") as f:
-            f.write(b"y" * 64)
+            f.write(b"x" * 64)
     download._write_manifest(base, browser)
     with open(os.path.join(base, ".verified"), "w", encoding="utf-8") as f:
         f.write("0" * 64 + "\n")
@@ -46,6 +46,8 @@ class FakeBuildServer:
     def __init__(self, meta_barrier=1, archive_delay=0.0, exe_sha256=None, on_archive=None):
         self.archive = fake_archive()
         self.sha = hashlib.sha256(self.archive).hexdigest()
+        self.code_sha = hashlib.sha256(b"x" * 64).hexdigest()
+        self.exe_sha256 = exe_sha256 or self.code_sha
         self.archive_hits = 0
         self.meta_seen = threading.Event()
         self._count = threading.Lock()
@@ -65,7 +67,8 @@ class FakeBuildServer:
                         except threading.BrokenBarrierError:
                             pass
                     body = json.dumps({"tag": TAG, "version": "0.0.0", "url": f"{server.url}/fake.zip",
-                                       "sha256": server.sha, "exe_sha256": exe_sha256, "asset": "fake.zip",
+                                       "sha256": server.sha, "exe_sha256": server.exe_sha256,
+                                       "chrome_dll_sha256": server.code_sha, "asset": "fake.zip",
                                        "archive": "zip", "binary": BINARY, "size": len(server.archive)}).encode()
                     ctype = "application/json"
                 elif self.path == "/fake.zip":
