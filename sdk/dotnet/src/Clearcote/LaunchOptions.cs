@@ -10,7 +10,9 @@ public class LaunchOptions : FingerprintOptions
     // ── license (opt-in PRO) ─────────────────────────────────────────────────
     /// License key ("cc_lic_..."). Resolved from this &gt; CLEARCOTE_LICENSE_KEY env &gt; ~/.clearcote/license.key.
     public string? LicenseKey { get; set; }
-    /// License backend base URL (default: CLEARCOTE_LICENSE_API env or clearcotelabs.com).
+    /// License backend base URL, used alone for every licence call (default: CLEARCOTE_LICENSE_API env; else the
+    /// lease calls use CLEARCOTE_LEASE_API env or lease.clearcotelabs.com, with www.clearcotelabs.com as its fallback,
+    /// and the PRO download uses www.clearcotelabs.com).
     public string? LicenseApiBase { get; set; }
     /// Send the licence calls (lease checkout / heartbeat / check-in) through <see cref="Proxy"/>
     /// instead of directly from this machine. Off by default. Null = CLEARCOTE_LICENSE_THROUGH_PROXY.

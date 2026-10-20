@@ -102,7 +102,7 @@ describe("acquireLease — per-machine token reuse", () => {
     process.env.CLEARCOTE_LICENSE_API = "http://test.local";
     const key = "cc_lic_disk_" + Date.now();
     process.env.CLEARCOTE_LICENSE_KEY = key;
-    writeCacheFile(key, { token: "DISK-TOK", exp: Math.floor(Date.now() / 1000) + 800, lease_id: "Ld" });
+    writeCacheFile(key, { token: "DISK-TOK", exp: Math.floor(Date.now() / 1000) + 800, lease_id: "Ld", scope: "machine" });
     const calls = mockBackend();
     const h = await acquireLease({ quiet: true });
     expect(calls.filter((c) => c === "checkout").length).toBe(0);
@@ -154,12 +154,12 @@ describe("acquireLease — per-machine token reuse", () => {
     expect(body.engine_version).toBeUndefined(); // omitted, not fatal
   });
 
-  it("reads a LEGACY cache without lease_id (backwards compat, 0 checkout)", async () => {
+  it("reads a cache without lease_id (backwards compat, 0 checkout)", async () => {
     isolateHome();
     process.env.CLEARCOTE_LICENSE_API = "http://test.local";
     const key = "cc_lic_legacy_" + Date.now();
     process.env.CLEARCOTE_LICENSE_KEY = key;
-    writeCacheFile(key, { token: "LEGACY", exp: Math.floor(Date.now() / 1000) + 800 }); // no lease_id
+    writeCacheFile(key, { token: "LEGACY", exp: Math.floor(Date.now() / 1000) + 800, scope: "machine" }); // no lease_id
     const calls = mockBackend();
     const h = await acquireLease({ quiet: true });
     expect(calls.filter((c) => c === "checkout").length).toBe(0);

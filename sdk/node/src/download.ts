@@ -1482,6 +1482,70 @@ export interface ProDownloadOptions {
   releaseChannel?: ReleaseChannel;
 }
 
+/** What `GET /api/v1/download/pro` answers. */
+interface ProMeta {
+  tag?: string; version?: string; asset?: string; archive?: string; binary?: string;
+  url?: string; sha256?: string; exe_sha256?: string; chrome_dll_sha256?: string; size?: number;
+  channel?: string; resolved_channel?: string;
+}
+
+// ── PRO metadata cache ──────────────────────────────────────────────────────
+// The answer of /api/v1/download/pro, kept for PRO_META_TTL_SEC per process and in
+// ~/.clearcote/pro-meta-<16 hex of sha256(key + "\n" + request url)>.json as {at, meta} (`at` in epoch
+// seconds), so a launch of an installed build does not ask for it again. Only a build that is installed
+// and passes the cached-build check (which re-hashes the protected files with the cached hashes) is
+// launched from it: a download always follows a fresh answer, whose signed url has not expired.
+const PRO_META_TTL_SEC = 600;
+const proMetaMemo = new Map<string, { at: number; meta: ProMeta }>();
+
+function proMetaPath(licenseKey: string, proUrl: string): string {
+  const id = createHash("sha256").update(`${licenseKey}\n${proUrl}`).digest("hex").slice(0, 16);
+  return path.join(os.homedir(), ".clearcote", `pro-meta-${id}.json`);
+}
+
+/** The cached answer for this key and request, while younger than the TTL; null otherwise (unreadable = none). */
+function readProMeta(licenseKey: string, proUrl: string): ProMeta | null {
+  const p = proMetaPath(licenseKey, proUrl);
+  const fresh = (e: unknown): e is { at: number; meta: ProMeta } => {
+    const d = e as { at?: unknown; meta?: unknown } | null | undefined;
+    if (!d || typeof d.at !== "number" || !d.meta || typeof d.meta !== "object") return false;
+    const age = Date.now() / 1000 - d.at;
+    return age >= 0 && age < PRO_META_TTL_SEC; // a time ahead of this clock is no proof of age
+  };
+  const mem = proMetaMemo.get(p);
+  if (fresh(mem)) return mem.meta;
+  try {
+    const d: unknown = JSON.parse(readFileSync(p, "utf8"));
+    if (fresh(d)) {
+      proMetaMemo.set(p, d);
+      return d.meta;
+    }
+  } catch {
+    /* none, or corrupt: a miss */
+  }
+  return null;
+}
+
+/** Keep a usable answer (never an error). Best-effort: a cache is never a reason to fail a launch. */
+function writeProMeta(licenseKey: string, proUrl: string, meta: ProMeta): void {
+  const p = proMetaPath(licenseKey, proUrl);
+  const entry = { at: Date.now() / 1000, meta };
+  proMetaMemo.set(p, entry);
+  const tmp = `${p}.tmp-${randomBytes(4).toString("hex")}`;
+  try {
+    mkdirSync(path.dirname(p), { recursive: true });
+    writeFileSync(tmp, JSON.stringify(entry));
+    renameSync(tmp, p);
+  } catch {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/** Whether an answer names a build this platform can install. */
+function proMetaUsable(meta: ProMeta, plat: "windows" | "linux" | "macos"): boolean {
+  return !!meta.url && !!meta.sha256 && !!meta.exe_sha256 && (plat !== "windows" || !!meta.chrome_dll_sha256);
+}
+
 /**
  * Download + verify the PRO (license-gated) browser and return its chrome path.
  *
@@ -1489,8 +1553,9 @@ export interface ProDownloadOptions {
  * `GET /api/v1/download/pro` with the license key, gets back an unguessable, short-lived
  * blob URL + sha256, then reuses the SAME verify+extract path as the free binary
  * ({@link fetchAndVerify}, sha256-only — no GPG, exactly like the free pin). Cached per PRO
- * tag. Throws on any failure — a licensed caller must get the PRO build, never a silent free
- * fall-back (that would launch a binary the engine gate then refuses).
+ * tag; the answer itself is reused for 10 minutes while its build is installed. Throws on any
+ * failure — a licensed caller must get the PRO build, never a silent free fall-back (that would
+ * launch a binary the engine gate then refuses).
  */
 export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptions = {}): Promise<string> {
   const baseUrl = (opts.apiBase || process.env.CLEARCOTE_LICENSE_API || "https://www.clearcotelabs.com").replace(/\/$/, "");
@@ -1499,6 +1564,17 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
 
   const channel = resolveReleaseChannel(opts.releaseChannel);
   const proUrl = proDownloadUrl(baseUrl, plat, opts.version, channel);
+  const known = readProMeta(licenseKey, proUrl);
+  if (known && proMetaUsable(known, plat)) {
+    // Launched only when its build is installed and its protected files still hash to these values.
+    const rel = proRelease(known, plat);
+    const cached = cachedBinary(path.join(opts.cacheDir || defaultCacheRoot(), rel.tag), rel.binary || "chrome.exe",
+      opts.quiet, false, undefined, launchIntegrity(rel));
+    if (cached) {
+      logResolvedChannel(known, plat, channel, opts.quiet);
+      return cached;
+    }
+  }
   const res = await fetch(proUrl, {
     redirect: "follow",
     headers: { authorization: `Bearer ${licenseKey}`, "User-Agent": "clearcote-sdk" },
@@ -1511,24 +1587,37 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
         "Check your license key and that your plan is active.",
     );
   }
-  const meta = (await res.json()) as {
-    tag?: string; version?: string; asset?: string; archive?: string; binary?: string;
-    url?: string; sha256?: string; exe_sha256?: string; chrome_dll_sha256?: string; size?: number;
-    channel?: string; resolved_channel?: string;
-  };
-  if (channel === "preview" && meta.resolved_channel && meta.resolved_channel !== "preview") {
-    log(opts.quiet, `release channel: preview requested, no newer preview for ${plat} -> ${meta.resolved_channel} ${meta.tag ?? ""}`.trim());
+  const meta = (await res.json()) as ProMeta;
+  logResolvedChannel(meta, plat, channel, opts.quiet);
+  const rel = proRelease(meta, plat);
+  writeProMeta(licenseKey, proUrl, meta);
+
+  const base = path.join(opts.cacheDir || defaultCacheRoot(), rel.tag);
+  {
+    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet, false, undefined, launchIntegrity(rel));
+    if (cached) return cached;
   }
-  if (!meta.url || !meta.sha256 || !meta.exe_sha256 || (plat === "windows" && !meta.chrome_dll_sha256)) {
+  return fetchAndVerify(rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
+}
+
+function logResolvedChannel(meta: ProMeta, plat: "windows" | "linux" | "macos", channel: ReleaseChannel, quiet?: boolean): void {
+  if (channel === "preview" && meta.resolved_channel && meta.resolved_channel !== "preview") {
+    log(quiet, `release channel: preview requested, no newer preview for ${plat} -> ${meta.resolved_channel} ${meta.tag ?? ""}`.trim());
+  }
+}
+
+/** The release a /download/pro answer names. Throws when it names no download for this platform. */
+function proRelease(meta: ProMeta, plat: "windows" | "linux" | "macos"): ResolvedRelease {
+  if (!proMetaUsable(meta, plat)) {
     throw new Error(`Clearcote PRO build is not currently available for ${plat} (the server returned no download).`);
   }
 
-  const rel: ResolvedRelease = {
+  return {
     tag: meta.tag || `pro-${meta.version || ""}`,
     version: meta.version || "",
     asset: meta.asset || `clearcote-pro-${meta.version || ""}-${plat}-${plat === "macos" ? "arm64" : "x64"}.${plat === "linux" ? "tar.xz" : "zip"}`,
-    url: meta.url,
-    sha256: meta.sha256,
+    url: meta.url as string,
+    sha256: meta.sha256 as string,
     exeSha256: meta.exe_sha256 || "",
     chromeDllSha256: meta.chrome_dll_sha256 || "",
     size: meta.size || 0,
@@ -1538,13 +1627,6 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
     assetGlob: `${plat}-${plat === "macos" ? "arm64" : "x64"}`,
     unpinned: false, // pinned -> sha256-only verify (no GPG), like the free pin
   };
-
-  const base = path.join(opts.cacheDir || defaultCacheRoot(), rel.tag);
-  {
-    const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet, false, undefined, launchIntegrity(rel));
-    if (cached) return cached;
-  }
-  return fetchAndVerify(rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
 }
 
 /**

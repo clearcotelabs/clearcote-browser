@@ -68,7 +68,7 @@ public class LicenseStaleTokenTests
         var id = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))).ToLowerInvariant()[..16];
         Directory.CreateDirectory(Path.Combine(home, ".clearcote"));
         File.WriteAllText(Path.Combine(home, ".clearcote", $"lease-{id}.json"),
-            JsonSerializer.Serialize(new { token = Tok(iat), exp = Exp(), lease_id = leaseId }));
+            JsonSerializer.Serialize(new { token = Tok(iat), exp = Exp(), lease_id = leaseId, scope = "machine" }));
     }
 
     private static Task<LeaseSession?> Acquire() =>

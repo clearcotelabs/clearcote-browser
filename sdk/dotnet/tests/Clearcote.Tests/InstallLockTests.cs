@@ -12,9 +12,19 @@ public class InstallLockTests : IDisposable
     private readonly List<string> _temp = new();
     private readonly (TimeSpan, TimeSpan, TimeSpan, TimeSpan) _timing =
         (Download.LockStaleAfter, Download.LockUnreadableAfter, Download.LockHeartbeat, Download.LockBreakerStaleAfter);
+    // The PRO installs keep their metadata answer in ~/.clearcote: a temp HOME, never the real one.
+    private readonly Sandbox _home = new();
+
+    public InstallLockTests()
+    {
+        _home.TempHome();
+        Download.ForgetProMeta();
+    }
 
     public void Dispose()
     {
+        _home.Dispose();
+        Download.ForgetProMeta();
         (Download.LockStaleAfter, Download.LockUnreadableAfter, Download.LockHeartbeat, Download.LockBreakerStaleAfter) = _timing;
         Download.BeforeVerifiedHook = null;
         Download.BeforeMoveDirHook = null;

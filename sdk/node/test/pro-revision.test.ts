@@ -2,14 +2,26 @@
 // the authenticated PRO download verbatim, and rejected without a license — all BEFORE the public
 // version catalog is consulted (revisions aren't in it). Hermetic: fetch is mocked, no real network.
 
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { isProRevisionSelector, resolvedEngineVersion, ensureVersion } from "../src/download.js";
 import { RELEASE } from "../src/release.js";
+import { tempDir } from "./helpers/temp.js";
 
 const realFetch = globalThis.fetch;
+const OLD = { home: process.env.HOME, profile: process.env.USERPROFILE };
+beforeEach(() => {
+  // the PRO download route's answer is kept in ~/.clearcote: never this machine's
+  const home = tempDir("cc-rev-home-");
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+});
 afterEach(() => {
   globalThis.fetch = realFetch;
   vi.restoreAllMocks();
+  for (const [k, v] of [["HOME", OLD.home], ["USERPROFILE", OLD.profile]] as const) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
 });
 
 describe("isProRevisionSelector", () => {

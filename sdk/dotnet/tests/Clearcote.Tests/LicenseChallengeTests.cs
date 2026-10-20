@@ -90,7 +90,7 @@ public class LicenseChallengeTests
         Directory.CreateDirectory(Path.Combine(home, ".clearcote"));
         File.WriteAllText(Path.Combine(home, ".clearcote", $"lease-{id}.json"), JsonSerializer.Serialize(new
         {
-            token = "CACHED-TOK", exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 800, lease_id = "Lcache",
+            token = "CACHED-TOK", exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 800, lease_id = "Lcache", scope = "machine",
         }));
         var lease = await License.AcquireLeaseAsync(new LicenseOptions(), "0.48.0", true, Engine); // cache: no call
         Assert.Equal("CACHED-TOK", lease!.Token);

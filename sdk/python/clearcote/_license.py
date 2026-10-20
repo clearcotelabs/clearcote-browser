@@ -6,10 +6,15 @@ and injects it into the engine as CLEARCOTE_RUN_TOKEN. A background heartbeat
 keeps the slot alive + rotates the token; on close the slot is released. With no
 license key this is entirely inert (free mode). See PRIVATE-SDK-LICENSING-PLAN.md.
 
-Concurrency is per-MACHINE: the backend dedups by a stable instance_id, so one
+Concurrency is per-MACHINE on capped paid licences: the backend dedups by a stable instance_id, so one
 machine holds exactly one slot regardless of how many browsers it runs. To avoid
 hammering the backend, the lease is **shared across all launches in a process**
-(one checkout per token-TTL, not one per launch) — see ``_MachineLease``.
+(one checkout per token-TTL, not one per launch) — see ``_MachineLease``. The free tier and paid
+licences without a cap get one lease per browser instead (``lease_scope: "browser"``) — see
+``_BrowserLease``.
+
+The lease calls go to the licence lease server, and to the site when that cannot be reached (see
+``_lease_bases``); every other call (the PRO download, device login) stays on the site.
 """
 from __future__ import annotations
 
@@ -29,6 +34,9 @@ from urllib import request, error
 from ._net import proxied_request, to_proxy_spec
 
 DEFAULT_API_BASE = "https://www.clearcotelabs.com"
+# The licence lease server. The lease calls (checkout, heartbeat, checkin, seats) go there first and to
+# DEFAULT_API_BASE when it cannot be reached; every other route stays on DEFAULT_API_BASE.
+DEFAULT_LEASE_API_BASE = "https://lease.clearcotelabs.com"
 _RUN_TOKEN_ENV = "CLEARCOTE_RUN_TOKEN"
 # Seconds of headroom kept before a token's exp: reuse it only while it's still
 # valid with this much slack, so an in-flight launch never ships an expiring token.
@@ -37,11 +45,14 @@ _SKEW_SEC = 60
 
 class LicenseError(RuntimeError):
     code = "LICENSE_ERROR"
+    status = None  # the licence server's HTTP status, when it answered one
 
-    def __init__(self, message: str, code: str | None = None):
+    def __init__(self, message: str, code: str | None = None, status: int | None = None):
         super().__init__(message)
         if code:
             self.code = code
+        if status:
+            self.status = status
 
 
 class ConcurrencyLimitError(LicenseError):
@@ -118,19 +129,76 @@ def _api_base(api_base: str | None) -> str:
     return (api_base or os.environ.get("CLEARCOTE_LICENSE_API") or DEFAULT_API_BASE).rstrip("/")
 
 
+def _lease_bases(api_base: str | None) -> tuple:
+    """``(primary, fallback)`` for the lease calls only (checkout, heartbeat, checkin, seats).
+
+    A base set explicitly is used alone, with no fallback: the ``api_base`` argument, else
+    CLEARCOTE_LICENSE_API (staging, tests, self-hosting), else CLEARCOTE_LEASE_API. By default the licence
+    lease server, with DEFAULT_API_BASE as the fallback when it cannot be reached (see _with_fallback)."""
+    explicit = (api_base or os.environ.get("CLEARCOTE_LICENSE_API")
+                or os.environ.get("CLEARCOTE_LEASE_API") or "").strip()
+    if explicit:
+        return explicit.rstrip("/"), None
+    return DEFAULT_LEASE_API_BASE.rstrip("/"), DEFAULT_API_BASE.rstrip("/")
+
+
+# Statuses a proxy or CDN in front of the lease server answers when the server itself is down or unreachable.
+_GATEWAY_STATUSES = frozenset({502, 503, 504, 530, *range(520, 528)})
+# After the primary lease base gave no answer of its own, this process sends lease calls straight to the
+# fallback for this many seconds, then tries the primary again.
+_PRIMARY_RETRY_SEC = 60.0
+_primary_down_until: dict = {}  # (primary base, route) -> time.monotonic() until which the primary is skipped
+_BREAKER_LOCK = threading.Lock()
+# Waits before a checkout answered RATE_LIMITED (this IP's request budget, not the licence's limit) is sent
+# again; after the last one it counts as no verdict.
+_RATE_LIMIT_RETRY_SEC = (1.0, 2.0, 4.0)
+
+
+def _with_fallback(primary: str, fallback: str | None, route, call, unanswered):
+    """``call(base)`` on the primary lease base, and once more on ``fallback`` when the primary gave no answer
+    of its own: a network error (DNS, refused or reset connection, TLS, timeout), a gateway status, or a
+    challenge page (``unanswered(result)``). Any other answer from the primary (200, 401, 403, 409, 426,
+    429, ...) is final. ``route`` keeps the direct path and each proxy apart in the per-process breaker."""
+    if not fallback:
+        return call(primary)
+    key = (primary, route)
+    with _BREAKER_LOCK:
+        skip = _primary_down_until.get(key, 0.0) > time.monotonic()
+    if not skip:
+        try:
+            out = call(primary)
+            if not unanswered(out):
+                return out
+        except Exception:  # noqa: BLE001 — unreachable: the fallback below says what is wrong, if it is too
+            pass
+        with _BREAKER_LOCK:
+            _primary_down_until[key] = time.monotonic() + _PRIMARY_RETRY_SEC
+    return call(fallback)
+
+
+def _lease_unanswered(out) -> bool:
+    """A ``_post`` result that is not the lease server's own answer: a gateway status or a challenge page."""
+    status, body = out
+    return status in _GATEWAY_STATUSES or (isinstance(body, dict) and bool(body.get(_CHALLENGE)))
+
+
 def _os_tag() -> str:
     return {"win32": "windows", "linux": "linux", "darwin": "macos"}.get(sys.platform, "unknown")
 
 
+def _key_hash(license_key: str) -> str:
+    return hashlib.sha256(license_key.encode()).hexdigest()[:16]
+
+
 def _cache_path(license_key: str) -> Path:
-    h = hashlib.sha256(license_key.encode()).hexdigest()[:16]
-    return Path.home() / ".clearcote" / f"lease-{h}.json"
+    return Path.home() / ".clearcote" / f"lease-{_key_hash(license_key)}.json"
 
 
 def _read_cache(license_key: str):
-    """The on-disk shared token cache: {token, exp, lease_id}. Enables cross-process
+    """The on-disk shared token cache: {token, exp, lease_id, scope}. Enables cross-process
     reuse on one machine — a second process picks up a still-valid token instead of
-    checking out again. Older caches without lease_id are still honored.
+    checking out again (only one this SDK marked ``scope: "machine"``, see _MachineLease.ensure).
+    Older caches without lease_id or scope are still honored as the offline fallback.
 
     A per-browser (free-tier) token is never returned, even one an older SDK wrote: it belongs to
     the one browser it was checked out for, and reusing it would start another browser without a
@@ -200,13 +268,129 @@ def new_launch_id() -> str:
     return uuid.uuid4().hex
 
 
-def _write_cache(license_key: str, token: str, exp: float, lease_id: str | None = None) -> None:
+def _write_cache(license_key: str, token: str, exp: float, lease_id: str | None = None,
+                 scope: str | None = "machine") -> None:
+    """Only ever a machine lease's token. ``scope: "machine"`` says a checkout answer of the licence server
+    made it one (``scope=None``: a lease kept alive from an unmarked file, which says nothing about that);
+    older SDKs read token/exp/lease_id and ignore it."""
+    d = {"token": token, "exp": exp, "lease_id": lease_id}
+    if scope:
+        d["scope"] = scope
     try:
         p = _cache_path(license_key)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"token": token, "exp": exp, "lease_id": lease_id}))
+        p.write_text(json.dumps(d))
     except OSError:
         pass
+
+
+def _grace_path(license_key: str) -> Path:
+    return Path.home() / ".clearcote" / f"grace-{_key_hash(license_key)}.json"
+
+
+def _read_grace(license_key: str):
+    """The grace token, ``{token, exp}``: the newest PAID per-browser run-token this machine was given. It lets
+    a paid launch start, uncounted, when the licence server gives no verdict. Never a free token."""
+    try:
+        d = json.loads(_grace_path(license_key).read_text())
+        if isinstance(d.get("token"), str) and isinstance(d.get("exp"), (int, float)):
+            if token_plan(d["token"]) == _PER_BROWSER_PLAN:
+                return None
+            return d
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None
+
+
+_GRACE_LOCK = threading.Lock()
+
+
+def _write_grace(license_key: str, token, exp) -> None:
+    """Keep a paid per-browser run-token as the grace token. Its own file, never lease-<hash>.json: older SDKs
+    on this machine read that one and would reuse a token that belongs to one browser. A token minted before
+    the one kept (a lower iat) never replaces it. Free tokens are never kept."""
+    if not isinstance(token, str) or not token or token_plan(token) == _PER_BROWSER_PLAN:
+        return
+    if not isinstance(exp, (int, float)) or isinstance(exp, bool):
+        return
+    with _GRACE_LOCK:
+        try:
+            p = _grace_path(license_key)
+            try:
+                kept = json.loads(p.read_text())
+            except (OSError, ValueError):
+                kept = None
+            kept_iat = token_iat(kept.get("token")) if isinstance(kept, dict) else None
+            new_iat = token_iat(token)
+            if kept_iat is not None and (new_iat is None or new_iat < kept_iat):
+                return
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"token": token, "exp": exp}))
+        except OSError:
+            pass
+
+
+# Launches this process started on a cached run-token while the licence server gave no verdict, per licence key,
+# not yet reported. The next checkout reports them (uncounted_launches) and a 200 takes them off.
+_uncounted_launches: dict = {}
+_UNCOUNTED_LOCK = threading.Lock()
+
+
+def _uncounted_add(license_key: str) -> None:
+    with _UNCOUNTED_LOCK:
+        _uncounted_launches[license_key] = _uncounted_launches.get(license_key, 0) + 1
+
+
+def _uncounted_pending(license_key: str) -> int:
+    with _UNCOUNTED_LOCK:
+        return _uncounted_launches.get(license_key, 0)
+
+
+def _uncounted_reported(license_key: str, n: int) -> None:
+    """A checkout that reported ``n`` uncounted launches got a 200. Launches started uncounted meanwhile stay."""
+    if not n:
+        return
+    with _UNCOUNTED_LOCK:
+        left = _uncounted_launches.get(license_key, 0) - n
+        if left > 0:
+            _uncounted_launches[license_key] = left
+        else:
+            _uncounted_launches.pop(license_key, None)
+
+
+_notices_shown: set = set()
+_NOTICE_LOCK = threading.Lock()
+
+
+def _show_notice(answer: dict, quiet: bool) -> None:
+    """Print a checkout answer's ``notice`` (stderr), each one once per process."""
+    notice = answer.get("notice") if isinstance(answer, dict) else None
+    if quiet or not isinstance(notice, str) or not notice.strip():
+        return
+    with _NOTICE_LOCK:
+        if notice in _notices_shown:
+            return
+        _notices_shown.add(notice)
+    sys.stderr.write(f"[clearcote] [license] {notice.strip()}\n")
+
+
+def _no_verdict(exc: BaseException) -> bool:
+    """A licence call that ended without the licence server's verdict on the licence: a network error, a 5xx, a
+    challenge page in front of the server, or this IP's request budget (RATE_LIMITED)."""
+    if isinstance(exc, LicenseServerChallengeError):
+        return True
+    if isinstance(exc, LicenseError):
+        return exc.code == "RATE_LIMITED" or (exc.status or 0) >= 500
+    return True
+
+
+def _no_verdict_reason(exc: BaseException) -> str:
+    """A short reason for the stderr line of a launch that starts uncounted (worded as the other SDKs do)."""
+    if isinstance(exc, LicenseServerChallengeError):
+        return f"security challenge, HTTP {exc.status or '?'}"
+    if isinstance(exc, LicenseError):
+        return "rate limited" if exc.code == "RATE_LIMITED" else f"HTTP {exc.status or exc.code}"
+    return str(getattr(exc, "reason", None) or exc)
 
 
 def _user_agent() -> str:
@@ -293,14 +477,20 @@ def _raise_for_status(status: int, body: dict):
             f"challenge (HTTP {status}, {body[_CHALLENGE]}) instead of a licence verdict, so your licence "
             f"was not checked (it is not revoked). This is usually temporary and tied to this machine's network: retry later, or send "
             f"the licence calls through your proxy (license_through_proxy=True).",
-            "LICENSE_SERVER_CHALLENGE")
+            "LICENSE_SERVER_CHALLENGE", status)
     msg = body.get("error") or f"License request failed ({status})."
     code = body.get("code")
+    if code == "RATE_LIMITED":
+        # This IP's request budget at the licence server is spent: not the licence's concurrency limit.
+        raise LicenseError(
+            f"{body.get('error') or 'Rate limit exceeded.'} The licence server is limiting requests from this "
+            f"network (RATE_LIMITED); this is not the licence's concurrency limit. Retry in a minute.",
+            "RATE_LIMITED", status)
     if status == 429 or code == "CONCURRENCY_LIMIT_EXCEEDED":
-        raise ConcurrencyLimitError(msg, "CONCURRENCY_LIMIT_EXCEEDED")
+        raise ConcurrencyLimitError(msg, "CONCURRENCY_LIMIT_EXCEEDED", status)
     if status == 403 or code in ("LICENSE_REVOKED", "LICENSE_EXPIRED"):
-        raise LicenseRevokedError(msg, "LICENSE_REVOKED")
-    raise LicenseError(msg, code or f"HTTP_{status}")
+        raise LicenseRevokedError(msg, "LICENSE_REVOKED", status)
+    raise LicenseError(msg, code or f"HTTP_{status}", status)
 
 
 # ---------------------------------------------------------------------------
@@ -386,10 +576,11 @@ class _MachineLease:
     """
 
     def __init__(self, key: str, base: str, instance_id: str,
-                 sdk_version: str | None, quiet: bool, engine_version=None, proxy=None):
+                 sdk_version: str | None, quiet: bool, engine_version=None, proxy=None, fallback=None):
         self._key = key
         self._proxy = proxy  # proxy spec when license_through_proxy is on, else None (direct)
         self._base = base
+        self._fallback = fallback  # the default bases only: where a call the lease server cannot answer goes
         self._instance_id = instance_id
         self._sdk_version = sdk_version          # SDK PACKAGE version (e.g. "0.17.1")
         # Resolved browser build (e.g. "150.0.7871.114"). May be a str or a zero-arg callable that
@@ -413,10 +604,17 @@ class _MachineLease:
         self.scope = "machine"
         self._pending_browser = None     # (checkout body, launch_id) made by ensure() for one launch
         self._browsers: set = set()      # live _BrowserLease objects, released at exit if still open
+        self._browser_plan = None        # plan of the last per-browser lease ("free" never falls back)
+        # The licence server said this lease is a machine lease (a checkout answer, or a cache marked so):
+        # only then is the cache this process writes marked scope "machine" (see _write_cache).
+        self._machine_known = False
 
     @property
     def token(self) -> str | None:
         return self._token
+
+    def _cache_scope(self):
+        return "machine" if self._machine_known else None
 
     @token.setter
     def token(self, v: str | None) -> None:
@@ -431,12 +629,17 @@ class _MachineLease:
         ignore it."""
         return self._token_files.bind(self._token or "")
 
-    def _send(self, url: str, body: dict):
-        """POST a lease call: through the launch proxy when license_through_proxy is on, else the
-        unchanged direct path."""
-        if self._proxy:
-            return _post(url, self._key, body, proxy=self._proxy)
-        return _post(url, self._key, body)
+    def _send(self, path: str, body: dict):
+        """POST a lease call (``path``, e.g. "/api/v1/lease/heartbeat"): through the launch proxy when
+        license_through_proxy is on, else the unchanged direct path. On the default bases a call the lease
+        server could not answer goes once to the fallback base (see _with_fallback)."""
+        def call(base):
+            if self._proxy:
+                return _post(f"{base}{path}", self._key, body, proxy=self._proxy)
+            return _post(f"{base}{path}", self._key, body)
+
+        route = (self._proxy["server"], self._proxy.get("username")) if self._proxy else None
+        return _with_fallback(self._base, self._fallback, route, call, _lease_unanswered)
 
     def _valid(self) -> bool:
         return bool(self.token) and self.exp > time.time() + _SKEW_SEC
@@ -452,49 +655,83 @@ class _MachineLease:
                 self._engine_resolved = ""
         return self._engine_resolved or None
 
-    def ensure(self) -> None:
+    def ensure(self):
         """Make a usable run-token available with the fewest possible backend calls.
-        Raises on a definitive limit/revoke verdict (cold checkout path only)."""
+        Raises on a definitive limit/revoke verdict (cold checkout path only).
+
+        Returns None, or the calling launch's uncounted handle when the cold checkout got no verdict and
+        a paid grace token is at hand (see _uncounted)."""
         with self._lock:
             if self.scope == "browser":
-                return  # per-browser plan: nothing is shared; acquire() checks out per launch
+                return None  # per-browser plan: nothing is shared; acquire() checks out per launch
             if self._valid():
-                return  # already holding a live token (owner or reusing) — zero calls
+                return None  # already holding a live token (owner or reusing) — zero calls
             cached = _read_cache(self._key)
-            if cached and cached["exp"] > time.time() + _SKEW_SEC:
-                # cross-process reuse: another process's owner is keeping the slot alive.
+            if cached and cached.get("scope") == "machine" and cached["exp"] > time.time() + _SKEW_SEC:
+                # cross-process reuse: another process's owner is keeping the slot alive. Only a cache this
+                # SDK marked as a machine lease: an older SDK's file may belong to a licence that now counts
+                # every browser, so it gets a checkout first (and stays the fallback if that fails).
                 self.token = cached["token"]
                 self.exp = float(cached["exp"])
                 self.lease_id = cached.get("lease_id")
                 self._owner = False
-                return  # NO checkout, NO heartbeat
+                self._machine_known = True
+                return None  # NO checkout, NO heartbeat
             # cold: this process owns the slot, the heartbeat, and the exit checkin.
-            self._checkout()
-            if self.scope == "browser":
-                return  # the checkout belongs to the launch that asked; see acquire()
+            uncounted = self._checkout(fail_open=True)
+            if uncounted is not None or self.scope == "browser":
+                return uncounted  # the checkout belongs to the launch that asked; see acquire()
             self._owner = True
             self._start_heartbeat()
+        return None
+
+    def _post_checkout(self, launch_id: str | None):
+        """POST one checkout. Every checkout offers per-browser leases and reports the launches this process
+        started uncounted since the last successful one; a 200 takes those off and shows its notice."""
+        body = {"instance_id": self._instance_id}
+        if launch_id:
+            # per-browser plans count each launch_id as its own slot; machine plans ignore it
+            body["launch_id"] = launch_id
+        body.update({"os": _os_tag(), "sdk_version": self._sdk_version, "engine_version": self._engine_ver(),
+                     "lease_scope_supported": ["browser"]})
+        uncounted = _uncounted_pending(self._key)
+        if uncounted:
+            body["uncounted_launches"] = uncounted
+        status, answer = self._send("/api/v1/lease/checkout", body)
+        if status == 200:
+            _uncounted_reported(self._key, uncounted)
+            _show_notice(answer, self._quiet)
+        return status, answer
 
     def checkout_for(self, launch_id: str) -> dict:
-        """POST a checkout for one launch. Raises the backend's verdict; network errors propagate."""
-        status, body = self._send(f"{self._base}/api/v1/lease/checkout",
-                                  {"instance_id": self._instance_id,
-                                   # per-browser plans count each launch_id as its own slot; machine plans ignore it
-                                   "launch_id": launch_id,
-                                   "os": _os_tag(),
-                                   "sdk_version": self._sdk_version,
-                                   "engine_version": self._engine_ver()})
+        """POST a checkout for one launch. Raises the backend's verdict; network errors propagate.
+        RATE_LIMITED (this IP's request budget, not the licence's limit) is sent again after each wait in
+        _RATE_LIMIT_RETRY_SEC first."""
+        for wait in (*_RATE_LIMIT_RETRY_SEC, None):
+            status, body = self._post_checkout(launch_id)
+            if wait is None or not (status == 429 and body.get("code") == "RATE_LIMITED"):
+                break
+            time.sleep(wait)
         if status != 200:
             _raise_for_status(status, body)
         return body
 
-    def _checkout(self) -> None:
+    def _checkout(self, fail_open: bool = False):
+        """A cold checkout. With ``fail_open`` (a launch waits on it) a checkout that got no verdict returns
+        that launch's uncounted handle when a paid grace token is at hand; otherwise returns None."""
         launch_id = new_launch_id()
         try:
             body = self.checkout_for(launch_id)
-        except LicenseServerChallengeError as e:
-            # Not a verdict: the server was never reached. Offline grace like a network error, and the
-            # challenge itself surfaces when there is no cached token.
+        except LicenseError as e:
+            if not _no_verdict(e):
+                raise  # a definitive verdict must surface (never silently downgrade)
+            uncounted = self._uncounted(e, legacy=False) if fail_open else None
+            if uncounted is not None:
+                return uncounted
+            if not isinstance(e, LicenseServerChallengeError) and e.code != "RATE_LIMITED":
+                raise  # a 5xx on a machine lease: raised, as before
+            # Not a verdict: the server was never reached, or this IP's request budget is spent. Offline grace
+            # like a network error, and the error itself surfaces when there is no cached token.
             cached = _read_cache(self._key)
             if cached and cached["exp"] > time.time() + _SKEW_SEC:
                 if not self._quiet:
@@ -502,11 +739,13 @@ class _MachineLease:
                 self.token = cached["token"]
                 self.exp = float(cached["exp"])
                 self.lease_id = cached.get("lease_id")
-                return
+                self._machine_known = cached.get("scope") == "machine"
+                return None
             raise
-        except LicenseError:
-            raise  # a definitive verdict must surface (never silently downgrade)
         except Exception as e:  # noqa: BLE001 — network/other: offline grace on a cached token
+            uncounted = self._uncounted(e, legacy=False) if fail_open else None
+            if uncounted is not None:
+                return uncounted
             cached = _read_cache(self._key)
             if cached and cached["exp"] > time.time() + _SKEW_SEC:
                 if not self._quiet:
@@ -514,18 +753,44 @@ class _MachineLease:
                 self.token = cached["token"]
                 self.exp = float(cached["exp"])
                 self.lease_id = cached.get("lease_id")
-                return
+                self._machine_known = cached.get("scope") == "machine"
+                return None
             raise LicenseError(f"Could not reach the license server and no valid cached token: {e}")
         if body.get("lease_scope") == "browser":
             # Per-browser plan: this checkout is the calling launch's own slot. Never shared, never cached.
             self.scope = "browser"
             self._pending_browser = (body, launch_id)
-            return
+            return None
         self.token = body["token"]
         self.exp = float(body["exp"])
         self.lease_id = body["lease_id"]
         self._hb_sec = int(body.get("heartbeat_interval_sec") or 270)
+        self._machine_known = True
         _write_cache(self._key, self.token, self.exp, self.lease_id)
+        return None
+
+    def _uncounted(self, exc: BaseException, legacy: bool = True):
+        """Fail open, paid only. A per-browser checkout ended without a verdict (``exc``, see _no_verdict): the
+        launch starts on a cached paid run-token instead, with no lease, no heartbeat and no check-in, and the
+        next checkout reports it (uncounted_launches). The grace token first, else (``legacy``) the machine
+        cache's token. None when neither is valid, or when this process has seen the licence as free: the
+        free tier stays fail-closed."""
+        if self._browser_plan == _PER_BROWSER_PLAN:
+            return None
+        floor = time.time() + _SKEW_SEC
+        kept = _read_grace(self._key)
+        if not (kept and kept["exp"] > floor) and legacy:
+            kept = _read_cache(self._key)
+        if not (kept and kept["exp"] > floor):
+            return None
+        _uncounted_add(self._key)
+        if not self._quiet:
+            sys.stderr.write(f"[clearcote] [license] licence server unreachable ({_no_verdict_reason(exc)}); "
+                             "this browser starts on a cached run-token and is not counted.\n")
+        lease = _UncountedLease(self, kept["token"])
+        with self._lock:
+            self._browsers.add(lease)  # its token file is removed at exit if the browser is never closed
+        return lease
 
     def _start_heartbeat(self) -> None:
         if self._hb_thread and self._hb_thread.is_alive():
@@ -537,24 +802,25 @@ class _MachineLease:
     def _heartbeat_loop(self, interval: int) -> None:
         while not self._stop.wait(interval):
             try:
-                status, body = self._send(f"{self._base}/api/v1/lease/heartbeat",
+                status, body = self._send("/api/v1/lease/heartbeat",
                                           {"lease_id": self.lease_id, "nonce": str(uuid.uuid4())})
                 if status == 409:  # reclaimed/expired -> re-checkout to keep the slot
-                    st2, b2 = self._send(f"{self._base}/api/v1/lease/checkout",
-                                         {"instance_id": self._instance_id, "os": _os_tag(),
-                                          "sdk_version": self._sdk_version,
-                                          "engine_version": self._engine_ver()})
-                    if st2 == 200:
+                    st2, b2 = self._post_checkout(None)
+                    if st2 == 200 and b2.get("lease_scope") == "browser":
+                        # Not a machine lease (no launch asked for it): give it back, retry on the next beat.
+                        self._send("/api/v1/lease/checkin", {"lease_id": b2.get("lease_id")})
+                    elif st2 == 200:
                         with self._lock:
                             self.lease_id = b2["lease_id"]
                             self.token = b2["token"]
                             self.exp = float(b2["exp"])
+                            self._machine_known = True
                         _write_cache(self._key, b2["token"], b2["exp"], b2["lease_id"])
                 elif status == 200 and body.get("token"):
                     with self._lock:
                         self.token = body["token"]
                         self.exp = float(body["exp"])
-                    _write_cache(self._key, body["token"], body["exp"], self.lease_id)
+                    _write_cache(self._key, body["token"], body["exp"], self.lease_id, self._cache_scope())
             except Exception:  # noqa: BLE001 — transient; offline grace until token exp
                 pass
 
@@ -582,14 +848,14 @@ class _MachineLease:
         out again, like a cold ensure(). A definitive refusal (limit, revoked) raises."""
         if self.lease_id:
             try:
-                status, body = self._send(f"{self._base}/api/v1/lease/heartbeat",
+                status, body = self._send("/api/v1/lease/heartbeat",
                                           {"lease_id": self.lease_id, "nonce": str(uuid.uuid4())})
             except Exception:  # noqa: BLE001 — unreachable: a checkout below says so properly
                 status, body = 0, {}
             if status == 200 and body.get("token"):
                 self.token = body["token"]
                 self.exp = float(body["exp"])
-                _write_cache(self._key, self.token, self.exp, self.lease_id)
+                _write_cache(self._key, self.token, self.exp, self.lease_id, self._cache_scope())
                 return True
         self._checkout()
         if self.scope == "browser":
@@ -605,7 +871,9 @@ class _MachineLease:
         On a per-browser plan (told by the backend's lease_scope "browser") every launch instead gets
         its own checked-out lease, released when that browser closes."""
         if self.scope != "browser":
-            self.ensure()
+            uncounted = self.ensure()
+            if uncounted is not None:
+                return uncounted  # paid per-browser licence, no verdict from the server: see _uncounted
             self.refresh_if_behind_engine()
         with self._lock:
             if self.scope != "browser":
@@ -621,15 +889,22 @@ class _MachineLease:
         launch_id = new_launch_id()
         try:
             body = self.checkout_for(launch_id)
-        except LicenseError:
-            raise
-        except Exception as e:  # noqa: BLE001 — no offline grace: without the backend there is no slot
-            raise LicenseError(f"Could not reach the license server to start this browser: {e}")
+        except LicenseError as e:
+            uncounted = self._uncounted(e) if _no_verdict(e) else None
+            if uncounted is None:
+                raise
+            return uncounted
+        except Exception as e:  # noqa: BLE001 — without the backend there is no slot (a paid licence: see _uncounted)
+            uncounted = self._uncounted(e)
+            if uncounted is None:
+                raise LicenseError(f"Could not reach the license server to start this browser: {e}")
+            return uncounted
         return self._start_browser(body, launch_id)
 
     def _start_browser(self, body: dict, launch_id: str):
         lease = _BrowserLease(self, body, launch_id)
         with self._lock:
+            self._browser_plan = token_plan(body.get("token"))
             self._browsers.add(lease)
         return lease
 
@@ -656,7 +931,7 @@ class _MachineLease:
         self._stop.set()
         if self._owner and self.lease_id:
             try:
-                self._send(f"{self._base}/api/v1/lease/checkin", {"lease_id": self.lease_id})
+                self._send("/api/v1/lease/checkin", {"lease_id": self.lease_id})
             except Exception:  # noqa: BLE001 — best-effort; TTL reclaims it anyway
                 pass
 
@@ -688,11 +963,12 @@ class _LeaseHandle:
 
 
 class _BrowserLease:
-    """One browser's own lease on a per-browser plan (the free tier: "1 browser at a time").
+    """One browser's own lease on a per-browser plan (the free tier: "1 browser at a time"; paid licences
+    without a cap: every browser counted).
 
     Checked out for exactly one launch, heartbeated while that browser runs, checked in when it
-    closes. Its token is never written to the shared cache and never handed to another launch.
-    Same surface as _LeaseHandle: ``.token`` and ``.stop()``."""
+    closes. Its token is never written to the shared cache and never handed to another launch; a paid
+    one is kept as the grace token (_write_grace). Same surface as _LeaseHandle: ``.token`` and ``.stop()``."""
 
     def __init__(self, owner: "_MachineLease", body: dict, launch_id: str):
         self._owner = owner
@@ -702,6 +978,7 @@ class _BrowserLease:
         self._token_files = _TokenFileSet()
         self._token: str = body["token"]
         self.lease_id: str = body["lease_id"]
+        _write_grace(owner._key, self._token, body.get("exp"))  # paid tokens only
         self._stopped = threading.Event()
         interval = max(5, int(body.get("heartbeat_interval_sec") or 120))
         self._thread = threading.Thread(target=self._loop, args=(interval,), daemon=True)
@@ -721,26 +998,31 @@ class _BrowserLease:
         ``(file_path, release)``."""
         return self._token_files.bind(self._token)
 
+    def _took(self, body: dict) -> None:
+        """Adopt the token a heartbeat or re-checkout returned (and keep a paid one as the grace token)."""
+        self.token = body["token"]
+        _write_grace(self._owner._key, body["token"], body.get("exp"))
+
     def refresh_token(self) -> bool:
         """The engine just refused this token as older than one it accepted: mint a fresh one by heartbeating
         this browser's lease, or, if the lease is gone, by re-taking the slot as the SAME launch."""
         with self._lock:
-            status, body = self._owner._send(f"{self._owner._base}/api/v1/lease/heartbeat",
+            status, body = self._owner._send("/api/v1/lease/heartbeat",
                                              {"lease_id": self.lease_id, "nonce": str(uuid.uuid4())})
             if status == 200 and body.get("token"):
-                self.token = body["token"]
+                self._took(body)
                 return True
             if status != 409:
                 return False
             b2 = self._owner.checkout_for(self._launch_id)  # a refusal (another browser holds it) raises
             self.lease_id = b2["lease_id"]
-            self.token = b2["token"]
+            self._took(b2)
             return True
 
     def _loop(self, interval: int) -> None:
         while not self._stopped.wait(interval):
             try:
-                status, body = self._owner._send(f"{self._owner._base}/api/v1/lease/heartbeat",
+                status, body = self._owner._send("/api/v1/lease/heartbeat",
                                                  {"lease_id": self.lease_id, "nonce": str(uuid.uuid4())})
                 if self._stopped.is_set():
                     return
@@ -750,10 +1032,11 @@ class _BrowserLease:
                     b2 = self._owner.checkout_for(self._launch_id)
                     with self._lock:
                         self.lease_id = b2["lease_id"]
-                        self.token = b2["token"]
+                        self._took(b2)
                 elif status == 200 and body.get("token"):
                     with self._lock:
-                        self.token = body["token"]
+                        self._took(body)
+                # Anything else (RATE_LIMITED, a 5xx, ...): the next beat tries again.
             except Exception:  # noqa: BLE001 — transient; the next beat retries, the lease TTL is the backstop
                 pass
 
@@ -771,7 +1054,7 @@ class _BrowserLease:
 
         def checkin():
             try:
-                self._owner._send(f"{self._owner._base}/api/v1/lease/checkin", {"lease_id": lease_id})
+                self._owner._send("/api/v1/lease/checkin", {"lease_id": lease_id})
             except Exception:  # noqa: BLE001 — best-effort; the lease TTL reclaims it
                 pass
 
@@ -780,6 +1063,27 @@ class _BrowserLease:
         else:
             # Not a daemon: the interpreter waits for the check-in instead of dropping it at exit.
             threading.Thread(target=checkin, daemon=False).start()
+
+
+class _UncountedLease:
+    """A paid browser started on a cached run-token while the licence server gave no verdict (see
+    _MachineLease._uncounted). It holds no lease: no heartbeat, no check-in, and the next checkout reports
+    it instead. Same surface as _LeaseHandle: ``.token`` and ``.stop()``."""
+
+    refresh_token = None  # nothing to refresh without the licence server
+
+    def __init__(self, owner: "_MachineLease", token: str):
+        self._owner = owner
+        self.token = token
+        self._token_files = _TokenFileSet()
+
+    def bind_launch(self):
+        """Bind a per-launch run-token file holding this launch's token. Returns ``(file_path, release)``."""
+        return self._token_files.bind(self.token)
+
+    def stop(self, wait: bool = False) -> None:
+        self._token_files.close_all()
+        self._owner._forget_browser(self)
 
 
 _MACHINE_LEASES: dict[str, _MachineLease] = {}
@@ -800,10 +1104,12 @@ def acquire_lease(license_key: str | None = None, api_base: str | None = None,
                   engine_version=None, license_through_proxy=None, proxy=None):
     """Acquire a concurrency lease for one launch. Returns None in free mode (no key).
 
-    Machine plans (every paid plan): a per-MACHINE lease, shared across every launch in this
-    process; a handle's stop() only drops a reference. Per-browser plans (the GitHub free tier,
-    told by the backend's lease_scope "browser"): every launch checks out its own slot and stop()
-    releases it, so a second browser is refused while one runs.
+    Machine plans (paid licences with a concurrency cap): a per-MACHINE lease, shared across every
+    launch in this process; a handle's stop() only drops a reference. Per-browser plans (the GitHub
+    free tier, and paid licences without a cap; told by the backend's lease_scope "browser"): every
+    launch checks out its own slot and stop() releases it, so on the free tier a second browser is
+    refused while one runs. A paid per-browser launch the licence server gives no verdict for
+    (unreachable, 5xx, a challenge, RATE_LIMITED) starts uncounted on the grace token instead.
 
     For machine plans: returns the shared handle. The backend is contacted at most once per
     token-TTL (not once per launch); subsequent launches reuse the shared token with
@@ -817,7 +1123,7 @@ def acquire_lease(license_key: str | None = None, api_base: str | None = None,
     if not key:
         return None  # free mode — inert
 
-    base = _api_base(api_base)
+    base, fallback = _lease_bases(api_base)
     wants_proxy = license_through_proxy_requested(license_through_proxy)
     via = to_proxy_spec(proxy) if (wants_proxy and proxy) else None
     if wants_proxy and not via and not quiet:
@@ -832,7 +1138,7 @@ def acquire_lease(license_key: str | None = None, api_base: str | None = None,
         ml = _MACHINE_LEASES.get(map_key)
         if ml is None:
             ml = _MachineLease(key, base, resolve_instance_id(), sdk_version, quiet,
-                               engine_version=engine_version, proxy=via)
+                               engine_version=engine_version, proxy=via, fallback=fallback)
             _MACHINE_LEASES[map_key] = ml
         if not _ATEXIT_REGISTERED:
             atexit.register(_shutdown_all)
@@ -870,9 +1176,19 @@ def get_session_seats(license_key: str | None = None, api_base: str | None = Non
         return {"state": "no-key"}
     try:
         via = to_proxy_spec(proxy) if (license_through_proxy_requested(license_through_proxy) and proxy) else None
-        res = proxied_request(f"{_api_base(api_base)}/api/v1/lease/seats", method="GET",
-                              headers={"authorization": f"Bearer {key}", "User-Agent": _user_agent()},
-                              timeout=15.0, proxy=via)
+
+        def call(base):
+            return proxied_request(f"{base}/api/v1/lease/seats", method="GET",
+                                   headers={"authorization": f"Bearer {key}", "User-Agent": _user_agent()},
+                                   timeout=15.0, proxy=via)
+
+        def unanswered(r):
+            rh = getattr(r, "headers", None) or {}
+            return r.status in _GATEWAY_STATUSES or bool(_challenge_reason(
+                r.status, rh.get("content-type", ""), r.text(), rh.get("x-vercel-mitigated", "")))
+
+        res = _with_fallback(*_lease_bases(api_base), (via["server"], via.get("username")) if via else None,
+                             call, unanswered)
         try:
             body = res.json()
         except ValueError:

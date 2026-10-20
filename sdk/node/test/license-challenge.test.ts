@@ -111,7 +111,7 @@ describe("licence calls answered by a firewall challenge", () => {
 
   it("a challenge on a forced refresh rides on the still-valid cached token", async () => {
     await serve(403, CHECKPOINT, "text/html", { "x-vercel-mitigated": "challenge" });
-    writeCacheFile({ token: "CACHED-TOK", exp: Math.floor(Date.now() / 1000) + 800, lease_id: "Lcache" });
+    writeCacheFile({ token: "CACHED-TOK", exp: Math.floor(Date.now() / 1000) + 800, lease_id: "Lcache", scope: "machine" });
     const lease = (await acquireLease({ quiet: true }))!; // reuses the cache: no call yet
     leases.push(lease);
     expect(lease.token).toBe("CACHED-TOK");

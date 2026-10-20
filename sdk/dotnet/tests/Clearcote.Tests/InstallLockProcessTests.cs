@@ -14,9 +14,14 @@ namespace Clearcote.Tests;
 public class InstallLockProcessTests : IDisposable
 {
     private readonly List<string> _temp = new();
+    // The installers keep the PRO metadata answer in ~/.clearcote: a temp HOME (the children inherit it).
+    private readonly Sandbox _home = new();
+
+    public InstallLockProcessTests() => _home.TempHome();
 
     public void Dispose()
     {
+        _home.Dispose();
         foreach (var dir in _temp) TestTemp.Remove(dir);
     }
 

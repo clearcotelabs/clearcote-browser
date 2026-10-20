@@ -128,7 +128,7 @@ public class LicenseReuseTests
         using var s = new Sandbox().Env("CLEARCOTE_LICENSE_KEY", key)
             .Env("CLEARCOTE_LICENSE_API", "http://test.local").Http(LeaseBackend(eps, bodies));
         var home = s.TempHome();
-        WriteCacheFile(home, key, new { token = "DISK-TOK", exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 800, lease_id = "Ld" });
+        WriteCacheFile(home, key, new { token = "DISK-TOK", exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 800, lease_id = "Ld", scope = "machine" });
         var lease = await License.AcquireLeaseAsync(new LicenseOptions(), "0.17.1", true, () => Engine("150.0.7871.114"));
         Assert.Equal(0, eps.Count(e => e == "checkout"));
         Assert.Equal("DISK-TOK", lease!.Token);
@@ -142,7 +142,8 @@ public class LicenseReuseTests
         using var s = new Sandbox().Env("CLEARCOTE_LICENSE_KEY", key)
             .Env("CLEARCOTE_LICENSE_API", "http://test.local").Http(LeaseBackend(eps, bodies));
         var home = s.TempHome();
-        WriteCacheFile(home, key, new { token = "LEGACY", exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 800 }); // no lease_id
+        // no lease_id (an SDK before 0.17 wrote token+exp only); marked machine, so it may skip the checkout
+        WriteCacheFile(home, key, new { token = "LEGACY", exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 800, scope = "machine" });
         var lease = await License.AcquireLeaseAsync(new LicenseOptions(), "0.17.1", true, () => Engine("150.0.7871.114"));
         Assert.Equal(0, eps.Count(e => e == "checkout"));
         Assert.Equal("LEGACY", lease!.Token);

@@ -90,7 +90,8 @@ public class LicenseTests
     [Fact]
     public async Task ProEnsureBinary_surfaces_auth_failure()
     {
-        using var _ = new Sandbox().Http(FakeHandler.Json(HttpStatusCode.Unauthorized, "{\"error\":\"Invalid license key.\"}"));
+        using var s = new Sandbox().Http(FakeHandler.Json(HttpStatusCode.Unauthorized, "{\"error\":\"Invalid license key.\"}"));
+        s.TempHome();
         var ex = await Assert.ThrowsAsync<Exception>(() => Download.ProEnsureBinaryAsync("cc_lic_bad", new ProDownloadOptions { Quiet = true }));
         Assert.Contains("not authorized (HTTP 401)", ex.Message);
     }
@@ -98,7 +99,8 @@ public class LicenseTests
     [Fact]
     public async Task ProEnsureBinary_throws_when_no_download_url()
     {
-        using var _ = new Sandbox().Http(FakeHandler.Json(HttpStatusCode.OK, "{\"version\":\"149.0.0.0\"}"));
+        using var s = new Sandbox().Http(FakeHandler.Json(HttpStatusCode.OK, "{\"version\":\"149.0.0.0\"}"));
+        s.TempHome();
         var ex = await Assert.ThrowsAsync<Exception>(() => Download.ProEnsureBinaryAsync("cc_lic_ok", new ProDownloadOptions { Quiet = true }));
         Assert.Contains("not currently available", ex.Message);
     }
@@ -107,7 +109,8 @@ public class LicenseTests
     public async Task ProEnsureBinary_calls_authenticated_route_with_bearer()
     {
         var handler = FakeHandler.Json(HttpStatusCode.OK, "{}"); // empty -> throws "no download", but request captured
-        using var _ = new Sandbox().Http(handler);
+        using var s = new Sandbox().Http(handler);
+        s.TempHome();
         await Assert.ThrowsAsync<Exception>(() =>
             Download.ProEnsureBinaryAsync("cc_lic_probe", new ProDownloadOptions { ApiBase = "https://example.test", Quiet = true }));
 

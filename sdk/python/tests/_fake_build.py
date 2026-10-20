@@ -49,6 +49,8 @@ class FakeBuildServer:
         self.code_sha = hashlib.sha256(b"x" * 64).hexdigest()
         self.exe_sha256 = exe_sha256 or self.code_sha
         self.archive_hits = 0
+        self.meta_hits = 0  # requests to the download route
+        self.meta_status = 200  # set to an error status to make the route refuse
         self.meta_seen = threading.Event()
         self._count = threading.Lock()
         self._barrier = threading.Barrier(meta_barrier) if meta_barrier > 1 else None
@@ -60,12 +62,22 @@ class FakeBuildServer:
 
             def do_GET(self):
                 if self.path.startswith("/api/v1/download/pro"):
+                    with server._count:
+                        server.meta_hits += 1
                     server.meta_seen.set()
                     if server._barrier is not None:
                         try:
                             server._barrier.wait(30)
                         except threading.BrokenBarrierError:
                             pass
+                    if server.meta_status != 200:
+                        body = json.dumps({"error": "Licence not active."}).encode()
+                        self.send_response(server.meta_status)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
                     body = json.dumps({"tag": TAG, "version": "0.0.0", "url": f"{server.url}/fake.zip",
                                        "sha256": server.sha, "exe_sha256": server.exe_sha256,
                                        "chrome_dll_sha256": server.code_sha, "asset": "fake.zip",

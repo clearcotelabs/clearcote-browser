@@ -988,7 +988,9 @@ public static class Download
         for (var attempt = 0; attempt < 3; attempt++)
         {
             using var held = await AcquireInstallLockAsync(@base, null, quiet).ConfigureAwait(false);
-            var cached = CachedBinary(@base, rel.Binary, quiet); // holding the lock: may repair
+            // Holding the lock: may repair. With the release's hashes, as the cache check before it had them, so a
+            // tree edited after install is installed again here, not handed back as one "installed meanwhile".
+            var cached = Cached(@base, rel.Binary, quiet, repair: true, integrity: rel);
             if (cached is not null)
             {
                 Log(quiet, $"installed by another process meanwhile: {cached}");
@@ -1194,35 +1196,69 @@ public static class Download
         return u;
     }
 
-    /// Download + verify the PRO (license-gated) browser and return its chrome path. Throws on any
-    /// failure — a licensed caller must get the PRO build, never a silent free fall-back.
-    public static async Task<string> ProEnsureBinaryAsync(string licenseKey, ProDownloadOptions? opts = null)
-    {
-        opts ??= new ProDownloadOptions();
-        var baseUrl = (opts.ApiBase ?? Environment.GetEnvironmentVariable("CLEARCOTE_LICENSE_API") ?? "https://www.clearcotelabs.com").TrimEnd('/');
-        var plat = Release.ProPlatformKey();   // throws on an Intel Mac: the macOS build is Apple Silicon only
-        if (plat is null) throw new Exception("Clearcote PRO ships Windows x64, Linux x64 and macOS arm64 only.");
+    // ── PRO metadata cache ───────────────────────────────────────────────────
+    // The PRO route's answer, reused for 10 minutes (per process, and in ~/.clearcote for other processes) to
+    // START a build that is installed and passes its checks with it. A download always follows a fresh answer:
+    // a cached one's signed url may have expired.
 
-        var channel = ResolveReleaseChannel(opts.ReleaseChannel);
-        using var client = SdkHttp.Create();
-        var proUrl = ProDownloadUrl(baseUrl, plat, opts.Version, channel);
-        var req = new HttpRequestMessage(HttpMethod.Get, proUrl);
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", licenseKey);
-        req.Headers.UserAgent.ParseAdd("clearcote-sdk");
-        using var res = await client.SendAsync(req).ConfigureAwait(false);
-        if (!res.IsSuccessStatusCode)
+    /// How long a PRO metadata answer is reused.
+    internal static readonly TimeSpan ProMetaTtl = TimeSpan.FromSeconds(600);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double At, string Meta)> ProMetaMemo = new();
+
+    /// Forget this process's PRO metadata (tests).
+    internal static void ForgetProMeta() => ProMetaMemo.Clear();
+
+    // One entry per licence key and request url, so licences, platforms, version pins and channels never mix.
+    private static string ProMetaId(string licenseKey, string proUrl) =>
+        Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(licenseKey + "\n" + proUrl))).ToLowerInvariant()[..16];
+
+    private static string ProMetaPath(string id) => Path.Combine(Native.ClearcoteDir, $"pro-meta-{id}.json");
+
+    /// A metadata answer younger than <see cref="ProMetaTtl"/>, or null. An unreadable file is a miss.
+    private static string? RecentProMeta(string id)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        // A time ahead of this clock is no proof of age: a miss.
+        bool Fresh(double at) => now - at >= 0 && now - at < ProMetaTtl.TotalSeconds;
+        if (ProMetaMemo.TryGetValue(id, out var memo) && Fresh(memo.At)) return memo.Meta;
+        try
         {
-            var body = (await res.Content.ReadAsStringAsync().ConfigureAwait(false));
-            if (body.Length > 200) body = body[..200];
-            throw new Exception($"Clearcote PRO download not authorized (HTTP {(int)res.StatusCode}): {body}\n" +
-                                "Check your license key and that your plan is active.");
+            using var doc = JsonDocument.Parse(File.ReadAllText(ProMetaPath(id)));
+            var root = doc.RootElement;
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("at", out var at) && at.ValueKind == JsonValueKind.Number && Fresh(at.GetDouble())
+                && root.TryGetProperty("meta", out var meta) && meta.ValueKind == JsonValueKind.Object)
+            {
+                ProMetaMemo[id] = (at.GetDouble(), meta.GetRawText());
+                return meta.GetRawText();
+            }
         }
-        using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
-        var meta = doc.RootElement;
+        catch { /* missing or unreadable */ }
+        return null;
+    }
+
+    /// Keep a usable metadata answer (<c>{at, meta}</c>, at in epoch seconds as a double, like the other SDKs write
+    /// it). Best-effort: written to a temporary file and renamed into place, so another process never reads half of it.
+    private static void KeepProMeta(string id, string metaJson)
+    {
+        var at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        ProMetaMemo[id] = (at, metaJson);
+        try
+        {
+            Directory.CreateDirectory(Native.ClearcoteDir);
+            var path = ProMetaPath(id);
+            var tmp = $"{path}.tmp-{Convert.ToHexString(RandomNumberGenerator.GetBytes(4)).ToLowerInvariant()}";
+            File.WriteAllText(tmp, $"{{\"at\":{at.ToString("R", System.Globalization.CultureInfo.InvariantCulture)},\"meta\":{metaJson}}}");
+            try { File.Move(tmp, path, overwrite: true); }
+            catch { TryDelete(tmp); }
+        }
+        catch { /* this process still has it */ }
+    }
+
+    /// The release a PRO metadata answer names. Throws when it names no usable download.
+    private static ReleaseInfo ProRelease(JsonElement meta, string plat)
+    {
         string? Get(string k) => meta.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-        var resolvedChannel = Get("resolved_channel");
-        if (channel == ReleaseChannel.Preview && !string.IsNullOrEmpty(resolvedChannel) && resolvedChannel != "preview")
-            Log(opts.Quiet, $"release channel: preview requested, no newer preview for {plat} -> {resolvedChannel} {Get("tag")}".Trim());
         var url = Get("url"); var sha = Get("sha256"); var exeSha = Get("exe_sha256");
         var dllSha = Get("chrome_dll_sha256");
         if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(sha) || string.IsNullOrEmpty(exeSha) ||
@@ -1230,7 +1266,7 @@ public static class Download
             throw new Exception($"Clearcote PRO build is not currently available for {plat} (the server returned no download).");
 
         var version = Get("version") ?? "";
-        var rel = new ReleaseInfo
+        return new ReleaseInfo
         {
             Tag = Get("tag") ?? $"pro-{version}",
             Version = version,
@@ -1246,8 +1282,66 @@ public static class Download
             AssetGlob = $"{plat}-{(plat == "macos" ? "arm64" : "x64")}",
             Unpinned = false, // pinned -> sha256-only verify (no GPG), like the free pin
         };
+    }
 
-        var @base = Path.Combine(opts.CacheDir ?? Native.CacheRoot(), rel.Tag);
+    private static void LogResolvedChannel(JsonElement meta, ReleaseChannel channel, string plat, bool quiet)
+    {
+        string? Get(string k) => meta.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        var resolvedChannel = Get("resolved_channel");
+        if (channel == ReleaseChannel.Preview && !string.IsNullOrEmpty(resolvedChannel) && resolvedChannel != "preview")
+            Log(quiet, $"release channel: preview requested, no newer preview for {plat} -> {resolvedChannel} {Get("tag")}".Trim());
+    }
+
+    /// Download + verify the PRO (license-gated) browser and return its chrome path. Throws on any
+    /// failure — a licensed caller must get the PRO build, never a silent free fall-back.
+    public static async Task<string> ProEnsureBinaryAsync(string licenseKey, ProDownloadOptions? opts = null)
+    {
+        opts ??= new ProDownloadOptions();
+        var baseUrl = (opts.ApiBase ?? Environment.GetEnvironmentVariable("CLEARCOTE_LICENSE_API") ?? "https://www.clearcotelabs.com").TrimEnd('/');
+        var plat = Release.ProPlatformKey();   // throws on an Intel Mac: the macOS build is Apple Silicon only
+        if (plat is null) throw new Exception("Clearcote PRO ships Windows x64, Linux x64 and macOS arm64 only.");
+
+        var channel = ResolveReleaseChannel(opts.ReleaseChannel);
+        var cacheRoot = opts.CacheDir ?? Native.CacheRoot();
+        var proUrl = ProDownloadUrl(baseUrl, plat, opts.Version, channel);
+        var metaId = ProMetaId(licenseKey, proUrl);
+        // A recent answer saves the request when the build it names is installed and passes the cached-build
+        // check with it, protected-code hashes included.
+        if (RecentProMeta(metaId) is { } recent)
+        {
+            try
+            {
+                using var recentDoc = JsonDocument.Parse(recent);
+                var recentRel = ProRelease(recentDoc.RootElement, plat);
+                var hit = Cached(Path.Combine(cacheRoot, recentRel.Tag), recentRel.Binary, opts.Quiet, repair: false, integrity: recentRel);
+                if (hit is not null)
+                {
+                    LogResolvedChannel(recentDoc.RootElement, channel, plat, opts.Quiet);
+                    return hit;
+                }
+            }
+            catch { /* unusable: ask the server */ }
+        }
+
+        using var client = SdkHttp.Create();
+        var req = new HttpRequestMessage(HttpMethod.Get, proUrl);
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", licenseKey);
+        req.Headers.UserAgent.ParseAdd("clearcote-sdk");
+        using var res = await client.SendAsync(req).ConfigureAwait(false);
+        if (!res.IsSuccessStatusCode)
+        {
+            var body = (await res.Content.ReadAsStringAsync().ConfigureAwait(false));
+            if (body.Length > 200) body = body[..200];
+            throw new Exception($"Clearcote PRO download not authorized (HTTP {(int)res.StatusCode}): {body}\n" +
+                                "Check your license key and that your plan is active.");
+        }
+        using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
+        var meta = doc.RootElement;
+        LogResolvedChannel(meta, channel, plat, opts.Quiet);
+        var rel = ProRelease(meta, plat);
+        KeepProMeta(metaId, meta.GetRawText()); // only an answer that names a usable build
+
+        var @base = Path.Combine(cacheRoot, rel.Tag);
         {
             var cached = Cached(@base, rel.Binary, opts.Quiet, repair: false, integrity: rel);
             if (cached is not null) return cached;

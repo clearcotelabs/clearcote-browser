@@ -298,7 +298,8 @@ describe("paid plans: the machine-shared lease is unchanged", () => {
   it("a still-valid cached PAID token is reused with zero backend calls (cross-process reuse)", async () => {
     const key = isolate("pro");
     mkdirSync(join(process.env.HOME!, ".clearcote"), { recursive: true });
-    writeFileSync(cacheFile(key), JSON.stringify({ token: tokenFor("pro", 5), exp: Math.floor(Date.now() / 1000) + 800, lease_id: "Lx" }));
+    // marked as a machine lease, as this SDK writes it (an older SDK's unmarked file is checked out past)
+    writeFileSync(cacheFile(key), JSON.stringify({ token: tokenFor("pro", 5), exp: Math.floor(Date.now() / 1000) + 800, lease_id: "Lx", scope: "machine" }));
     const be = backend("pro");
     const h = await acquireLease({ quiet: true });
     expect(h!.token).toBe(tokenFor("pro", 5));
@@ -315,12 +316,13 @@ describe("paid plans: the machine-shared lease is unchanged", () => {
     expect(h!.token).toBe(tokenFor("pro", 6));
   });
 
-  it("paid checkout bodies carry a launch_id the backend ignores; nothing else changed", async () => {
+  it("paid checkout bodies carry a launch_id the backend ignores and offer the browser scope; nothing else changed", async () => {
     isolate("pro");
     const be = backend("pro", { limit: 5 });
     await acquireLease({ quiet: true, sdkVersion: "9.9.9" });
     const body = be.checkouts()[0].body;
-    expect(Object.keys(body).sort()).toEqual(["engine_version", "instance_id", "launch_id", "os", "sdk_version"].filter((k) => k !== "engine_version" || "engine_version" in body).sort());
+    expect(Object.keys(body).sort()).toEqual(["engine_version", "instance_id", "launch_id", "lease_scope_supported", "os", "sdk_version"].filter((k) => k !== "engine_version" || "engine_version" in body).sort());
+    expect(body.lease_scope_supported).toEqual(["browser"]);
     expect(body.sdk_version).toBe("9.9.9");
   });
 });

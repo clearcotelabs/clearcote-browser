@@ -69,9 +69,11 @@ var browser = await Clearcote.Clearcote.LaunchAsync(new LaunchOptions
 
 Binary resolution order: **`ExecutablePath` → `CLEARCOTE_BINARY` env → PRO (when licensed) → free**. A
 revoked/expired key throws (`ConcurrencyLimitError` / `LicenseRevokedError` / `LicenseError`) — it never
-silently downgrades to the free binary. A background heartbeat keeps the slot alive and rotates the token;
-the slot is released when the browser closes. Override the backend with `LicenseApiBase` or
-`CLEARCOTE_LICENSE_API`.
+silently downgrades to the free binary. Each browser checks out its own slot from the licence lease server
+(`lease.clearcotelabs.com`, with `www.clearcotelabs.com` as its fallback); a background heartbeat keeps it
+alive and rotates the token, and the slot is released when the browser closes. A paid licence still launches
+on its last run-token while the lease server cannot be reached. Override the backend with `LicenseApiBase` or
+`CLEARCOTE_LICENSE_API` (every licence call), or only the lease calls with `CLEARCOTE_LEASE_API`.
 
 ## Persistent profile
 
@@ -388,7 +390,7 @@ Precedence, first match wins:
 
 ## Environment variables
 
-`CLEARCOTE_LICENSE_KEY`, `CLEARCOTE_LICENSE_API`, `CLEARCOTE_INSTANCE_ID`, `CLEARCOTE_BINARY`,
+`CLEARCOTE_LICENSE_KEY`, `CLEARCOTE_LICENSE_API`, `CLEARCOTE_LEASE_API`, `CLEARCOTE_INSTANCE_ID`, `CLEARCOTE_BINARY`,
 `CLEARCOTE_CACHE`, `CLEARCOTE_AUTO_UPDATE`, `CLEARCOTE_STOCK_RUNTIME`, `CLEARCOTE_PERSONA_ENV`,
 `CLEARCOTE_FONT_DIRS`, `CLEARCOTE_FALLBACK_FONT_DIRS`, `CLEARCOTE_GEOIP_TIMEOUT_SECONDS`, `CLEARCOTE_GEOIP_ECHO_URL`,
 `CLEARCOTE_GEOIP_IPAPI`, `CLEARCOTE_NO_WARN`, `CLEARCOTE_WIDEVINE`, `CLEARCOTE_WIDEVINE_DIR`,

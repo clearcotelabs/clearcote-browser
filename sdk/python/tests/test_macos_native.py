@@ -104,6 +104,9 @@ def test_intel_mac_is_told_the_build_is_apple_silicon_only(monkeypatch):
 
 def test_pro_download_asks_for_macos_and_expects_the_bundle(monkeypatch, tmp_path):
     _on(monkeypatch, "darwin", "arm64")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # the download answer is kept in ~/.clearcote
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setattr(dl, "_pro_meta_memo", {})
     seen = {}
     meta = {"version": "155.0.8059.39", "tag": "pro-155.0.8059.39-r42", "platform": "macos",
             "asset": "clearcote-pro-155.0.8059.39-macos-arm64.zip", "archive": "zip",

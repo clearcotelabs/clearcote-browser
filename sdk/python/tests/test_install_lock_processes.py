@@ -26,8 +26,10 @@ print(json.dumps({"path": pro_ensure_binary("test-key", api_base=sys.argv[1], ca
 
 
 def _start(api, cache):
+    home = os.path.join(os.path.dirname(cache), "home")  # pro_ensure_binary keeps the download answer in ~/.clearcote
     return subprocess.Popen([sys.executable, "-c", CHILD, api, cache],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env={**os.environ, "HOME": home, "USERPROFILE": home})
 
 
 def _finish(child):

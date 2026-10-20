@@ -99,10 +99,14 @@ public class LicensePerBrowserTests
         return Path.Combine(home, ".clearcote", $"lease-{id}.json");
     }
 
-    private static void WriteCache(string home, string key, string token)
+    // scope "machine": the file a 0.55+ SDK writes for a confirmed machine lease; without it, an older SDK's file.
+    private static void WriteCache(string home, string key, string token, bool machine = false)
     {
         Directory.CreateDirectory(Path.Combine(home, ".clearcote"));
-        File.WriteAllText(CacheFile(home, key), JsonSerializer.Serialize(new { token, exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 800, lease_id = "OLD" }));
+        var exp = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 800;
+        File.WriteAllText(CacheFile(home, key), machine
+            ? JsonSerializer.Serialize(new { token, exp, lease_id = "OLD", scope = "machine" })
+            : JsonSerializer.Serialize(new { token, exp, lease_id = "OLD" }));
     }
 
     private static async Task<bool> WaitUntil(Func<bool> pred, int ms = 5000)
@@ -391,13 +395,14 @@ public class LicensePerBrowserTests
             var h = await Acquire();
             using var doc = JsonDocument.Parse(File.ReadAllText(CacheFile(home, key)));
             Assert.Equal(h!.Token, doc.RootElement.GetProperty("token").GetString());
+            Assert.Equal("machine", doc.RootElement.GetProperty("scope").GetString());
         }
 
         var be2 = new Backend("pro");
         var (s2, home2, key2) = Setup(be2);
         using (s2)
         {
-            WriteCache(home2, key2, Backend.Tok("pro", 5));
+            WriteCache(home2, key2, Backend.Tok("pro", 5), machine: true);
             var h2 = await Acquire();
             Assert.Equal(Backend.Tok("pro", 5), h2!.Token);
             Assert.Empty(be2.Calls);
@@ -405,7 +410,7 @@ public class LicensePerBrowserTests
     }
 
     [Fact]
-    public async Task Paid_checkout_body_only_adds_launch_id()
+    public async Task Paid_checkout_body_only_adds_launch_id_and_the_browser_scope()
     {
         var be = new Backend("pro", limit: 5);
         var (s, _, _) = Setup(be);
@@ -414,7 +419,8 @@ public class LicensePerBrowserTests
             await Acquire();
             var body = be.Bodies("checkout").Single();
             var keys = body.EnumerateObject().Select(p => p.Name).OrderBy(n => n).ToArray();
-            Assert.Equal(new[] { "engine_version", "instance_id", "launch_id", "os", "sdk_version" }, keys);
+            Assert.Equal(new[] { "engine_version", "instance_id", "launch_id", "lease_scope_supported", "os", "sdk_version" }, keys);
+            Assert.Equal(new[] { "browser" }, body.GetProperty("lease_scope_supported").EnumerateArray().Select(e => e.GetString()));
         }
     }
 

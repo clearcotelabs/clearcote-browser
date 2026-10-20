@@ -29,6 +29,14 @@ BINARY = "chrome.exe" if sys.platform == "win32" else "chrome"
 needs_pro_platform = pytest.mark.skipif(sys.platform == "darwin", reason="the PRO route serves Windows and Linux")
 
 
+@pytest.fixture(autouse=True)
+def _own_home(monkeypatch, tmp_path):
+    """pro_ensure_binary keeps the download answer in ~/.clearcote: a temp home, and a clean in-process copy."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setattr(download, "_pro_meta_memo", {})
+
+
 def _archive():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:  # every file a healthy install must have (download.CRITICAL_FILES)

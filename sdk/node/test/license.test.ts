@@ -2,7 +2,7 @@
 // site's authenticated route; with no key it is fully inert (free binary from GitHub, no backend
 // call). These tests are hermetic — the only network is a mocked `fetch`.
 
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveLicenseKey, resolveInstanceId } from "../src/license.js";
@@ -89,8 +89,19 @@ describe("executablePath precedence (an explicit binary always wins over pro/fre
 
 describe("proEnsureBinary (license-gated download)", () => {
   const realFetch = globalThis.fetch;
+  const OLD = { home: process.env.HOME, profile: process.env.USERPROFILE };
+  beforeEach(() => {
+    // the download route's answer is kept in ~/.clearcote: never this machine's
+    const home = tempDir("cc-home-");
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+  });
   afterEach(() => {
     globalThis.fetch = realFetch;
+    for (const [k, v] of [["HOME", OLD.home], ["USERPROFILE", OLD.profile]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   });
 
   it("surfaces an auth failure instead of silently falling back to the free binary", async () => {

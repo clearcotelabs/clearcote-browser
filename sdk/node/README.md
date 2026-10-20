@@ -802,14 +802,17 @@ When a key is present the SDK:
 
 1. **downloads the PRO binary** via the site's authenticated `GET /api/v1/download/pro` route
    (short-lived signed URL), verified against its SHA-256 exactly like the free pin, then cached;
-2. **checks out one concurrency slot** — a background heartbeat keeps it alive and rotates a
-   short-lived run-token, and the slot is released when the browser closes.
+2. **checks out one concurrency slot for each browser** from the licence lease server
+   (`lease.clearcotelabs.com`, with `www.clearcotelabs.com` as its fallback) — a background heartbeat
+   keeps it alive and rotates the run-token, and the slot is released when the browser closes. A
+   paid licence still launches on its last run-token while the lease server cannot be reached.
 
 The PRO engine refuses to launch without a valid run-token, so a copied binary alone won't run.
 Resolution order for the binary is **`executablePath` → `CLEARCOTE_BINARY` → PRO (licensed) →
 free** — an explicit binary always wins. A revoked/expired key raises (`ConcurrencyLimitError` /
 `LicenseRevokedError` / `LicenseError`); it never silently downgrades to the free binary. Override
-the backend with `licenseApiBase` or `CLEARCOTE_LICENSE_API`.
+the backend with `licenseApiBase` or `CLEARCOTE_LICENSE_API` (every licence call), or only the lease
+calls with `CLEARCOTE_LEASE_API`.
 
 ## License
 

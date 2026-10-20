@@ -59,7 +59,7 @@ function setMark(home: string, iat: number): void {
 function cacheToken(home: string, iat: number, leaseId: string | null = "L1"): void {
   const id = createHash("sha256").update(process.env.CLEARCOTE_LICENSE_KEY!).digest("hex").slice(0, 16);
   mkdirSync(join(home, ".clearcote"), { recursive: true });
-  writeFileSync(join(home, ".clearcote", `lease-${id}.json`), JSON.stringify({ token: tok(iat), exp: Math.floor(Date.now() / 1000) + 3600, lease_id: leaseId }));
+  writeFileSync(join(home, ".clearcote", `lease-${id}.json`), JSON.stringify({ token: tok(iat), exp: Math.floor(Date.now() / 1000) + 3600, lease_id: leaseId, scope: "machine" }));
 }
 
 type Answer = [status: number, body: unknown];

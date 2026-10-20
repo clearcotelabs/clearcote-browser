@@ -20,6 +20,7 @@ import contextlib
 import hashlib
 import json
 import os
+import pathlib
 import re
 import shutil
 import socket
@@ -1356,6 +1357,85 @@ def list_cached_builds(cache_dir=None):
     return [{"tag": name, "path": exe} for _m, name, exe in out]
 
 
+# How long (seconds) a PRO download answer is reused, by this process and others on the machine, for the
+# build it names while that build is installed and passes its check: one request less per launch.
+_PRO_META_TTL = 600
+_pro_meta_memo = {}  # cache key -> {"at": epoch seconds, "meta": the parsed answer}
+
+
+def _pro_meta_key(license_key, url):
+    """Keeps licences, platforms, version pins and channels apart: the key and the full request URL."""
+    return hashlib.sha256(f"{license_key}\n{url}".encode("utf-8")).hexdigest()[:16]
+
+
+def _pro_meta_path(cache_key):
+    return os.path.join(str(pathlib.Path.home()), ".clearcote", f"pro-meta-{cache_key}.json")
+
+
+def _fresh_pro_meta(entry):
+    """The answer in a ``{at, meta}`` entry younger than _PRO_META_TTL, else None (an unreadable entry too)."""
+    try:
+        age = time.time() - float(entry["at"])
+        meta = entry["meta"]
+    except (TypeError, KeyError, ValueError):
+        return None
+    return meta if isinstance(meta, dict) and 0 <= age < _PRO_META_TTL else None
+
+
+def _kept_pro_meta(cache_key):
+    """The PRO download answer an earlier call kept for this key + request (this process first, then the
+    file another process may have written), or None."""
+    meta = _fresh_pro_meta(_pro_meta_memo.get(cache_key))
+    if meta is not None:
+        return meta
+    try:
+        with open(_pro_meta_path(cache_key), encoding="utf-8") as f:
+            return _fresh_pro_meta(json.load(f))
+    except (OSError, ValueError):
+        return None  # missing or corrupt: a miss
+
+
+def _keep_pro_meta(cache_key, meta):
+    entry = {"at": time.time(), "meta": meta}
+    _pro_meta_memo[cache_key] = entry
+    try:
+        path = _pro_meta_path(cache_key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(entry, f)
+    except OSError:
+        pass  # this process still has it
+
+
+def _pro_release(meta, plat):
+    """The release record for a PRO download answer; raises when the answer names no usable build."""
+    if (not meta.get("url") or not meta.get("sha256") or not meta.get("exe_sha256")
+            or (plat == "windows" and not meta.get("chrome_dll_sha256"))):
+        raise RuntimeError(
+            f"Clearcote PRO build is not currently available for {plat} "
+            "(the server returned no download).")
+    return {
+        "tag": meta.get("tag") or f"pro-{meta.get('version', '')}",
+        "version": meta.get("version", ""),
+        "url": meta["url"],
+        "sha256": meta["sha256"],
+        "exe_sha256": meta.get("exe_sha256"),
+        "chrome_dll_sha256": meta.get("chrome_dll_sha256"),
+        "asset": meta["asset"],
+        "archive": meta.get("archive"),
+        "binary": meta.get("binary") or {"windows": "chrome.exe", "macos": "Chromium"}.get(plat, "chrome"),
+        "size": meta.get("size"),
+        "unpinned": False,  # pinned -> sha256-only verify (no GPG), like the free pin
+    }
+
+
+def _log_resolved_channel(meta, channel, plat, quiet):
+    resolved = meta.get("resolved_channel")
+    if channel == "preview" and resolved and resolved != "preview":
+        _log(quiet, f"release channel: preview requested, no newer preview for {plat} -> "
+                    f"{resolved} {meta.get('tag') or ''}".strip())
+
+
 def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, version=None,
                       release_channel=None):
     """Download + verify the PRO (license-gated) browser and return its chrome path.
@@ -1365,6 +1445,10 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     URL + sha256, then reuses the SAME verify+extract path as the free binary
     (``_fetch_and_verify``, sha256-only — no GPG). Cached per PRO tag. Raises on any
     failure — a licensed caller must get the PRO build, never a silent free fall-back.
+
+    The answer is kept for _PRO_META_TTL seconds (in this process and in
+    ``~/.clearcote/pro-meta-<hash>.json``) and reused only while the build it names is installed and
+    passes the same check as below, protected-code hashes included. A download always asks again.
 
     ``release_channel="preview"`` (or CLEARCOTE_RELEASE_CHANNEL=preview) gets the newest build for
     this platform, preview or stable. An exact version pin overrides the channel.
@@ -1379,6 +1463,22 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
 
     channel = resolve_release_channel(release_channel)
     url = pro_download_url(base_url, plat, version, channel)
+    root = cache_dir or _cache_root()
+    meta_key = _pro_meta_key(license_key, url)
+    meta = _kept_pro_meta(meta_key)
+    if meta is not None:
+        # Never used to download (its signed URL may have expired): only for a build already installed.
+        try:
+            rel = _pro_release(meta, plat)
+        except (RuntimeError, KeyError, TypeError):
+            rel = None
+        if rel:
+            cached = _cached(os.path.join(root, rel["tag"]), rel["binary"], quiet, repair=False,
+                             integrity=_launch_integrity(rel))
+            if cached:
+                _log_resolved_channel(meta, channel, plat, quiet)
+                return cached
+
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {license_key}", "User-Agent": "clearcote-sdk"})
     try:
@@ -1390,30 +1490,10 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
             f"Clearcote PRO download not authorized (HTTP {e.code}): {body}\n"
             "Check your license key and that your plan is active.") from None
 
-    resolved = meta.get("resolved_channel")
-    if channel == "preview" and resolved and resolved != "preview":
-        _log(quiet, f"release channel: preview requested, no newer preview for {plat} -> "
-                    f"{resolved} {meta.get('tag') or ''}".strip())
-    if (not meta.get("url") or not meta.get("sha256") or not meta.get("exe_sha256")
-            or (plat == "windows" and not meta.get("chrome_dll_sha256"))):
-        raise RuntimeError(
-            f"Clearcote PRO build is not currently available for {plat} "
-            "(the server returned no download).")
-
-    rel = {
-        "tag": meta.get("tag") or f"pro-{meta.get('version', '')}",
-        "version": meta.get("version", ""),
-        "url": meta["url"],
-        "sha256": meta["sha256"],
-        "exe_sha256": meta.get("exe_sha256"),
-        "chrome_dll_sha256": meta.get("chrome_dll_sha256"),
-        "asset": meta["asset"],
-        "archive": meta.get("archive"),
-        "binary": meta.get("binary") or {"windows": "chrome.exe", "macos": "Chromium"}.get(plat, "chrome"),
-        "size": meta.get("size"),
-        "unpinned": False,  # pinned -> sha256-only verify (no GPG), like the free pin
-    }
-    dst = os.path.join(cache_dir or _cache_root(), rel["tag"])
+    _log_resolved_channel(meta, channel, plat, quiet)
+    rel = _pro_release(meta, plat)
+    _keep_pro_meta(meta_key, meta)
+    dst = os.path.join(root, rel["tag"])
     cached = _cached(dst, rel["binary"], quiet, repair=False, integrity=_launch_integrity(rel))
     if cached:
         return cached

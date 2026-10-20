@@ -44,6 +44,10 @@ internal sealed class FakeBuildServer : LocalServer
     public string Url => $"http://127.0.0.1:{Port}";
     /// Archive downloads served so far.
     public int ArchiveHits => Volatile.Read(ref _archiveHits);
+    /// Requests to the download route so far.
+    public int MetaHits => Volatile.Read(ref _asked);
+    /// The download route's status: anything but 200 answers a JSON error instead of the metadata.
+    public int MetaStatus { get; set; } = 200;
     /// Completes on the first request to the download route.
     public TaskCompletionSource MetaSeen { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -87,6 +91,14 @@ internal sealed class FakeBuildServer : LocalServer
             MetaSeen.TrySetResult();
             if (Interlocked.Increment(ref _asked) >= _metaBarrier) _allAsked.TrySetResult();
             await Task.WhenAny(_allAsked.Task, Task.Delay(30_000, ct));
+            if (MetaStatus != 200)
+            {
+                var err = Encoding.UTF8.GetBytes("{\"error\":\"unavailable\"}");
+                await s.WriteAsync(Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 {MetaStatus} X\r\nContent-Type: application/json\r\nContent-Length: {err.Length}\r\nConnection: close\r\n\r\n"), ct);
+                await s.WriteAsync(err, ct);
+                return;
+            }
             body = JsonSerializer.SerializeToUtf8Bytes(new
             {
                 tag = Tag, version = "0.0.0", url = $"{Url}/fake.zip", sha256 = Sha, exe_sha256 = _exeSha,

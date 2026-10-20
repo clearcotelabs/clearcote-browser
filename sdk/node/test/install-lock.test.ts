@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { INSTALL_LOCK, acquireInstallLock, installLockTiming, installTestHooks, proEnsureBinary } from "../src/download.js";
 import { BINARY, TAG, startFakeBuild, verifiedTree } from "./helpers/fake-build.js";
 import { tempDir } from "./helpers/temp.js";
@@ -35,6 +35,21 @@ function startMarker(): string | null {
 
 const lockPath = (base: string) => path.join(base, INSTALL_LOCK);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// proEnsureBinary keeps the download route's answer in ~/.clearcote: a temp HOME keeps this machine's out of
+// it (the install children inherit it).
+const savedHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+beforeAll(() => {
+  const home = tempDir("cc-lock-home-");
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+});
+afterAll(() => {
+  for (const [k, v] of Object.entries(savedHome)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+});
 
 const timing = { ...installLockTiming };
 afterEach(() => {

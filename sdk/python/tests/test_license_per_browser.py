@@ -107,10 +107,14 @@ def env(monkeypatch, tmp_path):
     L._MACHINE_LEASES.clear()
 
 
-def write_cache(key, token, exp_in=800):
+def write_cache(key, token, exp_in=800, scope=None):
+    """The shared cache as an older SDK wrote it, or (scope="machine") as this one does for a machine lease."""
     p = L._cache_path(key)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"token": token, "exp": time.time() + exp_in, "lease_id": "OLD"}))
+    d = {"token": token, "exp": time.time() + exp_in, "lease_id": "OLD"}
+    if scope:
+        d["scope"] = scope
+    p.write_text(json.dumps(d))
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -326,7 +330,7 @@ def test_paid_token_written_to_and_reused_from_cache(env):
 
 def test_paid_cached_token_reused_with_zero_calls(env):
     key, be = env("pro")
-    write_cache(key, tok("pro", 5))
+    write_cache(key, tok("pro", 5), scope="machine")
     h = L.acquire_lease(quiet=True)
     assert h.token == tok("pro", 5)
     assert be.calls == []
@@ -348,12 +352,13 @@ def test_paid_offline_grace_still_works(env, monkeypatch):
     assert h.token == tok("pro", 6)
 
 
-def test_paid_checkout_body_only_adds_launch_id(env):
+def test_paid_checkout_body_adds_launch_id_and_offers_browser_scope(env):
     _, be = env("pro", limit=5)
     L.acquire_lease(quiet=True, sdk_version="9.9.9")
     body = be.eps("checkout")[0]
-    assert set(body) == {"instance_id", "launch_id", "os", "sdk_version", "engine_version"}
+    assert set(body) == {"instance_id", "launch_id", "os", "sdk_version", "engine_version", "lease_scope_supported"}
     assert body["sdk_version"] == "9.9.9"
+    assert body["lease_scope_supported"] == ["browser"]
 
 
 # ── run-token file (engine online-enforcement opt-in) ──────────────────────

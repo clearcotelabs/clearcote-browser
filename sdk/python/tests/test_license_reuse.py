@@ -101,14 +101,23 @@ def test_cross_process_disk_reuse_zero_checkout(monkeypatch):
 
 
 def test_legacy_cache_without_lease_id(monkeypatch):
-    """Backwards compat: a cache written by an older SDK (no lease_id) is reused."""
+    """Backwards compat: a cache written by an older SDK (no lease_id, no scope) is still the offline
+    fallback. With the server reachable it is no reason to skip the checkout: the licence may now count
+    every browser, which only a checkout can tell."""
     _env(monkeypatch); _reset()
     p = L._cache_path(KEY); p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"token": "OLDFMT", "exp": time.time() + 800}))  # legacy shape
+
+    def neterr(url, k, b, timeout=15.0):
+        raise OSError("net down")
+
+    monkeypatch.setattr(L, "_post", neterr)
+    assert L.acquire_lease().token == "OLDFMT"
+    _reset()
+    p.write_text(json.dumps({"token": "OLDFMT", "exp": time.time() + 800}))
     calls, ok = _counter(); monkeypatch.setattr(L, "_post", ok)
     h = L.acquire_lease()
-    assert calls.count("checkout") == 0
-    assert h.token == "OLDFMT"
+    assert calls.count("checkout") == 1 and h.token.startswith("TOK-")
     _reset()
 
 
