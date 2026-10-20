@@ -325,7 +325,20 @@ def _write_grace(license_key: str, token, exp) -> None:
             if kept_iat is not None and (new_iat is None or new_iat < kept_iat):
                 return
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({"token": token, "exp": exp}))
+            # Written whole, then renamed into place: another process (or this one's next launch) reading the file
+            # while a heartbeat replaces it must see the old token or the new one, never an empty file.
+            tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                tmp.write_text(json.dumps({"token": token, "exp": exp}))
+                for _ in range(10):
+                    try:
+                        os.replace(tmp, p)
+                        break
+                    except PermissionError:  # Windows: a reader has the file open for a moment
+                        time.sleep(0.02)
+            finally:
+                if tmp.exists():
+                    tmp.unlink()
         except OSError:
             pass
 

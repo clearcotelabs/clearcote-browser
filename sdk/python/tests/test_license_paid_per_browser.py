@@ -621,6 +621,35 @@ def test_grace_file_is_not_replaced_by_an_older_token(env):
     assert read_grace(key)["token"] == tok("pro", 4, 3000)
 
 
+def test_a_reader_never_sees_a_half_written_grace_file(env):
+    """Heartbeats replace the grace file while other launches (and other processes) read it: a reader must see
+    the old token or the new one, never an empty or partial file."""
+    key, _server = env("pro")
+    exp = time.time() + 3600
+    L._write_grace(key, tok("pro", 0, 1000), exp)
+    stop = threading.Event()
+    torn = []
+
+    def writer():
+        for i in range(1, 400):
+            L._write_grace(key, tok("pro", i, 1000 + i), exp)
+        stop.set()
+
+    t = threading.Thread(target=writer)
+    t.start()
+    while not stop.is_set():
+        try:
+            json.loads(grace_path(key).read_text())
+        except ValueError:
+            torn.append(1)
+        except PermissionError:
+            pass  # Windows: the rename and the read crossed; a real reader treats it as a miss and retries
+    t.join()
+    assert torn == []
+    assert read_grace(key)["token"] == tok("pro", 399, 1399)
+    assert [f.name for f in grace_path(key).parent.iterdir() if f.name.endswith(".tmp")] == []
+
+
 def test_a_browser_lease_never_rolls_the_grace_token_back(env):
     key, server = env("pro")
     write_grace(key, tok("pro", 99, 10**10))          # another process got a newer one
