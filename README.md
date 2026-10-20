@@ -404,8 +404,10 @@ A replaced function can be told apart from a native one, for example:
 In Clearcote the getter behind `navigator.vendor` is the C++ getter, so it is native code in every frame
 and worker. There is no replacement to find.
 
-**One seed, one coherent machine.** A `fingerprint` seed sets canvas, WebGL, WebGPU, audio, fonts,
-screen, hardware, locale and timezone together, so the values agree with each other. Because the page's
+**One seed, one coherent machine.** A `fingerprint` seed sets the hardware, screen and GPU together,
+plus per-site canvas and WebGL noise, so the values agree with each other. Fonts, languages, timezone and
+audio do not come from the seed: fonts are the platform's common fonts, languages and timezone come from
+your options or `geoip`, and audio samples are left as Chromium computes them. Because the page's
 JavaScript and the network stack come from one real Chromium, the user agent, client-hint headers, TLS
 handshake and HTTP/2 settings agree too.
 
@@ -413,14 +415,15 @@ handshake and HTTP/2 settings agree too.
 
 - **Identity:** user agent and client hints (brand, platform, version, architecture), the same in JavaScript and in `Sec-CH-UA` headers.
 - **GPU:** WebGL vendor, renderer, `getParameter` limits and extensions, plus WebGPU limits that match the same GPU.
-- **Rendering:** per-site canvas, WebGL and audio noise from the seed, or switched off; an optional [real-GPU canvas bridge](docs/CANVAS-BRIDGE.md).
+- **Rendering:** per-site canvas and WebGL noise from the seed, or switched off; an optional [real-GPU canvas bridge](docs/CANVAS-BRIDGE.md).
+- **Audio:** `AudioContext` reports the persona's sample rate and latency instead of the host's. Audio samples (`getChannelData`, `copyFromChannel`, offline rendering) get no noise and are the same on every seed: they match stock Chrome on the same machine, and noise would give values no real Chrome produces.
 - **Fonts:** the persona's operating-system fonts with the right widths, including on a Linux server.
 - **Hardware and screen:** cores, memory, storage quota, screen size, colour depth, pixel ratio, `getScreenDetails()`, touch points.
 - **Locale and network:** timezone, languages, `Accept-Language`, `Intl` locale, geolocation, and a TLS and HTTP/2 shape that matches the claimed Chrome version. The licensed build also reports a coherent WebRTC IP.
 - **Long tail:** speech voices, media codecs, media devices, CSS media queries, battery, network information, keyboard layout.
 - **Input:** human-like, trusted mouse and keyboard input that keeps `navigator.webdriver` `false` (synthetic paths in the open build, recorded human paths in the licensed build).
 
-Each patch and what it changes: [docs/PATCHES.md](docs/PATCHES.md) · the release gate that checks them: [docs/STEALTH-COHERENCE.md](docs/STEALTH-COHERENCE.md).
+The patches that ship: [patches/](patches/) · the design plan they were built from, which also lists surfaces that were never built: [docs/PATCHES.md](docs/PATCHES.md) · the release gate that checks them: [docs/STEALTH-COHERENCE.md](docs/STEALTH-COHERENCE.md).
 
 ---
 
