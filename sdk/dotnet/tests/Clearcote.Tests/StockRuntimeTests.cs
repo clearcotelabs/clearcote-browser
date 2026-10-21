@@ -235,7 +235,7 @@ public class StockRuntimeTests : IDisposable
         await Clearcote.LaunchPersistentContextAsync(new LaunchOptions { Cloud = true, Profile = "acct-1", StockRuntime = true });
         var bodies = api.Requests("POST", "/api/v1/browsers").Select(r => (JsonObject)r.Body!).ToList();
         Assert.Equal(2, bodies.Count);
-        Assert.Equal(new[] { "country" }, bodies[0].Select(p => p.Key).ToArray());   // nothing about it reaches the API
+        Assert.Equal(new[] { "country", "humanize" }, bodies[0].Select(p => p.Key).ToArray());   // nothing about it reaches the API (humanize: false, the SDK humanizes)
         Assert.DoesNotContain(bodies.SelectMany(b => b.Select(p => p.Key)), k => k.Contains("runtime", StringComparison.OrdinalIgnoreCase));
         Assert.Equal(1, Said(CloudOnlyLocal));
         Assert.StartsWith("clearcote: warning: StockRuntime", Line(CloudOnlyLocal));

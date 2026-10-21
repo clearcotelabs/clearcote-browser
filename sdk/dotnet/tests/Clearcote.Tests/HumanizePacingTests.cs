@@ -89,7 +89,7 @@ public class HumanizePacingTests
             var (lo, hi, ownGap) = PlannedRange(persona, new Point(fx, fy), new Point(tx, ty), 24, settle);
             int n0 = m.Log.Count;
             var sw = Stopwatch.StartNew();
-            await (Task)Glide.Invoke(null, new object?[] { page, persona, State(fx, fy), tx, ty, 24.0, settle })!;
+            await (Task)Glide.Invoke(null, new object?[] { page, persona, State(fx, fy), tx, ty, 24.0, settle, false })!;
             double took = sw.Elapsed.TotalMilliseconds;
             Assert.True(took >= 0.8 * lo && took <= 1.2 * hi,
                 $"glide took {took:F0} ms; the planner plans {lo:F0}-{hi:F0} ms for this move");
@@ -185,6 +185,32 @@ public class HumanizePacingTests
         Assert.True(gap <= Pacing.FastPxPerMs * 25 + 1e-6, $"hop {gap}");
         Assert.True(c.Sent.Count > 10);
         Assert.Equal(39 * 30.0, c.Sent[^1].X);
+    }
+
+    private static readonly MethodInfo Drift = typeof(Humanize).GetMethod("IdleDriftAsync", BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    // The attention model's idle drift on a page the pointer has not been over yet (Node idleDrift, Python _idle_drift;
+    // SC 239): the drift itself comes in over the top edge, inside its budget -- its first event is at y 0-4 and the
+    // walk lasts about ms. Before, a placing glide to a random interior point went first, so the drift ran a whole
+    // glide (~0.4-1 s) past its budget.
+    [Theory]
+    [InlineData(600)]
+    [InlineData(1200)]
+    public async Task Idle_drift_on_a_fresh_page_enters_over_the_top_edge_inside_its_budget(double ms)
+    {
+        var mouse = DispatchProxy.Create<IMouse, Mouse>();
+        var m = (Mouse)(object)mouse;
+        var page = DispatchProxy.Create<IPage, HumanizeShiftTests.Recorder>();
+        ((HumanizeShiftTests.Recorder)(object)page).Mouse = mouse;
+        var st = Activator.CreateInstance(StateType, nonPublic: true)!;   // Known false: nothing placed it yet
+        var sw = Stopwatch.StartNew();
+        await (Task)Drift.Invoke(null, new object?[] { page, Motion.MakePersona("drift-net"), st, ms })!;
+        double took = sw.Elapsed.TotalMilliseconds;
+        var mv = m.Log.Where(e => e.Op == "move").ToList();
+        Assert.True(mv.Count > 10, $"{mv.Count} moves");
+        Assert.InRange(mv[0].Y, 0, 4);
+        Assert.All(mv, e => Assert.True(e.X >= 0 && e.X <= 1280 && e.Y >= 0 && e.Y <= 800, $"({e.X}, {e.Y})"));
+        Assert.True(took >= 0.75 * ms && took <= 1.25 * ms + 150, $"a {ms} ms drift took {took:F0} ms");
     }
 
     [Fact]

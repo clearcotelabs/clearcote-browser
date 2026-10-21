@@ -98,9 +98,14 @@ internal sealed record OriginRequest(string Method, string Url, List<KeyValuePai
 internal sealed class TestOrigin : LocalServer
 {
     private readonly Func<OriginRequest, (int Status, string Body)> _handler;
+    private readonly string _contentType;
     public readonly ConcurrentQueue<OriginRequest> Log = new();
 
-    public TestOrigin(Func<OriginRequest, (int Status, string Body)> handler) => _handler = handler;
+    public TestOrigin(Func<OriginRequest, (int Status, string Body)> handler, string contentType = "application/json")
+    {
+        _handler = handler;
+        _contentType = contentType;
+    }
 
     protected override async Task HandleAsync(NetworkStream s, CancellationToken ct)
     {
@@ -118,7 +123,7 @@ internal sealed class TestOrigin : LocalServer
         Log.Enqueue(req);
         var (status, text) = _handler(req);
         var bytes = Encoding.UTF8.GetBytes(text);
-        var resp = $"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {bytes.Length}\r\nConnection: close\r\n\r\n";
+        var resp = $"HTTP/1.1 {status} X\r\nContent-Type: {_contentType}\r\nContent-Length: {bytes.Length}\r\nConnection: close\r\n\r\n";
         await s.WriteAsync(Encoding.Latin1.GetBytes(resp), ct);
         await s.WriteAsync(bytes, ct);
         await s.FlushAsync(ct);
@@ -245,4 +250,32 @@ internal sealed class StderrCapture : IDisposable
     public StderrCapture() => Console.SetError(_sw);
     public string Text => _sw.ToString();
     public void Dispose() => Console.SetError(_old);
+}
+
+/// A stand-in for OpenRouter (any OpenAI-compatible chat-completions API) for the in-browser agent: every
+/// request is recorded and answered with a completion in which the model says it is done, so an agent task
+/// ends without a real LLM or API key.
+internal sealed class FakeOpenRouter : IAsyncDisposable
+{
+    private readonly TestOrigin _origin;
+
+    public FakeOpenRouter()
+        => _origin = new TestOrigin(req => req.Url.Split('?')[0].EndsWith("/chat/completions", StringComparison.Ordinal)
+            ? (200, Completion)
+            : (404, """{"error":{"message":"not found"}}"""));
+
+    /// What a client puts in <c>AgentLlmUrl</c>.
+    public string BaseUrl => $"http://127.0.0.1:{_origin.Port}/api/v1";
+
+    /// Every request seen so far.
+    public List<OriginRequest> Calls => _origin.Log.ToList();
+
+    private const string Completion = """
+        {"id":"gen-test","object":"chat.completion","created":1700000000,"model":"test/model",
+         "choices":[{"index":0,"finish_reason":"stop",
+                     "message":{"role":"assistant","content":"{\"action\":\"done\",\"text\":\"Task complete.\"}"}}],
+         "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+        """;
+
+    public ValueTask DisposeAsync() => _origin.DisposeAsync();
 }

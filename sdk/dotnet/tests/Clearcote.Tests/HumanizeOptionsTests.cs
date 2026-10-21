@@ -92,7 +92,7 @@ public class HumanizeOptionsTests
         var (loc, rec) = Locator(page, FrameSel);
         var e = await Assert.ThrowsAsync<HumanizeStrictException>(() => loc.HumanClickAsync());
         Assert.Equal("HumanClickAsync", e.Api);
-        Assert.Contains("frame locators", e.Reason);
+        Assert.StartsWith("frame: ", e.Reason);   // the frame route (Frames.cs): this stand-in has no box
         e = await Assert.ThrowsAsync<HumanizeStrictException>(() => loc.HumanFillAsync("x"));
         Assert.Equal("HumanFillAsync", e.Api);
         Assert.DoesNotContain("ClickAsync", rec.Calls);
@@ -109,7 +109,7 @@ public class HumanizeOptionsTests
         await loc.HumanClickAsync();
         await loc.HumanHoverAsync();
         Assert.Equal(new[] { "HumanClickAsync", "HumanHoverAsync" }, events.Select(e => e.Api).ToArray());
-        Assert.All(events, e => Assert.Contains("frame locators", e.Reason));
+        Assert.All(events, e => Assert.StartsWith("frame: ", e.Reason));   // reported by the frame route
         Assert.Equal("Locator@" + FrameSel, events[0].Selector);
         Assert.Equal(new[] { "ClickAsync", "HoverAsync" }, rec.Calls.Where(c => c is "ClickAsync" or "HoverAsync").ToArray());
     }

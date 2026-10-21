@@ -12,7 +12,7 @@ namespace Clearcote;
 /// the verified Clearcote binary (auto-downloaded + SHA-256 checked). With a PRO license key it pulls
 /// the license-gated build and checks out a floating-concurrency lease, injecting the run-token the
 /// engine gate requires. With no key it is the free build and never contacts the license backend.
-public static class Clearcote
+public static partial class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
     public const string Version = "0.57.0";
@@ -40,6 +40,12 @@ public static class Clearcote
     {
         options ??= new LaunchOptions();
         Offline.RequireOfflineBinary(options.OfflineKey, options.ExecutablePath);  // offline mode never downloads
+        return await ResolveBinaryAsync(options).ConfigureAwait(false);
+    }
+
+    // ExecutablePath > CLEARCOTE_BINARY > catalog version > PRO > free (index.ts executablePath).
+    private static async Task<string> ResolveBinaryAsync(LaunchOptions options)
+    {
         if (!string.IsNullOrEmpty(options.ExecutablePath))
         {
             // Caller-supplied tree (often a browser bundled into a packaged app): we did not install
@@ -65,9 +71,21 @@ public static class Clearcote
             new DownloadOptions { CacheDir = options.CacheDir, Quiet = options.Quiet, AutoUpdate = options.AutoUpdate }).ConfigureAwait(false);
     }
 
-    /// Pre-fetch + verify the FREE binary without launching (returns its path).
+    /// Pre-fetch + verify the Clearcote binary without launching (returns its path). Resolved like a launch:
+    /// CLEARCOTE_BINARY, then <see cref="DownloadOptions.Version"/> (or CLEARCOTE_BROWSER_VERSION: "150",
+    /// "150.0.7871.115", "latest", a PRO rebuild "150.0.7871.114-r7" / "r7"; PRO-tier versions need a licence key),
+    /// then the PRO build when a licence key resolves (<see cref="DownloadOptions.LicenseKey"/> &gt;
+    /// CLEARCOTE_LICENSE_KEY &gt; ~/.clearcote/license.key) on its <see cref="DownloadOptions.ReleaseChannel"/>,
+    /// else the free build.
     public static Task<string> DownloadAsync(DownloadOptions? options = null)
-        => Download.EnsureBinaryAsync(options);
+    {
+        options ??= new DownloadOptions();
+        return ResolveBinaryAsync(new LaunchOptions
+        {
+            CacheDir = options.CacheDir, Quiet = options.Quiet, AutoUpdate = options.AutoUpdate, Version = options.Version,
+            ReleaseChannel = options.ReleaseChannel, LicenseKey = options.LicenseKey, LicenseApiBase = options.LicenseApiBase,
+        });
+    }
 
     /// Launch Clearcote and return a standard Playwright <see cref="IBrowser"/>.
     /// <remarks>
@@ -123,18 +141,25 @@ public static class Clearcote
         if (CloudLaunch.Requested(options)) return await CloudLaunch.LaunchBrowserAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         // macOS without the native PRO build: the Clearcote Docker image, connected over CDP.
         if (DockerLaunch.Requested(options)) return await DockerLaunch.LaunchBrowserAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
-        options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
+        var hz = HumanizeLaunch.Of(options, cloud: false);   // Humanize / ShowCursor: a bad option throws before anything starts
+        CheckPlaywrightPassThrough(options);
+        var prepared = await PrepareLaunchAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
+        options = prepared.Options;
+        var egressDrift = prepared.EgressDrift;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
+        await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
         Crlset.WarnNoProfile(options, "LaunchAsync");  // incognito: no profile to seed a CRLSet into
 
-        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
-        var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
+        // http(s) credentials go to the engine's --proxy-auth only when THIS engine implements it (r19+).
+        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
+        LaunchOpts.WarnUnsupportedEngineOptions(exe, options, options.Proxy, options.Quiet);
+        var args = AssembleArgs(Agent.WithPersona(options), ExtensionAndPortableArgs(options),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
             Extras(options, exe, headed: options.Headless == false));
-        LaunchWarnings.Emit(LaunchWarnings.ForArgs(options.Args), options.Quiet);
-        LaunchWarnings.EmitOnce(LaunchWarnings.ForPersonaHost(options), options.Quiet);   // a Linux persona on Windows
+        EmitCoherenceWarnings(options, exe, args, options.Headless, PassThroughDevtools(options.PlaywrightLaunchOptions), userAgent: null);
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         // Offline mode: no licence key in play, so nothing below reaches the network (Offline.cs).
@@ -166,7 +191,7 @@ public static class Clearcote
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
         var browser = await License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
-            WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+            WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions(options.PlaywrightLaunchOptions ?? new())
             {
                 ExecutablePath = exePath,
                 Args = persona.Args.ToArray(),
@@ -180,8 +205,30 @@ public static class Clearcote
             }), exe)), launchToken).ConfigureAwait(false);
 
         // Release the concurrency slot + remove the run-token file when the browser closes.
-        if (lease is not null) browser.Disconnected += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };
-        return browser;
+        if (lease is not null)
+        {
+            // The stop is kept so a caller that must hand the seat on (the profile "auto" probe launch) can wait for it.
+            var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            LeaseReleases.AddOrUpdate(browser, released.Task);
+            browser.Disconnected += (_, _) =>
+            {
+                launchToken?.Release();
+                _ = lease.StopAsync().ContinueWith(_ => released.TrySetResult(), TaskScheduler.Default);
+            };
+        }
+        await egressDrift.ConfigureAwait(false);   // a rotating proxy's warning lands before the launch returns
+        // Every page and context it makes (and their popups) gets the persona of the fingerprint seed.
+        return (hz with { Seed = options.Fingerprint }).Wrap(browser);
+    }
+
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IBrowser, Task> LeaseReleases = new();
+
+    /// Completes once the seat of a browser from <see cref="LaunchAsync"/> has been handed back after it closed
+    /// (at once for a browser that held no seat), bounded by <paramref name="timeoutMs"/>.
+    internal static async Task LeaseReleasedAsync(IBrowser browser, int timeoutMs = 10_000)
+    {
+        if (!LeaseReleases.TryGetValue(browser, out var released)) return;
+        await Task.WhenAny(released, Task.Delay(timeoutMs)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -215,11 +262,19 @@ public static class Clearcote
     /// context ends the hosted session. A <see cref="LaunchOptions.Profile"/> loads that cloud profile's
     /// cookies (and saves them back only with <c>Persist = true</c>).
     /// </para>
+    /// <para>
+    /// MACOS. Without the native PRO build this runs the Clearcote Docker image, as <see cref="LaunchAsync"/> does,
+    /// and returns the container browser's own context (the image keeps its profile in the container); closing it
+    /// stops the container. <see cref="DockerContainerOf"/> names the container.
+    /// </para>
     /// </remarks>
     public static async Task<IBrowserContext> LaunchEphemeralProfileAsync(LaunchOptions? options = null)
     {
         if (CloudLaunch.Requested(options))
             return await CloudLaunch.LaunchContextAsync(options ?? new LaunchOptions(), persistent: false, userDataDir: null).ConfigureAwait(false);
+        // macOS without the native PRO build: the Clearcote Docker image, like LaunchAsync (index.ts launch()).
+        if (DockerLaunch.Requested(options))
+            return await DockerLaunch.LaunchContextAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         var dir = Path.Combine(Path.GetTempPath(), "clearcote-run-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
         IBrowserContext context;
@@ -242,9 +297,15 @@ public static class Clearcote
     {
         if (CloudLaunch.Requested(options))
             return await CloudLaunch.LaunchContextAsync(options!, persistent: true, userDataDir).ConfigureAwait(false);
-        options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
+        var hz = HumanizeLaunch.Of(options, cloud: false);   // Humanize / ShowCursor: a bad option throws before anything starts
+        CheckPlaywrightPassThrough(options, context: true);
+        var prepared = await PrepareLaunchAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
+        options = prepared.Options;
+        var egressDrift = prepared.EgressDrift;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
+        await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
 
         // Widevine ASKED FOR (Widevine = true or CLEARCOTE_WIDEVINE=1): seed the CDM into this profile and let the
@@ -270,12 +331,14 @@ public static class Clearcote
         var (crlsetPlan, crlsetIgnore) = await Crlset.ApplyLaunchAsync(userDataDir, options, ignoreDefaultArgs).ConfigureAwait(false);
         ignoreDefaultArgs = crlsetIgnore;
 
-        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
-        var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
+        // http(s) credentials go to the engine's --proxy-auth only when THIS engine implements it (r19+).
+        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
+        LaunchOpts.WarnUnsupportedEngineOptions(exe, options, options.Proxy, options.Quiet);
+        var args = AssembleArgs(Agent.WithPersona(options), ExtensionAndPortableArgs(options),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, userArgs, options.Proxy, options.Socks5Udp,
             Extras(options, exe, headed: options.Headless == false));
-        LaunchWarnings.Emit(LaunchWarnings.ForArgs(options.Args), options.Quiet);
-        LaunchWarnings.EmitOnce(LaunchWarnings.ForPersonaHost(options), options.Quiet);   // a Linux persona on Windows
+        EmitCoherenceWarnings(options, exe, args, options.Headless, PassThroughDevtools(options.PlaywrightContextOptions),
+            options.PlaywrightContextOptions?.UserAgent);
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
         // Offline mode: no licence key in play, so nothing below reaches the network (Offline.cs).
@@ -318,7 +381,7 @@ public static class Clearcote
         var crlsetArgs = crlsetPlan?.BeforeLaunch(proxy) ?? new List<string>();
         var context = await Crlset.CloseOnFailureAsync(crlsetPlan, () => License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
             WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchPersistentContextAsync(userDataDir,
-            new BrowserTypeLaunchPersistentContextOptions
+            new BrowserTypeLaunchPersistentContextOptions(options.PlaywrightContextOptions ?? new())
             {
                 ExecutablePath = exePath,
                 Args = persona.Args.Concat(crlsetArgs).ToArray(),
@@ -349,6 +412,9 @@ public static class Clearcote
         // explicit viewport only the reconcile (normal state, viewport + frame, kept on the work area).
         if (geometry.Mode != Geometry.Mode.None || headedFit)
             await Geometry.InstallWindowFixupAsync(context, args, geometry).ConfigureAwait(false);
+        await egressDrift.ConfigureAwait(false);   // a rotating proxy's warning lands before the launch returns
+        // Every page (and popup) of the context gets the persona of the fingerprint seed.
+        Humanize.Install(context, hz with { Seed = options.Fingerprint });
         return context;
     }
 
@@ -371,17 +437,24 @@ public static class Clearcote
     public static async Task<Server> ServeAsync(ServeOptions? options = null)
     {
         Geometry.ValidateWindowSize(options?.WindowSize);
-        options = await PrepareAsync(options ?? new ServeOptions()).ConfigureAwait(false);
+        var prepared = await PrepareLaunchAsync(options ?? new ServeOptions()).ConfigureAwait(false);
+        options = prepared.Options;
+        var egressDrift = prepared.EgressDrift;
         var host = string.IsNullOrEmpty(options.Host) ? "127.0.0.1" : options.Host;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
+        await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
         Crlset.WarnNoProfile(options, "ServeAsync");  // a raw CDP endpoint: no readiness wait to hold it
 
-        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
+        // passProxy: what is left for a plain --proxy-server once credentials went to the engine's own switches
+        // (--socks5-credentials, or --proxy-auth on an engine that implements it).
+        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
+        LaunchOpts.WarnUnsupportedEngineOptions(exe, options, options.Proxy, options.Quiet);
         // serve launches the binary directly, so Playwright's SwiftShader default is never added; the
         // blocklist rule still applies to a headed endpoint and on Windows.
-        var engineArgs = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
+        var engineArgs = AssembleArgs(Agent.WithPersona(options), ExtensionAndPortableArgs(options),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
             Extras(options, exe, headed: options.Headless == false, viaPlaywright: false));
 
@@ -390,8 +463,8 @@ public static class Clearcote
         var userDataDir = ownUdd ? Directory.CreateTempSubdirectory("clearcote-serve-").FullName : options.UserDataDir!;
         var origins = options.AllowOrigins ?? $"http://{host}:{port},http://localhost:{port}";
         // A non-loopback bind or a "*" origin list hands the browser to whoever can reach the port.
-        LaunchWarnings.Emit(LaunchWarnings.ForServe(host, origins).Concat(LaunchWarnings.ForArgs(options.Args)), options.Quiet);
-        LaunchWarnings.EmitOnce(LaunchWarnings.ForPersonaHost(options), options.Quiet);   // a Linux persona on Windows
+        EmitCoherenceWarnings(options, exe, engineArgs, options.Headless != false, devtools: false, userAgent: null);
+        LaunchWarnings.Emit(LaunchWarnings.ForServe(host, origins), options.Quiet);
         var cdpArgs = new List<string>
         {
             $"--remote-debugging-port={port}",
@@ -481,18 +554,74 @@ public static class Clearcote
             await Geometry.FitServedWindowAsync(await srv.WsUrlAsync().ConfigureAwait(false), geometry.Persona, options.WindowSize,
                 native: geometry.Native).ConfigureAwait(false);
         if (!options.Quiet) Console.Error.WriteLine($"[clearcote] serve: CDP endpoint ready at {srv.CdpUrl}");
+        await egressDrift.ConfigureAwait(false);   // a rotating proxy's warning lands before the launch returns
         return srv;
     }
 
+    /// One CDP endpoint, many identities: an HTTP/WebSocket front on <see cref="MultiplexOptions.Port"/>
+    /// (default 9222) that starts one <see cref="ServeAsync"/> browser per identity, chosen by the
+    /// connection URL (<c>ConnectOverCDPAsync("http://127.0.0.1:9222?fingerprint=acct-1&amp;platform=windows")</c>).
+    /// See <see cref="MultiplexServer"/> and the comment at the top of Multiplex.cs.
+    public static Task<MultiplexServer> ServeMultiplexAsync(MultiplexOptions? options = null)
+        => MultiplexServer.StartAsync(options);
+
     // ── internals ────────────────────────────────────────────────────────────
 
-    /// Copy the caller's options (never mutate them) and apply geoip, which fails closed BEFORE the
-    /// binary is resolved or any browser starts.
+    /// Copy the caller's options (never mutate them), layer a saved LocalProfile under them, and apply geoip,
+    /// which fails closed BEFORE the binary is resolved or any browser starts.
     internal static async Task<T> PrepareAsync<T>(T options) where T : LaunchOptions
+        => (await PrepareLaunchAsync(options).ConfigureAwait(false)).Options;
+
+    /// <see cref="PrepareAsync"/>, plus the geoip egress-drift check it started (a completed task without geoip):
+    /// the launch awaits it before it returns, as the Node and Python SDKs do.
+    internal static async Task<(T Options, Task EgressDrift)> PrepareLaunchAsync<T>(T options) where T : LaunchOptions
     {
         var copy = (T)options.Clone();
-        if (copy.Geoip) await GeoIp.ApplyAsync(copy, copy.Proxy, copy.Quiet).ConfigureAwait(false);
-        return copy;
+        // LocalProfile = a saved persona: its options fill what the caller left unset ("auto" waits for the binary).
+        ProfileOptionsMap.MergeSaved(copy);
+        var drift = copy.Geoip ? await GeoIp.ApplyForLaunchAsync(copy, copy.Proxy, copy.Quiet).ConfigureAwait(false) : Task.CompletedTask;
+        return (copy, drift);
+    }
+
+    // ── launch lane: shared steps of LaunchAsync / LaunchPersistentContextAsync / ServeAsync ──
+
+    /// --load-extension (+ --disable-extensions-except), then the profile-portability switch (index.ts
+    /// [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)]).
+    internal static List<string> ExtensionAndPortableArgs(LaunchOptions o)
+        => LaunchOpts.ExtensionArgs(o.Extensions).Concat(LaunchOpts.PortableArgs(o.PortableProfile == true, o.EncryptionKey)).ToList();
+
+    /// The coherence warnings (and once-per-process notes) for a local launch: the persona after geoip, the
+    /// caller's proxy and args, and the Playwright pass-through's Devtools / UserAgent. <paramref name="args"/>:
+    /// the assembled browser args, to tell whether this browser runs with the stock DevTools Runtime.
+    private static void EmitCoherenceWarnings(LaunchOptions o, string exe, IEnumerable<string> args, bool? headless, bool devtools, string? userAgent)
+        => LaunchWarnings.EmitCoherence(
+            LaunchWarnings.Coherence(o, o.Proxy, o.Geoip, headless, o.Args, devtools, userAgent),
+            o.Quiet, stockRuntime: LaunchOpts.StockRuntimeRunning(exe, args.Concat(o.Args ?? Array.Empty<string>())));
+
+#pragma warning disable CS0612, CS0618   // Devtools is deprecated in Playwright, and still honoured: it opens DevTools
+    private static bool PassThroughDevtools(BrowserTypeLaunchOptions? o) => o?.Devtools == true;
+    private static bool PassThroughDevtools(BrowserTypeLaunchPersistentContextOptions? o) => o?.Devtools == true;
+#pragma warning restore CS0612, CS0618
+
+    /// The fields <see cref="LaunchOptions"/> owns, by their Playwright name: the pass-through objects must not set them.
+    private static readonly string[] OwnedLaunchFields =
+        { "ExecutablePath", "Args", "Env", "Headless", "Channel", "SlowMo", "Timeout", "IgnoreDefaultArgs", "Proxy" };
+    private static readonly string[] OwnedContextFields = OwnedLaunchFields.Concat(new[] { "ViewportSize", "ScreenSize", "ColorScheme" }).ToArray();
+
+    /// Throw, naming it, when <see cref="LaunchOptions.PlaywrightLaunchOptions"/> (or, for a persistent context,
+    /// <see cref="LaunchOptions.PlaywrightContextOptions"/>) sets a field LaunchOptions has its own property for:
+    /// the SDK fills those itself, and one set in two places would silently lose one of them.
+    internal static void CheckPlaywrightPassThrough(LaunchOptions? o, bool context = false)
+    {
+        object? pass = context ? o?.PlaywrightContextOptions : o?.PlaywrightLaunchOptions;
+        if (pass is null) return;
+        var name = context ? nameof(LaunchOptions.PlaywrightContextOptions) : nameof(LaunchOptions.PlaywrightLaunchOptions);
+        foreach (var field in context ? OwnedContextFields : OwnedLaunchFields)
+        {
+            if (pass.GetType().GetProperty(field)?.GetValue(pass) is not null)
+                throw new ArgumentException(
+                    $"{name}.{field} is set: set LaunchOptions.{field} instead (the SDK fills {field} on the options it passes to Playwright).");
+        }
     }
 
     /// The per-launch inputs for the engine-switch extras and gating in <see cref="AssembleArgs"/>.
@@ -566,13 +695,21 @@ public static class Clearcote
             ? new Proxy { Server = server, Username = p.Username, Password = p.Password, Bypass = p.Bypass }
             : null;
 
+    /// Refuse a binary this OS has no build for -- but never one the caller named: an existing ExecutablePath /
+    /// CLEARCOTE_BINARY is theirs to run on any OS, whatever its name (a .exe under Wine, say; download.ts
+    /// ensureRunnableHere). macOS has a native PRO build (Apple Silicon), which the PRO download resolves itself.
     internal static void EnsureRunnableHere(string exe)
     {
-        if (!File.Exists(exe))
-            throw new FileNotFoundException($"Clearcote binary not found at '{exe}'. Set ExecutablePath / CLEARCOTE_BINARY, or let the SDK auto-download it.", exe);
-        var isWinExe = exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase);
-        if (isWinExe && !Native.IsWindows)
-            throw new PlatformNotSupportedException($"'{exe}' is a Windows binary but this is not Windows.");
+        if (!string.IsNullOrEmpty(exe) && File.Exists(exe)) return;
+        string? pro;
+        try { pro = Release.ProPlatformKey(); }
+        catch (PlatformNotSupportedException) { pro = null; }   // an Intel Mac: no build for this CPU
+        if (Release.PlatformRelease() is null && pro is null)
+            throw new PlatformNotSupportedException(
+                $"Clearcote {Release.Current.Version} ships Windows x64 and Linux x64 binaries — there is no build for '{Native.OsTag}'.\n" +
+                "Run on Windows or Linux, or set ExecutablePath to a compatible binary.\n" +
+                $"(The binary downloaded and verified fine; it is cached at: {exe})");
+        throw new FileNotFoundException($"Clearcote binary not found at '{exe}'. Set ExecutablePath / CLEARCOTE_BINARY, or let the SDK auto-download it.", exe);
     }
 
     private static int FreePort()
@@ -617,6 +754,8 @@ public sealed class Server
 
     public string Host { get; }
     public int Port { get; }
+    /// The engine's process id (null once it can no longer be read).
+    public int? Pid { get { try { return _proc.Id; } catch { return null; } } }
 
     /// The CDP base URL, e.g. "http://127.0.0.1:9222" — pass to ConnectOverCDP.
     public string CdpUrl => $"http://{Host}:{Port}";
@@ -635,23 +774,53 @@ public sealed class Server
 
     public bool IsAlive { get { try { return !_proc.HasExited; } catch { return false; } } }
 
+    /// How long CloseAsync waits for the engine to exit on its own after the graceful stop, before it kills it.
+    internal static TimeSpan CloseGrace = TimeSpan.FromSeconds(10);
+
     /// Stop the engine and wait for it to exit, release the lease (best-effort), then remove the temp
     /// profile ServeAsync made and the engine's singleton-socket directory. Closes once.
+    /// <remarks>
+    /// The stop is graceful first, as in the Node SDK's <c>close()</c>: SIGTERM on Linux and macOS, which Chrome
+    /// answers by shutting down cleanly (it writes its profile back and unlinks its singleton socket); after 10 s
+    /// still running, the engine and its child processes are killed. On Windows there is no signal: Node's
+    /// <c>kill("SIGTERM")</c> is TerminateProcess there, so this kills the engine's process tree at once, as before.
+    /// </remarks>
     public Task CloseAsync()
     {
         lock (_gate) return _closing ??= CloseCoreAsync();
     }
 
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "kill", SetLastError = true)]
+    private static extern int SysKill(int pid, int sig);
+
+    private async Task<bool> WaitForExitAsync(TimeSpan timeout)
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(timeout);
+            await _proc.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            return true;
+        }
+        catch { return IsExited(); }
+    }
+
+    private bool IsExited() { try { return _proc.HasExited; } catch { return true; } }
+
     private async Task CloseCoreAsync()
     {
         var socketDir = _socketDir ?? ThrowawayProfile.BrowserProcessFiles(_userDataDir).SocketDir;
-        try { if (!_proc.HasExited) _proc.Kill(entireProcessTree: true); } catch { }
-        try
+        var exited = IsExited();
+        if (!exited && !Native.IsWindows)
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            await _proc.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            try { SysKill(_proc.Id, 15); } catch { }   // SIGTERM: Chrome shuts down cleanly
+            exited = await WaitForExitAsync(CloseGrace).ConfigureAwait(false);
         }
-        catch { }   // still running at the deadline: remove what can be removed all the same
+        if (!exited)
+        {
+            try { _proc.Kill(entireProcessTree: true); } catch { }
+            // still running at the deadline: remove what can be removed all the same
+            await WaitForExitAsync(Native.IsWindows ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        }
         // Release the concurrency slot (best-effort) + remove the run-token file.
         if (_lease is not null) { try { await _lease.StopAsync().ConfigureAwait(false); } catch { } }
         _launchToken?.Release();

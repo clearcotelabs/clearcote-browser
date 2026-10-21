@@ -125,6 +125,9 @@ public class CloudSessionOptions
     /// Move the mouse along human paths and hold clicks for a human press time, on the server, for any
     /// client (the server's default is on); false turns it off.
     public bool? Humanize { get; set; }
+    /// A cloud launch's humanize options (<see cref="LaunchOptions.HumanizeOptions"/>), sent as <c>humanizeOptions</c>
+    /// so the server can show and later apply them; set by the launch only (Node and Python have no such session option).
+    internal HumanizeOptions? HumanizeOptions { get; set; }
     /// The challenge service (default off): <c>true</c>, or what it may do.
     public CloudChallengeService? ChallengeService { get; set; }
     /// Keep the session running after the client disconnects (stop it with Browsers.StopAsync).
@@ -721,6 +724,7 @@ public sealed class Cloud
         Put("solveCheckboxes", o.SolveCheckboxes);
         Put("solvePressHold", o.SolvePressHold);
         Put("humanize", o.Humanize);
+        if (o.HumanizeOptions is not null) b["humanizeOptions"] = o.HumanizeOptions.ToPayload();
         if (o.ChallengeService is not null) b["challengeService"] = ChallengeServiceNode(o.ChallengeService);
         Put("keepAlive", o.KeepAlive);
         Put("record", o.Record);

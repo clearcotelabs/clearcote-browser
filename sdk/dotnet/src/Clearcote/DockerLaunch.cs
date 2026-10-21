@@ -132,7 +132,7 @@ internal static class DockerLaunch
     };
     private static readonly string[] Special =
         { "DevicePixelRatio", "FingerprintProfile", "Headless", "Proxy", "Args", "LicenseKey", "LicenseApiBase", "PersonaEnv", "StockRuntime" };
-    private static readonly string[] SdkSide = { "Timeout", "SlowMo", "Quiet", "Docker", "DockerImage" };
+    private static readonly string[] SdkSide = { "Timeout", "SlowMo", "Quiet", "Docker", "DockerImage", "Humanize", "HumanizeOptions", "ShowCursor" };
 
     /// Everything else LaunchOptions has is refused when set: a Docker launch takes the image's options,
     /// and (like any local launch) ignores the cloud section. Derived from the type, so an option added to
@@ -198,6 +198,11 @@ internal static class DockerLaunch
                 throw new ArgumentException(
                     $"{p.Name} is not available when LaunchAsync runs Clearcote in Docker (there is no native macOS build here). {OffHint}");
         }
+        // Profile = "auto" is LocalProfile = "auto" on a launch that is not a cloud one (ProfileAuto.LocalProfileOf),
+        // which the image cannot take either.
+        if (o.Profile is { Name: "auto", Persist: null })
+            throw new ArgumentException(
+                $"Profile \"auto\" is not available when LaunchAsync runs Clearcote in Docker (there is no native macOS build here). {OffHint}");
         var env = new Dictionary<string, string>(StringComparer.Ordinal);
         var t = typeof(LaunchOptions);
         foreach (var (prop, name) in StrEnv)
@@ -1056,6 +1061,9 @@ internal static class DockerLaunch
     /// disconnect and stop the container; a lost connection stops it too.
     internal static async Task<IBrowser> LaunchBrowserAsync(LaunchOptions o)
     {
+        // Humanize / ShowCursor run on this side (a bad option throws before the container starts); the persona
+        // is seeded from the fingerprint, as for a local launch.
+        var hz = HumanizeLaunch.Of(o, cloud: false, seed: o.Fingerprint);
         var (container, exe) = await StartContainerAsync(o).ConfigureAwait(false);
         var state = new ContainerState(exe, container.Id);
         IBrowser? real = null;
@@ -1068,7 +1076,7 @@ internal static class DockerLaunch
                 SlowMo = o.SlowMo, Timeout = o.Timeout ?? ConnectTimeoutMs,
             }).ConfigureAwait(false);
             real.Disconnected += (_, _) => _ = state.EndAsync();
-            var browser = BrowserProxy.Wrap(real, state);
+            var browser = hz.Wrap(BrowserProxy.Wrap(real, state));   // the container's own context is hooked too
             Containers.AddOrUpdate(real, container);
             Containers.AddOrUpdate(browser, container);
             return browser;
@@ -1077,6 +1085,31 @@ internal static class DockerLaunch
         {
             if (real is not null) { try { await real.CloseAsync().ConfigureAwait(false); } catch { } }
             await state.EndAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// LaunchEphemeralProfileAsync on macOS without the native PRO build: the container browser's own context (the
+    /// image runs Chrome on a throwaway profile of its own), with no emulated viewport. Closing the context closes
+    /// the browser, which stops the container; <c>context.Browser</c> is the container's browser.
+    internal static async Task<IBrowserContext> LaunchContextAsync(LaunchOptions o)
+    {
+        var browser = await LaunchBrowserAsync(o).ConfigureAwait(false);
+        try
+        {
+            var ctx = browser.Contexts.FirstOrDefault()
+                ?? await browser.NewContextAsync(new BrowserNewContextOptions { ViewportSize = ViewportSize.NoViewport }).ConfigureAwait(false);
+            var context = CloudLaunch.ContextProxy.Wrap(ctx, browser);
+            if (Containers.TryGetValue(browser, out var container))
+            {
+                Containers.AddOrUpdate(ctx, container);
+                Containers.AddOrUpdate(context, container);
+            }
+            return context;
+        }
+        catch
+        {
+            try { await browser.CloseAsync().ConfigureAwait(false); } catch { /* the failure is what matters */ }
             throw;
         }
     }

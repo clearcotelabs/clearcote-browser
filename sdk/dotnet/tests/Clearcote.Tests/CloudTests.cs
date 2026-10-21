@@ -90,14 +90,21 @@ public sealed class CloudTests : IAsyncLifetime
     public class FakeContext : DispatchProxy
     {
         public bool Closed;
+        public EventHandler<IPage>? PageEv;   // the humanize hook (a cloud launch humanizes in the SDK by default)
+        public readonly List<string?> InitScripts = new();
         public static IBrowserContext Make() => Create<IBrowserContext, FakeContext>();
 
         protected override object? Invoke(MethodInfo? m, object?[]? args) => m!.Name switch
         {
             "get_Pages" => new List<IPage>(),
             "CloseAsync" => Close(),
+            "add_Page" => Hook((EventHandler<IPage>)args![0]!),
+            "AddInitScriptAsync" => Init((string?)args![0]),
             _ => throw new NotSupportedException(m.Name),
         };
+
+        private object? Hook(EventHandler<IPage> h) { PageEv += h; return null; }
+        private Task Init(string? s) { InitScripts.Add(s); return Task.CompletedTask; }
 
         private Task Close() { Closed = true; return Task.CompletedTask; }
     }
@@ -140,7 +147,7 @@ public sealed class CloudTests : IAsyncLifetime
         _sb.Env("CLEARCOTE_CLOUD", "1");
         await Clearcote.LaunchAsync(new LaunchOptions { Country = "us" });
         Assert.Single(calls);
-        AssertJson("""{"country":"us"}""", _api.Requests("POST", "/api/v1/browsers")[0].Body);
+        AssertJson("""{"country":"us","humanize":false}""", _api.Requests("POST", "/api/v1/browsers")[0].Body);
         // local: fails on the missing binary, without ever talking to the API
         await Assert.ThrowsAnyAsync<Exception>(() => Clearcote.LaunchAsync(new LaunchOptions
         {
@@ -349,7 +356,7 @@ public sealed class CloudTests : IAsyncLifetime
         var b = await Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, Country = "us", Identity = "acct-1", SlowMo = 10 });
         Assert.Equal(_api.ConnectUrl, calls.Single().Url);
         Assert.Equal(10f, calls.Single().Options.SlowMo);
-        AssertJson("""{"country":"us","identity":"acct-1"}""", _api.Requests("POST", "/api/v1/browsers")[0].Body);
+        AssertJson("""{"country":"us","identity":"acct-1","humanize":false}""", _api.Requests("POST", "/api/v1/browsers")[0].Body);
         var info = Cloud.SessionOf(b)!;
         Assert.Equal("bs_1", Cloud.Str(info["id"]));
         Assert.Null(info["connectUrl"]);
@@ -489,10 +496,63 @@ public sealed class CloudTests : IAsyncLifetime
         var (fake, _) = StandIn();
         _sb.Env("CLEARCOTE_CLOUD", "yes");
         var ctx = await Clearcote.LaunchEphemeralProfileAsync(new LaunchOptions { Note = "from env" });
-        AssertJson("""{"note":"from env"}""", _api.Requests("POST", "/api/v1/browsers")[0].Body);   // no profile is forced
+        AssertJson("""{"note":"from env","humanize":false}""", _api.Requests("POST", "/api/v1/browsers")[0].Body);   // no profile is forced
         await ctx.CloseAsync();
         Assert.True(fake.Closed);
         Assert.Single(_api.Requests("DELETE", "/api/v1/browsers/bs_1"));
+    }
+
+    // ── humanize: in the SDK by default (Node cloud.ts, Python cloud.py) ─────────────────────────────
+
+    private static IPage OpenPage(FakeBrowser fake)
+    {
+        var page = System.Reflection.DispatchProxy.Create<IPage, HumanizeAttachTests.Pg>();
+        ((HumanizeAttachTests.Pg)(object)page).Context = fake.Context;
+        ((FakeContext)(object)fake.Context).PageEv?.Invoke(fake.Context, page);
+        return page;
+    }
+
+    [Fact]
+    public async Task A_cloud_launch_humanizes_in_the_SDK_and_turns_the_servers_humanizer_off()
+    {
+        var (fake, _) = StandIn();
+        await Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, Fingerprint = "fp-cloud" });
+        var body = _api.Requests("POST", "/api/v1/browsers")[0].Body!;
+        AssertJson("""{"fingerprint":"fp-cloud","humanize":false}""", body);   // no humanizeOptions for the default
+        var page = OpenPage(fake);                         // a tab of the session's own context
+        Assert.NotNull(Humanize.OptionsFor(page));
+        Assert.Equal(Motion.MakePersona("fp-cloud").Seed, Humanize.PersonaFor(page).Seed);
+
+        // no fingerprint: the identity label seeds the persona (one identity, one hand across sessions)
+        var (fake2, _) = StandIn();
+        await Clearcote.LaunchPersistentContextAsync(new LaunchOptions { Cloud = true, Profile = "p", Identity = "acct-9", ShowCursor = true });
+        var p2 = OpenPage(fake2);
+        Assert.Equal(Motion.MakePersona("acct-9").Seed, Humanize.PersonaFor(p2).Seed);
+        Assert.Equal(new[] { Humanize.CursorOverlay }, ((FakeContext)(object)fake2.Context).InitScripts);
+    }
+
+    [Fact]
+    public async Task A_cloud_launchs_options_object_runs_in_the_SDK_and_is_sent_as_humanizeOptions()
+    {
+        var (fake, _) = StandIn();
+        var o = new HumanizeOptions { Preset = "quick", Strict = true, DeviceHz = 250 };
+        await Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, HumanizeOptions = o });
+        AssertJson("""{"humanize":false,"humanizeOptions":{"preset":"quick","strict":true,"engine":"auto","deviceHz":250}}""",
+            _api.Requests("POST", "/api/v1/browsers")[0].Body);
+        Assert.Same(o, Humanize.OptionsFor(OpenPage(fake)));
+    }
+
+    [Fact]
+    public async Task Humanize_false_turns_both_off_and_a_bad_option_sends_nothing()
+    {
+        var (fake, _) = StandIn();
+        await Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, Humanize = false, HumanizeOptions = new() { Preset = "quick" } });
+        AssertJson("""{"humanize":false}""", _api.Requests("POST", "/api/v1/browsers")[0].Body);
+        Assert.Null(((FakeContext)(object)fake.Context).PageEv);   // nothing hooked
+        var e = await Assert.ThrowsAsync<ArgumentException>(() =>
+            Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, HumanizeOptions = new() { Preset = "fast" } }));
+        Assert.Contains("Preset", e.Message);
+        Assert.Single(_api.Requests("POST", "/api/v1/browsers"));
     }
 
     // ── errors ─────────────────────────────────────────────────────────────────────────────────────

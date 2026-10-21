@@ -197,6 +197,7 @@ public static partial class Humanize
         public double X; public double Y; public bool Known; public bool Ambient; public int NotchPx;
         public long ViewAt = long.MinValue; public (double W, double H)? View;   // ViewBoundsAsync's cache
         public bool Held;               // a button is down (a drag): the wheel anchor must not move the pointer
+        public string HeldButton = "left";   // which one (HumanMouseDownAsync): an engine held leg carries it
         public string? Platform;        // the platform the page claims (NotchPxAsync)
         public string? Device;          // "mouse" | "trackpad" (DeviceAsync)
         public int DragLegs;            // legs of the last HumanDragByAsync (1-3)
@@ -388,23 +389,6 @@ public static partial class Humanize
     private static double Rand(double lo, double hi) => lo + Rnd.NextDouble() * (hi - lo);
 
     /// <summary>
-    /// Give the pointer an origin when it has never had one: start somewhere plausible rather than
-    /// teleporting from (0,0), which is itself a shape a real session does not produce.
-    /// </summary>
-    /// <summary>
-    /// The REAL viewport, in CSS px — NOT <c>page.ViewportSize</c>.
-    ///
-    /// Clearcote.cs sets <c>ViewportSize = ViewportSize.NoViewport</c> on every headed context launch
-    /// (and on headless ones where the engine's persona owns the screen), so
-    /// that innerWidth tracks the real OS window instead of Playwright's emulated 1280x720 (an
-    /// emulated viewport on a headed window is itself a tell). With NoViewport, page.ViewportSize is
-    /// null for the life of the page, so a <c>?? 1280 / ?? 800</c> fallback was taken on EVERY headed
-    /// run: the scroll anchor's "is the pointer inside the viewport" test then compared against a box
-    /// unrelated to the window, and on a maximized display a cursor legitimately at x=1400 read as
-    /// out-of-bounds and got re-homed on every scroll — the exact motion that gate exists to avoid.
-    /// innerWidth/innerHeight are correct in both modes; the constant is a last resort only.
-    /// </summary>
-    /// <summary>
     /// Is this Playwright failure a TIMEOUT?
     ///
     /// Playwright for .NET exports exactly ONE exception type — <c>PlaywrightException</c>. There is
@@ -428,6 +412,19 @@ public static partial class Humanize
     private static bool IsTimeoutError(Exception e) =>
         e is System.TimeoutException || (e is PlaywrightException pe && IsTimeout(pe));
 
+    /// <summary>
+    /// The REAL viewport, in CSS px — NOT <c>page.ViewportSize</c>.
+    ///
+    /// Clearcote.cs sets <c>ViewportSize = ViewportSize.NoViewport</c> on every headed context launch
+    /// (and on headless ones where the engine's persona owns the screen), so
+    /// that innerWidth tracks the real OS window instead of Playwright's emulated 1280x720 (an
+    /// emulated viewport on a headed window is itself a tell). With NoViewport, page.ViewportSize is
+    /// null for the life of the page, so a <c>?? 1280 / ?? 800</c> fallback was taken on EVERY headed
+    /// run: the scroll anchor's "is the pointer inside the viewport" test then compared against a box
+    /// unrelated to the window, and on a maximized display a cursor legitimately at x=1400 read as
+    /// out-of-bounds and got re-homed on every scroll — the exact motion that gate exists to avoid.
+    /// innerWidth/innerHeight are correct in both modes; the constant is a last resort only.
+    /// </summary>
     private static async Task<(double W, double H)> ViewportAsync(IPage page)
     {
         try
@@ -445,6 +442,10 @@ public static partial class Humanize
         return (vp?.Width ?? 1280, vp?.Height ?? 800);
     }
 
+    /// <summary>
+    /// Give the pointer an origin when it has never had one: start somewhere plausible rather than
+    /// teleporting from (0,0), which is itself a shape a real session does not produce.
+    /// </summary>
     private static async Task SeedPointerAsync(IPage page, Persona p, PointerState st)
     {
         if (st.Known) return;
@@ -458,20 +459,22 @@ public static partial class Humanize
     /// <summary>
     /// Glide the cursor to a point along a planned path, dispatching every sample. <c>settle</c> adds
     /// the seating jiggle a hand makes when it stops on a target — what a range thumb needs at the end
-    /// of a drag leg to register the final value.
+    /// of a drag leg to register the final value. <c>held</c>: a button is down (<see cref="HumanMoveAsync"/> between
+    /// <see cref="HumanMouseDownAsync"/> and <see cref="HumanMouseUpAsync"/>), so the move is a drag leg planned by
+    /// <see cref="Motion.PlanDrag"/>, on the line from grab to drop, and scored as one.
     /// </summary>
     private static async Task GlideAsync(IPage page, Persona p, PointerState st, double toX, double toY,
-        double targetW, bool settle = false)
+        double targetW, bool settle = false, bool held = false)
     {
         KeysOf(page).Typed = null;   // the hand left the keyboard: no submit / Tab pause owed
         // A page the pointer has not been over yet (nothing placed it): the path comes in over the top edge, as the
         // engine's own first path does (pro-r43-13), and the samples still above the view are not sent
         // (Motion.EntryPoint / EnterFromTop) -- the page's first pointer event is at the edge, not mid-page (lab row
-        // H 13). A seating drag never starts a page: its press glided first.
-        bool entering = !st.Known && !settle;
+        // H 13). A seating drag or a held leg never starts a page: its press glided first.
+        bool entering = !st.Known && !settle && !held;
         var vp = await ViewBoundsAsync(page, st).ConfigureAwait(false);
         var from = entering ? Motion.EntryPoint(new Point(toX, toY), vp?.W ?? 0) : new Point(st.X, st.Y);
-        var steps = Motion.PlanMove(from, new Point(toX, toY), p, targetW, settle);
+        var steps = Motion.PlanMove(from, new Point(toX, toY), p, targetW, settle, held: held);
         if (entering) steps = Motion.EnterFromTop(steps, from);
         double tempo = Tempo(page);   // HumanizeOptions.Preset: every planned duration x1.4 / x1.0 / x0.7
         if (tempo != 1.0) steps = steps.ConvertAll(s => s with { SleepMs = s.SleepMs * tempo });
@@ -484,7 +487,8 @@ public static partial class Humanize
         // the ~27 ms move round trip to every 6-8 ms sample: a 1.05 s planned glide took 3.5-5.4 s on
         // PRO r38 (SC 209).
         await Pacing.WalkAsync(vp is { } v ? Pacing.KeepInView(steps, v.W, v.H) : steps,
-            (x, y) => page.Mouse.MoveAsync((float)x, (float)y)).ConfigureAwait(false);
+            (x, y) => page.Mouse.MoveAsync((float)x, (float)y), kind: held ? "drag" : "glide", buttons: held ? 1 : 0)
+            .ConfigureAwait(false);
         st.X = toX;
         st.Y = toY;
         st.Known = true;
@@ -620,9 +624,11 @@ public static partial class Humanize
 
     private static async Task ClickCoreAsync(ILocator locator, HumanClickOptions options, bool strict, Func<Task> native)
     {
+        if (await FrameClickAsync(locator, options, options.Normalize(), noClick: false, native).ConfigureAwait(false)) return;
         if (!await RoutableAsync(locator, strict).ConfigureAwait(false))
         {
-            await native().ConfigureAwait(false);
+            try { await native().ConfigureAwait(false); }
+            finally { EngineOutOfSync(locator.Page); }   // Playwright moved the pointer: not from the engine's stale point
             return;
         }
         await TargetedClickAsync(locator, options, options.Normalize(), noClick: false, native).ConfigureAwait(false);
@@ -655,9 +661,11 @@ public static partial class Humanize
     private static async Task DblClickCoreAsync(ILocator locator, HumanClickOptions options, bool strict)
     {
         Task Native() => locator.DblClickAsync(options.ToDblClick());
+        if (await FrameClickAsync(locator, options, options.Normalize(defaultCount: 2), noClick: false, Native).ConfigureAwait(false)) return;
         if (!await RoutableAsync(locator, strict).ConfigureAwait(false))
         {
-            await Native().ConfigureAwait(false);
+            try { await Native().ConfigureAwait(false); }
+            finally { EngineOutOfSync(locator.Page); }   // Playwright moved the pointer: not from the engine's stale point
             return;
         }
         await TargetedClickAsync(locator, options, options.Normalize(defaultCount: 2), noClick: false, Native).ConfigureAwait(false);
@@ -688,9 +696,11 @@ public static partial class Humanize
     private static async Task HoverCoreAsync(ILocator locator, HumanClickOptions options, bool strict)
     {
         Task Native() => locator.HoverAsync(options.ToHover());
+        if (await FrameClickAsync(locator, options, options.Normalize(), noClick: true, Native).ConfigureAwait(false)) return;
         if (!await RoutableAsync(locator, strict).ConfigureAwait(false))
         {
-            await Native().ConfigureAwait(false);
+            try { await Native().ConfigureAwait(false); }
+            finally { EngineOutOfSync(locator.Page); }   // Playwright moved the pointer: not from the engine's stale point
             return;
         }
         await TargetedClickAsync(locator, options, options.Normalize(), noClick: true, Native).ConfigureAwait(false);
@@ -725,18 +735,19 @@ public static partial class Humanize
 
     /// <summary>
     /// A locator that enters an iframe (<c>page.FrameLocator(...).Locator(...)</c>): its selector carries
-    /// <c>internal:control=enter-frame</c>. The hit test and the isolated world only see the main frame, so
-    /// such a locator goes to Playwright's own method (a humanized fill there appended "new" to "old").
+    /// <c>internal:control=enter-frame</c>. The main-frame hit test and isolated world do not see inside it, so
+    /// such a locator takes the frame route (Frames.cs; through the main-frame route a fill appended "new" to "old").
     /// </summary>
     internal static bool IsFrameLocator(ILocator locator)
         => locator.ToString()?.Contains("internal:control=enter-frame", StringComparison.Ordinal) == true;
 
-    /// <summary>May the humanized route act on this locator? Not inside a frame, and (for locator actions)
-    /// not when it matches more than one element.</summary>
+    /// <summary>May the main-frame humanized route act on this locator? Not inside a child frame (a FrameLocator's
+    /// locator, or one made on a child IFrame: the actions that have a frame route took it before this, Frames.cs), and
+    /// (for locator actions) not when it matches more than one element.</summary>
     private static async Task<bool> RoutableAsync(ILocator locator, bool strict, [CallerMemberName] string member = "")
     {
-        if (IsFrameLocator(locator))
-            return !Report(locator.Page, ApiName(member), "frame locators go to Playwright", SelectorOf(locator));
+        if (FrameWhy(locator) is { } why)
+            return !Report(locator.Page, ApiName(member), why, SelectorOf(locator));
         return !strict || await StrictOkAsync(locator).ConfigureAwait(false);
     }
 
@@ -815,6 +826,16 @@ public static partial class Humanize
                 }
                 if (!goNative)
                 {
+                    if (!noClick && !o.Force && EngineModeFor(page) == "all")
+                    {
+                        // Opt-in (Engine "all" / CLEARCOTE_HUMANIZE_ENGINE_CLICKS=all): the engine walks the approach
+                        // and clicks the point the hit test above proved. A plain left click takes the r42 route (while
+                        // the engine knows where the pointer is; an r43 engine re-syncs from the SDK's position,
+                        // fromX/fromY); a right / double / modified click takes the r43 extensions (verifier A's R5).
+                        // Otherwise: the planner.
+                        if (Forms.EnginePathOk(o) && await EngineGlideAsync(page, st, x, y, false).ConfigureAwait(false)) return;
+                        if (await EngineExtClickAsync(page, st, x, y, o).ConfigureAwait(false)) return;
+                    }
                     if (noClick && o.Modifiers.Count > 0)
                     {
                         // hover with modifiers: Playwright holds them across the move
@@ -861,7 +882,13 @@ public static partial class Humanize
         {
             goNative = Report(page, api, "error: " + e.Message, SelectorOf(loc));
         }
-        if (goNative) await native().ConfigureAwait(false);
+        if (goNative)
+        {
+            // Playwright's own click moves the real pointer to the element: the engine path must not walk from its
+            // own stale point afterwards (verifier A #6).
+            try { await native().ConfigureAwait(false); }
+            finally { EngineOutOfSync(page); }
+        }
     }
 
     // Test seam: told why a humanized route handed an action to Playwright (the live tests print it when
@@ -1659,6 +1686,8 @@ public static partial class Humanize
         var page = locator.Page;
         await SerialAsync(page, async () =>
         {
+            Task Native() => locator.PressSequentiallyAsync(text, delay is null ? null : new LocatorPressSequentiallyOptions { Delay = delay });
+            if (await FrameTypeAsync(locator, text, delay, Native).ConfigureAwait(false)) return;
             if (await RoutableAsync(locator, strict: true).ConfigureAwait(false)
                 && await ClickIntoAsync(locator, null).ConfigureAwait(false))
             {
@@ -1667,7 +1696,7 @@ public static partial class Humanize
                 await TypeTextAsync(page, p, text, null, typos: true, floorMs: delay ?? 0, exact: false).ConfigureAwait(false);
                 return;
             }
-            await locator.PressSequentiallyAsync(text, delay is null ? null : new LocatorPressSequentiallyOptions { Delay = delay }).ConfigureAwait(false);
+            await Native().ConfigureAwait(false);
         }).ConfigureAwait(false);
     }
 
@@ -1778,6 +1807,26 @@ public static partial class Humanize
         bool search = allow && !exact && string.Equals(fld?.Type, "search", StringComparison.OrdinalIgnoreCase);
         double floor = Math.Max(0, floorMs);
         bool extShift = ks.Held.ContainsKey("Shift");
+        // ROLLOVER, decided up front: the pairs this run overlaps (index of the first key), one unseeded draw per
+        // eligible pair at the persona's rollover rate. Eligible: two different plain keys, never under a caller's
+        // delay floor. Drawn before the route is chosen so the engine run below is taken exactly for the runs that
+        // would have had no rollover, and the per-key path realises the persona's share on the others.
+        var rolls = new HashSet<int>();
+        if (floor <= 0)
+            for (int i = 0; i + 1 < chars.Length; i++)
+                if (CanRoll(chars[i]) && CanRoll(chars[i + 1]) && chars[i] != chars[i + 1] && Rnd.NextDouble() < rollover) rolls.Add(i);
+        // r43 engine (SC 232 lane H, EngineRoute.cs): a run with no slip to plan (typos off, or a field where a slip is
+        // a failure), no caller-held Shift and NO ROLLOVER goes out as ONE Browser.dispatchKeySequence -- the same
+        // dwell and flight draws, paced in the browser, so the rhythm carries no CDP round trips. A run the persona
+        // rolls over stays per key: the command cannot overlap keys, and an identity whose credential fields typed
+        // with zero overlap next to text fields with its 12-38 % would contradict itself (verifier A's R3b). Not with
+        // engine "off" (R3a): that is the documented way to keep everything SDK-side.
+        if (!allow && chars.Length > 1 && !extShift && rolls.Count == 0 && EngineModeFor(page) != "off"
+            && await EngineExtOkAsync(page).ConfigureAwait(false) && await EngineTypeAsync(page, p, text, floor).ConfigureAwait(false))
+        {
+            ks.Typed = Environment.TickCount64;   // a following Enter / Tab still waits (AfterTypingAsync)
+            return;
+        }
         // the score hook records this run's keys (RecKey at the press sites) and scores it as "typed" at the end
         bool outerRec = ks.Rec is not null;
         if (!outerRec && HumanizeTrace.Enabled) ks.Rec = new List<KeySample>();
@@ -1820,8 +1869,7 @@ public static partial class Humanize
                 // Rollover: one press per character never overlaps two keys, and a real typist's fast
                 // pairs do (0 overlapping keydowns in 32 keys, measured on r32/r33). Only two different
                 // plain keys, never under Shift, never next to a slip.
-                if (!typo && !shift && floor <= 0 && i + 1 < chars.Length && CanRoll(ch) && CanRoll(chars[i + 1]) && ch != chars[i + 1]
-                    && Rnd.NextDouble() < rollover && await RollPairAsync(page, ch, chars[i + 1], p).ConfigureAwait(false))
+                if (!typo && !shift && rolls.Contains(i) && await RollPairAsync(page, ch, chars[i + 1], p).ConfigureAwait(false))
                     ch = chars[++i];   // both typed: carry on as if after the second
                 else if (!consumed)
                     await PressOrInsertAsync(page, ch, p).ConfigureAwait(false);
@@ -1922,7 +1970,6 @@ public static partial class Humanize
         await page.Keyboard.TypeAsync(ch).ConfigureAwait(false);
     }
 
-    /// <summary>Lane A's preset scales on the persona (Tempo, PauseScale) when this build has them, else 1.</summary>
     /// <summary>The focused field's current value, read in the isolated world (null if unknown).</summary>
     private static async Task<string?> ActiveValueAsync(IPage page)
     {
@@ -2364,6 +2411,14 @@ public static partial class Humanize
         var page = locator.Page;
         await SerialAsync(page, async () =>
         {
+            // a child frame: its own route; the fallback is Playwright's focus, then the humanized key (as below)
+            if (await FramePressAsync(locator, key, repeat, delay, async () =>
+                {
+                    await locator.FocusAsync().ConfigureAwait(false);
+                    await KeySleep(Rand(40, 120)).ConfigureAwait(false);
+                    await PressFocusedAsync(page, key, repeat, delay).ConfigureAwait(false);
+                }).ConfigureAwait(false))
+                return;
             bool done = false;
             if (await RoutableAsync(locator, strict: true).ConfigureAwait(false))
             {
@@ -2410,6 +2465,36 @@ public static partial class Humanize
             catch (Exception e) when (!Propagates(e)) { /* Playwright's below */ }
             Report(locator.Page, "HumanFocusAsync", "no humane focus route", SelectorOf(locator));
             await locator.FocusAsync(new LocatorFocusOptions { Timeout = timeout }).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The first element matching <paramref name="selector"/>, focused as
+    /// <see cref="HumanFocusAsync(ILocator,float?)"/> does (page actions are not strict); Playwright's
+    /// <c>page.FocusAsync</c> for an activatable target out of Tab reach (reported) and for anything the humane
+    /// route cannot do. Python/Node <c>page.focus(selector)</c> under humanize.
+    /// </summary>
+    public static async Task HumanFocusAsync(this IPage page, string selector, float? timeout = null)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        ArgumentNullException.ThrowIfNull(selector);
+        var loc = page.Locator(selector).First;
+        await SerialAsync(page, async () =>
+        {
+            string why;
+            try
+            {
+                if (await RoutableAsync(loc, strict: false).ConfigureAwait(false)
+                    && await FocusTargetAsync(loc, timeout).ConfigureAwait(false))
+                    return;
+                why = "an activatable target out of Tab reach";
+            }
+            catch (Exception e) when (!Propagates(e))
+            {
+                why = "native focus";
+            }
+            Report(page, "HumanFocusAsync", why, selector);
+            await page.FocusAsync(selector, new PageFocusOptions { Timeout = timeout }).ConfigureAwait(false);
         }).ConfigureAwait(false);
     }
 
@@ -2647,6 +2732,8 @@ public static partial class Humanize
                 Report(loc.Page, "HumanSelectOptionAsync", "option values the humane route cannot match (several fields, or none)", SelectorOf(loc));
                 return await native().ConfigureAwait(false);
             }
+            var fr = await FrameSelectAsync(loc, wants, timeout, force, native).ConfigureAwait(false);
+            if (fr.Done) return fr.Result!;
             if (!await RoutableAsync(loc, strict).ConfigureAwait(false))
                 return await native().ConfigureAwait(false);
             try
@@ -2727,12 +2814,12 @@ public static partial class Humanize
             .ConfigureAwait(false);
         // Every pause here is the persona's (TimingTraits.PauseScale): the windows were one fixed set for every identity.
         await Task.Delay((int)Motion.PauseMs(p, 220, 480)).ConfigureAwait(false);   // the list opens; the eye finds the option
-        double tempo = Motion.TimingTraitsOf(p).PauseScale;
+        double pace = Motion.TimingTraitsOf(p).PauseScale * Tempo(page);   // the persona's deliberation x the preset
         foreach (var ch in plan.Keys)
         {
             await page.Keyboard.PressAsync(ch.ToString(), new KeyboardPressOptions { Delay = (float)Motion.KeyDwell(p) })
                 .ConfigureAwait(false);
-            await Task.Delay((int)Math.Max(40, Gauss(100, 35) * tempo)).ConfigureAwait(false);   // well inside type-ahead's 1 s window
+            await Task.Delay((int)Math.Max(40, Gauss(100, 35) * pace)).ConfigureAwait(false);   // well inside type-ahead's 1 s window
         }
         if (plan.Arrows != 0)
         {
@@ -2981,6 +3068,9 @@ public static partial class Humanize
         ArgumentNullException.ThrowIfNull(value);
         await SerialAsync(locator.Page, async () =>
         {
+            if (await FrameFillAsync(locator, "HumanFillAsync", value, options?.Timeout, options?.Force == true,
+                    () => locator.FillAsync(value, options)).ConfigureAwait(false))
+                return;
             if (await RoutableAsync(locator, strict: true).ConfigureAwait(false)
                 && await FillHumanizedAsync(locator, value, options?.Timeout, options?.Force == true).ConfigureAwait(false))
                 return;
@@ -2998,6 +3088,9 @@ public static partial class Humanize
         var loc = strict ? page.Locator(selector) : page.Locator(selector).First;
         await SerialAsync(page, async () =>
         {
+            if (await FrameFillAsync(loc, "HumanFillAsync", value, options?.Timeout, options?.Force == true,
+                    () => page.FillAsync(selector, value, options)).ConfigureAwait(false))
+                return;
             if (await RoutableAsync(loc, strict).ConfigureAwait(false)
                 && await FillHumanizedAsync(loc, value, options?.Timeout, options?.Force == true).ConfigureAwait(false))
                 return;
@@ -3692,6 +3785,7 @@ public static partial class Humanize
         bool trial, bool strict, Func<Task> native)
         => SerialAsync(loc.Page, after: !trial, body: async () =>
         {
+            if (await FrameSetCheckedAsync(loc, want, timeout, force, position, trial, native).ConfigureAwait(false)) return;
             if (!await RoutableAsync(loc, strict).ConfigureAwait(false))
             {
                 await native().ConfigureAwait(false);   // strict and frame cases are Playwright's
@@ -3736,6 +3830,10 @@ public static partial class Humanize
     /// <summary>This click: on the label? An unseeded draw (Random.Shared, or a test's own) against the share.</summary>
     internal static bool LabelDraw(Persona p, Random? rng = null) => (rng ?? Rnd).NextDouble() < LabelShareOf(p);
 
+    // Test seam: this page's visible-checkbox clicks all take (true) or skip (false) the label, in place of the draw
+    // (Python's monkeypatched label_draw, Node's persona.labelShare = 1).
+    internal static readonly ConditionalWeakTable<IPage, StrongBox<bool>> LabelDrawOverride = new();
+
     /// <summary>The persona's trait (lane B's aim traits, a salted stream of its seed, 0.25-0.55): the share of
     /// visible-checkbox clicks that land on the label text. <see cref="LabelShare"/> is the old single value.</summary>
     internal static double LabelShareOf(Persona p) => Motion.AimTraitsOf(p).LabelShare;
@@ -3771,7 +3869,8 @@ public static partial class Humanize
             if (lab is not { ValueKind: JsonValueKind.Object } l || !l.TryGetProperty("label", out var lb)
                 || lb.ValueKind != JsonValueKind.Object || (l.TryGetProperty("hidden", out var h) && h.ValueKind == JsonValueKind.True))
                 return null;
-            if (!LabelDraw(PersonaFor(page))) return null;   // the persona's share; THIS click's choice is unseeded
+            bool onLabel = LabelDrawOverride.TryGetValue(page, out var forced) ? forced.Value : LabelDraw(PersonaFor(page));
+            if (!onLabel) return null;   // the persona's share; THIS click's choice is unseeded
             // A label that WRAPS its control: LabelOf's text rect is the content clear of the input's box (SC 239 box
             // probe, 10-17: the first content rect IS the input's box, and taking it for the text put every "label"
             // click on the input -- lab F_label_visible 0/60, verifier B 0/20). No text left (a label holding only the
@@ -3837,10 +3936,14 @@ public static partial class Humanize
         {
             var p = PersonaFor(page);
             var st = StateFor(page);
+            // The engine route (EngineRoute.cs): a plain left click walked and pressed by the engine while it knows
+            // where the pointer is; on an r43 engine also right/double/modified clicks. Otherwise the planner.
+            if (await EngineClickAsync(page, st, x, y, o).ConfigureAwait(false)) return;
             await GlideAsync(page, p, st, x, y, 24).ConfigureAwait(false);
             st.Known = true;
             await PressAtAsync(page, p, o).ConfigureAwait(false);
-        }).ConfigureAwait(false);
+            ScheduleMoveOff(page, p, st);   // the hand drifts off afterwards, as after a targeted click (Node mouse.click)
+        }, coords: true).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -3853,6 +3956,9 @@ public static partial class Humanize
         ArgumentNullException.ThrowIfNull(locator);
         await SerialAsync(locator.Page, async () =>
         {
+            if (await FrameFillAsync(locator, "HumanClearAsync", "", options?.Timeout, options?.Force == true,
+                    () => locator.ClearAsync(options)).ConfigureAwait(false))
+                return;
             if (await RoutableAsync(locator, strict: true).ConfigureAwait(false)
                 && await FillHumanizedAsync(locator, "", options?.Timeout, options?.Force == true).ConfigureAwait(false))
                 return;
