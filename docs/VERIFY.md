@@ -42,6 +42,8 @@ a `.zip`; the Linux asset is a `.tar.xz`:
 sha256sum -c clearcote-<version>-windows-x64.zip.sha256
 # Linux
 sha256sum -c clearcote-<version>-linux-x64.tar.xz.sha256
+# macOS (arm64) — on macOS use `shasum -a 256 -c`, there is no `sha256sum`
+shasum -a 256 -c clearcote-<version>-macos-arm64.zip.sha256
 ```
 
 You can also confirm the inner binary against the signed aggregate list:
@@ -51,9 +53,36 @@ You can also confirm the inner binary against the signed aggregate list:
 unzip -p clearcote-<version>-windows-x64.zip chrome.exe | sha256sum
 # Linux — compare to the chrome line in SHA256SUMS.txt
 tar -xJOf clearcote-<version>-linux-x64.tar.xz chrome | sha256sum
+# macOS — compare to the "Chromium Framework" line in SHA256SUMS.txt
+unzip -p clearcote-<version>-macos-arm64.zip \
+  "Chromium.app/Contents/Frameworks/Chromium Framework.framework/Versions/<version>/Chromium Framework" \
+  | shasum -a 256
 ```
 
 If a hash doesn't match `SHA256SUMS.txt` (whose authenticity you verified in step 1), **do not run it.**
+
+## 2a. macOS only — clear the quarantine flag
+
+The macOS build is **not signed with an Apple Developer ID and not notarized**. Anything you
+download on macOS gets a `com.apple.quarantine` attribute, and Gatekeeper refuses to launch an
+unsigned, un-notarized bundle that carries it — usually with a message claiming the app is
+"damaged", which it is not.
+
+**Verify the GPG signature and the checksum first (steps 1 and 2), then clear the flag:**
+
+```bash
+xattr -dr com.apple.quarantine Chromium.app
+```
+
+That order matters. The quarantine flag is not a security check you are defeating — it only
+records that the file came from the network. Your actual assurance is the pinned-key GPG
+signature over `SHA256SUMS.txt` plus the hash of the bundle you downloaded. Clearing the flag
+before you have verified those means you are running an unverified binary.
+
+Why unsigned: Apple codesigning and notarization require an Apple Developer Program membership,
+and notarization means uploading each build to Apple for inspection. For a de-Googled,
+independently verifiable browser that is a deliberate trade — the GPG chain above is the integrity
+story, and it does not depend on trusting Apple or us.
 
 ## 3. Read the patches
 

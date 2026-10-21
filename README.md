@@ -497,9 +497,11 @@ No. `launch()` returns a normal Playwright `Browser`. Replace `chromium.launch(.
 Puppeteer and any CDP client: yes, through the binary or a CDP endpoint. Selenium and WebDriver: no, because Clearcote is driven over CDP.
 
 **Which operating systems are supported?**
-Windows x64 and Linux x64, plus the Docker image. The browser can present itself as Windows, Linux, macOS or Android on either.
-Native macOS and ARM64 builds are on the [roadmap](ROADMAP.md); until then `launch()` on macOS runs the Docker image
-through Docker Desktop (SDK 0.40.0+).
+Windows x64, Linux x64 and **macOS arm64** (Apple Silicon), plus the Docker image. The browser can present itself as
+Windows, Linux, macOS or Android on any of them.
+The macOS build is **unsigned** — clear the quarantine flag after verifying it ([VERIFY.md](docs/VERIFY.md) §2a).
+macOS x64 (Intel) is not built; on an Intel Mac `launch()` still runs the Docker image through Docker Desktop
+(SDK 0.40.0+).
 
 **Should I add a stealth plugin on top?**
 No. Plugins such as `puppeteer-extra-plugin-stealth` change values from JavaScript, which conflicts with the engine-level persona.
