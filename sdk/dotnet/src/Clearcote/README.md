@@ -361,6 +361,18 @@ The licence key file the `clearcote login` command writes is shared by all three
 
 Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the side-by-side configuration is incorrect"; this happens when the SDK runs inside an MSIX-packaged app, whose writes to `%LOCALAPPDATA%` Windows redirects), launches use one copy of that build in `~/.clearcote/recovered/` instead, made once and reused by every later launch from .NET, Python or Node. `WinLaunch.ClearRecovered()` removes those copies, as `clearcote clear-cache` does.
 
+## How many browsers fit on this machine (`ClearcoteBench`)
+
+"Why is my CPU at 100 %" and "how many browsers can I run" in one call. It starts `Concurrency` browsers (headless, temporary profiles, deleted afterwards), loads `Url` in each for `DurationSec` seconds, through `Proxy` if you give one, and reports what each browser costs in CPU threads and RAM on this machine, page timings (DOMContentLoaded, load, network idle), errors, about how many browsers the machine runs at once, and what to change. The lines are the ones `clearcote bench` prints in the Node and Python SDKs:
+
+```csharp
+var report = await ClearcoteBench.RunAsync(new BenchOptions { Concurrency = 5, Url = "https://example.com", Proxy = "http://user:pass@host:8080" });
+foreach (var line in report.Lines()) Console.WriteLine(line);   // or report.ToJson()
+foreach (var line in ClearcoteHost.Lines(ClearcoteHost.Info())) Console.WriteLine(line);   // CPU, RAM, OS, VM, GPU only
+```
+
+It runs fewer browsers than asked when free RAM looks too small (`Force = true` runs them all). Each browser holds a licence seat while it runs. Paste the lines into a support request; proxy credentials are never printed.
+
 ## Options (subset)
 
 | Option | Switch / effect |

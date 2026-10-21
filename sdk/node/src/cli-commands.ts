@@ -2,6 +2,7 @@
 //
 //   clearcote install [--version 152] [--channel preview]   download + verify the binary
 //   clearcote info    [--quick] [--json] [--proxy URL]      diagnostics (alias: doctor)
+//   clearcote bench   [--concurrency 3] [--proxy URL] …     what N browsers cost on this machine
 //   clearcote update  [--channel preview]                   fetch a newer build if one exists
 //   clearcote clear-cache                                   delete every cached binary
 //   clearcote login   [key] | --device                      save a licence key (validated first), or sign in
@@ -15,10 +16,11 @@
 import { parseArgs } from "node:util";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   download,
   launch,
+  launchPersistentContext,
   getSessionSeats,
   saveLicenseKey,
   removeLicenseKey,
@@ -42,6 +44,7 @@ import { fontLines, linuxFontReport, type FontReport } from "./fonts.js";
 import { toProxySpec } from "./net.js";
 import { clearRecovered, recoverRoot } from "./winlaunch.js";
 import { Cloud, CloudError, announceHandoff, type Json, type RunOptions } from "./cloud.js";
+import { benchLines, hostInfo, hostLines, runBench, summarizeBench, type HostReport } from "./bench.js";
 
 const SDK_VERSION: string = (() => {
   try {
@@ -56,6 +59,7 @@ export const USAGE = `clearcote ${SDK_VERSION} — manage and diagnose the Clear
 USAGE
   clearcote install [--version <v>] [--channel stable|preview]
   clearcote info [--quick] [--json] [--proxy <url>]      (alias: doctor)
+  clearcote bench [--concurrency 3] [--url <url>] [--proxy <url>] [--duration 30] [--headed] [--force] [--json]
   clearcote update [--channel stable|preview]
   clearcote clear-cache
   clearcote login [key]
@@ -74,6 +78,14 @@ INFO FLAGS
   --quick          skip everything that needs the network or a launch (seat count, launch test)
   --json           machine-readable output
   --proxy <url>    resolve the exit IP, timezone and language a launch through this proxy would use
+
+BENCH FLAGS
+  --concurrency <n>  browsers at once (default 3; capped by free RAM unless --force)
+  --url <url>        the page every browser loads over and over (default https://en.wikipedia.org/wiki/Web_browser)
+  --proxy <url>      load it through this proxy, as your script does
+  --duration <s>     how long to keep loading (default 30)
+  --headed           show the windows (default headless)
+  --json             machine-readable output
 
 ENVIRONMENT
   CLEARCOTE_LICENSE_KEY, CLEARCOTE_RELEASE_CHANNEL, CLEARCOTE_GEOIP_TIMEOUT_SECONDS,
@@ -120,6 +132,7 @@ function fail(msg: string, code = 1): never {
 /** What `info` reports. Also the `--json` shape. */
 export interface InfoReport {
   sdk: { version: string; node: string; platform: string };
+  host: HostReport;
   license: { source: string; key?: string; expiry?: LicenseExpiry; seats?: SessionSeats };
   binary: {
     source: "CLEARCOTE_BINARY" | "cache" | "none";
@@ -227,6 +240,7 @@ export async function buildInfo(
     process.env.CLEARCOTE_BROWSER_VERSION, !!flags.quick);
   const report: InfoReport = {
     sdk: { version: SDK_VERSION, node: process.version, platform: `${process.platform}-${process.arch}` },
+    host: hostInfo(),
     license: { source: src.source, ...(src.masked ? { key: src.masked } : {}) },
     binary: {
       source: envBinary ? "CLEARCOTE_BINARY" : pick ? "cache" : "none",
@@ -291,6 +305,7 @@ export async function buildInfo(
 function printInfo(r: InfoReport): void {
   const ok = (b: boolean | undefined) => (b ? "yes" : "no");
   out(`clearcote SDK   ${r.sdk.version}  (node ${r.sdk.node}, ${r.sdk.platform})`);
+  for (const line of hostLines(r.host)) out(line);
   out(`Licence         ${r.license.source === "none" ? "none (free build)" : `${r.license.key} from ${r.license.source}`}`);
   const exp = r.license.expiry;
   if (exp && exp.source === "device-login") out(`Expires         ${exp.expiresAt || "never"}  (as reported at device login)`);
@@ -460,7 +475,11 @@ const COMMAND_NOTES: Record<string, string> = {
     + "  --device   sign in from a browser instead: shows a link and a code, and saves the key the\n"
     + "             site issues once you approve it there. Nothing to copy or paste.",
   logout: "Removes the saved key (and what device login recorded about it).",
-  info: "Reports the SDK, the licence, the cached builds and what a launch would use. Never downloads.",
+  info: "Reports the SDK, this machine, the licence, the cached builds and what a launch would use. Never downloads.",
+  bench: "Starts N browsers, loads a page in each for a while, and reports what each browser costs in CPU\n"
+    + "  and RAM on this machine, how long pages take, and about how many browsers it runs at once.\n"
+    + "  Paste the output into a support request. Every browser counts against your licence's seats while\n"
+    + "  it runs; profiles are temporary and deleted afterwards.",
   install: "Downloads and verifies the build a launch would use.",
   update: "Fetches a newer build if one exists.",
   "clear-cache": "Deletes every cached browser build (nothing else in the cache directory), and on Windows the " +
@@ -480,8 +499,8 @@ export function commandUsage(cmd: string): string {
     if (keep) picked.push(line);
   }
   let text = `USAGE\n${picked.join("\n")}`;
-  if (name === "info") {
-    const flags = lines.slice(lines.indexOf("INFO FLAGS"));
+  if (name === "info" || name === "bench") {
+    const flags = lines.slice(lines.indexOf(name === "info" ? "INFO FLAGS" : "BENCH FLAGS"));
     const end = flags.indexOf("");
     text += `\n\n${flags.slice(0, end < 0 ? flags.length : end).join("\n")}`;
   }
@@ -517,7 +536,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
-  const known = ["info", "doctor", "install", "update", "clear-cache", "login", "logout", "serve"];
+  const known = ["info", "doctor", "bench", "install", "update", "clear-cache", "login", "logout", "serve"];
   if (known.includes(cmd) && rest.some((a) => a === "-h" || a === "--help")) {
     out(commandUsage(cmd));
     return;
@@ -528,6 +547,37 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const report = await buildInfo({ quick: !!(values.quick || values["no-launch"]), proxy: values.proxy });
     if (values.json) out(JSON.stringify(report, null, 2));
     else printInfo(report);
+    return;
+  }
+
+  if (cmd === "bench") {
+    const { values } = parseArgs({
+      args: rest,
+      options: {
+        concurrency: { type: "string" }, url: { type: "string" }, proxy: { type: "string" }, duration: { type: "string" },
+        headed: { type: "boolean" }, force: { type: "boolean" }, json: { type: "boolean" },
+      },
+    });
+    const whole = (name: string, v: string | undefined, dflt: number): number => {
+      if (v === undefined) return dflt;
+      if (!/^[1-9][0-9]*$/.test(v)) fail(`--${name} must be a whole number of at least 1`, 2);
+      return Number(v);
+    };
+    const binary = (await launchBuild(listCachedBuilds(), process.env.CLEARCOTE_BINARY, resolveLicenseKey(),
+      autoUpdateRequested(undefined), process.env.CLEARCOTE_BROWSER_VERSION)).pick?.path;
+    const raw = await runBench({
+      concurrency: whole("concurrency", values.concurrency, 3),
+      url: values.url ?? "https://en.wikipedia.org/wiki/Web_browser",
+      durationSec: whole("duration", values.duration, 30),
+      headless: !values.headed,
+      force: !!values.force,
+      ...(values.proxy ? { proxy: proxyOption(values.proxy) } : {}),
+      // cloud: false -- this measures THIS machine, whatever CLEARCOTE_CLOUD says.
+    }, (dir, opts) => launchPersistentContext(dir, { ...opts, cloud: false } as never),
+    binary ? basename(binary) : "chrome.exe", (line) => process.stderr.write(`[clearcote] ${line}\n`));
+    const report = summarizeBench(raw);
+    if (values.json) out(JSON.stringify(report, null, 2));
+    else for (const line of benchLines(report)) out(line);
     return;
   }
 

@@ -1,0 +1,23 @@
+Host            Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz, 8 threads, 7.8 GB RAM (2.5 GB free)
+                Microsoft Windows 10 Home (10.0.19045), physical machine, Remote Desktop session
+GPU             Microsoft Remote Display Adapter (no 3D acceleration: Chromium draws every page on the CPU)
+Bench           5 browsers for 30 s on https://shop.example/products (headed, proxy http://gw.example-proxy.net:7777)
+                10 asked for; capped by free RAM (--force runs them all)
+Launch          4 of 5 started, median 5.2 s
+                FAILED: browserType.launchPersistentContext: licence: all 4 seats are in use
+Pages           9 loaded: DOMContentLoaded median 1.2 s (p95 3.4 s), load median 4.1 s (p95 9.0 s)
+                'load' not reached within 30 s: 3
+                network idle within 5 s: 1 of 9
+Errors          3 x page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://shop.example/products
+Errors          1 x page.goto: Timeout 60000ms exceeded.
+Per browser     1.4 CPU threads (17.7 % of this machine), 611 MB RAM
+Machine CPU     100 % busy during the test (61 % before it) -- FULL
+Capacity        about 3 browsers at once at this pace (CPU allows 4, free RAM 3)
+Advice          The CPU was full during the test: 5 browsers at once is more than this machine runs smoothly; pages slow down and time out once it is.
+Advice          No GPU Chromium can use: every page is drawn on the CPU, so each browser costs more CPU. Run headless and block images/media you do not need.
+Advice          This is a Remote Desktop session: headed browsers here get no GPU acceleration.
+Advice          Headed browsers draw every frame on screen and cost more CPU than headless ones.
+Advice          3 of 9 pages never fired 'load' within 30 s: wait with waitUntil 'domcontentloaded' and then for the element you need, not for 'load'.
+Advice          This page rarely goes network-idle: never wait for 'networkidle' on it; wait for the element you need.
+Advice          Some navigations failed through the proxy: check it answers from this machine, and use sticky sessions (one exit IP per browser) rather than a new IP per request.
+Advice          At this pace this machine runs about 3 browsers at once (free RAM is the limit).

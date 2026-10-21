@@ -1,0 +1,31 @@
+{
+  "host": {
+    "cpu": { "model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz", "threads": 8 },
+    "memory": { "totalMB": 8034, "freeMB": 2560 },
+    "os": "Microsoft Windows 10 Home (10.0.19045)",
+    "virtual": null,
+    "remoteSession": true,
+    "gpu": { "adapters": ["Microsoft Remote Display Adapter"], "software": true }
+  },
+  "url": "https://shop.example/products",
+  "proxy": "http://gw.example-proxy.net:7777",
+  "headless": false,
+  "requested": 10,
+  "concurrency": 5,
+  "durationSec": 30,
+  "measuredSec": 31.25,
+  "browsers": [
+    { "launchMs": 4100, "dclMs": [250, 1200, 3400], "loadMs": [2600, 9000], "loadTimeouts": 1, "idleReached": 0, "idleMissed": 3,
+      "errors": ["page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://shop.example/products"], "cpuMs": 46875, "peakMemMB": 612.4 },
+    { "launchMs": 5200, "dclMs": [800, 2100], "loadMs": [], "loadTimeouts": 2, "idleReached": 1, "idleMissed": 1,
+      "errors": ["page.goto: Timeout 60000ms exceeded.", "page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://shop.example/products"], "cpuMs": 40000, "peakMemMB": 540.5 },
+    { "launchMs": 6800, "dclMs": [1500], "loadMs": [4100], "loadTimeouts": 0, "idleReached": 0, "idleMissed": 1,
+      "errors": [], "cpuMs": 52000, "peakMemMB": 701.1 },
+    { "launchMs": 3900, "dclMs": [650, 700, 2450], "loadMs": [3300, 3350, 7000], "loadTimeouts": 0, "idleReached": 0, "idleMissed": 3,
+      "errors": ["page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://shop.example/products"], "cpuMs": 38000, "peakMemMB": 588 },
+    { "launchError": "browserType.launchPersistentContext: licence: all 4 seats are in use", "dclMs": [], "loadMs": [],
+      "loadTimeouts": 0, "idleReached": 0, "idleMissed": 0, "errors": [], "cpuMs": 0, "peakMemMB": 0 }
+  ],
+  "machineBefore": 61.2,
+  "machineDuring": 99.6
+}
