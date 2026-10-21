@@ -12,7 +12,7 @@ namespace Clearcote;
 /// the verified Clearcote binary (auto-downloaded + SHA-256 checked). With a PRO license key it pulls
 /// the license-gated build and checks out a floating-concurrency lease, injecting the run-token the
 /// engine gate requires. With no key it is the free build and never contacts the license backend.
-public static class Clearcote
+public static partial class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
     public const string Version = "0.55.1";
@@ -131,7 +131,7 @@ public static class Clearcote
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
-        var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
+        var args = AssembleArgs(Agent.WithPersona(options), LaunchOpts.ExtensionArgs(options.Extensions),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
             Extras(options, exe, headed: options.Headless == false));
         LaunchWarnings.Emit(LaunchWarnings.ForArgs(options.Args), options.Quiet);
@@ -270,7 +270,7 @@ public static class Clearcote
         }
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
-        var args = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
+        var args = AssembleArgs(Agent.WithPersona(options), LaunchOpts.ExtensionArgs(options.Extensions),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, userArgs, options.Proxy, options.Socks5Udp,
             Extras(options, exe, headed: options.Headless == false));
         LaunchWarnings.Emit(LaunchWarnings.ForArgs(options.Args), options.Quiet);
@@ -377,7 +377,7 @@ public static class Clearcote
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
         // serve launches the binary directly, so Playwright's SwiftShader default is never added; the
         // blocklist rule still applies to a headed endpoint and on Windows.
-        var engineArgs = AssembleArgs(Fingerprint.Args(options), LaunchOpts.ExtensionArgs(options.Extensions),
+        var engineArgs = AssembleArgs(Agent.WithPersona(options), LaunchOpts.ExtensionArgs(options.Extensions),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
             Extras(options, exe, headed: options.Headless == false, viaPlaywright: false));
 

@@ -5,7 +5,7 @@ namespace Clearcote;
 /// Options for <see cref="Clearcote.LaunchAsync"/> / <see cref="Clearcote.LaunchPersistentContextAsync"/>.
 /// Combines the persona (<see cref="FingerprintOptions"/>), the license options, binary-resolution
 /// options, and the Playwright pass-through knobs the SDK understands.
-public class LaunchOptions : FingerprintOptions
+public partial class LaunchOptions : FingerprintOptions
 {
     // ── license (opt-in PRO) ─────────────────────────────────────────────────
     /// License key ("cc_lic_..."). Resolved from this &gt; CLEARCOTE_LICENSE_KEY env &gt; ~/.clearcote/license.key.
