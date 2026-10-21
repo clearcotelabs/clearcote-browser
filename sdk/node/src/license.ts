@@ -12,7 +12,7 @@
 import { offlineLease } from "./offline.js";
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, rmSync, chmodSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { proxiedRequest, toProxySpec, type ProxySpec, type SimpleResponse } from "./net.js";
@@ -316,13 +316,42 @@ export function engineHwm(env: Record<string, string | undefined> = process.env)
   }
 }
 
+/** Error codes Windows gives a rename onto a file another process has open this instant. */
+const RENAME_BUSY = new Set(["EPERM", "EBUSY", "EACCES"]);
+
+/**
+ * Write `path` through a temporary file renamed into place, so another process never reads half of it.
+ * On Windows the rename fails (EPERM/EBUSY/EACCES) while a reader has the old file open, so it is retried
+ * up to 10 times, 20 ms apart, as the Python SDK does; swallowing that first failure would silently drop
+ * the newer content. Throws on failure, with the temporary file removed. `rename` is a test seam.
+ * @internal
+ */
+export function writeFileAtomic(path: string, content: string, rename: (from: string, to: string) => void = renameSync): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp-${randomBytes(4).toString("hex")}`;
+  try {
+    writeFileSync(tmp, content);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rename(tmp, path);
+        return;
+      } catch (e) {
+        if (attempt >= 9 || !RENAME_BUSY.has((e as NodeJS.ErrnoException)?.code ?? "")) throw e;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); // synchronous 20 ms sleep
+      }
+    }
+  } catch (e) {
+    try { rmSync(tmp, { force: true }); } catch { /* ignore */ }
+    throw e;
+  }
+}
+
 /** `machine`: mark the file as a confirmed machine lease (see the cache comment above). */
 function writeCache(licenseKey: string, token: string, exp: number, leaseId?: string, machine = false): void {
   try {
-    const dir = join(homedir(), ".clearcote");
-    mkdirSync(dir, { recursive: true });
     // token / exp / lease_id stay exactly as older SDKs read them; `scope` is an addition they ignore.
-    writeFileSync(cachePath(licenseKey), JSON.stringify({ token, exp, lease_id: leaseId ?? null, ...(machine ? { scope: "machine" } : {}) }));
+    // Atomic, so another SDK process reading it while a heartbeat replaces it never sees an empty file.
+    writeFileAtomic(cachePath(licenseKey), JSON.stringify({ token, exp, lease_id: leaseId ?? null, ...(machine ? { scope: "machine" } : {}) }));
   } catch {
     /* ignore */
   }
@@ -358,14 +387,11 @@ function writeGrace(licenseKey: string, token: string, exp: number): void {
     /* none kept, or unreadable: replace it */
   }
   if ((tokenIat(token) ?? 0) < kept) return;
-  // Written to a temporary file and renamed into place, so another process never reads half a file.
-  const tmp = `${final}.tmp-${randomBytes(4).toString("hex")}`;
+  // Written to a temporary file and renamed into place (retried while a reader holds it on Windows).
   try {
-    mkdirSync(join(homedir(), ".clearcote"), { recursive: true });
-    writeFileSync(tmp, JSON.stringify({ token, exp }));
-    renameSync(tmp, final);
+    writeFileAtomic(final, JSON.stringify({ token, exp }));
   } catch {
-    try { rmSync(tmp, { force: true }); } catch { /* ignore */ }
+    /* best-effort */
   }
 }
 
