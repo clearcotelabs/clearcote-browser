@@ -13,6 +13,13 @@
  *
  * Only for an engine that has the switch (an older engine keeps Playwright's default exactly as
  * before), and never over a `colorScheme` the caller passed.
+ *
+ * A browser the SDK CONNECTS to (the Clearcote Docker container, over CDP) gets the same default, and
+ * also for the context(s) that exist already, which callers use directly
+ * (`browser.contexts()[0].newPage()`): the emulation is per page, so there it is turned off on each
+ * page as it opens (`emulateMedia({ colorScheme: null })`) and on the pages open at connect time.
+ * Measured 2026-10-21 with the fingerprint audit: through Docker every persona seed reported light
+ * while the same engine launched natively reports dark on about one seed in three.
  */
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { engineSupportsSwitch } from "./launchopts.js";
@@ -37,4 +44,37 @@ export function installColorSchemeDefault(browser: Browser): void {
     (o = {}) => origNewPage(defaultColorScheme(o) as Parameters<typeof origNewPage>[0]);
   (browser as unknown as { newContext: (o?: Record<string, unknown>) => Promise<BrowserContext> }).newContext =
     (o = {}) => origNewContext(defaultColorScheme(o) as Parameters<typeof origNewContext>[0]);
+}
+
+/** Turn the page's colour-scheme emulation off; a page closed in the meantime is left alone. */
+async function emulationOff(page: Page): Promise<void> {
+  try {
+    await page.emulateMedia({ colorScheme: null });
+  } catch {
+    // closed already: nothing left to emulate
+  }
+}
+
+/**
+ * Default an EXISTING context's pages to no colour-scheme emulation: the pages open now and every
+ * page its `newPage` opens. A context the SDK did not create has no options to set, so the emulation
+ * is turned off per page instead.
+ */
+export async function installColorSchemeDefaultOnContext(context: BrowserContext): Promise<void> {
+  const origNewPage = context.newPage.bind(context);
+  (context as unknown as { newPage: () => Promise<Page> }).newPage = async () => {
+    const page = await origNewPage();
+    await emulationOff(page);
+    return page;
+  };
+  for (const page of [...context.pages()]) await emulationOff(page);
+}
+
+/**
+ * The default for a browser the SDK connected to over CDP (the Docker container): its new
+ * pages/contexts ({@link installColorSchemeDefault}) and the context(s) it already has.
+ */
+export async function installColorSchemeDefaultConnected(browser: Browser): Promise<void> {
+  installColorSchemeDefault(browser);
+  for (const ctx of [...browser.contexts()]) await installColorSchemeDefaultOnContext(ctx);
 }

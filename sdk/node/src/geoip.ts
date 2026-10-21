@@ -333,6 +333,48 @@ export async function resolveGeoDetailed(
   return { geo, reason, elapsedMs };
 }
 
+/** Test seam: the resolver {@link applyGeoip} asks (resolveGeoDetailed). */
+export const geoResolver: { resolve: typeof resolveGeoDetailed } = { resolve: resolveGeoDetailed };
+
+/** The persona fields geoip fills (a FingerprintOptions, or the Docker launch's option bag). */
+export interface GeoFillable {
+  timezone?: string;
+  acceptLanguage?: string;
+  location?: string;
+  webrtcIp?: string;
+}
+
+/**
+ * Fill unset timezone/acceptLanguage/location/webrtcIp on `fp` from the proxy's exit-IP geo.
+ *
+ * FAILS CLOSED: if the region cannot be resolved, the launch throws {@link GeoipError} instead of
+ * continuing on the host's clock and a default language (UTC + en-US on most servers) — the exact
+ * mismatch geoip exists to prevent. A caller who set BOTH `timezone` and `acceptLanguage`
+ * explicitly still launches (with a warning), since nothing geoip would fill is missing.
+ */
+export async function applyGeoip(fp: GeoFillable, proxy: unknown, quiet?: boolean): Promise<Geo | undefined> {
+  const result = await geoResolver.resolve(proxy as { server?: string; username?: string; password?: string } | undefined, { quiet });
+  const geo: Geo | null = result.geo;
+  if (!geo || !geo.timezone) {
+    if (fp.timezone && fp.acceptLanguage) {
+      if (!quiet) console.warn(`clearcote: geoip could not resolve the region (${result.reason}); using the explicit timezone and acceptLanguage.`);
+      return undefined;
+    }
+    throw new GeoipError(
+      `geoip: could not resolve the ${proxy ? "proxy's" : "connection's"} region (${result.reason}). ` +
+        "Launching anyway would use this machine's clock and a default language. Fix the proxy, raise " +
+        "CLEARCOTE_GEOIP_TIMEOUT_SECONDS, or pass timezone and acceptLanguage explicitly.",
+    );
+  }
+  if (geo.timezone && fp.timezone == null) fp.timezone = geo.timezone;
+  if (geo.acceptLanguage && fp.acceptLanguage == null) fp.acceptLanguage = geo.acceptLanguage;
+  if (geo.location && fp.location == null) fp.location = geo.location;
+  // make WebRTC report the proxy egress IP too, coherent with HTTP egress (engine fabricates
+  // the srflx candidate at this IP; no real STUN leaves the host).
+  if (geo.ip && fp.webrtcIp == null) fp.webrtcIp = geo.ip;
+  return geo;
+}
+
 /**
  * Resolve geo for the egress (through `proxy` if given, else direct). Never throws — returns null
  * on failure. Uses the geoip-all-in-one offline DB (ip-api.com only with CLEARCOTE_GEOIP_IPAPI=1).

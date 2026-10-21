@@ -494,4 +494,46 @@ public class ParityLaunchTests : IDisposable
         Assert.Equal(new[] { "--test-type" }, LaunchOpts.ServeInfobarArgs(false, new[] { "--no-sandbox" }));
         Assert.Empty(LaunchOpts.ServeInfobarArgs(false, new[] { "--no-sandbox", "--test-type=browser" }));
     }
+
+    // ── software WebGPU under a desktop claim (engine r47+, pro-r47-04) ─────────────────────────────
+
+    [Fact]
+    public void EngineRevision_reads_the_PRO_tag_from_the_path()
+    {
+        Assert.Equal(47, LaunchOpts.EngineRevision("/home/u/.clearcote/pro-155.0.8059.39-r47/chrome"));
+        Assert.Equal(46, LaunchOpts.EngineRevision(@"C:\Users\u\.clearcote\pro-155.0.8059.39-r46\chrome.exe"));
+        Assert.Equal(48, LaunchOpts.EngineRevision("/Users/u/.clearcote/pro-155.0.8059.39-r48/Chromium.app/Contents/MacOS/Chromium"));
+        Assert.Equal(47, LaunchOpts.EngineRevision("/x/other-r3/pro-155.0.8059.39-r47/chrome"));   // the deepest component wins
+        Assert.Null(LaunchOpts.EngineRevision("/opt/clearcote/chrome"));   // a binary the caller named: no revision there
+        Assert.Null(LaunchOpts.EngineRevision(""));
+        Assert.Null(LaunchOpts.EngineRevision(null));
+    }
+
+    [Fact]
+    public void SoftwareWebgpuArgs_only_for_an_engine_that_can_dress_the_adapter()
+    {
+        var three = new[] { "--use-webgpu-adapter=swiftshader", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader" };
+        const string r47 = "/x/pro-155.0.8059.39-r47/chrome";
+        const string r46 = "/x/pro-155.0.8059.39-r46/chrome";
+        Assert.Equal(three, LaunchOpts.SoftwareWebgpuSwitches);
+        Assert.Equal(three, LaunchOpts.SoftwareWebgpuArgs(r47, "windows", "linux"));
+        Assert.Equal(three, LaunchOpts.SoftwareWebgpuArgs(r47, "macos", "linux"));
+        Assert.Equal(three, LaunchOpts.SoftwareWebgpuArgs(r47, "Windows ", "linux"));
+        Assert.Empty(LaunchOpts.SoftwareWebgpuArgs(r46, "windows", "linux"));   // r46: a raw SwiftShader adapter would show
+        Assert.Empty(LaunchOpts.SoftwareWebgpuArgs("/opt/cc/chrome", "windows", "linux"));   // no revision, no marker switch
+        Assert.Empty(LaunchOpts.SoftwareWebgpuArgs(r47, "linux", "linux"));   // a Linux claim renders through Mesa
+        Assert.Empty(LaunchOpts.SoftwareWebgpuArgs(r47, null, "linux"));   // pass-through: no persona
+        Assert.Empty(LaunchOpts.SoftwareWebgpuArgs(r47, "windows", "windows"));
+        Assert.Empty(LaunchOpts.SoftwareWebgpuArgs(r47, "windows", "macos"));
+        // the r48 marker switch stands in for the revision
+        Assert.Empty(LaunchOpts.SoftwareWebgpuArgs(FakeEngine(new[] { "fingerprint-platform" }), "windows", "linux"));
+        Assert.Equal(three, LaunchOpts.SoftwareWebgpuArgs(FakeEngine(new[] { "fingerprint-software-webgpu" }), "windows", "linux"));
+        // never a switch twice
+        Assert.Equal(three[..2], LaunchOpts.SoftwareWebgpuArgs(r47, "windows", "linux", new[] { "--enable-unsafe-swiftshader" }));
+        Assert.Empty(LaunchOpts.SoftwareWebgpuArgs(r47, "windows", "linux", three));
+        // Playwright's own --enable-unsafe-swiftshader reaches the line only when the launch keeps it
+        Assert.False(LaunchOpts.PlaywrightKeepsUnsafeSwiftshader(null));   // the SDK's default strip
+        Assert.True(LaunchOpts.PlaywrightKeepsUnsafeSwiftshader(new[] { "--enable-automation" }));
+        Assert.False(LaunchOpts.PlaywrightKeepsUnsafeSwiftshader(new[] { "--enable-automation", "--enable-unsafe-swiftshader" }));
+    }
 }

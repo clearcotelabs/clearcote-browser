@@ -53,6 +53,14 @@ var browser = await Clearcote.Clearcote.LaunchAsync(new LaunchOptions
 });
 ```
 
+In Docker (`Docker = true`), `Geoip = true` works exactly as for a native launch: the SDK resolves the proxy's exit
+IP before the container is started and hands the container the timezone and Accept-Language it resolved (any
+`Timezone` / `AcceptLanguage` you set yourself still wins). Without `Geoip` (and no `Timezone` / `AcceptLanguage` of
+your own) the container's entrypoint builds the persona the way a native launch does: Accept-Language defaults to
+`en-US` and the timezone is derived from its primary tag (`en-US` -> `America/New_York`), so every such container is
+New York, English. A container has no WebRTC ICE candidates at all unless `WebrtcIp` is given; the value to give is
+the proxy's exit IP, which `Geoip = true` fills in as it does for a native launch.
+
 ## PRO tier (license key)
 
 By default you get the **free** build. With a PRO license key the SDK pulls the license-gated browser and

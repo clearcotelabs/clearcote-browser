@@ -15,6 +15,7 @@ import tarfile
 import threading
 import time
 import types
+import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -900,3 +901,225 @@ def test_seccomp_args():
 def test_the_packaged_profile_is_docker_seccomp_json():
     with open(_docker.SECCOMP_PROFILE, "rb") as mine, open(REPO_PROFILE, "rb") as repo:
         assert mine.read() == repo.read(), "copy docker/seccomp.json to clearcote/docker-seccomp.json"
+
+
+# ── prefers-color-scheme: Playwright's light emulation is off for the container's pages too ─────────
+# Measured 2026-10-21: through Docker every persona seed reported light, natively one in three is dark.
+
+class _MediaPage:
+    def __init__(self, closed=False):
+        self.closed, self.media = closed, []
+
+    def emulate_media(self, **kw):
+        if self.closed:
+            raise RuntimeError("Target page, context or browser has been closed")
+        self.media.append(kw)
+
+
+class _MediaContext:
+    def __init__(self, pages=()):
+        self.pages, self.new_page_kwargs = list(pages), []
+
+    def on(self, *_a, **_k):
+        pass
+
+    def new_page(self, **kw):
+        self.new_page_kwargs.append(kw)
+        page = _MediaPage()
+        self.pages.append(page)
+        return page
+
+
+class _ConnectedBrowser:
+    """What connect_over_cdp hands back: a browser with the container's default context and a page."""
+
+    def __init__(self):
+        self.contexts = [_MediaContext([_MediaPage(), _MediaPage(closed=True)])]
+        self.calls, self.closed = [], False
+
+    def new_page(self, **kw):
+        self.calls.append(("page", kw))
+        return _MediaPage()
+
+    def new_context(self, **kw):
+        self.calls.append(("context", kw))
+        return _MediaContext()
+
+    def close(self):
+        self.closed = True
+
+    def on(self, *_a, **_k):
+        pass
+
+
+@pytest.fixture
+def connected(monkeypatch):
+    """connect_over_cdp -> a recording browser (sync and async drivers alike)."""
+    browser = _ConnectedBrowser()
+
+    class _Chromium:
+        def connect_over_cdp(self, endpoint, **kw):
+            browser.endpoint = endpoint
+            return browser
+
+    class _PW:
+        chromium = _Chromium()
+
+    class _AsyncChromium:
+        async def connect_over_cdp(self, endpoint, **kw):
+            browser.endpoint = endpoint
+            return browser
+
+    class _AsyncPW:
+        chromium = _AsyncChromium()
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(clearcote, "_playwright", lambda: _PW())
+
+    async def start():
+        return _AsyncPW()
+
+    monkeypatch.setattr(async_api, "_start_driver", start)
+    return browser
+
+
+def test_the_containers_pages_get_no_color_scheme_emulation(mac, docker, cdp, connected):
+    browser = clearcote.launch(fingerprint="seed-1", platform="windows")
+    assert browser is connected
+    existing = browser.contexts[0]
+    assert existing.pages[0].media == [{"color_scheme": "null"}]  # open at connect time
+    assert existing.pages[1].media == []  # closed already: the error is ignored, the launch goes on
+    page = existing.new_page()  # browser.contexts[0].new_page(): what Docker callers use directly
+    assert page.media == [{"color_scheme": "null"}] and existing.new_page_kwargs == [{}]
+    browser.new_page()
+    browser.new_context(color_scheme="dark")
+    browser.new_context(viewport={"width": 800, "height": 600})
+    assert browser.calls == [
+        ("page", {"no_viewport": True, "color_scheme": "null"}),
+        ("context", {"no_viewport": True, "color_scheme": "dark"}),  # the caller's choice stands
+        ("context", {"viewport": {"width": 800, "height": 600}, "color_scheme": "null"}),
+    ]
+    browser.close()
+    assert browser.closed and docker.commands()[-3:] == ["stop", "rm", "ps"]
+
+
+def test_the_async_launch_does_the_same(mac, docker, cdp, connected):
+    async def go():
+        # the async driver awaits these: give the recording browser awaitable twins
+        browser = connected
+        ctx = browser.contexts[0]
+        sync_new_page, sync_emulate = ctx.new_page, _MediaPage.emulate_media
+
+        async def new_page(**kw):
+            return sync_new_page(**kw)
+
+        async def emulate_media(self, **kw):
+            return sync_emulate(self, **kw)
+
+        async def close():
+            browser.closed = True
+
+        ctx.new_page, browser.close = new_page, close
+        _MediaPage.emulate_media = emulate_media
+        try:
+            b = await async_api.launch(docker=True)
+            assert b is browser
+            assert ctx.pages[0].media == [{"color_scheme": "null"}] and ctx.pages[1].media == []
+            assert (await ctx.new_page()).media == [{"color_scheme": "null"}]
+        finally:
+            _MediaPage.emulate_media = sync_emulate
+
+    asyncio.run(go())
+
+
+# ── geoip=True: resolved here, before the container starts; what it filled goes in as CC_* ─────────
+
+GEO = {"ip": "203.0.113.7", "country": "DE", "timezone": "Europe/Berlin", "accept_language": "de-DE",
+       "location": (52.52, 13.405)}
+
+
+PROXY = {"server": "http://proxy.example:8080"}
+
+
+@pytest.fixture
+def geo(monkeypatch, docker):
+    """The exit-region resolver apply_geoip asks, answering GEO (or what the test puts in ``answer``);
+    the container's log says it applied PROXY."""
+    docker.marks = [serve_state(proxy=PROXY["server"])]
+    state = {"answer": (GEO, None, 12), "calls": []}
+
+    def resolve(proxy, quiet=False, **kw):
+        state["calls"].append(proxy)
+        return state["answer"]
+
+    monkeypatch.setattr(clearcote, "resolve_geo_detailed", resolve)
+    return state
+
+
+def test_geoip_fills_the_containers_clock_language_location_and_webrtc_ip(mac, docker, cdp, connected, geo):
+    browser = clearcote.launch(geoip=True, proxy=PROXY, fingerprint="seed-1", quiet=True)
+    assert browser is connected and geo["calls"] == [PROXY]  # resolved through the proxy, once
+    env = docker.call("create")["env"]
+    assert env["CC_TIMEZONE"] == "Europe/Berlin" and env["CC_ACCEPT_LANGUAGE"] == "de-DE"
+    assert env["CC_LOCATION"] == "52.52,13.405" and env["CC_WEBRTC_IP"] == "203.0.113.7"
+    assert "CC_GEOIP" not in env and "geoip" not in " ".join(docker.call("create")["argv"])
+    browser.close()
+
+
+def test_geoip_keeps_what_the_caller_set(mac, docker, cdp, connected, geo):
+    clearcote.launch(geoip=True, proxy=PROXY, timezone="Europe/Paris", webrtc_ip="198.51.100.9", quiet=True)
+    env = docker.call("create")["env"]
+    assert env["CC_TIMEZONE"] == "Europe/Paris" and env["CC_WEBRTC_IP"] == "198.51.100.9"
+    assert env["CC_ACCEPT_LANGUAGE"] == "de-DE"  # the unset ones are still filled
+
+
+def test_geoip_fails_closed_before_any_container_starts(mac, docker, cdp, geo):
+    geo["answer"] = (None, "could not determine the exit IP through the proxy", 1500)
+    with pytest.raises(clearcote.GeoipError) as ei:
+        clearcote.launch(geoip=True, proxy=PROXY, quiet=True)
+    assert ei.value.code == "GEOIP_UNRESOLVED"
+    assert docker.calls == []  # not even `docker info`
+
+
+def test_geoip_with_an_explicit_timezone_and_language_still_launches(mac, docker, cdp, connected, geo):
+    geo["answer"] = (None, "timed out after 2s", 2000)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        browser = clearcote.launch(geoip=True, proxy=PROXY, timezone="Europe/Paris", accept_language="fr-FR,fr")
+    assert browser is connected
+    assert any("using the explicit timezone and accept_language" in str(w.message) for w in caught)
+    env = docker.call("create")["env"]
+    assert env["CC_TIMEZONE"] == "Europe/Paris" and env["CC_ACCEPT_LANGUAGE"] == "fr-FR,fr"
+    assert "CC_WEBRTC_IP" not in env  # nothing resolved: nothing invented
+    browser.close()
+
+
+def test_async_geoip_launch(mac, docker, cdp, connected, geo):
+    async def go():
+        browser = connected
+
+        async def close():
+            browser.closed = True
+
+        browser.close = close
+        sync_emulate = _MediaPage.emulate_media
+
+        async def emulate_media(self, **kw):
+            return sync_emulate(self, **kw)
+
+        _MediaPage.emulate_media = emulate_media
+        try:
+            b = await async_api.launch(docker=True, geoip=True, proxy=PROXY, quiet=True)
+            assert b is browser
+        finally:
+            _MediaPage.emulate_media = sync_emulate
+
+    asyncio.run(go())
+    assert docker.call("create")["env"]["CC_TIMEZONE"] == "Europe/Berlin"
+
+
+def test_geoip_is_an_option_the_image_takes(mac):
+    assert "geoip" in _docker.ACCEPTED
+    assert _docker.container_env({"geoip": False}) == {}  # false: nothing to resolve, nothing refused

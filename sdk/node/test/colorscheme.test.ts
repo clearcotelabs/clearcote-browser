@@ -140,3 +140,52 @@ describe("launch entry points", () => {
     expect(stub.pageOpts).toEqual([{ viewport: null }]);
   });
 });
+
+// A browser the SDK connected to (the Docker container): its existing context(s) too. Measured 2026-10-21:
+// through Docker every persona seed reported light, natively one in three is dark.
+describe("a connected browser's existing context", () => {
+  type Media = Record<string, unknown>;
+  const fakePage = (closed = false) => {
+    const media: Media[] = [];
+    return {
+      media,
+      emulateMedia: async (o: Media) => {
+        if (closed) throw new Error("Target page, context or browser has been closed");
+        media.push(o);
+      },
+    };
+  };
+  const fakeContext = (pages: ReturnType<typeof fakePage>[] = []) => ({
+    pages: () => pages,
+    newPage: async () => { const p = fakePage(); pages.push(p); return p; },
+  });
+
+  it("turns the emulation off on the pages open now and on each page newPage opens", async () => {
+    const { installColorSchemeDefaultOnContext } = await import("../src/colorscheme.js");
+    const open = fakePage();
+    const closed = fakePage(true);
+    const ctx = fakeContext([open, closed]);
+    await installColorSchemeDefaultOnContext(ctx as never);  // the closed page throws inside; ignored
+    expect(open.media).toEqual([{ colorScheme: null }]);
+    expect(closed.media).toEqual([]);
+    const page = await ctx.newPage();
+    expect(page.media).toEqual([{ colorScheme: null }]);
+  });
+
+  it("the connected default covers newPage, newContext and browser.contexts()[0]", async () => {
+    const { installColorSchemeDefaultConnected } = await import("../src/colorscheme.js");
+    const seen: Array<[string, Record<string, unknown>]> = [];
+    const existing = fakeContext([fakePage()]);
+    const b = {
+      contexts: () => [existing],
+      newPage: async (o: Record<string, unknown> = {}) => { seen.push(["page", o]); return fakePage(); },
+      newContext: async (o: Record<string, unknown> = {}) => { seen.push(["context", o]); return fakeContext(); },
+    };
+    await installColorSchemeDefaultConnected(b as never);
+    await (b.newPage as (o?: object) => Promise<unknown>)();
+    await (b.newContext as (o?: object) => Promise<unknown>)({ colorScheme: "dark" });
+    expect(seen).toEqual([["page", { colorScheme: null }], ["context", { colorScheme: "dark" }]]);  // the caller's choice stands
+    expect(existing.pages()[0].media).toEqual([{ colorScheme: null }]);  // open at connect time
+    expect((await existing.newPage()).media).toEqual([{ colorScheme: null }]);  // browser.contexts()[0].newPage()
+  });
+});

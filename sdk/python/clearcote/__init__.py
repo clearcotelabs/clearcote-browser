@@ -54,7 +54,10 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     engine_extras_args,
     engine_supports_switch,
     gate_engine_switches,
+    engine_revision,
     gpu_backend_args,
+    playwright_keeps_unsafe_swiftshader,
+    software_webgpu_args,
     mesa_egl_available,
     gpu_blocklist_args,
     macos_keychain_args,
@@ -150,6 +153,8 @@ __all__ = [
     "is_fingerprint_passthrough",
     "DEFAULT_IGNORED_ARGS",
     "gpu_backend_args",
+    "software_webgpu_args",
+    "engine_revision",
     "mesa_egl_available",
     "gpu_blocklist_args",
     "gate_engine_switches",
@@ -572,6 +577,13 @@ def _prepare(kwargs):
     # SwiftShader for a Windows claim (Direct3D11-like limits), Mesa for a Linux claim (over the X
     # display, or over EGL when there is none). Pass-through has no persona to match. See gpu_backend_args.
     base += gpu_backend_args(None if passthrough else persona_platform(fp), headed, sys.platform, user)
+    # Engine r47+ (pro-r47-04) on a Linux host: a software WebGPU adapter that wears the persona under a
+    # Windows or macOS claim. Gated on the engine (an older one would show a raw SwiftShader adapter),
+    # and never a switch twice: Playwright's own --enable-unsafe-swiftshader counts when it is kept.
+    base += software_webgpu_args(
+        exe, None if passthrough else persona_platform(fp), sys.platform,
+        present=base + user + (["--enable-unsafe-swiftshader"] if not direct_launch
+                               and playwright_keeps_unsafe_swiftshader(kwargs.get("ignore_default_args")) else []))
     # macOS: the build is unsigned, so every launch would prompt for the "Chromium Safe Storage"
     # keychain item. See macos_keychain_args.
     base += macos_keychain_args(sys.platform, user)

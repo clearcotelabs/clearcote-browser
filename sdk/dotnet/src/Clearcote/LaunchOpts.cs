@@ -540,6 +540,63 @@ public static class LaunchOpts
         catch { return false; }
     }
 
+    // ── software WebGPU under a desktop claim (155 r47+) ─────────────────────
+
+    /// What the engine's pro-r47-04 patch needs to let a software WebGPU adapter wear the persona:
+    /// Chromium's own WebGPU-on-SwiftShader opt-ins. Playwright adds the last one itself (and the SDK
+    /// strips it again, <see cref="DefaultIgnoredArgs"/>), so it may already be on the line.
+    public static readonly IReadOnlyList<string> SoftwareWebgpuSwitches =
+        new[] { "--use-webgpu-adapter=swiftshader", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader" };
+    /// The marker switch engine r48 introduces.
+    public const string SoftwareWebgpuSwitch = "fingerprint-software-webgpu";
+    /// pro-r47-04: the first engine whose software adapter wears the persona.
+    public const int SoftwareWebgpuMinRevision = 47;
+    private static readonly Regex ProRevision = new(@"-r(\d+)(?!\d)");
+
+    /// The PRO revision of the engine at <paramref name="exe"/>, read from its path, or null when the
+    /// path does not carry one. An auto-downloaded engine lives in a directory named after its tag
+    /// (<c>pro-155.0.8059.39-r47</c>); a binary the caller named by any other path answers null, and
+    /// the engine's own switches decide (<see cref="EngineSupportsSwitch"/>).
+    public static int? EngineRevision(string? exe)
+    {
+        int? found = null;
+        foreach (var part in (exe ?? "").Split('\\', '/'))
+        {
+            var m = ProRevision.Match(part);
+            if (m.Success) found = int.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);   // the deepest component wins
+        }
+        return found;
+    }
+
+    /// Whether Playwright's own <c>--enable-unsafe-swiftshader</c> reaches the command line. It does
+    /// unless the launch ignores it: the SDK's default strip (<c>IgnoreDefaultArgs</c> unset ->
+    /// <see cref="DefaultIgnoredArgs"/>) or a caller's list that names it.
+    public static bool PlaywrightKeepsUnsafeSwiftshader(IEnumerable<string>? ignoreDefaultArgs)
+        => ignoreDefaultArgs is not null && !ignoreDefaultArgs.Contains("--enable-unsafe-swiftshader");
+
+    /// The switches that give a Windows or macOS claim on a Linux host a WebGPU adapter in the persona's
+    /// name, on an engine that can dress one (pro-r47-04, engine r47+; mirrors Python's
+    /// software_webgpu_args). Without that patch the same three switches expose a raw SwiftShader adapter
+    /// (<c>isFallbackAdapter</c> true, architecture "swiftshader") under the persona's NVIDIA/Intel
+    /// renderer string, which is worse than no adapter at all, so they are gated: the engine's revision
+    /// from its path (<see cref="EngineRevision"/>) at or past 47, or the marker switch the r48 engine
+    /// carries (<c>--fingerprint-software-webgpu</c>, <see cref="EngineSupportsSwitch"/>).
+    /// <paramref name="present"/> lists the switches already on the line (the caller's, the SDK's and
+    /// Playwright's own <c>--enable-unsafe-swiftshader</c> when it is kept); none is added twice. A
+    /// Linux claim renders through Mesa (<see cref="GpuBackendArgs"/>) and a pass-through launch has no
+    /// persona: nothing for either, nor on any host but Linux.
+    public static List<string> SoftwareWebgpuArgs(string? exe, string? claimedPlatform, string? osTag = null,
+                                                  IEnumerable<string>? present = null)
+    {
+        if (claimedPlatform is null || (osTag ?? Native.OsTag) != "linux") return new();
+        var claim = claimedPlatform.Trim().ToLowerInvariant();
+        if (claim != "windows" && claim != "macos") return new();
+        var rev = EngineRevision(exe);
+        if (!((rev is int r && r >= SoftwareWebgpuMinRevision) || EngineSupportsSwitch(exe, SoftwareWebgpuSwitch))) return new();
+        var have = new HashSet<string>(present ?? Enumerable.Empty<string>(), StringComparer.Ordinal);
+        return SoftwareWebgpuSwitches.Where(a => !have.Contains(a)).ToList();
+    }
+
     // ── new engine switches (152 r22+) ───────────────────────────────────────
 
     /// Switches introduced in engine 152 r22, with the option that asked for each. Gated per binary.

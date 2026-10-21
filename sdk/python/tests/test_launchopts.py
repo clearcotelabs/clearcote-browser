@@ -437,3 +437,56 @@ def test_parse_is_robust_to_a_bracket_in_a_comment_and_rejects_an_unrecognised_l
         == ("MediaRouter", "Translate")
     assert parse('disabledFeatures = ["SomethingElse"];') is None      # no known entry: not trusted
     assert parse('const disabledFeatures2 = ["MediaRouter"];') is None  # a different variable
+
+
+# -- software WebGPU under a desktop claim (engine r47+, pro-r47-04) ------------------------------
+
+def test_engine_revision_reads_the_pro_tag_from_the_path():
+    from clearcote._launchopts import engine_revision
+    assert engine_revision("/home/u/.clearcote/pro-155.0.8059.39-r47/chrome") == 47
+    assert engine_revision(r"C:\Users\u\.clearcote\pro-155.0.8059.39-r46\chrome.exe") == 46
+    assert engine_revision("/Users/u/.clearcote/pro-155.0.8059.39-r48/Chromium.app/Contents/MacOS/Chromium") == 48
+    assert engine_revision("/x/other-r3/pro-155.0.8059.39-r47/chrome") == 47  # the deepest component wins
+    assert engine_revision("/opt/clearcote/chrome") is None  # a binary the caller named: no revision there
+    assert engine_revision("/x/chromium-r4/chrome") == 4
+    assert engine_revision("") is None and engine_revision(None) is None
+
+
+def test_software_webgpu_args_only_for_an_engine_that_can_dress_the_adapter(tmp_path):
+    from clearcote._launchopts import SOFTWARE_WEBGPU_ARGS, software_webgpu_args
+    r47 = str(tmp_path / "pro-155.0.8059.39-r47" / "chrome")
+    r46 = str(tmp_path / "pro-155.0.8059.39-r46" / "chrome")
+    three = list(SOFTWARE_WEBGPU_ARGS)
+    assert three == ["--use-webgpu-adapter=swiftshader", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader"]
+    assert software_webgpu_args(r47, "windows", "linux") == three
+    assert software_webgpu_args(r47, "macos", "linux") == three
+    assert software_webgpu_args(r47, "Windows ", "linux") == three
+    assert software_webgpu_args(r46, "windows", "linux") == []  # r46: a raw SwiftShader adapter would show
+    assert software_webgpu_args("/opt/cc/chrome", "windows", "linux") == []  # no revision, no marker switch
+    assert software_webgpu_args(r47, "linux", "linux") == []  # a Linux claim renders through Mesa
+    assert software_webgpu_args(r47, None, "linux") == []  # pass-through: no persona
+    assert software_webgpu_args(r47, "windows", "win32") == []
+    assert software_webgpu_args(r47, "windows", "darwin") == []
+
+
+def test_software_webgpu_args_marker_switch_stands_in_for_the_revision(tmp_path):
+    from clearcote._launchopts import SOFTWARE_WEBGPU_ARGS, software_webgpu_args
+    exe = tmp_path / "chrome"
+    exe.write_bytes(b"xx\x00fingerprint-platform\x00yy")
+    assert software_webgpu_args(str(exe), "windows", "linux") == []
+    exe.write_bytes(b"xx\x00fingerprint-software-webgpu\x00yy")  # the r48 engine's marker
+    assert software_webgpu_args(str(exe), "windows", "linux") == list(SOFTWARE_WEBGPU_ARGS)
+
+
+def test_software_webgpu_args_never_adds_a_switch_twice(tmp_path):
+    from clearcote._launchopts import playwright_keeps_unsafe_swiftshader, software_webgpu_args
+    r47 = str(tmp_path / "pro-155.0.8059.39-r47" / "chrome")
+    assert software_webgpu_args(r47, "windows", "linux", present=["--enable-unsafe-swiftshader"]) == [
+        "--use-webgpu-adapter=swiftshader", "--enable-unsafe-webgpu"]
+    assert software_webgpu_args(r47, "windows", "linux", present=[
+        "--use-webgpu-adapter=swiftshader", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader"]) == []
+    # Playwright's own --enable-unsafe-swiftshader reaches the line only when the launch keeps it
+    assert playwright_keeps_unsafe_swiftshader(None) is False  # the SDK's default strip
+    assert playwright_keeps_unsafe_swiftshader(True) is False  # every default dropped
+    assert playwright_keeps_unsafe_swiftshader(["--enable-automation"]) is True
+    assert playwright_keeps_unsafe_swiftshader(["--enable-automation", "--enable-unsafe-swiftshader"]) is False

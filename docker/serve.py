@@ -20,9 +20,11 @@ line saying why.
 """
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from clearcote import executable_path
@@ -120,6 +122,57 @@ except TypeError:
 
 print("[clearcote] engine: %s (%s)" % (exe, "licensed" if _license else "free"), flush=True)
 
+# A PRO engine refuses to run without a run token (the licence gate reads CLEARCOTE_RUN_TOKEN once at
+# startup), and this entrypoint starts chrome itself, so the lease is checked out here, as early as
+# possible: the persona display below runs the engine's validator before Xvfb starts, and a key that
+# cannot lease fails the container before anything else is set up. The lease lives as long as this
+# process: chrome runs as its CHILD, so the heartbeat keeps the slot while the browser runs and releases
+# it when it stops (exec'ing chrome used to kill the heartbeat). The token is also mirrored into a
+# per-launch file (CLEARCOTE_RUN_TOKEN_FILE) that follows the lease's rotation: a supporting engine
+# (152 r23+) re-reads it and stops a running FREE browser once the token stops advancing.
+_lease = None
+_token_file = None
+_release_token_file = None
+if _license:
+    try:
+        from clearcote._license import acquire_lease
+
+        _lease = acquire_lease(_license, quiet=False)
+        if _lease and _lease.token:
+            try:
+                _token_file, _release_token_file = _lease.bind_launch()
+            except Exception as exc:  # noqa: BLE001 -- an older SDK has no bind_launch; PRO still runs
+                print("[clearcote] WARNING: this SDK cannot keep the run-token fresh (%s: %s); a "
+                      "FREE licence needs a newer clearcote package." % (type(exc).__name__, exc),
+                      flush=True)
+            print("[clearcote] licence lease acquired", flush=True)
+        else:
+            print("[clearcote] WARNING: no lease returned for this key; the PRO engine will "
+                  "refuse to start.", flush=True)
+    except Exception as exc:  # noqa: BLE001 -- surface the reason, never launch a doomed browser
+        print("[clearcote] ERROR: could not lease a run token (%s: %s). The PRO engine will not "
+              "start. Check the key, the plan's concurrency limit, and outbound network access."
+              % (type(exc).__name__, exc), flush=True)
+        raise SystemExit(1)
+
+
+def _engine_revision(path):
+    """The PRO revision of an auto-downloaded engine from its path (".../pro-155.0.8059.39-r47/..."), or
+    None for a path that does not carry one (a caller's own binary, the free build)."""
+    m = re.search(r"-r(\d+)(?=[/\\]|$)", str(path or ""))
+    return int(m.group(1)) if m else None
+
+
+def _engine_has_switch(name):
+    try:
+        from clearcote._launchopts import engine_supports_switch
+    except ImportError:  # an image built with an SDK older than this entrypoint: the same probe
+        from proxy_relay import engine_supports_switch
+    try:
+        return bool(engine_supports_switch(exe, name))
+    except Exception:  # noqa: BLE001 -- a probe failure means "no", never a container that will not boot
+        return False
+
 # The seed is the identity. Without CC_FINGERPRINT each container now gets its own random one, kept
 # in the profile directory (it used to be the fixed "clearcote-docker", so every such container was
 # the same device and any two could be linked). See clearcote._containerseed.
@@ -209,12 +262,71 @@ for _map, _cast, _what in ((_ENV_TO_OPT, str, "string"),
 # (measured: one seed gives 3840x2160 / avail 3840x2120, another 1536x864 / 1536x824). So a page
 # read a 4K screen off a 1920x1080 display, and the window fitted neither.
 #
-# CC_SCREEN becomes the single source of truth: it sizes Xvfb (below) and is ALSO pinned onto the
-# persona through --fingerprint-screen-* / --fingerprint-avail-*, which patch 140 checks BEFORE the
-# persona and returns early on -- so the override wins and the claimed screen is the real one. The
-# same switches are honoured without --fingerprint too, so this still holds under CC_LIGHT_STEALTH.
-# CC_PIN_SCREEN=0 opts out and hands the screen back to the seed, restoring the old disagreement.
+# Two ways to agree, and the seed's own display is the default:
+#
+# * PERSONA DISPLAY (default when CC_SCREEN is unset and a seed persona is served): the engine's
+#   validator (--clearcote-validate-persona, the same call fingerprint-audit dumps with) prints the
+#   screen, work area and DPR the seed derives, Xvfb is created at exactly that size, and the engine
+#   serves its own numbers -- no --fingerprint-screen-* pin at all. So a seed is the same machine
+#   in this container as in a native launch: measured before this (fingerprint-audit, 2026-10-21),
+#   the fixed 1920x1080 pin made 13 of 30 Linux seeds and 27 of 30 Windows seeds a different
+#   machine than natively (4K seeds clamped to 1920x1080; avail 1040 against the engine's 1032),
+#   and every container the same screen size. Costs one validator run (~1 s) before Xvfb starts.
+# * PINNED (CC_SCREEN set, or a persona the validator cannot describe: light_stealth, an imported
+#   profile, an android claim, a window/screen switch in CC_EXTRA_ARGS, an engine without the
+#   validator): CC_SCREEN sizes Xvfb and is pinned onto the persona through --fingerprint-screen-*
+#   / --fingerprint-avail-*, which patch 140 checks BEFORE the persona and returns early on -- so
+#   the override wins and the claimed screen is the real one. The same switches are honoured
+#   without --fingerprint too, so this still holds under CC_LIGHT_STEALTH.
+# CC_PIN_SCREEN=0 opts out of both and hands the screen back to the seed on the default display,
+# restoring the old disagreement.
 # ---------------------------------------------------------------------------------------------
+def _persona_display(seed):
+    """(screen_w, screen_h, avail_w, avail_h, dpr) the engine derives for `seed` under the persona
+    switches of this launch, read from the engine's own validator, or None when the engine cannot say
+    (no validator in this build, a bad seed, a timeout). The validator prints one REPRO line per seed
+    and exits before any window opens; a lone seed is its COUNT mode (summary only), so a companion
+    seed rides along and its line is dropped."""
+    try:
+        seed_i = int(str(seed).strip())
+    except ValueError:
+        return None
+    companion = seed_i + 1 if seed_i < 2 ** 63 - 1 else seed_i - 1
+    udd = tempfile.mkdtemp(prefix="cc-persona-")
+    out = os.path.join(udd, "report.txt")
+    persona_switches = [a for a in fingerprint_args(dict(opts))
+                        if str(a).startswith(("--fingerprint", "--canvas-bridge-"))]
+    cmd = [exe, "--clearcote-validate-persona=%d,%d" % (seed_i, companion),
+           "--clearcote-validate-persona-out=" + out, "--user-data-dir=" + udd, "--no-first-run",
+           "--headless=new", "--no-sandbox"] + persona_switches
+    venv = dict(os.environ)
+    venv.pop("CLEARCOTE_LICENSE_KEY", None)  # the engine only ever sees the run token
+    if _lease and _lease.token:
+        venv["CLEARCOTE_RUN_TOKEN"] = _lease.token
+    try:
+        subprocess.run(cmd, env=venv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        text = open(out, encoding="utf-8").read() if os.path.exists(out) else ""
+    except (OSError, subprocess.SubprocessError):
+        text = ""
+    finally:
+        subprocess.run(["rm", "-rf", udd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for line in text.splitlines():
+        if not line.startswith("REPRO "):
+            continue
+        kv = dict(tok.split("=", 1) for tok in line[6:].split() if "=" in tok)
+        if kv.get("seed") != str(seed_i):
+            continue
+        try:
+            sw, sh = (int(x) for x in kv["screen"].split("x"))
+            aw, ah = (int(x) for x in kv["avail"].split("x"))
+            dpr = float(kv.get("dpr", "1") or 1)
+            if sw > 0 and sh > 0 and 0 < aw <= sw and 0 < ah <= sh and dpr > 0:
+                return sw, sh, aw, ah, dpr
+        except (KeyError, ValueError):
+            return None
+    return None
+
+
 def _parse_screen(value):
     """CC_SCREEN ("<w>x<h>[x<depth>]") -> (width, height, depth). Never raises: an unusable value
     falls back to the documented default instead of stopping the container from starting."""
@@ -231,8 +343,9 @@ def _parse_screen(value):
     return 1920, 1080, 24
 
 
-screen_w, screen_h, screen_depth = _parse_screen(os.environ.get("CC_SCREEN", "1920x1080x24"))
-xvfb_screen = "%dx%dx%d" % (screen_w, screen_h, screen_depth)
+_cc_screen = os.environ.get("CC_SCREEN")
+screen_w, screen_h, screen_depth = _parse_screen(_cc_screen or "1920x1080x24")
+persona_display = None  # set below when the seed's own display is used
 extra = os.environ.get("CC_EXTRA_ARGS", "").split()
 
 # --disable-runtime-suppression (engine r32+; the SDKs' stock_runtime option, which they pass in CC_EXTRA_ARGS)
@@ -269,7 +382,11 @@ def _caller_owns_geometry(argv):
 # the BOTTOM, because the engine reports availLeft/availTop as 0 whenever a persona is active
 # (patch 140) and exposes no switch to move them -- so a reduction a real OS puts at the TOP would
 # claim a strip the coordinates say is not there.
-#   windows  40px taskbar -- the same inset every row of the SDK's _LIGHT_STEALTH_PROFILES uses.
+#   windows  48px taskbar, the Windows 11 bar (the audit corpus: 48 on 57 % of Windows machines, 40
+#            on 25 %, and 40 is exactly the Windows 10 bar). 40px when the persona claims Windows
+#            10 (CC_PLATFORM_VERSION "10.x"): a 40px strip under a Windows 11 platformVersion was a
+#            readable contradiction (27 of 30 Docker seeds, fingerprint-audit 2026-10-21). The
+#            SDK's _LIGHT_STEALTH_PROFILES rows keep their own inset.
 #   macos    25px menu bar. Imperfect, knowingly: a real Mac reports availTop=25 and this says 0, so
 #            the strip reads as bottom-docked (a Dock, not the menu bar). Still the better of the
 #            two answers available -- no Mac hides the menu bar, so avail == screen would be the
@@ -278,7 +395,15 @@ def _caller_owns_geometry(argv):
 #            with availTop pinned to 0 either guess is a coin flip; avail == screen is *true* of the
 #            container's own bare X display, is internally consistent, and is what 78 of 432 real
 #            desktop captures in the audit corpus report anyway. This is the default persona's path.
-_AVAIL_INSET = {"windows": 40, "macos": 25, "linux": 0}
+_AVAIL_INSET = {"windows": 48, "macos": 25, "linux": 0}
+
+
+def _avail_inset(platform, platform_version):
+    if platform == "windows" and str(platform_version or "").strip().startswith("10."):
+        return 40
+    return _AVAIL_INSET.get(platform, 0)
+
+
 
 avail_w, avail_h = screen_w, screen_h
 pin_screen = os.environ.get("CC_PIN_SCREEN", "").strip().lower() not in _FALSE
@@ -295,8 +420,22 @@ elif _caller_owns_geometry(extra):
     pin_screen = False
     print("[clearcote] screen: not pinned (CC_EXTRA_ARGS sets window/screen geometry itself)",
           flush=True)
+elif (not _cc_screen and not opts.get("light_stealth") and not opts.get("fingerprint_profile")
+      and (persona_display := _persona_display(_seed))):
+    # The seed's own display: Xvfb takes the persona's screen (in device pixels: the engine reports
+    # CSS pixels and the persona's DPR), the work area is the engine's, and nothing is pinned.
+    _sw, _sh, _aw, _ah, _dpr = persona_display
+    screen_w, screen_h = int(round(_sw * _dpr)), int(round(_sh * _dpr))
+    avail_w, avail_h = _aw, _ah
+    print("[clearcote] screen: the persona's own, %dx%d (avail %dx%d, DPR %g) -- the virtual display "
+          "is created at that size and the engine serves it unpinned" % (_sw, _sh, _aw, _ah, _dpr),
+          flush=True)
 else:
-    avail_h = screen_h - _AVAIL_INSET.get(opts.get("platform"), 0)
+    if not _cc_screen and not opts.get("light_stealth") and not opts.get("fingerprint_profile"):
+        print("[clearcote] WARNING: the engine's validator could not describe seed %s; pinning the "
+              "default 1920x1080 display onto the persona instead (set CC_SCREEN to choose one)."
+              % _seed, flush=True)
+    avail_h = screen_h - _avail_inset(opts.get("platform"), opts.get("platform_version"))
     opts["screen_width"], opts["screen_height"] = screen_w, screen_h
     opts["avail_width"], opts["avail_height"] = avail_w, avail_h
     # colour depth is deliberately NOT pinned from CC_SCREEN's third field: Chrome reports 24 on a
@@ -304,18 +443,21 @@ else:
     # screen.colorDepth no desktop Chrome emits. Set CC_COLOR_DEPTH to override it explicitly.
     print("[clearcote] screen: %dx%d claimed, avail %dx%d" % (screen_w, screen_h, avail_w, avail_h),
           flush=True)
+xvfb_screen = "%dx%dx%d" % (screen_w, screen_h, screen_depth)
 
-# Widevine CDM -- seeded ONLY for a Windows persona on this Linux host, which is where its absence
-# is a measured contradiction: a build branded Google Chrome that claims Windows and carries no CDM
-# is readable by any page (audit: "a build branded Google Chrome carries Google's Widevine CDM").
-# A Linux persona is NOT flagged for this, so the default container behaviour stays unchanged.
+# Widevine CDM -- seeded for every desktop persona (windows, linux, macos). A build branded Google
+# Chrome that carries no CDM reads as a Chromium build to any EME probe (audit: "a build branded
+# Google Chrome carries Google's Widevine CDM"); it used to be seeded for Windows claims only, and
+# fingerprint-audit (2026-10-21) found the Linux persona answering requestMediaKeySystemAccess with
+# NotSupportedError on 30 of 30 seeds while the same engine launched natively, and genuine Linux
+# Chrome, report widevine. An android claim keeps the old default (the .so here is the desktop CDM).
 # Force either way with CC_WIDEVINE=1 / CC_WIDEVINE=0.
 #
 # The CDM fetched is host-shaped (libwidevinecdm.so here), not persona-shaped -- correct, since a
 # Linux binary can only load a .so. Cached in the engine volume rather than $HOME so it is fetched
 # once, not per container. Best-effort: DRM must never stop the server coming up.
 _wv = os.environ.get("CC_WIDEVINE")
-_wv_on = (_wv not in ("0", "false", "no")) if _wv else (opts.get("platform") == "windows")
+_wv_on = (_wv not in ("0", "false", "no")) if _wv else (opts.get("platform") in ("windows", "linux", "macos"))
 if _wv_on:
     os.environ.setdefault("CLEARCOTE_WIDEVINE_DIR",
                           os.path.join(os.environ.get("XDG_CACHE_HOME", "/opt/xdg-cache"),
@@ -464,6 +606,24 @@ elif persona_platform(opts) == "linux" and mesa_egl_available():
     gpu_args = ["--use-gl=angle", "--use-angle=gl-egl", "--ignore-gpu-blocklist", "--enable-unsafe-swiftshader"]
 else:
     gpu_args = ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
+# WebGPU on the GPU-less host. Real Windows and macOS Chrome on the persona's GPU always has a WebGPU
+# adapter; this container had none (requestAdapter() null on 30 of 30 Windows seeds, fingerprint-audit
+# 2026-10-21). From engine r47 (pro-r47-04) a software adapter wears the persona -- identity, feature
+# list, limits, not a fallback -- but only when the launcher asks for one with the switches below.
+# On an OLDER engine those switches expose a raw SwiftShader adapter (architecture "swiftshader",
+# isFallbackAdapter true) under the persona's renderer string, the louder tell, so they are gated:
+# the engine path names its revision (auto-downloaded engines live in ".../pro-<build>-r<N>/"), and
+# from r48 the binary also carries the --fingerprint-software-webgpu switch (its "off" value keeps the
+# software adapter real). A linux claim keeps the Mesa backend's own answer, like real Linux Chrome.
+if persona_platform(opts) in ("windows", "macos"):
+    _rev = _engine_revision(exe)
+    if (_rev is not None and _rev >= 47) or _engine_has_switch("fingerprint-software-webgpu"):
+        gpu_args += ["--use-webgpu-adapter=swiftshader", "--enable-unsafe-webgpu"]
+        print("[clearcote] WebGPU: software adapter wearing the persona (engine r%s)"
+              % (_rev if _rev is not None else "48+"), flush=True)
+    else:
+        print("[clearcote] WebGPU: none (a %s claim gets a persona WebGPU adapter from engine r47 on)"
+              % persona_platform(opts), flush=True)
 _BACKENDS = {"--use-angle=gl": "Mesa GL (llvmpipe)", "--use-angle=gl-egl": "Mesa GL over EGL (llvmpipe)"}
 print("[clearcote] WebGL backend: %s" % next((v for k, v in _BACKENDS.items() if k in gpu_args), "SwiftShader"),
       flush=True)
@@ -533,46 +693,13 @@ elif opts.get("platform") == "windows":
 if env.get("CLEARCOTE_SHADER_DIALECT"):
     print("[clearcote] shader dialect: %s" % env["CLEARCOTE_SHADER_DIALECT"], flush=True)
 
-# A PRO engine refuses to launch without a run token: the licence gate reads CLEARCOTE_RUN_TOKEN
-# once at startup and exits if it is missing or invalid. The SDK's own launch() mints one, but this
-# entrypoint starts chrome itself, so check a lease out here and inject it.
-#
-# The lease has to live as long as the browser does. Chrome runs as a CHILD of this process (not
-# exec'd over it), so the lease's heartbeat keeps the slot while the browser runs and the slot is
-# released when it stops. Exec'ing chrome killed the heartbeat: the lease quietly expired a few
-# minutes after start while the browser kept running — on the free plan that let a second
-# container start alongside the first — and a stopped container kept its slot until the TTL.
-#
-# The token is ALSO mirrored into a per-launch file (CLEARCOTE_RUN_TOKEN_FILE) that follows the
-# lease's rotation. A supporting engine (152 r23+) re-reads that file and stops a running FREE
-# browser once the token stops advancing, so revoke / check-in / over-limit reach this container
-# instead of only being checked at startup — and a free container WITHOUT the file is refused
-# outright by the engine. Older engines ignore the file, so this is additive.
-_lease = None
-_release_token_file = None
-if _license:
-    try:
-        from clearcote._license import acquire_lease
-
-        _lease = acquire_lease(_license, quiet=False)
-        if _lease and _lease.token:
-            env["CLEARCOTE_RUN_TOKEN"] = _lease.token
-            try:
-                token_file, _release_token_file = _lease.bind_launch()
-                env["CLEARCOTE_RUN_TOKEN_FILE"] = token_file
-            except Exception as exc:  # noqa: BLE001 -- an older SDK has no bind_launch; PRO still runs
-                print("[clearcote] WARNING: this SDK cannot keep the run-token fresh (%s: %s); a "
-                      "FREE licence needs a newer clearcote package." % (type(exc).__name__, exc),
-                      flush=True)
-            print("[clearcote] licence lease acquired", flush=True)
-        else:
-            print("[clearcote] WARNING: no lease returned for this key; the PRO engine will "
-                  "refuse to start.", flush=True)
-    except Exception as exc:  # noqa: BLE001 -- surface the reason, never launch a doomed browser
-        print("[clearcote] ERROR: could not lease a run token (%s: %s). The PRO engine will not "
-              "start. Check the key, the plan's concurrency limit, and outbound network access."
-              % (type(exc).__name__, exc), flush=True)
-        raise SystemExit(1)
+# The lease itself was checked out right after the engine was resolved (the persona display asks the
+# engine's validator for the seed's screen before Xvfb starts, and a PRO validator needs the token too);
+# here it only reaches chrome's environment.
+if _lease and _lease.token:
+    env["CLEARCOTE_RUN_TOKEN"] = _lease.token
+    if _token_file:
+        env["CLEARCOTE_RUN_TOKEN_FILE"] = _token_file
 
 # fingerprint_profile may be the capture JSON inline (tens of KB), which would bury every other log
 # line in the container -- summarise it instead of printing it. "socat", not "proxy", since CC_PROXY

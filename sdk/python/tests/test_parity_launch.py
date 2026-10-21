@@ -609,3 +609,26 @@ def test_no_copy_of_playwrights_list_when_the_caller_dropped_it(prepared):
 def test_serve_never_carries_playwrights_list(served_line):
     line = served_line()
     assert not any("HttpsUpgrades" in a or "ThirdPartyStoragePartitioning" in a for a in line), line
+
+
+def test_prepare_software_webgpu_only_on_an_engine_that_dresses_the_adapter(prepared, monkeypatch):
+    # The fake engine's path carries no PRO revision, so the r48 marker switch is what admits it.
+    monkeypatch.setattr(sys, "platform", "linux")
+    three = ["--use-webgpu-adapter=swiftshader", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader"]
+    _exe, args, *_ = prepared(NEW + ["fingerprint-software-webgpu"], headless=True, platform="windows")
+    assert [a for a in args if a in three] == three
+    _exe, args, *_ = prepared(NEW + ["fingerprint-software-webgpu"], headless=True, platform="macos")
+    assert [a for a in args if a in three] == three
+    _exe, args, *_ = prepared(NEW, headless=True, platform="windows")  # r46 and older: nothing
+    assert not any(a in three for a in args)
+    _exe, args, *_ = prepared(NEW + ["fingerprint-software-webgpu"], headless=True, platform="linux")
+    assert not any(a in three for a in args)
+    _exe, args, *_ = prepared(NEW + ["fingerprint-software-webgpu"], headless=True, fingerprint="off")
+    assert not any(a in three for a in args)
+    # A caller's ignore_default_args that keeps Playwright's own --enable-unsafe-swiftshader: not added again
+    _exe, args, *_ = prepared(NEW + ["fingerprint-software-webgpu"], headless=True, platform="windows",
+                              ignore_default_args=["--enable-automation"])
+    assert [a for a in args if a in three] == three[:2]
+    _exe, args, *_ = prepared(NEW + ["fingerprint-software-webgpu"], headless=True, platform="windows",
+                              args=["--enable-unsafe-webgpu"])
+    assert args.count("--enable-unsafe-webgpu") == 1 and "--use-webgpu-adapter=swiftshader" in args

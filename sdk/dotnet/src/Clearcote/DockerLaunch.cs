@@ -132,7 +132,8 @@ internal static class DockerLaunch
     };
     private static readonly string[] Special =
         { "DevicePixelRatio", "FingerprintProfile", "Headless", "Proxy", "Args", "LicenseKey", "LicenseApiBase", "PersonaEnv", "StockRuntime" };
-    private static readonly string[] SdkSide = { "Timeout", "SlowMo", "Quiet", "Docker", "DockerImage" };
+    // Geoip: resolved on this side before the container starts (StartContainerAsync), its answers go in as CC_*.
+    private static readonly string[] SdkSide = { "Timeout", "SlowMo", "Quiet", "Docker", "DockerImage", "Geoip" };
 
     /// Everything else LaunchOptions has is refused when set: a Docker launch takes the image's options,
     /// and (like any local launch) ignores the cloud section. Derived from the type, so an option added to
@@ -141,7 +142,7 @@ internal static class DockerLaunch
         .GetProperties(BindingFlags.Public | BindingFlags.Instance)
         .Where(p => !StrEnv.ContainsKey(p.Name) && !IntEnv.ContainsKey(p.Name) && !BoolEnv.ContainsKey(p.Name)
                     && !Special.Contains(p.Name) && !SdkSide.Contains(p.Name)
-                    && (!CloudLaunch.SessionOptions.Contains(p.Name) || p.Name == "Geoip")
+                    && !CloudLaunch.SessionOptions.Contains(p.Name)
                     && !CloudLaunch.SdkSideOptions.Contains(p.Name))
         .OrderBy(p => p.Name, StringComparer.Ordinal)
         .ToList();
@@ -975,6 +976,18 @@ internal static class DockerLaunch
     /// owner token for SweepStaleAsync.
     internal static async Task<(DockerContainer Container, string Exe)> StartContainerAsync(LaunchOptions o)
     {
+        // Geoip = true on the Docker path: resolve the proxy's exit region HERE, before any container starts, and
+        // hand the container what it filled (Timezone, AcceptLanguage, Location, WebrtcIp -> the CC_* variables of
+        // the same name). The same GeoIp.ApplyAsync as a native launch, so it fails closed the same way:
+        // GeoipException and no container when the region is unresolvable; an explicit Timezone AND AcceptLanguage
+        // warn and launch. On a copy, as the native launch does: the caller's options are never written to. Without
+        // Geoip the container's entrypoint builds the persona as a native launch does: Accept-Language defaults to
+        // en-US and the timezone follows its primary tag (en-US -> America/New_York).
+        if (o.Geoip)
+        {
+            o = (LaunchOptions)o.Clone();
+            await GeoIp.ApplyAsync(o, o.Proxy, o.Quiet).ConfigureAwait(false);
+        }
         var env = ContainerEnv(o);
         var idle = IdleExitSeconds();
         var (exe, arch) = await DockerInfoAsync().ConfigureAwait(false);
@@ -1068,6 +1081,13 @@ internal static class DockerLaunch
                 SlowMo = o.SlowMo, Timeout = o.Timeout ?? ConnectTimeoutMs,
             }).ConfigureAwait(false);
             real.Disconnected += (_, _) => _ = state.EndAsync();
+            // Playwright emulates prefers-color-scheme: light in every context it manages, a connected one
+            // included: measured (2026-10-21, fingerprint audit), every persona seed reported light through
+            // Docker while the same engine launched natively reports dark on about one seed in three. The
+            // same default as the native launch, here without its engine gate: an engine too old to decide
+            // the scheme from the persona shows the container's (light) host theme either way. The
+            // container's existing context(s) here; new pages and contexts in BrowserProxy.
+            foreach (var ctx in real.Contexts.ToList()) await ColorSchemeDefault.InstallOnContextAsync(ctx).ConfigureAwait(false);
             var browser = BrowserProxy.Wrap(real, state);
             Containers.AddOrUpdate(real, container);
             Containers.AddOrUpdate(browser, container);
@@ -1114,7 +1134,8 @@ internal static class DockerLaunch
 
     /// A container's browser: Playwright's own IBrowser, except that closing it also stops the container and
     /// a new page or context gets no emulated viewport unless one is asked for (the window is real, on the
-    /// image's virtual display; an emulated 1280x720 on top of it is the impossible-window tell).
+    /// image's virtual display; an emulated 1280x720 on top of it is the impossible-window tell) and no
+    /// colour-scheme emulation unless one is asked for (see <see cref="ColorSchemeDefault"/>).
     public class BrowserProxy : DispatchProxy
     {
         internal IBrowser Target = null!;
@@ -1154,11 +1175,13 @@ internal static class DockerLaunch
                 case "NewPageAsync" when args is { Length: 1 }:
                     var page = args[0] is BrowserNewPageOptions po ? new BrowserNewPageOptions(po) : new BrowserNewPageOptions();
                     page.ViewportSize ??= ViewportSize.NoViewport;
+                    page.ColorScheme = ColorSchemeDefault.Connected(page.ColorScheme);
                     args[0] = page;
                     break;
                 case "NewContextAsync" when args is { Length: 1 }:
                     var ctx = args[0] is BrowserNewContextOptions co ? new BrowserNewContextOptions(co) : new BrowserNewContextOptions();
                     ctx.ViewportSize ??= ViewportSize.NoViewport;
+                    ctx.ColorScheme = ColorSchemeDefault.Connected(ctx.ColorScheme);
                     args[0] = ctx;
                     break;
             }

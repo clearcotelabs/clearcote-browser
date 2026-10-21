@@ -149,6 +149,7 @@ public sealed class DockerLaunchTests : IDisposable
     private readonly Func<string, string?> _realProcText = DockerLaunch.ProcText;
     private readonly Func<bool> _realIsWindows = DockerLaunch.IsWindowsHost;
     private readonly Func<string?> _realBoot = DockerLaunch.BootIdProbe;
+    private readonly Func<ProxyOptions?, bool, int?, Task<GeoResult>> _realGeo = GeoIp.Resolver;
     private readonly Func<string?> _realPidNs = DockerLaunch.PidNamespaceProbe;
     private readonly Func<System.Diagnostics.ProcessStartInfo, string?> _realPs = DockerLaunch.RunPs;
     private readonly TimeSpan _realRemovalWait = DockerLaunch.RemovalWait;
@@ -178,6 +179,7 @@ public sealed class DockerLaunchTests : IDisposable
         DockerLaunch.ProcText = _realProcText;
         DockerLaunch.IsWindowsHost = _realIsWindows;
         DockerLaunch.BootIdProbe = _realBoot;
+        GeoIp.Resolver = _realGeo;
         DockerLaunch.PidNamespaceProbe = _realPidNs;
         DockerLaunch.RunPs = _realPs;
         DockerLaunch.RemovalWait = _realRemovalWait;
@@ -723,8 +725,6 @@ public sealed class DockerLaunchTests : IDisposable
     {
         var e = await Assert.ThrowsAsync<ArgumentException>(() => Clearcote.LaunchAsync(new LaunchOptions { Extensions = new[] { "/tmp/ext" } }));
         Assert.StartsWith("Extensions is not available when LaunchAsync runs Clearcote in Docker", e.Message);
-        e = await Assert.ThrowsAsync<ArgumentException>(() => Clearcote.LaunchAsync(new LaunchOptions { Geoip = true }));
-        Assert.StartsWith("Geoip is not available", e.Message);
         e = await Assert.ThrowsAsync<ArgumentException>(() => Clearcote.LaunchAsync(new LaunchOptions { Args = new[] { "--window-name=two words" } }));
         Assert.Contains("whitespace", e.Message);
         Assert.Empty(_docker.Calls);
@@ -768,6 +768,170 @@ public sealed class DockerLaunchTests : IDisposable
         _docker.CreateError = "docker: Error response from daemon: Conflict. The container name is already in use.\n";
         var e = await Assert.ThrowsAsync<InvalidOperationException>(() => Clearcote.LaunchAsync(new LaunchOptions { Quiet = true }));
         Assert.Contains("`docker create example/other:tag` failed: docker: Error response", e.Message);
+    }
+
+    // ── prefers-color-scheme: Playwright's light emulation is off for the container's pages too ─────────
+    // Measured 2026-10-21: through Docker every persona seed reported light, natively one in three is dark.
+
+    /// A recording stand-in for a Playwright interface: every call is logged; <see cref="Answers"/> decides
+    /// what a method returns, else a completed Task (of default) or default.
+    public class Recording : System.Reflection.DispatchProxy
+    {
+        public readonly List<(string Name, object?[] Args)> Calls = new();
+        public readonly Dictionary<string, Func<object?[], object?>> Answers = new();
+
+        public static (T Proxy, Recording Log) Of<T>() where T : class
+        {
+            var proxy = Create<T, Recording>();
+            return (proxy, (Recording)(object)proxy);
+        }
+
+        public object?[] ArgsOf(string name) => Assert.Single(Calls, c => c.Name == name).Args;
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            ArgumentNullException.ThrowIfNull(targetMethod);
+            var a = args ?? Array.Empty<object?>();
+            Calls.Add((targetMethod.Name, a));
+            if (Answers.TryGetValue(targetMethod.Name, out var answer)) return answer(a);
+            var t = targetMethod.ReturnType;
+            if (t == typeof(Task)) return Task.CompletedTask;
+            if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(Task<>))
+            {
+                var inner = t.GetGenericArguments()[0];
+                var value = inner.IsValueType ? Activator.CreateInstance(inner) : null;
+                return typeof(Task).GetMethod(nameof(Task.FromResult))!.MakeGenericMethod(inner).Invoke(null, new[] { value });
+            }
+            return t.IsValueType && t != typeof(void) ? Activator.CreateInstance(t) : null;
+        }
+    }
+
+    [Fact]
+    public async Task The_containers_pages_get_no_colour_scheme_emulation()
+    {
+        // The connected browser: one default context with a page open and one closed already.
+        var (openPage, openLog) = Recording.Of<IPage>();
+        var (closedPage, closedLog) = Recording.Of<IPage>();
+        closedLog.Answers["EmulateMediaAsync"] = _ => throw new PlaywrightException("Target page, context or browser has been closed");
+        var pages = new List<IPage> { openPage, closedPage };
+        var (ctx, ctxLog) = Recording.Of<IBrowserContext>();
+        EventHandler<IPage>? onPage = null;
+        ctxLog.Answers["get_Pages"] = _ => pages.AsReadOnly();
+        ctxLog.Answers["add_Page"] = a => { onPage = (EventHandler<IPage>?)a[0]; return null; };
+        ctxLog.Answers["NewPageAsync"] = _ =>
+        {
+            var (page, _) = Recording.Of<IPage>();
+            pages.Add(page);
+            onPage?.Invoke(ctx, page);   // as Playwright does: the Page event, then NewPageAsync resolves
+            return Task.FromResult(page);
+        };
+        var (real, realLog) = Recording.Of<IBrowser>();
+        realLog.Answers["get_Contexts"] = _ => new List<IBrowserContext> { ctx }.AsReadOnly();
+        realLog.Answers["get_IsConnected"] = _ => true;
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        DockerLaunch.ConnectOverride = (_, _) => Task.FromResult(real);
+
+        var browser = await Clearcote.LaunchAsync(new LaunchOptions { Fingerprint = "seed-1", Platform = "windows", Quiet = true });
+
+        // the page open at connect time; the closed one threw inside and the launch went on
+        Assert.Equal(ColorScheme.Null, Assert.IsType<PageEmulateMediaOptions>(openLog.ArgsOf("EmulateMediaAsync")[0]).ColorScheme);
+        Assert.Single(closedLog.Calls, c => c.Name == "EmulateMediaAsync");
+        // browser.Contexts[0].NewPageAsync(): what Docker callers use directly
+        var page = await browser.Contexts[0].NewPageAsync();
+        Assert.Equal(ColorScheme.Null, Assert.IsType<PageEmulateMediaOptions>(((Recording)(object)page).ArgsOf("EmulateMediaAsync")[0]).ColorScheme);
+        // new pages and contexts: no emulation unless asked for, next to the no-viewport default
+        await browser.NewPageAsync();
+        await browser.NewContextAsync(new() { ColorScheme = ColorScheme.Dark });
+        await browser.NewContextAsync(new() { ViewportSize = new ViewportSize { Width = 800, Height = 600 } });
+        var newPage = Assert.IsType<BrowserNewPageOptions>(realLog.ArgsOf("NewPageAsync")[0]);
+        Assert.Equal(ColorScheme.Null, newPage.ColorScheme);
+        Assert.Equal(ViewportSize.NoViewport.Width, newPage.ViewportSize!.Width);   // the no-viewport default, still
+        var contexts = realLog.Calls.Where(c => c.Name == "NewContextAsync").Select(c => Assert.IsType<BrowserNewContextOptions>(c.Args[0])).ToList();
+        Assert.Equal(ColorScheme.Dark, contexts[0].ColorScheme);   // the caller's choice stands
+        Assert.Equal(ColorScheme.Null, contexts[1].ColorScheme);
+        Assert.Equal(800, contexts[1].ViewportSize!.Width);
+        await browser.CloseAsync();
+        Assert.Equal(new[] { "stop", "rm", "ps" }, _docker.Commands[^3..]);
+    }
+
+    // ── Geoip = true: resolved here, before the container starts; what it filled goes in as CC_* ────────
+
+    private static readonly ProxyOptions GeoProxy = new() { Server = "http://proxy.example:8080" };
+    private static readonly GeoInfo Berlin = new("203.0.113.7", "DE", "Europe/Berlin", "de-DE", "52.52,13.405");
+
+    /// The exit-region resolver GeoIp.ApplyAsync asks, answering <paramref name="geo"/>; the container's log says it
+    /// applied GeoProxy; the connect hands back a recording browser.
+    private List<ProxyOptions?> GeoAnswers(GeoInfo? geo, string? reason = null)
+    {
+        var asked = new List<ProxyOptions?>();
+        GeoIp.Resolver = (proxy, _, _) => { asked.Add(proxy); return Task.FromResult(new GeoResult(geo, reason, 12)); };
+        _docker.Marks = new() { ServeState("open", GeoProxy.Server) };
+        var (real, realLog) = Recording.Of<IBrowser>();
+        realLog.Answers["get_Contexts"] = _ => new List<IBrowserContext>().AsReadOnly();
+        DockerLaunch.ConnectOverride = (_, _) => Task.FromResult(real);
+        return asked;
+    }
+
+    [Fact]
+    public async Task Geoip_fills_the_containers_clock_language_location_and_WebRTC_IP()
+    {
+        var asked = GeoAnswers(Berlin);
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        var browser = await Clearcote.LaunchAsync(new LaunchOptions { Geoip = true, Proxy = GeoProxy, Fingerprint = "seed-1", Quiet = true });
+        Assert.Equal(GeoProxy.Server, Assert.Single(asked)!.Server);   // resolved through the proxy, once
+        var (_, env, _) = _docker.Call("create");
+        Assert.Equal("Europe/Berlin", env["CC_TIMEZONE"]);
+        Assert.Equal("de-DE", env["CC_ACCEPT_LANGUAGE"]);
+        Assert.Equal("52.52,13.405", env["CC_LOCATION"]);
+        Assert.Equal("203.0.113.7", env["CC_WEBRTC_IP"]);
+        Assert.DoesNotContain(env.Keys, k => k.Contains("GEOIP"));
+        await browser.CloseAsync();
+    }
+
+    [Fact]
+    public async Task Geoip_keeps_what_the_caller_set_and_never_writes_to_the_callers_options()
+    {
+        GeoAnswers(Berlin);
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        var options = new LaunchOptions { Geoip = true, Proxy = GeoProxy, Timezone = "Europe/Paris", WebrtcIp = "198.51.100.9", Quiet = true };
+        await Clearcote.LaunchAsync(options);
+        var (_, env, _) = _docker.Call("create");
+        Assert.Equal("Europe/Paris", env["CC_TIMEZONE"]);
+        Assert.Equal("198.51.100.9", env["CC_WEBRTC_IP"]);
+        Assert.Equal("de-DE", env["CC_ACCEPT_LANGUAGE"]);   // the unset ones are still filled
+        Assert.Null(options.AcceptLanguage);   // on a copy, as the native launch does
+    }
+
+    [Fact]
+    public async Task Geoip_fails_closed_before_any_container_starts()
+    {
+        GeoAnswers(null, "could not determine the exit IP through the proxy");
+        var e = await Assert.ThrowsAsync<GeoipException>(() => Clearcote.LaunchAsync(new LaunchOptions { Geoip = true, Proxy = GeoProxy, Quiet = true }));
+        Assert.Equal("GEOIP_UNRESOLVED", e.Code);
+        Assert.Empty(_docker.Calls);   // not even `docker info`
+    }
+
+    [Fact]
+    public async Task Geoip_with_an_explicit_timezone_and_language_still_launches()
+    {
+        GeoAnswers(null, "timed out after 2s");
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        await Clearcote.LaunchAsync(new LaunchOptions { Geoip = true, Proxy = GeoProxy, Timezone = "Europe/Paris", AcceptLanguage = "fr-FR,fr", Quiet = true });
+        var (_, env, _) = _docker.Call("create");
+        Assert.Equal("Europe/Paris", env["CC_TIMEZONE"]);
+        Assert.Equal("fr-FR,fr", env["CC_ACCEPT_LANGUAGE"]);
+        Assert.False(env.ContainsKey("CC_WEBRTC_IP"));   // nothing resolved: nothing invented
+    }
+
+    [Fact]
+    public void Geoip_is_an_option_the_image_takes()
+    {
+        Assert.DoesNotContain(DockerLaunch.RefusedOptions, p => p.Name == "Geoip");
+        Assert.Empty(DockerLaunch.ContainerEnv(new LaunchOptions { Geoip = false }));
     }
 
     [Fact]

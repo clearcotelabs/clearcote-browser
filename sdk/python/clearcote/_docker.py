@@ -128,7 +128,7 @@ _BOOL_ENV = {
 }
 # Handled specially below, or on this side of the connection.
 _SPECIAL = ("location", "fingerprint_profile", "headless", "proxy", "args", "license_key", "license_api_base",
-            "persona_env", "stock_runtime")
+            "persona_env", "stock_runtime", "geoip")
 SDK_SIDE = ("timeout", "slow_mo", "humanize", "show_cursor", "quiet", "docker", "docker_image",
             "ephemeral_profile")
 ACCEPTED = tuple(_STR_ENV) + tuple(_INT_ENV) + tuple(_FLOAT_ENV) + tuple(_BOOL_ENV) + _SPECIAL + SDK_SIDE
@@ -190,6 +190,29 @@ def _proxy_url(proxy) -> str:
         from urllib.parse import quote
         rest = f"{quote(str(user or ''), safe='')}:{quote(str(pw or ''), safe='')}@{rest}"
     return f"{scheme}://{rest}"
+
+
+# What geoip fills, and the container takes as CC_TIMEZONE / CC_ACCEPT_LANGUAGE / CC_LOCATION / CC_WEBRTC_IP.
+GEOIP_FILLED = ("timezone", "accept_language", "location", "webrtc_ip")
+
+
+def apply_geoip_before_start(kwargs: dict, quiet=False) -> dict:
+    """``geoip=True`` on the Docker path: resolve the proxy's exit region HERE, before any container
+    starts, and hand the container what it filled (timezone, accept_language, location, webrtc_ip ->
+    the CC_* variables of the same name). The same :func:`clearcote.apply_geoip` as a native launch,
+    so it fails closed the same way: GeoipError and no container when the region is unresolvable;
+    an explicit timezone AND accept_language warn and launch. Without geoip the container's
+    entrypoint builds the persona as a native launch does: Accept-Language defaults to en-US and the
+    timezone follows its primary tag (en-US -> America/New_York; see _fingerprint._default_timezone).
+    Pops ``geoip`` from ``kwargs`` and returns it."""
+    geoip = kwargs.pop("geoip", None)
+    if not geoip:
+        return kwargs
+    from . import apply_geoip
+    fp = {k: kwargs[k] for k in GEOIP_FILLED if kwargs.get(k) is not None}
+    apply_geoip(fp, kwargs.get("proxy"), quiet=quiet)
+    kwargs.update(fp)
+    return kwargs
 
 
 def container_env(kwargs: dict) -> dict:
@@ -903,6 +926,7 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     raises: a browser on the open engine, one sending traffic direct, or one whose every request the proxy
     turns away is never handed back in their place. The container
     carries this process's owner token for sweep_stale()."""
+    apply_geoip_before_start(kwargs, quiet)  # geoip=True: the region first; GeoipError starts nothing
     env = container_env(kwargs)
     idle = idle_exit_seconds()
     exe, arch = docker_info()
@@ -994,6 +1018,7 @@ def launch_docker(kwargs: dict):
     """``clearcote.launch()`` on macOS (see the module docstring): the Playwright Browser of a Clearcote
     container. ``close()`` disconnects and stops the container."""
     from . import _install_headed_viewport, _playwright
+    from ._colorscheme import install_color_scheme_default_connected
     from ._humanize import install_humanize, install_humanize_on_context
 
     container = start_container(kwargs, quiet=kwargs.get("quiet", False))
@@ -1013,6 +1038,12 @@ def launch_docker(kwargs: dict):
         # The window is real (on the image's virtual display, sized to the persona's screen): an
         # emulated 1280x720 viewport on top of it is the impossible-window tell a local launch avoids.
         _install_headed_viewport(browser)
+        # Playwright emulates prefers-color-scheme: light in every context it manages, a connected one
+        # included: measured (2026-10-21, fingerprint audit), every persona seed reported light through
+        # Docker while the same engine launched natively reports dark on about one seed in three. The
+        # same default as the native launch, here without its engine gate: an engine too old to decide
+        # the scheme from the persona shows the container's (light) host theme either way.
+        install_color_scheme_default_connected(browser)
         seed = kwargs.get("fingerprint")
         humanize, show_cursor = kwargs.get("humanize", False), kwargs.get("show_cursor", False)
         for ctx in browser.contexts:
@@ -1033,6 +1064,7 @@ async def launch_docker_async(kwargs: dict):
     """Async twin of :func:`launch_docker` (``clearcote.async_api.launch()`` on macOS)."""
     import asyncio
 
+    from ._colorscheme import install_color_scheme_default_connected_async
     from ._humanize_async import install_humanize, install_humanize_on_context
     from .async_api import _bind_driver, _install_headed_viewport, _start_driver
 
@@ -1054,6 +1086,7 @@ async def launch_docker_async(kwargs: dict):
 
         browser.close = close
         _install_headed_viewport(browser)
+        await install_color_scheme_default_connected_async(browser)  # see launch_docker
         seed = kwargs.get("fingerprint")
         humanize, show_cursor = kwargs.get("humanize", False), kwargs.get("show_cursor", False)
         for ctx in browser.contexts:

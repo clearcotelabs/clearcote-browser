@@ -31,7 +31,7 @@ import type {
 import { makeRecoveredCopy, recoveredExe, removeFailedLaunchDirs } from "./winlaunch.js";
 import { checkInstall, ensureBinary, ensureRunnableHere, ensureVersion, proEnsureBinary, resolvedEngineVersion, resolveReleaseChannel, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
-import { resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
+import { applyGeoip, resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
 import { defaultColorScheme, engineDecidesColorScheme, installColorSchemeDefault } from "./colorscheme.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeLaunchOptions } from "./humanize.js";
 import { resolveHumanize } from "./hzoptions.js";
@@ -60,6 +60,8 @@ import {
   DEFAULT_IGNORED_ARGS,
   gpuBlocklistArgs,
   gpuBackendArgs,
+  playwrightKeepsUnsafeSwiftshader,
+  softwareWebgpuArgs,
   macosKeychainArgs,
   gateEngineSwitches,
   engineExtrasArgs,
@@ -118,11 +120,11 @@ export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
 export { proEnsureBinary, type ProDownloadOptions } from "./download.js";
 export { checkInstall, verifyInstall } from "./download.js";
-export { resolveGeo, resolveGeoDetailed, geoipTimeoutMs, GeoipError, type Geo, type GeoResult } from "./geoip.js";
+export { applyGeoip, resolveGeo, resolveGeoDetailed, geoipTimeoutMs, GeoipError, type Geo, type GeoResult } from "./geoip.js";
 export { proxiedRequest, toProxySpec, type ProxySpec } from "./net.js";
 export { resolveReleaseChannel, type ReleaseChannel } from "./download.js";
 export { isFingerprintPassthrough } from "./fingerprint.js";
-export { DEFAULT_IGNORED_ARGS, gpuBlocklistArgs, gpuBackendArgs, xDisplayAvailable, mesaEglAvailable, gateEngineSwitches, engineSupportsSwitch } from "./launchopts.js";
+export { DEFAULT_IGNORED_ARGS, gpuBlocklistArgs, gpuBackendArgs, softwareWebgpuArgs, engineRevision, xDisplayAvailable, mesaEglAvailable, gateEngineSwitches, engineSupportsSwitch } from "./launchopts.js";
 export { serveMultiplex, type MultiplexOptions, type MultiplexServer } from "./multiplex.js";
 export type { HumanizeLaunchOptions } from "./humanize.js";
 export { ClearcoteStrictError, resolveHumanize } from "./hzoptions.js";
@@ -371,36 +373,6 @@ export interface PersistentContextOptions
     CloudSwitchOption,
     WidevineOption {}
 
-/**
- * Fill unset timezone/acceptLanguage/location/webrtcIp on `fp` from the proxy's exit-IP geo.
- *
- * FAILS CLOSED: if the region cannot be resolved, the launch throws {@link GeoipError} instead of
- * continuing on the host's clock and a default language (UTC + en-US on most servers) — the exact
- * mismatch geoip exists to prevent. A caller who set BOTH `timezone` and `acceptLanguage`
- * explicitly still launches (with a warning), since nothing geoip would fill is missing.
- */
-export async function applyGeoip(fp: FingerprintOptions, proxy: unknown, quiet?: boolean): Promise<Geo | undefined> {
-  const result = await resolveGeoDetailed(proxy as { server?: string; username?: string; password?: string } | undefined, { quiet });
-  const geo: Geo | null = result.geo;
-  if (!geo || !geo.timezone) {
-    if (fp.timezone && fp.acceptLanguage) {
-      if (!quiet) console.warn(`clearcote: geoip could not resolve the region (${result.reason}); using the explicit timezone and acceptLanguage.`);
-      return undefined;
-    }
-    throw new GeoipError(
-      `geoip: could not resolve the ${proxy ? "proxy's" : "connection's"} region (${result.reason}). ` +
-        "Launching anyway would use this machine's clock and a default language. Fix the proxy, raise " +
-        "CLEARCOTE_GEOIP_TIMEOUT_SECONDS, or pass timezone and acceptLanguage explicitly.",
-    );
-  }
-  if (geo.timezone && fp.timezone == null) fp.timezone = geo.timezone;
-  if (geo.acceptLanguage && fp.acceptLanguage == null) fp.acceptLanguage = geo.acceptLanguage;
-  if (geo.location && fp.location == null) fp.location = geo.location;
-  // make WebRTC report the proxy egress IP too, coherent with HTTP egress (engine fabricates
-  // the srflx candidate at this IP; no real STUN leaves the host).
-  if (geo.ip && fp.webrtcIp == null) fp.webrtcIp = geo.ip;
-  return geo;
-}
 
 
 /**
@@ -574,6 +546,16 @@ function assembleArgs(
     base.push(...gpuBackendArgs(
       fpArgs.find((a) => a.startsWith("--fingerprint-platform="))?.slice("--fingerprint-platform=".length),
       !!extra.headed, process.platform, userArgs));
+    // Engine r47+ (pro-r47-04) on a Linux host: a software WebGPU adapter that wears the persona under
+    // a Windows or macOS claim. Gated on the engine (an older one would show a raw SwiftShader
+    // adapter), and never a switch twice: Playwright's own --enable-unsafe-swiftshader counts when kept.
+    base.push(...softwareWebgpuArgs(
+      extra.exe,
+      fpArgs.find((a) => a.startsWith("--fingerprint-platform="))?.slice("--fingerprint-platform=".length),
+      process.platform,
+      [...base, ...userArgs,
+        ...(extra.playwrightIgnoreDefaultArgs !== undefined && playwrightKeepsUnsafeSwiftshader(extra.playwrightIgnoreDefaultArgs)
+          ? ["--enable-unsafe-swiftshader"] : [])]));
     // macOS: the build is unsigned, so every launch would prompt for the "Chromium Safe Storage"
     // keychain item. See macosKeychainArgs.
     base.push(...macosKeychainArgs(process.platform, userArgs));

@@ -251,6 +251,12 @@ Geo data comes from the offline [geoip-all-in-one](https://github.com/daijro/geo
 - `CLEARCOTE_GEOIP_ECHO_URL`: your own IP-echo endpoint(s), comma-separated, used instead of the public ones, so no third party learns that the proxy is in use. It should answer with the IP as plain text, or JSON with an `ip` field.
 - `CLEARCOTE_GEOIP_IPAPI=1`: also ask `ip-api.com` when the database has no answer, e.g. while it is still downloading on first use. Off by default: ip-api.com's free endpoint is for non-commercial use only and allows 45 requests a minute per IP.
 
+### In Docker (`docker=True`)
+
+`geoip=True` works for a Docker launch exactly as for a native one: the SDK resolves the proxy's exit IP before the container is started and hands the container the timezone and Accept-Language it resolved (any `timezone` / `accept_language` you set yourself still wins). Without `geoip` (and no `timezone` / `accept_language` of your own) the container's entrypoint builds the persona the way a native launch does: Accept-Language defaults to `en-US` and the timezone is derived from its primary tag (`en-US` -> `America/New_York`, see `_fingerprint.py`), so every such container is New York, English.
+
+A container has no WebRTC ICE candidates at all unless `webrtc_ip` is given. The value to give is the proxy's exit IP, which `geoip=True` fills in as it does for a native launch.
+
 ### Humanized input (`humanize`, `show_cursor`)
 
 ```python

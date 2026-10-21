@@ -18,6 +18,7 @@ import {
   processStart, removal, removeContainer, resetOwnerToken, startContainer, sweepStale, TEST_ONLY_ASSUME_MACOS, verifyApplied,
   type CliResult,
 } from "../src/docker.js";
+import { GeoipError, geoResolver, type GeoResult } from "../src/geoip.js";
 import { LocalChromium, findChromium } from "./helpers/chromium.js";
 import { tempDir } from "./helpers/temp.js";
 import { resetWarnings, SECCOMP_PROFILE, seccompArgs } from "../src/docker.js";
@@ -817,5 +818,146 @@ describe("Chrome's sandbox: the seccomp profile", () => {
 
   it.skipIf(!existsSync(REPO_PROFILE))("the packaged profile is docker/seccomp.json", () => {
     expect(readFileSync(SECCOMP_PROFILE).equals(readFileSync(REPO_PROFILE))).toBe(true);
+  });
+});
+
+// prefers-color-scheme: Playwright's light emulation is off for the container's pages too. Measured
+// 2026-10-21: through Docker every persona seed reported light, natively one in three is dark.
+describe("the container's pages get no colour-scheme emulation", () => {
+  type Media = Record<string, unknown>;
+  const mediaPage = (closed = false) => {
+    const media: Media[] = [];
+    return { media, emulateMedia: async (o: Media) => { if (closed) throw new Error("Target page, context or browser has been closed"); media.push(o); } };
+  };
+  const mediaContext = (pages: ReturnType<typeof mediaPage>[] = []) => ({
+    pages: () => pages,
+    newPage: async () => { const p = mediaPage(); pages.push(p); return p; },
+    on: () => {},
+  });
+
+  it("on the existing context, its open pages, and every new page or context", async () => {
+    const existing = mediaContext([mediaPage(), mediaPage(true)]);
+    const seen: Array<[string, Media]> = [];
+    const connected = {
+      contexts: () => [existing],
+      newPage: async (o: Media = {}) => { seen.push(["page", o]); return mediaPage(); },
+      newContext: async (o: Media = {}) => { seen.push(["context", o]); return mediaContext(); },
+      close: async () => { connected.closed = true; },
+      closed: false,
+      on: () => {},
+    };
+    const spy = vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(connected as never);
+    const stub = await cdpStub();
+    try {
+      docker.cdpPort = stub.port;
+      const browser = await onMac(() => launch({ fingerprint: "seed-1", platform: "windows" }));
+      expect(browser as unknown).toBe(connected);
+      expect(existing.pages()[0].media).toEqual([{ colorScheme: null }]);  // open at connect time
+      expect(existing.pages()[1].media).toEqual([]);  // closed already: the error is ignored, the launch goes on
+      expect((await existing.newPage()).media).toEqual([{ colorScheme: null }]);  // browser.contexts()[0].newPage()
+      await browser.newPage();
+      await browser.newContext({ colorScheme: "dark" });
+      await browser.newContext({ viewport: { width: 800, height: 600 } });
+      expect(seen).toEqual([
+        ["page", { viewport: null, colorScheme: null }],
+        ["context", { viewport: null, colorScheme: "dark" }],  // the caller's choice stands
+        ["context", { viewport: { width: 800, height: 600 }, colorScheme: null }],
+      ]);
+      await browser.close();
+      expect(connected.closed).toBe(true);
+      expect(docker.commands().slice(-3)).toEqual(["stop", "rm", "ps"]);
+    } finally {
+      spy.mockRestore();
+      await stub.close();
+    }
+  }, 60_000);
+});
+
+// geoip: true is resolved here, before the container starts; what it filled goes in as CC_*.
+describe("geoip on the Docker path", () => {
+  const PROXY = { server: "http://proxy.example:8080" };
+  const GEO = { ip: "203.0.113.7", country: "DE", timezone: "Europe/Berlin", acceptLanguage: "de-DE", location: "52.52,13.405" };
+  const realResolve = geoResolver.resolve;
+  let answer: GeoResult;
+  let asked: unknown[];
+  const fakeBrowser = () => {
+    const ctx = { pages: () => [], newPage: async () => ({ emulateMedia: async () => {} }), on: () => {} };
+    const b = { contexts: () => [ctx], newPage: async () => ({}), newContext: async () => ctx, close: async () => {}, on: () => {} };
+    return b;
+  };
+
+  beforeEach(() => {
+    docker.marks = [serveState("open", PROXY.server)];
+    answer = { geo: GEO, elapsedMs: 12 };
+    asked = [];
+    geoResolver.resolve = async (proxy) => { asked.push(proxy); return answer; };
+  });
+  afterEach(() => { geoResolver.resolve = realResolve; });
+
+  it("fills the container's clock, language, location and WebRTC IP", async () => {
+    const spy = vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fakeBrowser() as never);
+    const stub = await cdpStub();
+    try {
+      docker.cdpPort = stub.port;
+      const browser = await onMac(() => launch({ geoip: true, proxy: PROXY, fingerprint: "seed-1", quiet: true }));
+      expect(asked).toEqual([PROXY]);  // resolved through the proxy, once
+      const { env } = docker.call("create");
+      expect(env.CC_TIMEZONE).toBe("Europe/Berlin");
+      expect(env.CC_ACCEPT_LANGUAGE).toBe("de-DE");
+      expect(env.CC_LOCATION).toBe("52.52,13.405");
+      expect(env.CC_WEBRTC_IP).toBe("203.0.113.7");
+      expect(Object.keys(env).some((k) => k.includes("GEOIP"))).toBe(false);
+      await browser.close();
+    } finally {
+      spy.mockRestore();
+      await stub.close();
+    }
+  }, 60_000);
+
+  it("keeps what the caller set and fills the rest", async () => {
+    const spy = vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fakeBrowser() as never);
+    const stub = await cdpStub();
+    try {
+      docker.cdpPort = stub.port;
+      await onMac(() => launch({ geoip: true, proxy: PROXY, timezone: "Europe/Paris", webrtcIp: "198.51.100.9", quiet: true }));
+      const { env } = docker.call("create");
+      expect(env.CC_TIMEZONE).toBe("Europe/Paris");
+      expect(env.CC_WEBRTC_IP).toBe("198.51.100.9");
+      expect(env.CC_ACCEPT_LANGUAGE).toBe("de-DE");
+    } finally {
+      spy.mockRestore();
+      await stub.close();
+    }
+  }, 60_000);
+
+  it("fails closed before any container starts", async () => {
+    answer = { geo: null, reason: "could not determine the exit IP through the proxy", elapsedMs: 1500 };
+    const err = await onMac(() => launch({ geoip: true, proxy: PROXY, quiet: true }).then(() => null, (e) => e as Error));
+    expect(err).toBeInstanceOf(GeoipError);
+    expect(docker.calls).toEqual([]);  // not even `docker info`
+  });
+
+  it("an explicit timezone and language still launch when the region is unresolvable", async () => {
+    answer = { geo: null, reason: "timed out after 2s", elapsedMs: 2000 };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const spy = vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fakeBrowser() as never);
+    const stub = await cdpStub();
+    try {
+      docker.cdpPort = stub.port;
+      await onMac(() => launch({ geoip: true, proxy: PROXY, timezone: "Europe/Paris", acceptLanguage: "fr-FR,fr" }));
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("using the explicit timezone and acceptLanguage"))).toBe(true);
+      const { env } = docker.call("create");
+      expect(env.CC_TIMEZONE).toBe("Europe/Paris");
+      expect(env.CC_ACCEPT_LANGUAGE).toBe("fr-FR,fr");
+      expect(env.CC_WEBRTC_IP).toBeUndefined();  // nothing resolved: nothing invented
+    } finally {
+      warn.mockRestore();
+      spy.mockRestore();
+      await stub.close();
+    }
+  }, 60_000);
+
+  it("geoip is an option the image takes", () => {
+    expect(containerEnv({ geoip: false })).toEqual({});
   });
 });

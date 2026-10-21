@@ -626,6 +626,71 @@ export function gpuBackendArgs(
   return [];
 }
 
+// ── software WebGPU under a desktop claim (155 r47+) ────────────────────────────────────────────
+
+/** What the engine's pro-r47-04 patch needs to let a software WebGPU adapter wear the persona: Chromium's
+ * own WebGPU-on-SwiftShader opt-ins. Playwright adds the last one itself (and the SDK strips it again,
+ * DEFAULT_IGNORED_ARGS), so it may already be on the line. */
+export const SOFTWARE_WEBGPU_ARGS: readonly string[] = ["--use-webgpu-adapter=swiftshader", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader"];
+/** The marker switch engine r48 introduces. */
+export const SOFTWARE_WEBGPU_SWITCH = "fingerprint-software-webgpu";
+/** pro-r47-04: the first engine whose software adapter wears the persona. */
+export const SOFTWARE_WEBGPU_MIN_REVISION = 47;
+const PRO_REVISION = /-r(\d+)(?!\d)/;
+
+/**
+ * The PRO revision of the engine at `exe`, read from its path, or undefined when the path does not
+ * carry one. An auto-downloaded engine lives in a directory named after its tag
+ * (`pro-155.0.8059.39-r47`); a binary the caller named by any other path answers undefined, and the
+ * engine's own switches decide ({@link engineSupportsSwitch}).
+ */
+export function engineRevision(exe: string | null | undefined): number | undefined {
+  let found: number | undefined;
+  for (const part of String(exe ?? "").split(/[\\/]+/)) {
+    const m = PRO_REVISION.exec(part);
+    if (m) found = Number(m[1]);  // the deepest component wins
+  }
+  return found;
+}
+
+/**
+ * Whether Playwright's own `--enable-unsafe-swiftshader` reaches the command line. It does unless the
+ * launch ignores it: the SDK's default strip (`ignoreDefaultArgs` unset -> DEFAULT_IGNORED_ARGS),
+ * `ignoreDefaultArgs: true` (every default dropped) or a caller's list that names it.
+ */
+export function playwrightKeepsUnsafeSwiftshader(ignoreDefaultArgs: string[] | boolean | null | undefined): boolean {
+  if (ignoreDefaultArgs == null || ignoreDefaultArgs === true) return false;
+  if (ignoreDefaultArgs === false) return true;
+  return !ignoreDefaultArgs.includes("--enable-unsafe-swiftshader");
+}
+
+/**
+ * The switches that give a Windows or macOS claim on a Linux host a WebGPU adapter in the persona's
+ * name, on an engine that can dress one (pro-r47-04, engine r47+; mirrors Python's software_webgpu_args).
+ *
+ * Without that patch the same three switches expose a raw SwiftShader adapter (`isFallbackAdapter`
+ * true, architecture "swiftshader") under the persona's NVIDIA/Intel renderer string, which is worse
+ * than no adapter at all, so they are gated: the engine's revision from its path
+ * ({@link engineRevision}) at or past 47, or the marker switch the r48 engine carries
+ * (`--fingerprint-software-webgpu`, engineSupportsSwitch). `present` lists the switches already on the
+ * line (the caller's, the SDK's and Playwright's own `--enable-unsafe-swiftshader` when it is kept);
+ * none is added twice. A Linux claim renders through Mesa (gpuBackendArgs) and a pass-through launch
+ * has no persona: nothing for either, nor on any host but Linux.
+ */
+export function softwareWebgpuArgs(
+  exe: string | null | undefined,
+  claimedPlatform: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+  present: readonly string[] = [],
+): string[] {
+  if (claimedPlatform === undefined || platform !== "linux") return [];
+  const claim = claimedPlatform.trim().toLowerCase();
+  if (claim !== "windows" && claim !== "macos") return [];
+  const rev = engineRevision(exe);
+  if (!((rev !== undefined && rev >= SOFTWARE_WEBGPU_MIN_REVISION) || engineSupportsSwitch(exe ?? undefined, SOFTWARE_WEBGPU_SWITCH))) return [];
+  return SOFTWARE_WEBGPU_ARGS.filter((a) => !present.includes(a));
+}
+
 // ── new engine switches (152 r22+) ──────────────────────────────────────────────────────────────
 
 /** Switches introduced in engine 152 r22, with what the caller asked for. Gated per binary. */

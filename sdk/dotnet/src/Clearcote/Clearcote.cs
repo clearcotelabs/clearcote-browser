@@ -542,6 +542,16 @@ public static class Clearcote
             baseList.AddRange(LaunchOpts.GpuBackendArgs(
                 fpArgs.Find(a => a.StartsWith(platFlag, System.StringComparison.Ordinal))?[platFlag.Length..],
                 extra.Headed, null, userArgs));
+            // Engine r47+ (pro-r47-04) on a Linux host: a software WebGPU adapter that wears the persona
+            // under a Windows or macOS claim. Gated on the engine (an older one would show a raw SwiftShader
+            // adapter), and never a switch twice: Playwright's own --enable-unsafe-swiftshader counts when kept.
+            baseList.AddRange(LaunchOpts.SoftwareWebgpuArgs(
+                extra.Exe,
+                fpArgs.Find(a => a.StartsWith(platFlag, System.StringComparison.Ordinal))?[platFlag.Length..],
+                null,
+                baseList.Concat(userArgs).Concat(
+                    extra.ViaPlaywright && LaunchOpts.PlaywrightKeepsUnsafeSwiftshader(extra.IgnoreDefaultArgs)
+                        ? new[] { "--enable-unsafe-swiftshader" } : System.Array.Empty<string>())));
             // macOS: the build is unsigned, so every launch would prompt for the "Chromium Safe Storage"
             // keychain item. See MacosKeychainArgs.
             baseList.AddRange(LaunchOpts.MacosKeychainArgs(null, userArgs));

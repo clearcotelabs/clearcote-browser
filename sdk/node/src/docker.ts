@@ -51,6 +51,8 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
+import { installColorSchemeDefaultConnected } from "./colorscheme.js";
+import { applyGeoip, type GeoFillable } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext } from "./humanize.js";
 import { STOCK_RUNTIME_SWITCH, stockRuntimeWanted } from "./launchopts.js";
 import { resolveLicenseKey } from "./license.js";
@@ -136,7 +138,7 @@ const BOOL_ENV: Record<string, string> = {
   lightStealth: "CC_LIGHT_STEALTH", disableGpuFingerprint: "CC_DISABLE_GPU_FINGERPRINT",
   fingerprintNoise: "CC_FINGERPRINT_NOISE", canvasNoise: "CC_CANVAS_NOISE", gpuStringSpoof: "CC_GPU_STRING_SPOOF",
 };
-const SPECIAL = ["location", "fingerprintProfile", "headless", "proxy", "args", "licenseKey", "licenseApiBase", "personaEnv", "stockRuntime"];
+const SPECIAL = ["location", "fingerprintProfile", "headless", "proxy", "args", "licenseKey", "licenseApiBase", "personaEnv", "stockRuntime", "geoip"];
 const SDK_SIDE = ["timeout", "slowMo", "humanize", "showCursor", "quiet", "docker", "dockerImage", "ephemeralProfile"];
 export const DOCKER_ACCEPTED: readonly string[] = [
   ...Object.keys(STR_ENV), ...Object.keys(INT_ENV), ...Object.keys(FLOAT_ENV), ...Object.keys(BOOL_ENV), ...SPECIAL, ...SDK_SIDE,
@@ -800,7 +802,30 @@ async function createStarted(exe: string, argv: string[], env: Record<string, st
  * (verifyApplied); otherwise it is stopped and removed and launch() rejects: a browser on the open engine, one
  * sending traffic direct, or one whose every request the proxy turns away is never handed back in their place. The container carries this process's owner token for sweepStale().
  */
+/** What geoip fills, and the container takes as CC_TIMEZONE / CC_ACCEPT_LANGUAGE / CC_LOCATION / CC_WEBRTC_IP. */
+const GEOIP_FILLED = ["timezone", "acceptLanguage", "location", "webrtcIp"] as const;
+
+/**
+ * `geoip: true` on the Docker path: resolve the proxy's exit region HERE, before any container starts,
+ * and hand the container what it filled (timezone, acceptLanguage, location, webrtcIp -> the CC_*
+ * variables of the same name). The same {@link applyGeoip} as a native launch, so it fails closed the
+ * same way: GeoipError and no container when the region is unresolvable; an explicit timezone AND
+ * acceptLanguage warn and launch. Without geoip the container's entrypoint builds the persona as a
+ * native launch does: Accept-Language defaults to en-US and the timezone follows its primary tag
+ * (en-US -> America/New_York). Removes `geoip` from `options`.
+ */
+export async function applyGeoipBeforeStart(options: Record<string, unknown>): Promise<void> {
+  const geoip = options.geoip;
+  delete options.geoip;
+  if (!geoip) return;
+  const fp: GeoFillable = {};
+  for (const k of GEOIP_FILLED) if (options[k] != null) (fp as Record<string, unknown>)[k] = options[k];
+  await applyGeoip(fp, options.proxy, !!options.quiet);
+  Object.assign(options, fp);
+}
+
 export async function startContainer(options: Record<string, unknown>): Promise<DockerContainer & { exe: string }> {
+  await applyGeoipBeforeStart(options);  // geoip: true -> the region first; GeoipError starts nothing
   const env = containerEnv(options);
   const idle = idleExitSeconds();
   const { exe, arch } = await dockerInfo();
@@ -899,6 +924,12 @@ export async function launchDocker(options: Record<string, unknown>): Promise<Br
     // The window is real (on the image's virtual display, sized to the persona's screen): an emulated
     // viewport on top of it is the impossible-window tell a local launch avoids.
     defaultNoViewport(browser);
+    // Playwright emulates prefers-color-scheme: light in every context it manages, a connected one
+    // included: measured (2026-10-21, fingerprint audit), every persona seed reported light through
+    // Docker while the same engine launched natively reports dark on about one seed in three. The
+    // same default as the native launch, here without its engine gate: an engine too old to decide
+    // the scheme from the persona shows the container's (light) host theme either way.
+    await installColorSchemeDefaultConnected(browser);
     const humanize = { humanize: options.humanize as boolean | undefined, showCursor: options.showCursor as boolean | undefined, seed: options.fingerprint as string | number | undefined };
     for (const ctx of browser.contexts()) installHumanizeOnContext(ctx, humanize, browser);
     installHumanize(browser, humanize);

@@ -428,3 +428,63 @@ describe("playwrightFeatureOverrideArgs, second review (2026-10-06)", () => {
     expect(parse('const disabledFeatures2 = ["MediaRouter"];')).toBeUndefined();
   });
 });
+
+// Software WebGPU under a desktop claim (engine r47+, pro-r47-04).
+describe("engineRevision", () => {
+  it("reads the PRO tag from the engine's path", async () => {
+    const { engineRevision } = await import("../src/launchopts.js");
+    expect(engineRevision("/home/u/.clearcote/pro-155.0.8059.39-r47/chrome")).toBe(47);
+    expect(engineRevision("C:\\Users\\u\\.clearcote\\pro-155.0.8059.39-r46\\chrome.exe")).toBe(46);
+    expect(engineRevision("/Users/u/.clearcote/pro-155.0.8059.39-r48/Chromium.app/Contents/MacOS/Chromium")).toBe(48);
+    expect(engineRevision("/x/other-r3/pro-155.0.8059.39-r47/chrome")).toBe(47);  // the deepest component wins
+    expect(engineRevision("/opt/clearcote/chrome")).toBeUndefined();  // a binary the caller named: no revision there
+    expect(engineRevision("")).toBeUndefined();
+    expect(engineRevision(undefined)).toBeUndefined();
+  });
+});
+
+describe("softwareWebgpuArgs", () => {
+  const three = ["--use-webgpu-adapter=swiftshader", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader"];
+  const r47 = "/x/pro-155.0.8059.39-r47/chrome";
+  const r46 = "/x/pro-155.0.8059.39-r46/chrome";
+
+  it("only for an engine that can dress the adapter, under a Windows or macOS claim, on Linux", async () => {
+    const { SOFTWARE_WEBGPU_ARGS, softwareWebgpuArgs } = await import("../src/launchopts.js");
+    expect([...SOFTWARE_WEBGPU_ARGS]).toEqual(three);
+    expect(softwareWebgpuArgs(r47, "windows", "linux")).toEqual(three);
+    expect(softwareWebgpuArgs(r47, "macos", "linux")).toEqual(three);
+    expect(softwareWebgpuArgs(r47, "Windows ", "linux")).toEqual(three);
+    expect(softwareWebgpuArgs(r46, "windows", "linux")).toEqual([]);  // r46: a raw SwiftShader adapter would show
+    expect(softwareWebgpuArgs("/opt/cc/chrome", "windows", "linux")).toEqual([]);  // no revision, no marker switch
+    expect(softwareWebgpuArgs(r47, "linux", "linux")).toEqual([]);  // a Linux claim renders through Mesa
+    expect(softwareWebgpuArgs(r47, undefined, "linux")).toEqual([]);  // pass-through: no persona
+    expect(softwareWebgpuArgs(r47, "windows", "win32")).toEqual([]);
+    expect(softwareWebgpuArgs(r47, "windows", "darwin")).toEqual([]);
+  });
+
+  it("the r48 marker switch stands in for the revision", async () => {
+    const { softwareWebgpuArgs } = await import("../src/launchopts.js");
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "cc-webgpu-"));
+    const exe = path.join(dir, "chrome");
+    writeFileSync(exe, Buffer.from("xx\0fingerprint-platform\0yy", "latin1"));
+    expect(softwareWebgpuArgs(exe, "windows", "linux")).toEqual([]);
+    const marked = path.join(dir, "chrome2");
+    writeFileSync(marked, Buffer.from("xx\0fingerprint-software-webgpu\0yy", "latin1"));
+    expect(softwareWebgpuArgs(marked, "windows", "linux")).toEqual(three);
+  });
+
+  it("never adds a switch twice", async () => {
+    const { playwrightKeepsUnsafeSwiftshader, softwareWebgpuArgs } = await import("../src/launchopts.js");
+    expect(softwareWebgpuArgs(r47, "windows", "linux", ["--enable-unsafe-swiftshader"])).toEqual(three.slice(0, 2));
+    expect(softwareWebgpuArgs(r47, "windows", "linux", three)).toEqual([]);
+    // Playwright's own --enable-unsafe-swiftshader reaches the line only when the launch keeps it
+    expect(playwrightKeepsUnsafeSwiftshader(null)).toBe(false);  // the SDK's default strip
+    expect(playwrightKeepsUnsafeSwiftshader(undefined)).toBe(false);
+    expect(playwrightKeepsUnsafeSwiftshader(true)).toBe(false);  // every default dropped
+    expect(playwrightKeepsUnsafeSwiftshader(["--enable-automation"])).toBe(true);
+    expect(playwrightKeepsUnsafeSwiftshader(["--enable-automation", "--enable-unsafe-swiftshader"])).toBe(false);
+  });
+});

@@ -666,6 +666,64 @@ def gpu_backend_args(claimed_platform, headed, platform=None, user_args=(), envi
     return []
 
 
+# -- software WebGPU under a desktop claim (155 r47+) --------------------------------------------
+
+# What the engine's pro-r47-04 patch needs to let a software WebGPU adapter wear the persona: Chromium's
+# own WebGPU-on-SwiftShader opt-ins. Playwright adds the last one itself (and the SDK strips it again,
+# DEFAULT_IGNORED_ARGS), so it may already be on the line.
+SOFTWARE_WEBGPU_ARGS = ("--use-webgpu-adapter=swiftshader", "--enable-unsafe-webgpu", "--enable-unsafe-swiftshader")
+SOFTWARE_WEBGPU_SWITCH = "fingerprint-software-webgpu"  # the marker switch engine r48 introduces
+SOFTWARE_WEBGPU_MIN_REVISION = 47  # pro-r47-04: the first engine whose software adapter wears the persona
+_PRO_REVISION = re.compile(r"-r(\d+)(?!\d)")
+
+
+def engine_revision(exe):
+    """The PRO revision of the engine at ``exe``, read from its path, or None when the path does not
+    carry one. An auto-downloaded engine lives in a directory named after its tag
+    (``pro-155.0.8059.39-r47``); a binary the caller named by any other path answers None, and the
+    engine's own switches decide (engine_supports_switch)."""
+    found = None
+    for part in re.split(r"[\\/]+", str(exe or "")):
+        m = _PRO_REVISION.search(part)
+        if m:
+            found = int(m.group(1))  # the deepest component wins
+    return found
+
+
+def playwright_keeps_unsafe_swiftshader(ignore_default_args):
+    """Whether Playwright's own ``--enable-unsafe-swiftshader`` reaches the command line. It does unless
+    the launch ignores it: the SDK's default strip (``ignore_default_args`` unset -> DEFAULT_IGNORED_ARGS),
+    ``ignore_default_args=True`` (every default dropped) or a caller's list that names it."""
+    if ignore_default_args is None or ignore_default_args is True:
+        return False
+    return "--enable-unsafe-swiftshader" not in list(ignore_default_args)
+
+
+def software_webgpu_args(exe, claimed_platform, platform=None, present=()):
+    """The switches that give a Windows or macOS claim on a Linux host a WebGPU adapter in the persona's
+    name, on an engine that can dress one (pro-r47-04, engine r47+).
+
+    Without that patch the same three switches expose a raw SwiftShader adapter (``isFallbackAdapter``
+    true, architecture "swiftshader") under the persona's NVIDIA/Intel renderer string, which is worse
+    than no adapter at all, so they are gated: the engine's revision from its path
+    (:func:`engine_revision`) at or past 47, or the marker switch the r48 engine carries
+    (``--fingerprint-software-webgpu``, engine_supports_switch). ``present`` lists the switches already
+    on the line (the caller's, the SDK's and Playwright's own ``--enable-unsafe-swiftshader`` when it is
+    kept); none is added twice. A Linux claim renders through Mesa (gpu_backend_args) and a pass-through
+    launch has no persona: nothing for either, nor on any host but Linux."""
+    platform = sys.platform if platform is None else platform
+    if claimed_platform is None or not str(platform).startswith("linux"):
+        return []
+    if str(claimed_platform).strip().lower() not in ("windows", "macos"):
+        return []
+    rev = engine_revision(exe)
+    if not ((rev is not None and rev >= SOFTWARE_WEBGPU_MIN_REVISION)
+            or engine_supports_switch(exe, SOFTWARE_WEBGPU_SWITCH)):
+        return []
+    have = set(present or ())
+    return [a for a in SOFTWARE_WEBGPU_ARGS if a not in have]
+
+
 # -- new engine switches (152 r22+) -------------------------------------------------------------
 
 # Switches introduced in engine 152 r22, with what the caller asked for. Gated per binary.

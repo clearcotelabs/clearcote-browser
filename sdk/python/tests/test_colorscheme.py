@@ -183,3 +183,103 @@ def test_incognito_launch_on_an_older_engine_is_unchanged(monkeypatch, tmp_path)
     browser = clearcote.launch(executable_path=_engine(tmp_path, r32=False), ephemeral_profile=False,
                                headless=False, quiet=True)
     assert browser.new_page().kw == {"no_viewport": True}
+
+
+# -- a browser the SDK connected to (the Docker container): its existing context(s) too ----------
+
+class _FakePage:
+    def __init__(self, closed=False):
+        self.closed, self.media = closed, []
+
+    def emulate_media(self, **kw):
+        if self.closed:
+            raise RuntimeError("Target page, context or browser has been closed")
+        self.media.append(kw)
+
+
+class _FakeContext:
+    def __init__(self, pages=()):
+        self.pages, self.new_page_kwargs = list(pages), []
+
+    def new_page(self, **kw):
+        self.new_page_kwargs.append(kw)
+        page = _FakePage()
+        self.pages.append(page)
+        return page
+
+
+class _FakeConnectedBrowser:
+    def __init__(self):
+        self.contexts, self.calls = [_FakeContext([_FakePage(), _FakePage(closed=True)])], []
+
+    def new_page(self, **kw):
+        self.calls.append(("page", kw))
+        return _FakePage()
+
+    def new_context(self, **kw):
+        self.calls.append(("context", kw))
+        return _FakeContext()
+
+
+def test_existing_context_gets_the_emulation_off_per_page_now_and_on_new_page():
+    from clearcote._colorscheme import install_color_scheme_default_on_context
+    open_page, closed_page = _FakePage(), _FakePage(closed=True)
+    ctx = _FakeContext([open_page, closed_page])
+    install_color_scheme_default_on_context(ctx)  # the closed page raises inside; ignored
+    assert open_page.media == [{"color_scheme": "null"}] and closed_page.media == []
+    page = ctx.new_page(viewport={"width": 1, "height": 1})
+    assert ctx.new_page_kwargs == [{"viewport": {"width": 1, "height": 1}}]  # the options pass as given
+    assert page.media == [{"color_scheme": "null"}]
+
+
+def test_connected_browser_defaults_new_pages_contexts_and_the_existing_context():
+    from clearcote._colorscheme import install_color_scheme_default_connected
+    b = _FakeConnectedBrowser()
+    install_color_scheme_default_connected(b)
+    b.new_page()
+    b.new_context(color_scheme="dark")
+    assert b.calls == [("page", {"color_scheme": "null"}), ("context", {"color_scheme": "dark"})]
+    existing = b.contexts[0]
+    assert existing.pages[0].media == [{"color_scheme": "null"}]  # open at connect time
+    assert existing.new_page().media == [{"color_scheme": "null"}]  # browser.contexts[0].new_page()
+
+
+def test_async_connected_browser_twin():
+    from clearcote._colorscheme import install_color_scheme_default_connected_async
+
+    class _AsyncPage(_FakePage):
+        async def emulate_media(self, **kw):
+            return _FakePage.emulate_media(self, **kw)
+
+    class _AsyncContext(_FakeContext):
+        async def new_page(self, **kw):
+            self.new_page_kwargs.append(kw)
+            page = _AsyncPage()
+            self.pages.append(page)
+            return page
+
+    class _B:
+        def __init__(self):
+            self.contexts, self.calls = [_AsyncContext([_AsyncPage(), _AsyncPage(closed=True)])], []
+
+        async def new_page(self, **kw):
+            self.calls.append(("page", kw))
+            return _AsyncPage()
+
+        async def new_context(self, **kw):
+            self.calls.append(("context", kw))
+            return _AsyncContext()
+
+    b = _B()
+
+    async def go():
+        await install_color_scheme_default_connected_async(b)
+        await b.new_page()
+        await b.new_context(color_scheme="light")
+        return await b.contexts[0].new_page()
+
+    page = asyncio.run(go())
+    assert b.calls == [("page", {"color_scheme": "null"}), ("context", {"color_scheme": "light"})]
+    assert b.contexts[0].pages[0].media == [{"color_scheme": "null"}]
+    assert b.contexts[0].pages[1].media == []  # closed: the error is swallowed
+    assert page.media == [{"color_scheme": "null"}]

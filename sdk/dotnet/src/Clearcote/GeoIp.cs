@@ -365,9 +365,12 @@ public static class GeoIp
     ///
     /// FAILS CLOSED: throws <see cref="GeoipException"/> when the region cannot be resolved, unless the
     /// caller set BOTH Timezone and AcceptLanguage explicitly (then it warns and returns).
+    /// Test seam: the resolver <see cref="ApplyAsync"/> asks (<see cref="ResolveDetailedAsync"/>).
+    internal static Func<ProxyOptions?, bool, int?, Task<GeoResult>> Resolver = ResolveDetailedAsync;
+
     public static async Task ApplyAsync(FingerprintOptions fp, ProxyOptions? proxy, bool quiet = false, int? timeoutMs = null)
     {
-        var result = await ResolveDetailedAsync(proxy, quiet, timeoutMs).ConfigureAwait(false);
+        var result = await Resolver(proxy, quiet, timeoutMs).ConfigureAwait(false);
         var geo = result.Geo;
         if (geo is null || string.IsNullOrEmpty(geo.Timezone))
         {
