@@ -1,0 +1,158 @@
+clearcote-958: bind the CSS generics to the persona's clones on macOS (the CoreText equivalent
+of fonts.conf.template's four <alias> lines).
+
+assets/fonts/fonts.conf.template already does this for the Linux release:
+
+  <alias><family>sans-serif</family><prefer><family>Arimo</family></prefer></alias>
+  <alias><family>serif</family>     <prefer><family>Tinos</family></prefer></alias>
+  <alias><family>monospace</family> <prefer><family>Inconsolata</family></prefer></alias>
+  <alias><family>system-ui</family> <prefer><family>Selawik</family></prefer></alias>
+
+macOS has no fontconfig, so those four lines have no effect there. The generics kept resolving
+to the host's own defaults -- Helvetica, Times, Menlo, .AppleSystemUIFont -- which the persona
+filter then hides, collapsing all of them onto the standard font.
+
+MEASURED on the native macOS arm64 build of 150.0.7871.114, platform="windows", 32px "WgQmil":
+
+  after `serif`      111.98
+  after `monospace`  111.98     <- equal to serif
+  after `cursive`    111.98     <- equal to serif
+  `16px system-ui`    56.84     <- byte-identical to the macos persona
+
+width(monospace) == width(serif) is impossible on real Windows, where the generics bind to
+Times New Roman, Consolas and Arial respectively. It needs no reference data to detect, which
+is the same class of tell the template's own comment was written to close:
+
+    "system-ui had no rule at all, so it fell through to the default and measured identical to
+     a family that does not exist, which is the cheapest possible tell"
+
+TWO MAPPINGS ARE ENOUGH. The other two generics already arrive here as Windows families and
+take the ordinary substitution path: macOS's sans-serif default is Helvetica, which 957
+resolves as Arial -> Arimo, and its serif and standard default is Times, which is in the
+Windows list -> Tinos. Both agree with the template.
+
+  * system-ui reaches FontCache::GetFontPlatformData literally on macOS -- the system-ui
+    shortcut at the top of that function is compiled out under IS_MAC and
+    CreateFontPlatformData goes straight to MatchSystemUIFont(). Resolved as "Segoe UI", whose
+    clone is Selawik: the template's target.
+  * macOS's monospace default is Menlo. Resolved as "Consolas", whose clone is Inconsolata:
+    again the template's target, including its documented residual width error.
+
+Gated on FontDescription::GenericFamily() so that `font-family: Menlo` on its own stays ABSENT
+under a Windows persona; only a request carrying the monospace generic is remapped.
+`font-family: Menlo, monospace` matches both and is remapped, which is the right answer anyway
+-- on real Windows Menlo is absent and the generic supplies Consolas.
+
+MEASURED AFTER, platform="windows", 32px "WgQmil" through each generic:
+
+  serif       111.98   Tinos         (Times New Roman)
+  sans-serif  113.77   Arimo         (Arial, via 957's Helvetica -> Arial)
+  monospace    96.00   Inconsolata   (Consolas)
+  cursive     106.82   Comic Neue    (Comic Sans MS)
+  fantasy     106.82   Comic Neue    (Papyrus -- see below)
+  16px system-ui 57.96 Selawik       (Segoe UI); 56.84 under the macos persona
+
+ONE RESIDUAL, MEASURED NOT GLOSSED. cursive and fantasy both land on Comic Neue, so
+width(cursive) == width(fantasy) where genuine Windows has Comic Sans MS and Impact and they
+differ. `fantasy` is NOT remapped on purpose: macOS's default for it is Papyrus, and Papyrus is
+one of the families a real Windows machine HAS -- it is in the Windows list above -- so
+remapping would make `font-family: Papyrus, fantasy` resolve to Impact where genuine Windows
+resolves it to Papyrus. Trading a present font for an absent one is the worse of the two
+errors. Closing this properly needs the generic to be distinguishable from an explicit first
+family, which GenericFamily() alone does not give; left as a documented gap rather than traded
+for a new one. The other four generics are now four distinct widths, where before this patch
+serif, monospace and cursive were all 111.98. Emoji is also not bound: the open line has no emoji clone, since
+MetricCompatibleSubstitute maps Segoe UI Emoji to Noto Color Emoji, which assets/fonts/ does
+not ship and which CoreText cannot render in any case (it is a CBDT/CBLC bitmap font).
+
+diff -u a/third_party/blink/renderer/platform/fonts/font_cache.cc b/third_party/blink/renderer/platform/fonts/font_cache.cc
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -664,6 +664,87 @@
+       // persona, and a same-OS persona, register nothing at all.
+       EnsurePersonaSubstituteFontsRegistered();
+ #endif
++#if BUILDFLAG(IS_MAC)
++      // clearcote-958: bind the CSS generics to the persona's clones, which is what
++      // assets/fonts/fonts.conf.template already does for the Linux release:
++      //
++      //   <alias><family>sans-serif</family><prefer><family>Arimo</family></prefer></alias>
++      //   <alias><family>serif</family>     <prefer><family>Tinos</family></prefer></alias>
++      //   <alias><family>monospace</family> <prefer><family>Inconsolata</family></prefer></alias>
++      //   <alias><family>system-ui</family> <prefer><family>Selawik</family></prefer></alias>
++      //
++      // macOS has no fontconfig, so those four lines have no effect here and the generics
++      // kept resolving to the host's defaults -- which the persona filter then hides,
++      // collapsing every one of them onto the standard font. MEASURED on the native
++      // 150.0.7871.114 arm64 build before this patch, platform="windows": an unresolvable
++      // family rendered at 111.98 after `serif`, after `monospace` AND after `cursive`,
++      // i.e. width(monospace) == width(serif), which is impossible on real Windows and is a
++      // reference-free tell of exactly the kind the template's comment was written to close.
++      // `16px system-ui` was also byte-identical between the macos and windows personas.
++      //
++      // Two mappings are enough, because the other two already arrive here as Windows
++      // families and take the ordinary substitution path: macOS's sans-serif default is
++      // Helvetica, which 957 resolves as Arial -> Arimo, and its serif and standard default
++      // is Times, which is in the Windows list -> Tinos. Both agree with the template.
++      //
++      //  * system-ui reaches this function literally on macOS (the system-ui shortcut at the
++      //    top of GetFontPlatformData is compiled out under IS_MAC and
++      //    CreateFontPlatformData goes straight to MatchSystemUIFont()). Resolved as
++      //    "Segoe UI", whose clone is Selawik -- the template's target.
++      //  * The remaining generics arrive as the macOS default family for that generic, from
++      //    chrome/app/resources/locale_settings_mac.grd, and are remapped to what
++      //    locale_settings_win.grd gives the same generic -- Chromium's own per-platform
++      //    answer, read out of the tree rather than assumed:
++      //
++      //      generic     mac .grd         win .grd                    clone
++      //      monospace   Menlo            Courier New / Consolas      Inconsolata
++      //                                   (IDS_FIXED_FONT_FAMILY_ALT_WIN)
++      //      cursive     Apple Chancery   Comic Sans MS               Comic Neue
++      //
++      //    Consolas rather than Courier New: Chrome takes the _ALT_WIN string on modern
++      //    Windows, and fonts.conf.template's comment says the same from the other side
++      //    ("monospace binds to Consolas on Windows, not Courier New", measured against
++      //    genuine Windows at 549.81).
++      //
++      //    Gated on GenericFamily() so an explicit `font-family: Menlo` stays ABSENT under a
++      //    Windows persona; only a request carrying that generic is remapped. `font-family:
++      //    Menlo, monospace` matches both and IS remapped, which is the right answer anyway:
++      //    on real Windows Menlo is absent and the generic supplies Consolas. The same holds
++      //    for Apple Chancery, which no Windows edition ships either.
++      //
++      // TWO THINGS DELIBERATELY NOT BOUND HERE.
++      //
++      //  * `fantasy`. macOS's default is Papyrus and Windows' is Impact, so a Windows
++      //    persona currently measures Papyrus's clone (Comic Neue) where genuine Windows
++      //    measures Impact's (Anton). It is NOT remapped, because Papyrus is one of the
++      //    families a real Windows machine HAS -- it is in the Windows list above -- so
++      //    remapping would make `font-family: Papyrus, fantasy` resolve to Impact where
++      //    genuine Windows resolves it to Papyrus. Trading a present font for an absent one
++      //    is the worse error of the two. Left as a measured, documented residual.
++      //  * Emoji. The open line has no emoji clone: MetricCompatibleSubstitute maps Segoe UI
++      //    Emoji to Noto Color Emoji, which assets/fonts/ does not ship and which CoreText
++      //    cannot render in any case (it is a CBDT/CBLC bitmap font).
++      if (spoofed_platform == "windows") {
++        const char* cc_generic = nullptr;
++        if (base::EqualsCaseInsensitiveASCII(requested_family, "system-ui")) {
++          cc_generic = "Segoe UI";
++        } else if (font_description.GenericFamily() ==
++                       FontDescription::kMonospaceFamily &&
++                   base::EqualsCaseInsensitiveASCII(requested_family, "Menlo")) {
++          cc_generic = "Consolas";
++        } else if (font_description.GenericFamily() ==
++                       FontDescription::kCursiveFamily &&
++                   base::EqualsCaseInsensitiveASCII(requested_family,
++                                                    "Apple Chancery")) {
++          cc_generic = "Comic Sans MS";
++        }
++        if (cc_generic) {
++          return GetFontPlatformData(font_description,
++                                     FontFaceCreationParams(AtomicString(cc_generic)),
++                                     alternate_font_name);
++        }
++      }
++#endif
+       // Cross-OS persona: this host physically lacks the persona OS's fonts, so a requested
+       // persona font would otherwise render absent/mismatched. Render each persona font
+       // through a metric-compatible clone that IS installed here, so the family is present

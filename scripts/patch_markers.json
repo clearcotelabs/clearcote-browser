@@ -448,6 +448,36 @@
         "probe": "With --fingerprint=seed: every name in getSupportedExtensions() returns non-null from getExtension(); a name not advertised returns null (except WEBGL_debug_renderer_info); on webgl2, getParameter(gl.MAX_ELEMENT_INDEX).",
         "expect": "Advertised == gettable; MAX_ELEMENT_INDEX == 4294967294 (persona default) even on a GPU-less host."
       }
+    },
+    "956-macos-persona-substitution-fonts.patch": {
+      "surface": "macOS only: registers the bundled metric-compatible font clones (assets/fonts/, the same files the Linux release ships) with CoreText at kCTFontManagerScopeProcess, and lets MetricCompatibleSubstitute() answer on a macOS host instead of returning early for every non-Linux host. Without it a cross-OS persona on macOS substitutes nothing and every Windows family reports absent.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "Presence of the persona's own font families (canvas advance width)",
+        "probe": "Launch the macOS build with --fingerprint=<seed> --fingerprint-platform=windows and measure canvas advance widths with (f,g)=>{c.font='32px \"'+f+'\", '+g; return c.measureText('WgQmil').width} against a guaranteed-absent family in the same generic context (document.fonts.check() answers true for almost any name and is useless). scripts/verify_macos_persona.py does exactly this.",
+        "expect": "Under --fingerprint-platform=windows on a macOS build, Segoe UI, Calibri, Consolas, Cambria, Candara and Corbel all render at a width different from the absent-family baseline (they resolve to Selawik, Carlito, Inconsolata, Caladea and Carlito). Without this patch every one of them equals the baseline. Not observable on a Windows or Linux build, where the code is #if'd out or the host already has fontconfig."
+      }
+    },
+    "957-macos-persona-hides-host-helvetica.patch": {
+      "surface": "macOS only: stops IsBasicFont()'s unconditional cross-OS bypass from serving the host's Helvetica and Helvetica Neue to a Windows persona. Helvetica is resolved as Arial (the HKLM FontSubstitutes answer, and what fonts.conf.template gives Linux); Helvetica Neue is reported absent.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "Helvetica Neue presence under a Windows persona",
+        "probe": "Launch the macOS build with --fingerprint=<seed> --fingerprint-platform=windows and measure canvas advance widths with (f,g)=>{c.font='32px \"'+f+'\", '+g; return c.measureText('WgQmil').width} against a guaranteed-absent family in the same generic context (document.fonts.check() answers true for almost any name and is useless). scripts/verify_macos_persona.py does exactly this.",
+        "expect": "Under --fingerprint-platform=windows on a macOS build, 'Helvetica Neue' equals the absent-family baseline in every generic context, while 'Helvetica' renders at Arimo's width. Without this patch Helvetica Neue renders at the host's real HelveticaNeue.ttc width (113.82 at 32px) -- the one macOS font left standing in an otherwise Windows-shaped font list."
+      }
+    },
+    "958-macos-persona-generic-font-families.patch": {
+      "surface": "macOS only: binds the CSS generics to the persona's clones, the CoreText equivalent of the four <alias> lines in assets/fonts/fonts.conf.template. system-ui resolves as Segoe UI (-> Selawik) and the monospace and cursive generics, which arrive as macOS's own defaults Menlo and Apple Chancery, resolve as Consolas (-> Inconsolata) and Comic Sans MS (-> Comic Neue), matching locale_settings_win.grd.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "CSS generic font families and system-ui (canvas advance width)",
+        "probe": "Launch the macOS build with --fingerprint=<seed> --fingerprint-platform=windows and measure canvas advance widths with (f,g)=>{c.font='32px \"'+f+'\", '+g; return c.measureText('WgQmil').width} against a guaranteed-absent family in the same generic context (document.fonts.check() answers true for almost any name and is useless). scripts/verify_macos_persona.py does exactly this. Also measure each generic on its own: c.font='32px monospace' etc.",
+        "expect": "Under --fingerprint-platform=windows on a macOS build, serif/sans-serif/monospace are three DIFFERENT widths (111.98 / 113.77 / 96.00 at 32px), and 16px system-ui differs from the macos persona's (57.96 vs 56.84). Without this patch serif, monospace and cursive are all 111.98 -- width(monospace)==width(serif) is impossible on real Windows and needs no reference data to spot -- and system-ui is byte-identical between the two personas. Known residual: cursive and fantasy both land on Comic Neue; fantasy is deliberately not remapped because macOS's default for it, Papyrus, is a family real Windows machines have."
+      }
     }
   }
 }

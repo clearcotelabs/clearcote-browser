@@ -35,3 +35,6 @@
 905-rc-invoked-guard.patch
 951-gfx-quadf-offset.patch
 955-webgl-persona-parity.patch
+956-macos-persona-substitution-fonts.patch
+957-macos-persona-hides-host-helvetica.patch
+958-macos-persona-generic-font-families.patch
