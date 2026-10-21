@@ -185,6 +185,8 @@ public static class ProfileSource
         finally
         {
             try { await browser.CloseAsync().ConfigureAwait(false); } catch { }
+            // The caller's own launch checks out its seat next: on a one-browser plan the probe's seat must be back first.
+            await Clearcote.LeaseReleasedAsync(browser).ConfigureAwait(false);
         }
     }
 

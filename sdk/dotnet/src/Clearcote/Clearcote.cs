@@ -181,8 +181,28 @@ public static partial class Clearcote
             }), exe)), launchToken).ConfigureAwait(false);
 
         // Release the concurrency slot + remove the run-token file when the browser closes.
-        if (lease is not null) browser.Disconnected += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };
+        if (lease is not null)
+        {
+            // The stop is kept so a caller that must hand the seat on (the profile "auto" probe launch) can wait for it.
+            var released = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            LeaseReleases.AddOrUpdate(browser, released.Task);
+            browser.Disconnected += (_, _) =>
+            {
+                launchToken?.Release();
+                _ = lease.StopAsync().ContinueWith(_ => released.TrySetResult(), TaskScheduler.Default);
+            };
+        }
         return browser;
+    }
+
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IBrowser, Task> LeaseReleases = new();
+
+    /// Completes once the seat of a browser from <see cref="LaunchAsync"/> has been handed back after it closed
+    /// (at once for a browser that held no seat), bounded by <paramref name="timeoutMs"/>.
+    internal static async Task LeaseReleasedAsync(IBrowser browser, int timeoutMs = 10_000)
+    {
+        if (!LeaseReleases.TryGetValue(browser, out var released)) return;
+        await Task.WhenAny(released, Task.Delay(timeoutMs)).ConfigureAwait(false);
     }
 
     /// <summary>
