@@ -85,6 +85,28 @@ var context = await Clearcote.Clearcote.LaunchPersistentContextAsync("./profile-
 });
 ```
 
+## Saved personas (`Profile`) and `LocalProfile = "auto"`
+
+A `Profile` is a named set of launch options saved as JSON in `~/.clearcote/profiles/<name>.json`
+(`CLEARCOTE_PROFILE_DIR` overrides the directory), in the same format the Python and Node SDKs read and write, so
+one file serves all three. `LocalProfile` launches one: its options fill everything left unset, and explicit
+options win.
+
+```csharp
+new Profile("acct-1", new LaunchOptions { Fingerprint = "acct-1", Platform = "windows" }).Save();
+var ctx = await Clearcote.Clearcote.LaunchEphemeralProfileAsync(new LaunchOptions { LocalProfile = "acct-1" });
+// or: await Profile.Load("acct-1").LaunchEphemeralProfileAsync();   Profile.ListProfiles() names them
+```
+
+`LocalProfile = "auto"` (or `Profile = "auto"`, the Node spelling) applies a real captured fingerprint for this
+machine as `FingerprintProfile`, with no seed: the licensed profile service first, a local directory of
+clearcote-profile JSON as backup (`CLEARCOTE_PROFILE_SOURCE`, default `~/.clearcote/profiles/imported`), announced
+on stderr either way. It may launch the engine once, headless and without a persona, to measure this host's GPU and
+display (cached per binary for 30 days). An engine before 150 cannot apply a profile and gets a stable seed persona
+instead. `ProfileSelect` tunes it (`Mode`, `Key`, `PreferLocal`, `LocalDir`, `Offline`, ...);
+`CLEARCOTE_PROFILE_API` points it at another service. `LocalProfile` is for local launches: a cloud or Docker
+launch refuses it (`Profile` stays the cloud's cookie store).
+
 ## Widevine / DRM (`Widevine`)
 
 clearcote ships the EME/Widevine plumbing but, being open source, not Google's proprietary CDM. The SDK fetches

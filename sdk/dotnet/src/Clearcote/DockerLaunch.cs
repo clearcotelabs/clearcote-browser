@@ -198,6 +198,11 @@ internal static class DockerLaunch
                 throw new ArgumentException(
                     $"{p.Name} is not available when LaunchAsync runs Clearcote in Docker (there is no native macOS build here). {OffHint}");
         }
+        // Profile = "auto" is LocalProfile = "auto" on a launch that is not a cloud one (ProfileAuto.LocalProfileOf),
+        // which the image cannot take either.
+        if (o.Profile is { Name: "auto", Persist: null })
+            throw new ArgumentException(
+                $"Profile \"auto\" is not available when LaunchAsync runs Clearcote in Docker (there is no native macOS build here). {OffHint}");
         var env = new Dictionary<string, string>(StringComparer.Ordinal);
         var t = typeof(LaunchOptions);
         foreach (var (prop, name) in StrEnv)
