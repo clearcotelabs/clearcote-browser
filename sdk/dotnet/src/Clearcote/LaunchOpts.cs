@@ -603,6 +603,8 @@ public static class LaunchOpts
         if (!((rev is int r && r >= SoftwareWebgpuMinRevision) || EngineSupportsSwitch(exe, SoftwareWebgpuSwitch))) return new();
         var have = new HashSet<string>(present ?? Enumerable.Empty<string>(), StringComparer.Ordinal);
         return SoftwareWebgpuSwitches.Where(a => !have.Contains(a)).ToList();
+    }
+
     /// A string literal only engines from 154 r37 carry: the persona schema-4 GPU pool's Intel Arc row. Pool tables
     /// are frozen with their schema (3 keeps r36's rows, which name this chip "Arc(TM) Pro"), so the literal stays in
     /// every later engine, and <see cref="EngineSupportsSwitch"/>'s NUL-delimited search finds it like a switch name.

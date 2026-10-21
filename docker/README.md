@@ -52,10 +52,10 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | `CC_GPU_VENDOR` / `CC_GPU_RENDERER` | `Google Inc. (NVIDIA)` / `ANGLE (NVIDIA …)` | WebGL strings |
 | `CC_TLS_PROFILE` | `match-persona` | TLS ClientHello follows the claimed Chrome major |
 | `CC_HEADLESS` | `1` | force pure-headless (default is **headful on Xvfb**) |
-| `CC_SCREEN` | `1920x1080x24` | screen size: sizes Xvfb and is also the screen, work area and window the persona claims, headed or headless |
-| `CC_PIN_SCREEN` | `0` | let the seed choose the claimed screen instead of `CC_SCREEN` (default: pinned to `CC_SCREEN`) |
+| `CC_SCREEN` | `1920x1080x24` | pin a screen size: sizes Xvfb and is also the screen, work area and window the persona claims, headed or headless. **Unset (the default since SDK 0.60), the seed's own display is used**: the entrypoint asks the engine for the persona's screen, work area and scale, creates the virtual display at exactly that size and pins nothing, so a seed is the same machine in the container as in a native launch |
+| `CC_PIN_SCREEN` | `0` | neither: let the seed choose the claimed screen on the default `1920x1080` display (the two then disagree) |
 | `CC_PORT` | `9222` | exposed CDP port |
-| `CC_WIDEVINE` | `1` \| `0` | seed the Widevine CDM — **auto-on for `CC_PLATFORM=windows`** |
+| `CC_WIDEVINE` | `1` \| `0` | seed the Widevine CDM — **auto-on for every desktop persona** (`windows`, `linux`, `macos`; since SDK 0.60, Windows claims only before) |
 | `CC_SHADER_DIALECT` | `hlsl` \| `0` | report ANGLE's translated shader as HLSL — **auto-on for `CC_PLATFORM=windows`** |
 | `CLEARCOTE_LICENSE_KEY` | `cc_lic_...` | use the licensed engine instead of the bundled open one — see below |
 | `CC_VERSION` | `<major>` \| `<exact build>` \| `r<N>` | with a **Pro** key: pin a major, an exact build or a revision (default: the newest your key allows). Free keys always get the latest build and are refused a pin |
