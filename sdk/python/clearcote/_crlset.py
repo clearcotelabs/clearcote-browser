@@ -20,12 +20,11 @@ The engine still knows how to use one. This module:
    moment (AfterStartupTaskUtils, 3 min failsafe). A caller who navigates straight away would keep the tab
    busy and stay unprotected for minutes. So the first tab stays on about:blank until the CRLSet applies.
 
-Readiness signal: applying a CRLSet changes the cert verifier, and the network service then drops its
-pooled TLS connections. The probe keeps one keep-alive HTTPS connection to a local server (self-signed key
-in ``_crlset_probe.pem``; certificate errors are ignored, through CDP, only for the probe's lifetime) and
-waits for that connection to be dropped and re-opened. Measured 6/6 on a 155 engine: the re-opened
-connection's verification carries the seeded sequence, and an eMudhra host navigated right after is
-ERR_CERT_REVOKED. It adds a few seconds to a launch.
+Readiness signal: applying a CRLSet changes the cert verifier, and the network service then closes its
+idle pooled connections, plain HTTP ones included. The probe keeps one keep-alive HTTP connection to a
+local server and waits for that connection to be dropped and re-opened. Measured 5/5 on a 155 engine (and
+6/6 with an HTTPS probe): a revoked host navigated right after is ERR_CERT_REVOKED. It adds a few seconds
+to a launch.
 
 OPT-IN: ``crlset=True`` (or CLEARCOTE_CRLSET=1). Where the CRLSet comes from, first match wins:
 ``crlset="<path>"`` (a crl-set file or a component directory), CLEARCOTE_CRLSET_FILE, then the newest
@@ -38,7 +37,6 @@ shared by the Python, Node and .NET SDKs.
 import json
 import os
 import shutil
-import ssl
 import struct
 import sys
 import threading
@@ -52,7 +50,6 @@ DEFAULT_TIMEOUT_SECONDS = 15.0  # the readiness wait (CLEARCOTE_CRLSET_TIMEOUT, 
 FETCH_TIMEOUT_SECONDS = 15.0  # how long a launch waits for a first download (CLEARCOTE_CRLSET_FETCH_TIMEOUT)
 REFRESH_SECONDS = 6 * 3600  # a cache older than this is refreshed in the background
 STAMP_FILE = ".last-check"  # in the cache root: mtime = the last fetch attempt
-PROBE_PEM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_crlset_probe.pem")
 
 _WARNED = set()
 _REFRESH = {"thread": None}
@@ -337,7 +334,7 @@ def apply_crlset_launch(user_data_dir, kwargs, quiet=False):
 
 
 class _ProbeServer:
-    """HTTPS on 127.0.0.1 that counts the TLS connections the browser opens to it."""
+    """HTTP on 127.0.0.1 that counts the connections the browser opens to it."""
 
     def __init__(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -365,10 +362,8 @@ class _ProbeServer:
         self.connections = 0
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.httpd.daemon_threads = True
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(PROBE_PEM)
-        self.httpd.socket = context.wrap_socket(self.httpd.socket, server_side=True)
-        self.url = "https://127.0.0.1:%d/" % self.httpd.server_address[1]
+        self.host_port = "127.0.0.1:%d" % self.httpd.server_address[1]
+        self.url = "http://%s/" % self.host_port
         self.thread = threading.Thread(target=self.httpd.serve_forever, name="clearcote-crlset-probe", daemon=True)
         self.thread.start()
 
@@ -416,73 +411,56 @@ class CRLSetReadiness:
         """Start the probe server; returns the launch args to append (the proxy bypass for its port)."""
         try:
             self.server = _ProbeServer()
-            return proxy_bypass_args(pw_kwargs, self.server.url[len("https://"):].rstrip("/"))
+            return proxy_bypass_args(pw_kwargs, self.server.host_port)
         except Exception as exc:  # noqa: BLE001 - best-effort: launch without waiting
             _warn_once("probe", "readiness probe unavailable (%s: %s)" % (type(exc).__name__, exc), self.quiet)
             self.close()
             return []
 
-    def wait(self, context, ignore_https_errors=False):
+    def _timed_out(self):
+        _warn_once("timeout", "CRLSet not confirmed live within %g s; the browser may still trust revoked "
+                              "certificates until it loads" % self.timeout, self.quiet)
+        return False
+
+    def wait(self, context):
         """Hold the first tab on about:blank until the CRLSet is live. True when confirmed; False on timeout
         or error (warned once). See the module docstring for the signal."""
         if self.server is None:
             return False
         deadline = time.monotonic() + self.timeout
-        cdp = None
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            cdp = context.new_cdp_session(page)
-            cdp.send("Security.setIgnoreCertificateErrors", {"ignore": True})
             while time.monotonic() < deadline:
                 page.evaluate(_PROBE_JS, self.server.url)
                 if self.server.count() >= 2:  # the pooled connection was dropped: the cert verifier changed
                     return True
                 time.sleep(0.05)
-            _warn_once("timeout", "CRLSet not confirmed live within %g s; the browser may still trust revoked "
-                                  "certificates until it loads" % self.timeout, self.quiet)
-            return False
+            return self._timed_out()
         except Exception as exc:  # noqa: BLE001 - best-effort
             _warn_once("wait", "readiness check failed (%s: %s)" % (type(exc).__name__, exc), self.quiet)
             return False
         finally:
-            if cdp is not None:
-                try:
-                    cdp.send("Security.setIgnoreCertificateErrors", {"ignore": bool(ignore_https_errors)})
-                    cdp.detach()
-                except Exception:  # noqa: BLE001 - the browser may be gone
-                    pass
             self.close()
 
-    async def wait_async(self, context, ignore_https_errors=False):
+    async def wait_async(self, context):
         """``wait`` for the async API (playwright.async_api objects)."""
         import asyncio
 
         if self.server is None:
             return False
         deadline = time.monotonic() + self.timeout
-        cdp = None
         try:
             page = context.pages[0] if context.pages else await context.new_page()
-            cdp = await context.new_cdp_session(page)
-            await cdp.send("Security.setIgnoreCertificateErrors", {"ignore": True})
             while time.monotonic() < deadline:
                 await page.evaluate(_PROBE_JS, self.server.url)
                 if self.server.count() >= 2:
                     return True
                 await asyncio.sleep(0.05)
-            _warn_once("timeout", "CRLSet not confirmed live within %g s; the browser may still trust revoked "
-                                  "certificates until it loads" % self.timeout, self.quiet)
-            return False
+            return self._timed_out()
         except Exception as exc:  # noqa: BLE001 - best-effort
             _warn_once("wait", "readiness check failed (%s: %s)" % (type(exc).__name__, exc), self.quiet)
             return False
         finally:
-            if cdp is not None:
-                try:
-                    await cdp.send("Security.setIgnoreCertificateErrors", {"ignore": bool(ignore_https_errors)})
-                    await cdp.detach()
-                except Exception:  # noqa: BLE001 - the browser may be gone
-                    pass
             self.close()
 
     def close(self):

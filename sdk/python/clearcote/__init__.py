@@ -1313,7 +1313,7 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
             _lt[1]()
         context.on("close", _on_close)
     if crlset_plan:  # before anything touches the first tab: it must stay idle on about:blank
-        crlset_plan.wait(context, ignore_https_errors=pw_kwargs.get("ignore_https_errors", False))
+        crlset_plan.wait(context)
     if geom or headed_fit:
         _install_window_fixup(context, args, geom or _FIT)
     install_humanize_on_context(context, humanize, show_cursor, seed=seed)

@@ -3,7 +3,6 @@ import http.client
 import io
 import json
 import os
-import ssl
 import struct
 import zipfile
 
@@ -233,15 +232,14 @@ def test_apply_never_raises_on_a_broken_path(tmp_path, capsys):
 def test_probe_server_counts_connections_not_requests():
     server = _crlset._ProbeServer()
     try:
-        host, port = server.url[len("https://"):].rstrip("/").split(":")
-        ctx = ssl._create_unverified_context()
-        conn = http.client.HTTPSConnection(host, int(port), context=ctx, timeout=5)
+        host, port = server.host_port.split(":")
+        conn = http.client.HTTPConnection(host, int(port), timeout=5)
         for _ in range(3):  # keep-alive: one connection
             conn.request("GET", "/")
             assert conn.getresponse().read() == b""
         assert server.count() == 1
         conn.close()
-        second = http.client.HTTPSConnection(host, int(port), context=ctx, timeout=5)
+        second = http.client.HTTPConnection(host, int(port), timeout=5)
         second.request("GET", "/")
         second.getresponse().read()
         second.close()
@@ -266,11 +264,7 @@ def test_the_probe_port_bypasses_a_playwright_proxy_last(proxy, expected, monkey
 def test_readiness_starts_the_probe_before_launch_and_closes_it(tmp_path):
     plan = _crlset.CRLSetReadiness(1.0, 42, quiet=True)
     args = plan.before_launch({"proxy": {"server": "http://p:1"}})
-    assert args == ["--proxy-bypass-list=<-loopback>;" + plan.server.url[len("https://"):].rstrip("/")]
+    assert args == ["--proxy-bypass-list=<-loopback>;" + plan.server.host_port]
     plan.close()
     assert plan.server is None
     assert plan.wait(context=None) is False  # nothing to wait with once closed
-
-
-def test_the_probe_key_pair_ships_with_the_package():
-    ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(_crlset.PROBE_PEM)

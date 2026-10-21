@@ -394,7 +394,7 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
             _lt[1]()
         context.on("close", _on_close)
     if crlset_plan:  # before anything touches the first tab: it must stay idle on about:blank
-        await crlset_plan.wait_async(context, ignore_https_errors=pw_kwargs.get("ignore_https_errors", False))
+        await crlset_plan.wait_async(context)
     if geom:
         await _install_window_fixup(context, args, geom)
     await install_humanize_on_context(context, humanize, show_cursor, seed=seed)
