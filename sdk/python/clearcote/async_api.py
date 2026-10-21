@@ -275,6 +275,11 @@ async def launch(cloud=None, **kwargs):
     docker, docker_image = kwargs.pop("docker", None), kwargs.pop("docker_image", None)
     if docker_requested(docker, kwargs):  # macOS without the native PRO build: the Docker image
         return await launch_docker_async({**kwargs, "docker_image": docker_image})
+    # this launch is incognito: no profile to seed a CRLSet into (launch_persistent_context has one)
+    if kwargs.pop("crlset", None) not in (None, False):
+        print("clearcote: crlset: the async launch() has no profile to seed a CRLSet into; use "
+              "launch_persistent_context(). Launching without one", file=sys.stderr)
+    kwargs.pop("crlset_timeout", None)
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
@@ -343,6 +348,9 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     from ._widevine import apply_widevine_launch, widevine_mode
     if widevine_mode(kwargs.get("widevine"), licensed=False) == "explicit":
         await asyncio.to_thread(apply_widevine_launch, user_data_dir, kwargs, kwargs.get("quiet", False))
+    # CRLSet (opt-in, see the sync path): seed + un-suppress off the event loop (it may fetch); wait below
+    from ._crlset import apply_crlset_launch
+    crlset_plan = await asyncio.to_thread(apply_crlset_launch, user_data_dir, kwargs, kwargs.get("quiet", False))
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
@@ -364,6 +372,8 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
         default_color_scheme(pw_kwargs)
     launch_args = _with_geometry_args(args, geom)  # carries --widevine-cdm-path when on (see _prepare)
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
+    if crlset_plan:  # the readiness probe's port must bypass a launch proxy, so its server starts first
+        launch_args = launch_args + crlset_plan.before_launch(pw_kwargs)
     pw = await _start_driver()
     try:
         context = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
@@ -373,6 +383,8 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
         if lease:
             lease.stop()
         _release_launch_token(launch_token)  # a shared paid lease keeps it otherwise (see the sync helper)
+        if crlset_plan:
+            crlset_plan.close()
         await pw.stop()
         raise
     _bind_driver(context, pw)
@@ -381,6 +393,8 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
             _lease.stop()
             _lt[1]()
         context.on("close", _on_close)
+    if crlset_plan:  # before anything touches the first tab: it must stay idle on about:blank
+        await crlset_plan.wait_async(context, ignore_https_errors=pw_kwargs.get("ignore_https_errors", False))
     if geom:
         await _install_window_fixup(context, args, geom)
     await install_humanize_on_context(context, humanize, show_cursor, seed=seed)

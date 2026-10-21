@@ -521,6 +521,38 @@ ctx.close()
   for the component updater. Older engines need `widevine=True` on a **persistent** context (the seeded-profile
   route). Your own `--widevine-cdm-path=<dir>` in `args` is left as it is.
 - Fetch the CDM ahead of time (e.g. in a Docker build step) with `fetch_widevine()`.
+
+### Certificate revocation (`crlset`, opt-in)
+
+Real Chrome receives Google's **CRLSet** — the list of revoked and distrusted certificate keys — in the
+background, which is how a CA compromise reaches browsers within hours. A Clearcote engine never downloads
+it, so on its own it keeps trusting certificates that Chrome already blocks. `crlset=True` closes that gap
+for every engine the SDK launches, old builds included:
+
+- The SDK fetches the current CRLSet **from Google** (`update.googleapis.com`, the same service as the
+  Widevine CDM), checks its SHA-256 and caches it under `~/.clearcote/crlset` (`CLEARCOTE_CRLSET_DIR`
+  overrides). A cache older than 6 hours is refreshed in the background; the launch uses the cached copy.
+- It places the CRLSet in the profile and lets the engine's component updater load it (it makes no network
+  request of its own). The launch then **waits until the CRLSet is live**, usually a few seconds, so the
+  first page you open is already protected.
+- `crlset="nowait"` skips the wait: the CRLSet goes live once the first tab has been idle for a moment.
+  `crlset="<path>"` seeds that file instead. `crlset_timeout` bounds the wait (default 15 s).
+- Fail-soft: if the first download fails or the CRLSet is not confirmed in time, the launch goes on and
+  prints one warning (`quiet=True` or `CLEARCOTE_NO_WARN=1` silences it).
+- `CLEARCOTE_CRLSET=1` turns it on for every launch. It needs a profile: `launch()` (which uses a temporary
+  one), `launch_persistent_context()` and the async `launch_persistent_context()`; an incognito launch
+  (`ephemeral_profile=False`, the async `launch()`) prints a warning and goes on without it.
+
+```python
+from clearcote import launch
+
+browser = launch(crlset=True)
+page = browser.new_page()
+page.goto("https://dv-g3b-emudhra.we-have-a-problem.com/")   # net::ERR_CERT_REVOKED, as in Chrome
+```
+
+- Fetch it ahead of time with `fetch_crlset()`, or point `CLEARCOTE_CRLSET_URL` at your own mirror of the
+  raw `crl-set` file.
 - The clearcote package never distributes Google's CDM: it is downloaded from Google, on your machine.
 - Cloud launches (`cloud=True`) are unchanged: hosted browsers load Widevine on the server.
 - Software-secure (L3) playback. Hardware-secure (L1) paths are out of scope.
