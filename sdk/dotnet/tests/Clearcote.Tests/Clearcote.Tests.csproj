@@ -25,6 +25,9 @@
   <ItemGroup>
     <!-- The engine's persona-window parity vector (same file as sdk/python and sdk/node tests/data). -->
     <None Update="data\window_vectors.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The bench summary fixture and its expected lines (same files as sdk/python and sdk/node tests/data). -->
+    <None Update="data\bench_raw.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="data\bench_lines.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
