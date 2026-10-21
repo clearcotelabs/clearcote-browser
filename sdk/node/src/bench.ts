@@ -127,9 +127,24 @@ function macHost(): HostReport {
 
 /** The machine: CPU, RAM, OS, VM or not, and whether there is a GPU Chromium can draw with. Local only. */
 export function hostInfo(): HostReport {
-  if (process.platform === "win32") return windowsHost();
-  if (process.platform === "darwin") return macHost();
-  return linuxHost();
+  // The CPU, OS, VM and GPU do not change while a process runs, and reading them spawns reg / lspci /
+  // system_profiler: read them once. Free memory changes, and is cheap to read again.
+  hostOnce ??= process.platform === "win32" ? windowsHost() : process.platform === "darwin" ? macHost() : linuxHost();
+  const h = structuredClone(hostOnce);
+  if (hostReads++) h.memory.freeMB = freeMB();
+  return h;
+}
+
+let hostOnce: HostReport | undefined;
+let hostReads = 0;
+
+function freeMB(): number {
+  if (process.platform === "linux") {
+    const kb = Number(/^MemAvailable:\s+(\d+)/m.exec(readText("/proc/meminfo"))?.[1] ?? 0);
+    return Math.floor(kb / 1024 + 0.5);
+  }
+  if (process.platform === "darwin") return macHost().memory.freeMB;
+  return Math.floor(os.freemem() / 2 ** 20 + 0.5);
 }
 
 // Every figure is rounded half-up before it is formatted: toFixed and Python's format round ties

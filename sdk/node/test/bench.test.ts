@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  benchLines, browserTree, hostLines, proxyLabel, ramSafeCount, summarizeBench, windowsName,
+  benchLines, browserTree, hostInfo, hostLines, proxyLabel, ramSafeCount, summarizeBench, windowsName,
   type BenchRaw, type HostReport, type Proc,
 } from "../src/bench.js";
 import { USAGE, commandUsage } from "../src/cli-commands.js";
@@ -85,6 +85,17 @@ describe("clearcote info: Host", () => {
     ]);
     expect(hostLines(host({ gpu: { adapters: ["ASPEED Graphics Family"], software: true } }))[2])
       .toBe("GPU             ASPEED Graphics Family (no 3D acceleration: Chromium draws every page on the CPU)");
+  });
+
+  it("reads the machine once per process and hands out copies", () => {
+    const a = hostInfo();
+    a.gpu.adapters.push("changed by the caller");
+    a.cpu.model = "changed";
+    const b = hostInfo();
+    expect(b.cpu.model).not.toBe("changed");
+    expect(b.gpu.adapters).not.toContain("changed by the caller");
+    expect(b.memory.totalMB).toBe(a.memory.totalMB);
+    expect(b.memory.freeMB).toBeGreaterThan(0);
   });
 
   it("names Windows 11 although its ProductName says Windows 10", () => {

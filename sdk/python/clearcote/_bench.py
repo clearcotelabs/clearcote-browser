@@ -173,13 +173,32 @@ def _mac_host():
     }
 
 
-def host_info():
-    """The machine: CPU, RAM, OS, VM or not, and whether there is a GPU Chromium can draw with. Local only."""
+_HOST_ONCE = []  # [report]: the CPU, OS, VM and GPU, read once per process
+
+
+def _free_mb():
     if sys.platform == "win32":
-        return _windows_host()
+        return _half_up(_windows_memory()[1] / 2 ** 20)
     if sys.platform == "darwin":
-        return _mac_host()
-    return _linux_host()
+        return _mac_host()["memory"]["freeMB"]
+    m = re.search(r"^MemAvailable:\s+(\d+)", _read("/proc/meminfo"), re.M)
+    return _half_up(int(m.group(1)) / 1024) if m else 0
+
+
+def host_info():
+    """The machine: CPU, RAM, OS, VM or not, and whether there is a GPU Chromium can draw with. Local only.
+
+    The CPU, OS, VM and GPU do not change while a process runs, and reading them spawns reg / lspci /
+    system_profiler: they are read once. Free memory changes, and is read again on every call."""
+    import copy
+    first = not _HOST_ONCE
+    if first:
+        _HOST_ONCE.append(_windows_host() if sys.platform == "win32" else _mac_host() if sys.platform == "darwin"
+                          else _linux_host())
+    h = copy.deepcopy(_HOST_ONCE[0])
+    if not first:
+        h["memory"]["freeMB"] = _free_mb()
+    return h
 
 
 # Every figure is rounded half-up before it is formatted: Python's format and JS toFixed round ties

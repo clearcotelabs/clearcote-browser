@@ -154,6 +154,19 @@ public class BenchTests
     }
 
     [Fact]
+    public void HostIsReadOncePerProcessAndHandedOutAsCopies()
+    {
+        var a = ClearcoteHost.Info();
+        a.Gpu.Adapters.Add("changed by the caller");
+        a.Cpu.Model = "changed";
+        var b = ClearcoteHost.Info();
+        Assert.NotEqual("changed", b.Cpu.Model);
+        Assert.DoesNotContain("changed by the caller", b.Gpu.Adapters);
+        Assert.Equal(a.Memory.TotalMB, b.Memory.TotalMB);
+        Assert.True(b.Memory.FreeMB > 0);
+    }
+
+    [Fact]
     public async Task RejectsABadConcurrency()
         => await Assert.ThrowsAsync<ArgumentException>(() => ClearcoteBench.MeasureAsync(new BenchOptions { Concurrency = 0 }));
 }

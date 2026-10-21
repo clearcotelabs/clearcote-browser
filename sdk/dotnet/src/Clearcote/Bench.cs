@@ -178,7 +178,33 @@ public static class ClearcoteHost
 
     /// The machine: CPU, RAM, OS, VM or not, and whether there is a GPU Chromium can draw with. Local only.
     public static HostReport Info()
-        => OperatingSystem.IsWindows() ? Windows() : OperatingSystem.IsMacOS() ? Mac() : Linux();
+    {
+        // The CPU, OS, VM and GPU do not change while a process runs, and reading them spawns reg / lspci /
+        // system_profiler: read them once. Free memory changes, and is read again on every call.
+        var first = _once is null;
+        var h = _once ??= OperatingSystem.IsWindows() ? Windows() : OperatingSystem.IsMacOS() ? Mac() : Linux();
+        return new HostReport
+        {
+            Cpu = { Model = h.Cpu.Model, Threads = h.Cpu.Threads },
+            Memory = { TotalMB = h.Memory.TotalMB, FreeMB = first ? h.Memory.FreeMB : FreeMB() },
+            Os = h.Os, Virtual = h.Virtual, RemoteSession = h.RemoteSession,
+            Gpu = { Adapters = new List<string>(h.Gpu.Adapters), Software = h.Gpu.Software },
+        };
+    }
+
+    private static HostReport? _once;
+
+    private static int FreeMB()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var m = new MemoryStatusEx { Length = (uint)Marshal.SizeOf<MemoryStatusEx>() };
+            return GlobalMemoryStatusEx(ref m) ? HalfUp(m.AvailPhys / 1048576.0) : 0;
+        }
+        if (OperatingSystem.IsMacOS()) return Mac().Memory.FreeMB;
+        var kb = Regex.Match(Read("/proc/meminfo"), @"^MemAvailable:\s+(\d+)", RegexOptions.Multiline);
+        return kb.Success ? HalfUp(long.Parse(kb.Groups[1].Value, CultureInfo.InvariantCulture) / 1024.0) : 0;
+    }
 
     // Every figure is rounded half-up before it is formatted, as the Node and Python SDKs do (their
     // formatters round ties differently, so all three round first).

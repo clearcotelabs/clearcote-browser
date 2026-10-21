@@ -4,7 +4,7 @@ import json
 import os
 
 from clearcote import _commands
-from clearcote._bench import (_secs, bench_lines, browser_tree, host_lines, proxy_label, ram_safe_count,
+from clearcote._bench import (_secs, bench_lines, browser_tree, host_info, host_lines, proxy_label, ram_safe_count,
                               summarize_bench, windows_name)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -93,6 +93,17 @@ def test_host_lines():
     ]
     assert host_lines(host(gpu={"adapters": ["ASPEED Graphics Family"], "software": True}))[2] == (
         "GPU             ASPEED Graphics Family (no 3D acceleration: Chromium draws every page on the CPU)")
+
+
+def test_host_is_read_once_per_process_and_handed_out_as_copies():
+    a = host_info()
+    a["gpu"]["adapters"].append("changed by the caller")
+    a["cpu"]["model"] = "changed"
+    b = host_info()
+    assert b["cpu"]["model"] != "changed"
+    assert "changed by the caller" not in b["gpu"]["adapters"]
+    assert b["memory"]["totalMB"] == a["memory"]["totalMB"]
+    assert b["memory"]["freeMB"] > 0
 
 
 def test_names_windows_11_although_its_product_name_says_10():
