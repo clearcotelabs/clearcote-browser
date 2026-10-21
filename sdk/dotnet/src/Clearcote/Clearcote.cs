@@ -126,6 +126,8 @@ public static class Clearcote
         options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
+        await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
@@ -244,6 +246,8 @@ public static class Clearcote
         options = await PrepareAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
+        await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
 
         // Widevine ASKED FOR (Widevine = true or CLEARCOTE_WIDEVINE=1): seed the CDM into this profile and let the
@@ -366,6 +370,8 @@ public static class Clearcote
         var host = string.IsNullOrEmpty(options.Host) ? "127.0.0.1" : options.Host;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
+        await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
 
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy);
@@ -476,11 +482,13 @@ public static class Clearcote
 
     // ── internals ────────────────────────────────────────────────────────────
 
-    /// Copy the caller's options (never mutate them) and apply geoip, which fails closed BEFORE the
-    /// binary is resolved or any browser starts.
+    /// Copy the caller's options (never mutate them), layer a saved LocalProfile under them, and apply geoip,
+    /// which fails closed BEFORE the binary is resolved or any browser starts.
     internal static async Task<T> PrepareAsync<T>(T options) where T : LaunchOptions
     {
         var copy = (T)options.Clone();
+        // LocalProfile = a saved persona: its options fill what the caller left unset ("auto" waits for the binary).
+        ProfileOptionsMap.MergeSaved(copy);
         if (copy.Geoip) await GeoIp.ApplyAsync(copy, copy.Proxy, copy.Quiet).ConfigureAwait(false);
         return copy;
     }

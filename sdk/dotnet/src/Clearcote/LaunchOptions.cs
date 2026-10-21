@@ -35,6 +35,25 @@ public class LaunchOptions : FingerprintOptions
     /// both Timezone and AcceptLanguage were set explicitly (then it warns and launches).
     public bool Geoip { get; set; }
 
+    // ── saved persona / profile "auto" (local launches) ──────────────────────
+    /// A saved persona (<see cref="global::Clearcote.Profile"/>): a name (under CLEARCOTE_PROFILE_DIR), a path, or a
+    /// Profile instance. Its saved options fill every option left unset here (explicit options win). The Node SDK's
+    /// <c>profile</c> option; a separate property because <see cref="Profile"/> is the cloud's cookie store.
+    ///
+    /// <para><c>"auto"</c> is special: instead of a saved option set, it resolves a REAL CAPTURED FINGERPRINT for this
+    /// machine — the licensed profile service first, a local imported directory as backup — and applies it as
+    /// <see cref="FingerprintOptions.FingerprintProfile"/> with NO seed. With no <c>--fingerprint</c> the farbling
+    /// machinery never engages and canvas/WebGL/audio readbacks are byte-identical to an unmodified browser, which is
+    /// why the profile path survives strict anti-bot scoring where a synthetic seed does not. It may launch the engine
+    /// once, headless and with no persona, to measure this host's GPU and display (cached per binary for 30 days). An
+    /// engine before 150 cannot apply a profile: it gets a stable seed persona instead, with a note. Tune it with
+    /// <see cref="ProfileSelect"/>. <c>Profile = "auto"</c> means the same on a local launch.</para>
+    ///
+    /// <para>Local launches only: a cloud or Docker launch refuses it.</para>
+    public LocalProfile? LocalProfile { get; set; }
+    /// Selection + source options for <c>LocalProfile = "auto"</c> (see <see cref="ProfileAuto"/>).
+    public AutoOptions? ProfileSelect { get; set; }
+
     // ── engine behaviour switches (engine 152 r22+; dropped with a warning on older engines) ──
     /// Third-party cookies. Allowed by default (null or true), as in stock Chrome: embedded
     /// reCAPTCHA, SSO sign-in and payment challenges rely on them. <c>false</c> blocks them. Since
@@ -215,7 +234,8 @@ public class LaunchOptions : FingerprintOptions
     /// Cloud: stop the session once it has used this much traffic.
     public double? MaxGb { get; set; }
     /// Cloud: a named cookie store on the server. A name loads it; <c>Persist = true</c> also saves it
-    /// back when the session ends (LaunchPersistentContextAsync does that by default).
+    /// back when the session ends (LaunchPersistentContextAsync does that by default). A local launch ignores it,
+    /// except <c>"auto"</c>, which there means <c>LocalProfile = "auto"</c> (a saved persona is <see cref="LocalProfile"/>).
     public CloudProfile? Profile { get; set; }
     /// Cloud: the page the session opens on.
     public string? Url { get; set; }

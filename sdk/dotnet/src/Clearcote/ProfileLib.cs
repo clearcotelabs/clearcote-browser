@@ -224,6 +224,28 @@ public static class ProfileLib
             Mode = mode,
         };
     }
+
+    /// <see cref="SelectProfile(IReadOnlyList{ProfileIndexEntry}, HostFacts, SelectMode, string?, int, string?, int, Random?)"/>
+    /// with the options as one object (Node's <c>selectProfile(index, host, opts)</c>); unset fields take their defaults.
+    public static ProfileSelection SelectProfile(IReadOnlyList<ProfileIndexEntry> index, HostFacts host, SelectOptions? options)
+        => SelectProfile(index, host, options?.Mode ?? SelectMode.Rotate, options?.Key, options?.TopN ?? DefaultTopN,
+            options?.Os, options?.MaxEncodedSize ?? DefaultMaxEncoded);
+}
+
+/// How <see cref="ProfileLib.SelectProfile(IReadOnlyList{ProfileIndexEntry}, HostFacts, SelectOptions?)"/> picks a
+/// profile. Every field is optional.
+public class SelectOptions
+{
+    /// Rotate (default) sticky per key; Best always top-scoring; Random fresh each call.
+    public SelectMode? Mode { get; set; }
+    /// Stickiness key for Rotate — an account id, proxy session, or profile name.
+    public string? Key { get; set; }
+    /// Candidate pool the mode picks from (default 25). Wide enough to avoid herding, narrow enough to stay coherent.
+    public int? TopN { get; set; }
+    /// Override the target OS (defaults to the host's).
+    public string? Os { get; set; }
+    /// Hard ceiling on encoded size (default 24000); entries above it cannot be launched on Windows.
+    public int? MaxEncodedSize { get; set; }
 }
 
 /// How SelectProfile picks from the top-N pool.

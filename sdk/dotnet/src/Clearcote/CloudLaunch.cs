@@ -67,6 +67,11 @@ internal static class CloudLaunch
     /// The cloud session options of a launch; throws naming the first option a cloud browser cannot take.
     internal static CloudSessionOptions SessionOptionsOf(LaunchOptions o)
     {
+        // LocalProfile picks a persona on THIS machine; say what to use instead (as the Node SDK does for its profile).
+        if (o.LocalProfile is { } local)
+            throw new ArgumentException(local.IsAuto
+                ? "LocalProfile \"auto\" picks a local persona; for a stable cloud device set Identity, and for cookies a cloud profile name"
+                : "a saved local Profile cannot be used for a cloud browser; set Profile to the name of a cloud profile (see cloud.Profiles)");
         var defaults = new LaunchOptions();
         foreach (var p in LocalOnlyOptions)
         {
