@@ -80,6 +80,31 @@ public sealed class IsolatedWorld
         return null;
     }
 
+    /// As <see cref="EvaluateAsync"/>, awaiting the promise the function returns (the engine route's frame wait).
+    internal async Task<JsonElement?> EvaluatePromiseAsync(string fnSource, object? arg = null)
+    {
+        for (int attempt = 0; attempt < 2; attempt++)   // a stale context (navigation) is re-created once
+        {
+            try
+            {
+                await EnsureAsync().ConfigureAwait(false);
+                var r = await _cdp!.SendAsync("Runtime.evaluate", new Dictionary<string, object>
+                {
+                    ["expression"] = $"({fnSource})({JsonSerializer.Serialize(arg)})",
+                    ["contextId"] = _ctx!.Value,
+                    ["returnByValue"] = true,
+                    ["awaitPromise"] = true,
+                }).ConfigureAwait(false);
+                return Value(r);
+            }
+            catch (Exception)
+            {
+                _ctx = null;
+            }
+        }
+        return null;
+    }
+
     /// A raw CDP call on this page's session (DOM reads that run no script), or null when it fails.
     internal async Task<JsonElement?> SendAsync(string method, Dictionary<string, object>? args = null)
     {
@@ -241,6 +266,12 @@ public sealed class IsolatedWorld
 
     // The reads humanize makes, as functions of one JSON argument.
     internal const string Viewport = "() => [innerWidth, innerHeight]";
+    // Two animation frames, at most `ms` (remembered per document): the engine walks without waiting for the page,
+    // and what it walks into a page that has not drawn yet is lost (a fresh headless browser's first page, SC 216).
+    internal const string Frames = @"(ms) => window.__ccFramed ? true : new Promise((done) => {
+  const t = setTimeout(() => { window.__ccFramed = 1; done(false); }, ms);
+  requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); window.__ccFramed = 1; done(true); }));
+})";
     // The platform the page believes (the persona's), for the wheel notch size.
     internal const string Platform = "() => { const d = navigator.userAgentData; return (d && d.platform) || navigator.platform || ''; }";
     internal const string FocusedRect = @"() => {
