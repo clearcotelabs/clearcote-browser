@@ -122,8 +122,11 @@ public class LaunchLaneTests : IDisposable
         var proxy = new ProxyOptions { Server = "http://127.0.0.1:9", Username = "u", Password = "p" };
         var withSwitch = await Argv(entry, FakeEngine("proxy-auth"), o => o.Proxy = proxy);
         Assert.Contains("--proxy-auth=u:p", withSwitch);
-        Assert.Single(withSwitch, a => a.StartsWith("--proxy-server=", StringComparison.Ordinal));
-        Assert.Contains("--proxy-server=http://127.0.0.1:9", withSwitch);
+        // The real proxy is the LAST --proxy-server (Chromium keeps the last value); any earlier one is the
+        // credential-less request-API forwarder Playwright was given (RequestProxy), on another local port.
+        var servers = withSwitch.Where(a => a.StartsWith("--proxy-server=", StringComparison.Ordinal)).ToList();
+        Assert.Equal("--proxy-server=http://127.0.0.1:9", servers[^1]);
+        Assert.All(servers.SkipLast(1), a => Assert.Matches(@"^--proxy-server=http://127\.0\.0\.1:\d+$", a));
         var without = await Argv(entry, FakeEngine(), o => o.Proxy = proxy);
         Assert.DoesNotContain(without, a => a.StartsWith("--proxy-auth", StringComparison.Ordinal));
     }

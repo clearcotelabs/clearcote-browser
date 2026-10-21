@@ -1065,6 +1065,10 @@ internal static class DockerLaunch
         // is seeded from the fingerprint, as for a local launch.
         var hz = HumanizeLaunch.Of(o, cloud: false, seed: o.Fingerprint);
         var (container, exe) = await StartContainerAsync(o).ConfigureAwait(false);
+        // The browser in the container uses the proxy; Playwright's request API runs here, over CDP, with no
+        // proxy of its own (RequestProxy), so it connects from this machine.
+        if (!string.IsNullOrEmpty(o.Proxy?.Server) && !o.Quiet && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLEARCOTE_NO_WARN")))
+            Console.Error.WriteLine(RequestProxy.DockerWarning);
         var state = new ContainerState(exe, container.Id);
         IBrowser? real = null;
         try

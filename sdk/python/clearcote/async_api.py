@@ -32,7 +32,9 @@ from . import (  # shared sync helpers
     _headed_no_viewport, _headless_geometry_kwargs, _prepare, _acquire_lease_from_kwargs,
     _is_win_launch_race, _is_stale_token_refusal, _with_geometry_args, _profile_dir_remover,
     _browser_process_files, _drop_cloud_credentials, _release_launch_token, _FIT, _call_geometry,
+    _start_request_route, _close_route_with,
 )
+from ._reqproxy import close_on_failure
 from .cloud import AsyncCloud, CloudError, CloudTimeoutError, cloud_requested, launch_cloud_async, verify_webhook
 from ._docker import docker_requested, launch_docker_async
 from ._launchopts import DEFAULT_IGNORED_ARGS
@@ -298,10 +300,14 @@ async def launch(cloud=None, **kwargs):
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args, exe)
     launch_args = _with_geometry_args(args, geom)
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
+    # Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
+    # instead of no proxy at all (_reqproxy.py, mirror sync).
     pw = await _start_driver()
+    req_route = _start_request_route(pw_kwargs)
     try:
-        browser = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
-            lambda e: pw.chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe))
+        with close_on_failure(req_route):
+            browser = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
+                lambda e: pw.chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe))
     except BaseException:
         if lease:
             lease.stop()
@@ -309,6 +315,7 @@ async def launch(cloud=None, **kwargs):
         await pw.stop()
         raise
     _bind_driver(browser, pw)
+    _close_route_with(browser, "disconnected", req_route)
     if lease:  # release the concurrency slot + remove the run-token file when the browser closes
         def _on_disconnect(_b=None, _lease=lease, _lt=launch_token):
             _lease.stop()
@@ -374,11 +381,15 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     if crlset_plan:  # the readiness probe's port must bypass a launch proxy, so its server starts first
         launch_args = launch_args + crlset_plan.before_launch(pw_kwargs)
+    # As launch(): the request API reaches the proxy through a local forwarder (_reqproxy.py), started after
+    # the CRLSet probe (the forwarder is a proxy the browser never uses).
     pw = await _start_driver()
+    req_route = _start_request_route(pw_kwargs)
     try:
-        context = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
-            lambda e: pw.chromium.launch_persistent_context(
-                user_data_dir, executable_path=e, args=launch_args, **pw_kwargs), exe))
+        with close_on_failure(req_route):
+            context = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
+                lambda e: pw.chromium.launch_persistent_context(
+                    user_data_dir, executable_path=e, args=launch_args, **pw_kwargs), exe))
     except BaseException:
         if lease:
             lease.stop()
@@ -388,6 +399,7 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
         await pw.stop()
         raise
     _bind_driver(context, pw)
+    _close_route_with(context, "close", req_route)
     if lease:  # release the concurrency slot + remove the run-token file when the context closes
         def _on_close(_c=None, _lease=lease, _lt=launch_token):
             _lease.stop()

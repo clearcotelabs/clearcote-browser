@@ -15,7 +15,7 @@ namespace Clearcote;
 public static partial class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.58.0";
+    public const string Version = "0.59.0";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
@@ -87,6 +87,29 @@ public static partial class Clearcote
         });
     }
 
+    /// The fonts a launch of the build at <paramref name="executablePath"/> would see on this host: the font
+    /// section of Node's and Python's <c>clearcote info</c> (this SDK has no CLI). On Linux: whether the build
+    /// bundles its Windows font clones, which of 29 scripts the fonts can draw (bundle +
+    /// <paramref name="fontDirs"/> / CLEARCOTE_FONT_DIRS + CLEARCOTE_FALLBACK_FONT_DIRS) and which are missing,
+    /// and which key Windows families your own fonts provide for real. Off Linux the browser uses the host's
+    /// own fonts and the report says so. Reads files only: nothing starts and nothing is downloaded.
+    /// <c>report.ToString()</c> is the text the CLIs print.
+    public static FontReport FontReportFor(string executablePath, IEnumerable<string>? fontDirs = null)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(executablePath);
+        return Fonts.Report(executablePath, fontDirs);
+    }
+
+    /// <see cref="FontReportFor"/> for the build a launch with <paramref name="options"/> would run, resolved as
+    /// <see cref="ExecutablePathAsync"/> does (so it downloads and verifies that build when it is not cached
+    /// yet), with <see cref="LaunchOptions.FontDirs"/> as the launch would take them.
+    public static async Task<FontReport> FontReportAsync(LaunchOptions? options = null)
+    {
+        options ??= new LaunchOptions();
+        var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
+        return Fonts.Report(exe, options.FontDirs);
+    }
+
     /// Launch Clearcote and return a standard Playwright <see cref="IBrowser"/>.
     /// <remarks>
     /// GEOMETRY CAVEAT. Only half of the headless geometry default (see <see cref="Geometry"/>) can be
@@ -156,6 +179,11 @@ public static partial class Clearcote
         // http(s) credentials go to the engine's --proxy-auth only when THIS engine implements it (r19+).
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
         LaunchOpts.WarnUnsupportedEngineOptions(exe, options, options.Proxy, options.Quiet);
+        // Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
+        // instead of no proxy at all, which sent it from this machine's IP (RequestProxy). It starts just
+        // before the browser; its bypass-list override is an engine arg, so it is known now.
+        var reqUpstream = proxy is null ? RequestProxy.RequestProxyUpstream(options.Proxy, proxyArgs) : null;
+        if (reqUpstream is not null) proxyArgs.AddRange(RequestProxy.RequestProxyArgs(proxyArgs));
         var args = AssembleArgs(Agent.WithPersona(options), ExtensionAndPortableArgs(options),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
             Extras(options, exe, headed: options.Headless == false));
@@ -190,19 +218,31 @@ public static partial class Clearcote
         var persona = PersonaEnv.Plan(exe, args.Concat(display.Args), options.PersonaEnv);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
-        var browser = await License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
-            WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions(options.PlaywrightLaunchOptions ?? new())
-            {
-                ExecutablePath = exePath,
-                Args = persona.Args.ToArray(),
-                Headless = options.Headless,
-                Channel = options.Channel,
-                SlowMo = options.SlowMo,
-                Timeout = options.Timeout,
-                IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
-                Env = persona.Env(envFor()),
-                Proxy = ToPwProxy(proxy),
-            }), exe)), launchToken).ConfigureAwait(false);
+        var reqProxy = reqUpstream is not null ? RequestProxy.Route(options.Proxy, proxyArgs, options.Quiet) : null;
+        if (reqProxy is not null) proxy = reqProxy.PlaywrightProxy;
+        IBrowser browser;
+        try
+        {
+            browser = await License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
+                WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions(options.PlaywrightLaunchOptions ?? new())
+                {
+                    ExecutablePath = exePath,
+                    Args = persona.Args.ToArray(),
+                    Headless = options.Headless,
+                    Channel = options.Channel,
+                    SlowMo = options.SlowMo,
+                    Timeout = options.Timeout,
+                    IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
+                    Env = persona.Env(envFor()),
+                    Proxy = ToPwProxy(proxy),
+                }), exe)), launchToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (reqProxy is not null) await reqProxy.CloseAsync().ConfigureAwait(false);   // the browser never came up
+            throw;
+        }
+        if (reqProxy is not null) browser.Disconnected += (_, _) => { _ = reqProxy.CloseAsync(); };
 
         // Release the concurrency slot + remove the run-token file when the browser closes.
         if (lease is not null)
@@ -334,6 +374,9 @@ public static partial class Clearcote
         // http(s) credentials go to the engine's --proxy-auth only when THIS engine implements it (r19+).
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
         LaunchOpts.WarnUnsupportedEngineOptions(exe, options, options.Proxy, options.Quiet);
+        // As LaunchAsync: the request API reaches the proxy through a local forwarder (RequestProxy).
+        var reqUpstream = proxy is null ? RequestProxy.RequestProxyUpstream(options.Proxy, proxyArgs) : null;
+        if (reqUpstream is not null) proxyArgs.AddRange(RequestProxy.RequestProxyArgs(proxyArgs));
         var args = AssembleArgs(Agent.WithPersona(options), ExtensionAndPortableArgs(options),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, userArgs, options.Proxy, options.Socks5Udp,
             Extras(options, exe, headed: options.Headless == false));
@@ -379,28 +422,41 @@ public static partial class Clearcote
         var pw = await PlaywrightAsync().ConfigureAwait(false);
         // The CRLSet readiness probe's port must bypass a Playwright-handled proxy, so its server starts first.
         var crlsetArgs = crlsetPlan?.BeforeLaunch(proxy) ?? new List<string>();
-        var context = await Crlset.CloseOnFailureAsync(crlsetPlan, () => License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
-            WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchPersistentContextAsync(userDataDir,
-            new BrowserTypeLaunchPersistentContextOptions(options.PlaywrightContextOptions ?? new())
-            {
-                ExecutablePath = exePath,
-                Args = persona.Args.Concat(crlsetArgs).ToArray(),
-                Headless = options.Headless,
-                Channel = options.Channel,
-                SlowMo = options.SlowMo,
-                Timeout = options.Timeout,
-                IgnoreDefaultArgs = ignoreDefaultArgs.ToArray(),  // the caller's, else the SDK's strip (+ component updater on when Widevine is asked for)
-                Env = persona.Env(envFor()),
-                Proxy = ToPwProxy(proxy),
-                // Headed with no explicit viewport -> real window size (matches launch()).
-                // Headless -> the persona's display (regime 1) or the SDK's (regime 2), and the window
-                // is fitted to its work area below; an r39+ persona window as the engine opened it.
-                // See Geometry.
-                ViewportSize = Geometry.ContextViewport(geometry, options.Headless, options.ViewportSize, options.ScreenSize),
-                ScreenSize = options.ScreenSize,
-                // r32+: the persona's colour scheme reaches the page instead of Playwright's light.
-                ColorScheme = ColorSchemeDefault.Resolve(options.ColorScheme, exe),
-            }), exe)), launchToken)).ConfigureAwait(false);
+        // After the probe: the forwarder is a proxy the browser never uses, so it needs no bypass for the probe.
+        var reqProxy = reqUpstream is not null ? RequestProxy.Route(options.Proxy, proxyArgs, options.Quiet) : null;
+        if (reqProxy is not null) proxy = reqProxy.PlaywrightProxy;
+        IBrowserContext context;
+        try
+        {
+            context = await Crlset.CloseOnFailureAsync(crlsetPlan, () => License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
+                WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchPersistentContextAsync(userDataDir,
+                new BrowserTypeLaunchPersistentContextOptions(options.PlaywrightContextOptions ?? new())
+                {
+                    ExecutablePath = exePath,
+                    Args = persona.Args.Concat(crlsetArgs).ToArray(),
+                    Headless = options.Headless,
+                    Channel = options.Channel,
+                    SlowMo = options.SlowMo,
+                    Timeout = options.Timeout,
+                    IgnoreDefaultArgs = ignoreDefaultArgs.ToArray(),  // the caller's, else the SDK's strip (+ component updater on when Widevine is asked for)
+                    Env = persona.Env(envFor()),
+                    Proxy = ToPwProxy(proxy),
+                    // Headed with no explicit viewport -> real window size (matches launch()).
+                    // Headless -> the persona's display (regime 1) or the SDK's (regime 2), and the window
+                    // is fitted to its work area below; an r39+ persona window as the engine opened it.
+                    // See Geometry.
+                    ViewportSize = Geometry.ContextViewport(geometry, options.Headless, options.ViewportSize, options.ScreenSize),
+                    ScreenSize = options.ScreenSize,
+                    // r32+: the persona's colour scheme reaches the page instead of Playwright's light.
+                    ColorScheme = ColorSchemeDefault.Resolve(options.ColorScheme, exe),
+                }), exe)), launchToken)).ConfigureAwait(false);
+        }
+        catch
+        {
+            if (reqProxy is not null) await reqProxy.CloseAsync().ConfigureAwait(false);   // the browser never came up
+            throw;
+        }
+        if (reqProxy is not null) context.Close += (_, _) => { _ = reqProxy.CloseAsync(); };
 
         // Release the concurrency slot + remove the run-token file when the context closes.
         if (lease is not null) context.Close += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };
@@ -452,6 +508,10 @@ public static partial class Clearcote
         // (--socks5-credentials, or --proxy-auth on an engine that implements it).
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
         LaunchOpts.WarnUnsupportedEngineOptions(exe, options, options.Proxy, options.Quiet);
+        // A client attached over CDP runs Playwright's request API in its own process with no proxy of its
+        // own (RequestProxy): nothing here can route it, so say so.
+        if (!options.Quiet && RequestProxy.RequestProxyUpstream(options.Proxy, proxyArgs) is not null)
+            Console.Error.WriteLine(RequestProxy.ServeWarning);
         // serve launches the binary directly, so Playwright's SwiftShader default is never added; the
         // blocklist rule still applies to a headed endpoint and on Windows.
         var engineArgs = AssembleArgs(Agent.WithPersona(options), ExtensionAndPortableArgs(options),
@@ -689,6 +749,7 @@ public static partial class Clearcote
         // Last: drop 152 r22+ switches this engine does not implement (with a warning), wherever they came from.
         return extra is null ? merged : LaunchOpts.GateEngineSwitches(extra.Exe, merged, extra.Quiet).Args;
     }
+
 
     private static Proxy? ToPwProxy(ProxyOptions? p)
         => p?.Server is { Length: > 0 } server

@@ -880,6 +880,10 @@ function defaultNoViewport(browser: Browser): void {
  * carries `dockerContainer` ({ id, image, endpoint }). close() disconnects and stops the container. */
 export async function launchDocker(options: Record<string, unknown>): Promise<Browser> {
   const container = await startContainer(options);
+  // The browser in the container uses the proxy; Playwright's request API runs here, over CDP, with no
+  // proxy of its own (./reqproxy.ts), so it connects from this machine.
+  if (options.proxy && !options.quiet && !process.env.CLEARCOTE_NO_WARN)
+    console.warn("clearcote: with docker, context.request / page.request do not use the proxy and connect from this machine's IP; make API calls inside the page (page.evaluate(() => fetch(...))) instead.");
   let disconnect: (() => Promise<void>) | null = null;
   try {
     const connect: Record<string, unknown> = { timeout: CONNECT_TIMEOUT_MS };
