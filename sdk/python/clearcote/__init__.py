@@ -89,6 +89,7 @@ from ._warnings import emit_coherence_warnings
 from ._widevine import (  # noqa: F401  (widevine_cdm_args re-exported for tests)
     apply_widevine_launch, fetch_widevine, seed_widevine, widevine_cdm_args, widevine_launch_args, widevine_mode,
 )
+from ._crlset import apply_crlset_launch, fetch_crlset, install_crlset
 from . import _offline
 from ._offline import OfflineKeyError
 from ._license import (
@@ -184,6 +185,8 @@ __all__ = [
     "check_render_coherence",
     "fetch_widevine",
     "seed_widevine",
+    "fetch_crlset",
+    "install_crlset",
     "resolve_license_key",
     "acquire_lease",
     "LicenseError",
@@ -195,7 +198,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.56.0"
+__version__ = "0.57.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -1166,6 +1169,11 @@ def launch(cloud=None, **kwargs):
     if ephemeral:
         return _install_persistent_as_browser(_launch_on_throwaway_profile("clearcote-run-", kwargs))
 
+    # incognito has no profile to seed a CRLSet into (see _crlset): drop the options, warn if asked for
+    if kwargs.pop("crlset", None) not in (None, False):
+        print("clearcote: crlset: ephemeral_profile=False has no profile to seed a CRLSet into; "
+              "launching without one", file=sys.stderr)
+    kwargs.pop("crlset_timeout", None)
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
     font_dirs = check_font_dirs(kwargs.pop("font_dirs", None))  # Linux fontconfig dirs; a typo raises before the lease
@@ -1227,6 +1235,14 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     free launch stays opt-in: ``widevine=True`` (or CLEARCOTE_WIDEVINE=1) fetches the CDM, seeds it
     into this profile and enables it.
 
+    CRLSET (opt-in). The engine never downloads Chrome's certificate revocation list (CRLSet), so revoked
+    or distrusted CA keys stay trusted. ``crlset=True`` (or CLEARCOTE_CRLSET=1) seeds the current CRLSet
+    into this profile (fetched from Google's component updater on first use, cached in
+    ~/.clearcote/crlset, refreshed every 6 h) and the launch waits, a few seconds, until the engine has it
+    live. ``crlset="nowait"`` seeds without waiting (live once the first tab has been idle for a moment),
+    ``crlset="<path>"`` seeds that file, ``crlset_timeout`` bounds the wait (default 15 s). See
+    ``clearcote._crlset``.
+
     CLOUD: ``launch_persistent_context(cloud=True, profile="name")`` returns the context of a hosted
     session that loads the cloud profile ``name`` and saves it back when the context closes (which
     also ends the session). A cloud browser has no local directory, so ``user_data_dir`` with
@@ -1246,6 +1262,9 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     # uses that switch, which _prepare adds (with the explicit case's) once the engine is known.
     if widevine_mode(kwargs.get("widevine"), licensed=False) == "explicit":
         apply_widevine_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
+    # CRLSet: Chrome's revocation list, which the engine never downloads (see _crlset). Seeded into the
+    # profile with the component updater un-suppressed; the launch then waits until it is live.
+    crlset_plan = apply_crlset_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
     font_dirs = check_font_dirs(kwargs.pop("font_dirs", None))  # Linux fontconfig dirs; a typo raises before the lease
@@ -1273,19 +1292,28 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
         default_color_scheme(pw_kwargs)
     launch_args = _with_geometry_args(args, geom)  # carries --widevine-cdm-path when on (see _prepare)
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
-    context = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
-        lease, pw_kwargs, launch_token, lambda: _win_av_retry(
-            lambda e: _playwright().chromium.launch_persistent_context(
-                user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
-            ),
-            exe,
-        )), launch_token)
+    if crlset_plan:  # the readiness probe's port must bypass a launch proxy, so its server starts first
+        launch_args = launch_args + crlset_plan.before_launch(pw_kwargs)
+    try:
+        context = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
+            lease, pw_kwargs, launch_token, lambda: _win_av_retry(
+                lambda e: _playwright().chromium.launch_persistent_context(
+                    user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
+                ),
+                exe,
+            )), launch_token)
+    except BaseException:
+        if crlset_plan:
+            crlset_plan.close()
+        raise
     if lease:  # release the concurrency slot + remove the run-token file when the context closes
         def _on_close(_c=None, _lease=lease, _lt=launch_token, _own=owns_lease):
             if _own:  # a borrowed slot belongs to the caller: only drop this launch's token file
                 _lease.stop()
             _lt[1]()
         context.on("close", _on_close)
+    if crlset_plan:  # before anything touches the first tab: it must stay idle on about:blank
+        crlset_plan.wait(context)
     if geom or headed_fit:
         _install_window_fixup(context, args, geom or _FIT)
     install_humanize_on_context(context, humanize, show_cursor, seed=seed)

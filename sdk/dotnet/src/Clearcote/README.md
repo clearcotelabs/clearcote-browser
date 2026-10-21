@@ -148,6 +148,31 @@ Your own `--widevine-cdm-path=<dir>` in `Args` is left as it is. Cloud launches 
 Widevine on the server). The package never distributes Google's CDM: it is downloaded from Google, on your
 machine. Software-secure (L3) playback only.
 
+## Certificate revocation (`Crlset`, opt-in)
+
+Real Chrome receives Google's **CRLSet** (the list of revoked and distrusted certificate keys) in the background,
+which is how a CA compromise reaches browsers within hours. A Clearcote engine never downloads it, so on its own it
+keeps trusting certificates that Chrome already blocks. `Crlset = true` closes that gap for every engine the SDK
+launches, old builds included:
+
+- The SDK fetches the current CRLSet **from Google** (`update.googleapis.com`, the same service as the Widevine CDM),
+  checks its SHA-256 and caches it under `~/.clearcote/crlset` (`CLEARCOTE_CRLSET_DIR` overrides; shared with the
+  Python and Node SDKs). A cache older than 6 hours is refreshed in the background.
+- It places the CRLSet in the profile and lets the engine's component updater load it (no network request of its
+  own). The launch then **waits until the CRLSet is live**, usually a few seconds, so the first page you open is
+  already protected.
+- `CrlsetNoWait = true` skips the wait (live once the first tab has been idle for a moment), `CrlsetPath` seeds that
+  file instead, `CrlsetTimeout` bounds the wait (default 15 s). `CLEARCOTE_CRLSET=1` turns it on for every launch.
+- Fail-soft: a failed first download or an unconfirmed CRLSet prints one warning and the launch goes on. It needs a
+  profile: `LaunchEphemeralProfileAsync` and `LaunchPersistentContextAsync`; `LaunchAsync` (incognito) warns and goes
+  on without it.
+
+```csharp
+await using var context = await Clearcote.LaunchEphemeralProfileAsync(new LaunchOptions { Crlset = true });
+var page = context.Pages[0];
+await page.GotoAsync("https://dv-g3b-emudhra.we-have-a-problem.com/"); // net::ERR_CERT_REVOKED, as in Chrome
+```
+
 ## Local or cloud
 
 The same call can run the browser on Clearcote's hosted servers instead of this machine. `Cloud = true`

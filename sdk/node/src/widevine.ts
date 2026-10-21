@@ -161,7 +161,7 @@ export function omahaRequestBody(): unknown {
 }
 
 /** `AbortSignal.timeout(ms)`, also aborted with `signal` (AbortSignal.any is Node 20.3+). */
-function withTimeout(ms: number, signal?: AbortSignal): AbortSignal {
+export function withTimeout(ms: number, signal?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(ms);
   if (!signal) return timeout;
   const both = new AbortController();
@@ -174,7 +174,8 @@ function withTimeout(ms: number, signal?: AbortSignal): AbortSignal {
   return both.signal;
 }
 
-async function postJson(url: string, body: unknown, signal?: AbortSignal): Promise<any> {
+/** POST an Omaha JSON request and parse the answer (XSSI guard stripped). Also the CRLSet fetch's (./crlset.ts). */
+export async function postJson(url: string, body: unknown, signal?: AbortSignal): Promise<any> {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", "User-Agent": omahaUserAgent() },
@@ -550,6 +551,21 @@ export async function seedWidevine(userDataDir: string, opts: WidevineOptions = 
 }
 
 /**
+ * `ignoreDefaultArgs` with Playwright's `--disable-component-update` dropped from the launch, so the
+ * component updater runs (it registers a seeded CDM or CRLSet). A list gets the flag added, `undefined`
+ * becomes `["--disable-component-update"]`, and `true` (ignore ALL defaults) already un-suppresses it and
+ * is returned as is. Pure. Also used by the CRLSet seeding (./crlset.ts).
+ */
+export function unsuppressComponentUpdate(ignoreDefaultArgs: string[] | boolean | undefined): string[] | boolean | undefined {
+  if (Array.isArray(ignoreDefaultArgs)) {
+    return ignoreDefaultArgs.includes("--disable-component-update")
+      ? ignoreDefaultArgs
+      : [...ignoreDefaultArgs, "--disable-component-update"];
+  }
+  return ignoreDefaultArgs === undefined ? ["--disable-component-update"] : ignoreDefaultArgs;
+}
+
+/**
  * Adjust launch args so the engine actually registers the seeded CDM. Pure — returns the new values.
  *
  * The un-suppress of the component updater (Playwright disables it by default via
@@ -565,14 +581,7 @@ export function widevineArgs(
   ignoreDefaultArgs: string[] | boolean | undefined,
   userArgs: string[],
 ): { ignoreDefaultArgs: string[] | boolean | undefined; args: string[] } {
-  let ida: string[] | boolean | undefined = ignoreDefaultArgs;
-  if (Array.isArray(ignoreDefaultArgs)) {
-    ida = ignoreDefaultArgs.includes("--disable-component-update")
-      ? ignoreDefaultArgs
-      : [...ignoreDefaultArgs, "--disable-component-update"];
-  } else if (ignoreDefaultArgs === undefined) {
-    ida = ["--disable-component-update"];
-  }
+  const ida = unsuppressComponentUpdate(ignoreDefaultArgs);
   // Force the pre-installed-component scan on Windows and macOS. On Linux the hint file registers the CDM.
   const args =
     process.platform === "linux" || userArgs.some((a) => a.includes("component-updater"))

@@ -15,7 +15,7 @@ namespace Clearcote;
 public static partial class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.56.0";
+    public const string Version = "0.57.0";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
@@ -151,6 +151,7 @@ public static partial class Clearcote
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
+        Crlset.WarnNoProfile(options, "LaunchAsync");  // incognito: no profile to seed a CRLSet into
 
         // http(s) credentials go to the engine's --proxy-auth only when THIS engine implements it (r19+).
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
@@ -325,6 +326,10 @@ public static partial class Clearcote
                 if (!options.Quiet) Console.Error.WriteLine($"[clearcote] [widevine] setup failed (continuing without DRM): {e.Message}");
             }
         }
+        // CRLSet (opt-in): Chrome's revocation list, which the engine never downloads. Seeded into this profile with the
+        // component updater un-suppressed; the launch then waits until it is live (see Crlset). Never throws.
+        var (crlsetPlan, crlsetIgnore) = await Crlset.ApplyLaunchAsync(userDataDir, options, ignoreDefaultArgs).ConfigureAwait(false);
+        ignoreDefaultArgs = crlsetIgnore;
 
         // http(s) credentials go to the engine's --proxy-auth only when THIS engine implements it (r19+).
         var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
@@ -372,12 +377,14 @@ public static partial class Clearcote
         var persona = PersonaEnv.Plan(exe, args.Concat(geometry.Args), options.PersonaEnv);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
-        var context = await License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
+        // The CRLSet readiness probe's port must bypass a Playwright-handled proxy, so its server starts first.
+        var crlsetArgs = crlsetPlan?.BeforeLaunch(proxy) ?? new List<string>();
+        var context = await Crlset.CloseOnFailureAsync(crlsetPlan, () => License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
             WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchPersistentContextAsync(userDataDir,
             new BrowserTypeLaunchPersistentContextOptions(options.PlaywrightContextOptions ?? new())
             {
                 ExecutablePath = exePath,
-                Args = persona.Args.ToArray(),
+                Args = persona.Args.Concat(crlsetArgs).ToArray(),
                 Headless = options.Headless,
                 Channel = options.Channel,
                 SlowMo = options.SlowMo,
@@ -393,10 +400,12 @@ public static partial class Clearcote
                 ScreenSize = options.ScreenSize,
                 // r32+: the persona's colour scheme reaches the page instead of Playwright's light.
                 ColorScheme = ColorSchemeDefault.Resolve(options.ColorScheme, exe),
-            }), exe)), launchToken).ConfigureAwait(false);
+            }), exe)), launchToken)).ConfigureAwait(false);
 
         // Release the concurrency slot + remove the run-token file when the context closes.
         if (lease is not null) context.Close += (_, _) => { _ = lease.StopAsync(); launchToken?.Release(); };
+        // Before anything touches the first tab: it must stay idle on about:blank until the CRLSet is live.
+        if (crlsetPlan is not null) await crlsetPlan.WaitAsync(context).ConfigureAwait(false);
         // Both headless regimes, and headed Linux: maximize into the display's work area. It never
         // throws, so a launch cannot fail on it, and it runs while the context is still on about:blank,
         // so the caller's page never observes a resize. An r39+ persona window gets no fit: under an
@@ -437,6 +446,7 @@ public static partial class Clearcote
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
+        Crlset.WarnNoProfile(options, "ServeAsync");  // a raw CDP endpoint: no readiness wait to hold it
 
         // passProxy: what is left for a plain --proxy-server once credentials went to the engine's own switches
         // (--socks5-credentials, or --proxy-auth on an engine that implements it).

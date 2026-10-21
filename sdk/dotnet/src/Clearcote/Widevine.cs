@@ -132,7 +132,10 @@ public static class Widevine
         Environment.GetEnvironmentVariable("CLEARCOTE_WIDEVINE_DIR") is { Length: > 0 } d ? d : Path.Combine(Native.ClearcoteDir, "WidevineCdm");
 
     /// Minimal Omaha v3.1 update check for this OS's CDM (version 0.0.0.0 -> the latest).
-    public static string OmahaRequestBody()
+    public static string OmahaRequestBody() => OmahaRequestBody(AppId);
+
+    /// The same update check for another component (<paramref name="appId"/>): the CRLSet fetch (<see cref="Crlset"/>) uses it.
+    internal static string OmahaRequestBody(string appId)
     {
         var (atOs, osPlatform, osVersion, _, _) = CdmPlatform();
         var (arch, naclArch, osArch) = CdmArch();
@@ -146,7 +149,7 @@ public static class Widevine
                 ["os"] = new JsonObject { ["arch"] = osArch, ["platform"] = osPlatform, ["version"] = osVersion },
                 ["app"] = new JsonArray(new JsonObject
                 {
-                    ["appid"] = AppId, ["version"] = "0.0.0.0", ["updatecheck"] = new JsonObject(),
+                    ["appid"] = appId, ["version"] = "0.0.0.0", ["updatecheck"] = new JsonObject(),
                     ["ping"] = new JsonObject { ["r"] = -2 },
                 }),
             },
@@ -256,7 +259,7 @@ public static class Widevine
 
     private static void Log(bool quiet, string msg) { if (!quiet) Console.Error.WriteLine($"[clearcote] [widevine] {msg}"); }
 
-    private static HttpClient Client()
+    internal static HttpClient Client()
     {
         var c = SdkHttp.Create();
         c.Timeout = Timeout.InfiniteTimeSpan; // bounded per request below
