@@ -728,8 +728,8 @@ public static partial class Humanize
 
     /// <summary>
     /// A locator that enters an iframe (<c>page.FrameLocator(...).Locator(...)</c>): its selector carries
-    /// <c>internal:control=enter-frame</c>. The hit test and the isolated world only see the main frame, so
-    /// such a locator goes to Playwright's own method (a humanized fill there appended "new" to "old").
+    /// <c>internal:control=enter-frame</c>. The main-frame hit test and isolated world do not see inside it, so
+    /// such a locator takes the frame route (Frames.cs; through the main-frame route a fill appended "new" to "old").
     /// </summary>
     internal static bool IsFrameLocator(ILocator locator)
         => locator.ToString()?.Contains("internal:control=enter-frame", StringComparison.Ordinal) == true;
