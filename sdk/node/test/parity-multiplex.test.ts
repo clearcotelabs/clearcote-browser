@@ -10,6 +10,8 @@ import {
   publicWsBase,
   rewriteWsUrl,
   originAllowed,
+  hostAllowed,
+  requestRefusal,
   SEED_PATTERN,
   QUERY_PARAMS,
   MultiplexRequestError,
@@ -66,6 +68,14 @@ describe("parseConnectionIdentity", () => {
     expect(p("platform=linux").id).not.toBe(a.id);
   });
 
+  it("parameter-only ids are the same in every SDK (shared vectors)", () => {
+    // The same vectors are in sdk/python/tests/test_parity_multiplex.py and the .NET MultiplexTests.
+    expect(p("platform=macos&brand=Edge").id).toBe("_p9bebdd7bbfdbb6c2");
+    expect(p("hardware-concurrency=8&device-pixel-ratio=1.25&fingerprint-noise=false&locale=de-DE"
+      + "&timezone=Europe/Berlin&proxy=" + encodeURIComponent("socks5://u:p+w@h.test:1080")).id).toBe("_p07a2e37476a5fbf5");
+    expect(p("device-pixel-ratio=1.0").id).toBe(p("device-pixel-ratio=1").id);
+  });
+
   it("exposes the engine-extra options as kebab-case parameters", () => {
     expect(QUERY_PARAMS["allow-third-party-cookies"]).toBe("allowThirdPartyCookies");
     expect(QUERY_PARAMS["transparent-proxy"]).toBe("transparentProxy");
@@ -92,6 +102,22 @@ describe("URL + origin helpers", () => {
     expect(originAllowed("null")).toBe(false);
     expect(originAllowed("https://evil.example")).toBe(false);
     expect(originAllowed("https://tool.example", ["https://tool.example"])).toBe(true);
+  });
+
+  it("accepts IP literals (bracketed or bare IPv6) and localhost as Host, refuses names", () => {
+    for (const ok of [undefined, "127.0.0.1:9222", "localhost", "LOCALHOST:1", "[::1]:9222", "[::1]", "10.0.0.5", "::1", "fe80::1"]) {
+      expect(hostAllowed(ok), String(ok)).toBe(true);
+    }
+    for (const bad of ["evil.example", "evil.example:9222", "127.0.0.1.nip.io", ""]) {
+      expect(hostAllowed(bad), bad).toBe(false);
+    }
+    expect(hostAllowed("cdp.example.com:443", ["CDP.example.com"])).toBe(true);
+  });
+
+  it("a cross-site request is refused unless its Origin is explicitly allowed", () => {
+    const h = { host: "127.0.0.1", "sec-fetch-site": "cross-site", origin: "https://tool.example" };
+    expect(requestRefusal(h)).toBe("Forbidden: cross-site request");
+    expect(requestRefusal(h, ["https://tool.example"])).toBeNull();
   });
 });
 
@@ -209,6 +235,21 @@ describe("serveMultiplex integration (fake browsers)", () => {
     expect(a2.body.webSocketDebuggerUrl).toBe(a1.body.webSocketDebuggerUrl);
     expect(b.body.webSocketDebuggerUrl).toContain("/fingerprint/acct-2/devtools/browser/");
     expect(d.body.webSocketDebuggerUrl).toBe(`ws://127.0.0.1:${mux.port}/devtools/browser/uuid-1`);
+  });
+
+  it("Playwright <= 1.49: a /json path appended to the query is routed as that path", async () => {
+    const { mux, browsers } = await startMux();
+    const a = await getJson(`${mux.url}?fingerprint=old-pw&platform=windows/json/version/`);
+    expect(a.status).toBe(200);
+    expect(a.body.webSocketDebuggerUrl).toBe(`ws://127.0.0.1:${mux.port}/fingerprint/old-pw/devtools/browser/uuid-1`);
+    expect(browsers[0].options).toMatchObject({ fingerprint: "old-pw", platform: "windows" });
+    const list = await getJson(`${mux.url}/?fingerprint=old-pw&platform=windows/json/list`);
+    expect(list.status).toBe(200);
+    expect(list.body[0].id).toBe("p1");
+    expect((await getJson(`${mux.url}/?fingerprint=old-pw&platform=windows/json`)).status).toBe(200);
+    expect(browsers).toHaveLength(1);
+    expect((await getJson(`${mux.url}/?fingerprint=a/b`)).status).toBe(200); // not a /json tail: the status page
+    expect((await getJson(`${mux.url}/json/version?fingerprint=a/b`)).status).toBe(400);
   });
 
   it("uses X-Forwarded-Host/Proto for the URLs it hands out (#14)", async () => {

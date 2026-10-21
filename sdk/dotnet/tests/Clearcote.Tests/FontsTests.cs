@@ -499,4 +499,78 @@ public class FontsTests : IDisposable
     {
         Assert.Contains(CloudLaunch.LocalOnlyOptions, p => p.Name == nameof(LaunchOptions.FontDirs));
     }
+
+    // --- the font report (Node's and Python's `clearcote info`) ---------------------------------------
+
+    [Fact]
+    public void Report_names_the_scripts_the_fonts_draw_and_the_ones_missing()
+    {
+        var (exe, fonts) = Bundle();
+        MakeFont(Path.Join(fonts, "clone.ttf"), new[] { "Arimo" }, new[] { 0x41, 0x3A9, 0x416 });
+        // a monochrome emoji glyph does not count; the colour one in the fallback directory does
+        MakeFont(Path.Join(fonts, "mono.ttf"), new[] { "DejaVu Sans" }, new[] { 0x1F600, 0x5D0 });
+        var fallback = Sub("fallback");
+        MakeFont(Path.Join(fallback, "emoji.ttf"), new[] { "Noto Color Emoji" }, new[] { 0x1F600 }, color: true);
+        var missing = Path.Join(_root, "nope");
+        Environment.SetEnvironmentVariable(Fonts.FallbackFontDirsEnv, fallback + Path.PathSeparator + missing);
+        var r = Fonts.Report(exe, isLinux: true);
+        Assert.True(r.Bundled);
+        Assert.Equal(new[] { "Latin", "Greek", "Cyrillic", "Hebrew", "Emoji" }, r.ScriptsCovered);
+        Assert.Equal(Fonts.ScriptSamples.Length - 5, r.ScriptsMissing!.Count);
+        Assert.Contains("CJK ideographs", r.ScriptsMissing);
+        Assert.Equal(new[] { fallback }, r.FallbackFontDirs);
+        Assert.Equal(new[] { missing }, r.IgnoredFontDirs);
+        Assert.Empty(r.FontDirs);
+        Assert.Null(r.GenuineWindowsFamilies);
+        var lines = r.Lines();
+        Assert.Equal("Fonts           metric-compatible Windows font clones are bundled with this build", lines[0]);
+        Assert.StartsWith($"Scripts         5 of {Fonts.ScriptSamples.Length} render; no font for Arabic, ", lines[1]);
+        Assert.EndsWith("(they draw as empty boxes)", lines[1]);
+        Assert.Equal($"Fallback fonts  {fallback}", lines[2]);
+        Assert.Equal($"Ignored         {missing} (not a directory)", lines[3]);
+        Assert.Equal(string.Join(Environment.NewLine, lines), r.ToString());
+    }
+
+    [Fact]
+    public void Report_says_which_key_windows_families_your_fonts_provide_for_real()
+    {
+        var (exe, _) = Bundle(genuineFaces: false);
+        var win = Sub("winfonts");
+        MakeFont(Path.Join(win, "arial.ttf"), new[] { "Arial" }, new[] { 0x41 });
+        MakeFont(Path.Join(win, "segoeui.ttf"), new[] { "Segoe UI" }, new[] { 0x41 });
+        // the public entry point on Linux; elsewhere the same report with the host forced to Linux
+        var r = OperatingSystem.IsLinux() ? Clearcote.FontReportFor(exe, new[] { win }) : Fonts.Report(exe, new[] { win }, isLinux: true);
+        Assert.Equal(new[] { win }, r.FontDirs);
+        Assert.Equal(new[] { "Arial", "Segoe UI" }, r.GenuineWindowsFamilies);
+        Assert.Equal(Fonts.KeyWindowsFamilies.Length - 2, r.LookalikeWindowsFamilies!.Count);
+        Assert.False(r.GenuineFacesSupported);
+        var lines = r.Lines();
+        Assert.Contains($"Your fonts      {win}", lines);
+        Assert.Contains("                real: Arial, Segoe UI", lines);
+        Assert.Contains(lines, l => l.StartsWith("                lookalike: Calibri, Cambria", StringComparison.Ordinal));
+        Assert.Contains("                this engine still draws its lookalikes for them (real faces need PRO r32 or newer)", lines);
+        // an engine that draws genuine faces says nothing more
+        var (exe2, _) = Bundle(genuineFaces: true, name: "bin2");
+        var r2 = Fonts.Report(exe2, new[] { win }, isLinux: true);
+        Assert.True(r2.GenuineFacesSupported);
+        Assert.DoesNotContain(r2.Lines(), l => l.Contains("still draws its lookalikes", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Report_without_a_bundle_or_off_linux_says_so()
+    {
+        var exe = Path.Join(Sub("nobundle"), "chrome");
+        File.WriteAllBytes(exe, Encoding.Latin1.GetBytes("ELF\0"));
+        var none = Fonts.Report(exe, isLinux: true);
+        Assert.False(none.Bundled);
+        Assert.Equal(Fonts.NoBundleNote, none.Note);
+        Assert.Null(none.ScriptsCovered);
+        Assert.Equal(new[] { $"Fonts           {Fonts.NoBundleNote}" }, none.Lines());
+        Assert.Null(Fonts.LinuxFontReport(exe));
+        var (bundled, _) = Bundle();
+        var off = Fonts.Report(bundled, isLinux: false);
+        Assert.False(off.Bundled);
+        Assert.Equal(Fonts.NotLinuxNote, off.Note);
+        Assert.Throws<ArgumentException>(() => Clearcote.FontReportFor(""));
+    }
 }

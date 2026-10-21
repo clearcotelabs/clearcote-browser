@@ -5,7 +5,7 @@ namespace Clearcote;
 /// Options for <see cref="Clearcote.LaunchAsync"/> / <see cref="Clearcote.LaunchPersistentContextAsync"/>.
 /// Combines the persona (<see cref="FingerprintOptions"/>), the license options, binary-resolution
 /// options, and the Playwright pass-through knobs the SDK understands.
-public class LaunchOptions : FingerprintOptions
+public partial class LaunchOptions : FingerprintOptions
 {
     // ── license (opt-in PRO) ─────────────────────────────────────────────────
     /// License key ("cc_lic_..."). Resolved from this &gt; CLEARCOTE_LICENSE_KEY env &gt; ~/.clearcote/license.key.
@@ -34,6 +34,25 @@ public class LaunchOptions : FingerprintOptions
     /// (default 20). Fails closed with <see cref="GeoipException"/> before any browser starts, unless
     /// both Timezone and AcceptLanguage were set explicitly (then it warns and launches).
     public bool Geoip { get; set; }
+
+    // ── saved persona / profile "auto" (local launches) ──────────────────────
+    /// A saved persona (<see cref="global::Clearcote.Profile"/>): a name (under CLEARCOTE_PROFILE_DIR), a path, or a
+    /// Profile instance. Its saved options fill every option left unset here (explicit options win). The Node SDK's
+    /// <c>profile</c> option; a separate property because <see cref="Profile"/> is the cloud's cookie store.
+    ///
+    /// <para><c>"auto"</c> is special: instead of a saved option set, it resolves a REAL CAPTURED FINGERPRINT for this
+    /// machine — the licensed profile service first, a local imported directory as backup — and applies it as
+    /// <see cref="FingerprintOptions.FingerprintProfile"/> with NO seed. With no <c>--fingerprint</c> the farbling
+    /// machinery never engages and canvas/WebGL/audio readbacks are byte-identical to an unmodified browser, which is
+    /// why the profile path survives strict anti-bot scoring where a synthetic seed does not. It may launch the engine
+    /// once, headless and with no persona, to measure this host's GPU and display (cached per binary for 30 days). An
+    /// engine before 150 cannot apply a profile: it gets a stable seed persona instead, with a note. Tune it with
+    /// <see cref="ProfileSelect"/>. <c>Profile = "auto"</c> means the same on a local launch.</para>
+    ///
+    /// <para>Local launches only: a cloud or Docker launch refuses it.</para>
+    public LocalProfile? LocalProfile { get; set; }
+    /// Selection + source options for <c>LocalProfile = "auto"</c> (see <see cref="ProfileAuto"/>).
+    public AutoOptions? ProfileSelect { get; set; }
 
     // ── engine behaviour switches (engine 152 r22+; dropped with a warning on older engines) ──
     /// Third-party cookies. Allowed by default (null or true), as in stock Chrome: embedded
@@ -105,7 +124,9 @@ public class LaunchOptions : FingerprintOptions
     // ── Playwright pass-through / SDK arg knobs ──────────────────────────────
     /// Headless mode. Null = Playwright default (headless). Set false for a headed window.
     public bool? Headless { get; set; }
-    /// Proxy (credentialed SOCKS5 is auto-rerouted to --proxy-server; QUIC is disabled when a proxy is set).
+    /// Proxy. Credentials go to the engine's own switches (SOCKS5 always; http(s) on an engine with
+    /// --proxy-auth, r19+), and Playwright's request API (context.APIRequest / page.APIRequest) then reaches
+    /// the proxy through a local credential-less forwarder (see RequestProxy). QUIC is disabled when a proxy is set.
     public ProxyOptions? Proxy { get; set; }
     /// Extra Chromium args appended last (after the SDK's persona + default args).
     public IReadOnlyList<string>? Args { get; set; }
@@ -187,6 +208,48 @@ public class LaunchOptions : FingerprintOptions
     /// engine. Applies to the persistent and ephemeral-profile launches.
     public ColorScheme? ColorScheme { get; set; }
 
+    // ── profile portability + the rest of Playwright's launch options ─────────
+    // Local launches only: a cloud or Docker launch refuses them by name.
+
+    /// Keep the cookie encryption key in the profile, so the user data directory is portable between
+    /// machines (<c>--portable-profile</c>). Opt-in: the cookie database is then effectively unencrypted at rest.
+    public bool? PortableProfile { get; set; }
+    /// Derive the profile encryption key from this secret instead (<c>--profile-encryption-key</c>), writing
+    /// nothing to disk. Preferred when the profile is synced to shared storage; wins over <see cref="PortableProfile"/>.
+    public string? EncryptionKey { get; set; }
+    /// The rest of Playwright's launch options for <see cref="Clearcote.LaunchAsync"/> (ChromiumSandbox,
+    /// DownloadsPath, TracesDir, HandleSIGINT/SIGTERM/SIGHUP, IgnoreAllDefaultArgs, ...). Copied, then the SDK
+    /// fills its own fields on the copy. The fields this class already has (ExecutablePath, Args, Env, Headless,
+    /// Channel, SlowMo, Timeout, IgnoreDefaultArgs, Proxy) must be set here instead: setting one on this object
+    /// throws, naming it. Devtools = true gets the same warning as <c>--auto-open-devtools-for-tabs</c>.
+    public BrowserTypeLaunchOptions? PlaywrightLaunchOptions { get; set; }
+    /// The rest of Playwright's persistent-context options for <see cref="Clearcote.LaunchPersistentContextAsync(string, LaunchOptions?)"/>
+    /// and <see cref="Clearcote.LaunchEphemeralProfileAsync"/> (Locale, UserAgent, Geolocation, Permissions,
+    /// RecordVideoDir, IgnoreHTTPSErrors, AcceptDownloads, ExtraHTTPHeaders, ChromiumSandbox, DownloadsPath, ...).
+    /// Copied, then the SDK fills its own fields on the copy. The fields this class already has (those of
+    /// <see cref="PlaywrightLaunchOptions"/>, plus ViewportSize, ScreenSize and ColorScheme) must be set here
+    /// instead: setting one on this object throws, naming it. A UserAgent gets the custom-user-agent warning:
+    /// it replaces only the User-Agent string, not the rest of the persona.
+    public BrowserTypeLaunchPersistentContextOptions? PlaywrightContextOptions { get; set; }
+
+    // ── humanize (local, Docker and cloud launches; an SDK option, never sent to the browser) ──
+    /// Attach a motor persona to every page the launch makes: each page of the browser or context, every page a
+    /// new context opens, and every popup (window.open, target=_blank), seeded from <see cref="FingerprintOptions.Fingerprint"/>
+    /// so an identity moves the same way on every launch and in every SDK (no fingerprint: a random persona per
+    /// launch). The .NET input methods stay explicit (<c>HumanClickAsync</c> beside <c>ClickAsync</c>, see
+    /// <see cref="global::Clearcote.Humanize"/>); this gives them the identity's persona and <see cref="HumanizeOptions"/>.
+    /// True turns it on, false off. Null: off for a local or Docker launch, on for a cloud launch (where the SDK
+    /// humanizes and the hosted browser's own mouse humanizer is switched off: <c>humanize: false</c> in the session).
+    /// Python/Node <c>humanize=</c>.
+    public bool? Humanize { get; set; }
+    /// The humanize options every page is attached with (preset, strict, engine, ambient, ...); setting it turns
+    /// <see cref="Humanize"/> on unless that is false. A bad value throws before anything starts. A cloud launch also
+    /// sends them as the session's <c>humanizeOptions</c>.
+    public HumanizeOptions? HumanizeOptions { get; set; }
+    /// Show a red cursor dot that follows the pointer on every page (a visualization: <see cref="global::Clearcote.Humanize.CursorOverlay"/>).
+    /// Python <c>show_cursor</c>, Node <c>showCursor</c>.
+    public bool? ShowCursor { get; set; }
+
     // ── macOS: the Clearcote Docker image ────────────────────────────────────
     // Without the native PRO build (a licence key on an Apple Silicon Mac), LaunchAsync on macOS runs the
     // Clearcote Docker image and connects to it (see Clearcote.LaunchAsync).
@@ -232,7 +295,8 @@ public class LaunchOptions : FingerprintOptions
     /// Cloud: stop the session once it has used this much traffic.
     public double? MaxGb { get; set; }
     /// Cloud: a named cookie store on the server. A name loads it; <c>Persist = true</c> also saves it
-    /// back when the session ends (LaunchPersistentContextAsync does that by default).
+    /// back when the session ends (LaunchPersistentContextAsync does that by default). A local launch ignores it,
+    /// except <c>"auto"</c>, which there means <c>LocalProfile = "auto"</c> (a saved persona is <see cref="LocalProfile"/>).
     public CloudProfile? Profile { get; set; }
     /// Cloud: the page the session opens on.
     public string? Url { get; set; }

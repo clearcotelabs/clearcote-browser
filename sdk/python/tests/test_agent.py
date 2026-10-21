@@ -54,3 +54,80 @@ def test_maps_every_agent_option():
 def test_agent_keys_constant():
     assert set(AGENT_KEYS) == {
         "agent_llm_url", "agent_llm_key", "agent_model", "agent_tool_mode", "agent_typing"}
+
+
+# -- run_agent_task: which CDP session carries Browser.agentRunTask ---------------------------------
+
+class _Session:
+    def __init__(self, name, log):
+        self.name, self.log = name, log
+
+    def send(self, method, params=None):
+        self.log.append((self.name, method, params))
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"targetId": "T1"}}
+        return {"success": True, "finalText": "done", "stepsJson": '[{"action":"click"}]'}
+
+
+class _ASession(_Session):
+    async def send(self, method, params=None):
+        return _Session.send(self, method, params)
+
+
+def _fake_page(with_browser, session_cls=_Session):
+    log = []
+
+    def make(name):
+        if session_cls is _Session:
+            return session_cls(name, log)
+
+        async def opened():  # the async API awaits session creation too
+            return session_cls(name, log)
+        return opened()
+
+    class Browser:
+        def new_browser_cdp_session(self):
+            return make("browser")
+
+    class Context:
+        # Older Playwright clients: a persistent context has no Browser.
+        browser = Browser() if with_browser else None
+
+        def new_cdp_session(self, page):
+            return make("page")
+
+    class Page:
+        context = Context()
+
+    return Page(), log
+
+
+def test_run_agent_task_uses_the_browser_session_when_there_is_one():
+    from clearcote._agent import run_agent_task
+    page, log = _fake_page(True)
+    r = run_agent_task(page, "goal", max_steps=3)
+    assert log[-1] == ("browser", "Browser.agentRunTask", {"targetId": "T1", "goal": "goal", "maxSteps": 3})
+    assert r == {"success": True, "finalText": "done", "steps": [{"action": "click"}],
+                 "stepsJson": '[{"action":"click"}]'}
+
+
+def test_run_agent_task_falls_back_to_the_page_session_without_a_browser():
+    from clearcote._agent import run_agent_task
+    page, log = _fake_page(False)
+    r = run_agent_task(page, "goal", model="m")
+    assert log == [("page", "Target.getTargetInfo", None),
+                   ("page", "Browser.agentRunTask", {"targetId": "T1", "goal": "goal", "model": "m"})]
+    assert r["success"] is True
+
+
+def test_run_agent_task_async_falls_back_to_the_page_session_without_a_browser():
+    import asyncio
+
+    from clearcote._agent import run_agent_task_async
+    page, log = _fake_page(False, _ASession)
+    r = asyncio.run(run_agent_task_async(page, "goal", plan_json="{}"))
+    assert log[-1] == ("page", "Browser.agentRunTask", {"targetId": "T1", "goal": "goal", "planJson": "{}"})
+    assert r["finalText"] == "done"
+    page, log = _fake_page(True, _ASession)
+    asyncio.run(run_agent_task_async(page, "goal"))
+    assert log[-1][0] == "browser"

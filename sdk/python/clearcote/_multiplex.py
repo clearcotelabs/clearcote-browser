@@ -22,7 +22,7 @@ SAFETY:
   * seeds are validated against a strict pattern and profile directories are named by a HASH of
     the identity, so no request value ever becomes part of a filesystem path;
   * every request (HTTP and WebSocket) is refused when it carries ``Sec-Fetch-Site: cross-site`` or
-    ``same-site``, a browser Origin that is not loopback or explicitly allowed, or a Host header that
+    ``same-site`` (unless its Origin is explicitly allowed), a browser Origin that is not loopback or explicitly allowed, or a Host header that
     is not an IP literal or "localhost" (or explicitly allowed) -- the same DNS-rebinding rule as
     Chrome's own DevTools server;
   * the number of concurrent browsers is capped (max_browsers, default 16).
@@ -117,8 +117,60 @@ def _parse_number(name, v):
     return n
 
 
+def _camel(name):
+    return re.sub(r"_([a-z0-9])", lambda m: m.group(1).upper(), name)
+
+
+def _js_number(n):
+    """A number as JavaScript's ``String(n)`` prints it (1.0 -> "1", 1e-7 -> "1e-7", 1e16 -> "10000000000000000")."""
+    if isinstance(n, bool) or not isinstance(n, (int, float)):
+        raise TypeError(n)
+    if isinstance(n, int):
+        n = float(n)
+    if n == 0:
+        return "0"
+    sign = "-" if n < 0 else ""
+    # Shortest round-trip digits (the same digits JS picks), then JS's exponent rule.
+    mant, _e, exp = repr(abs(n)).partition("e")
+    digits = mant.replace(".", "")
+    point = (mant.index(".") if "." in mant else len(mant)) + (int(exp) if exp else 0)
+    stripped = digits.lstrip("0")
+    point -= len(digits) - len(stripped)
+    digits = stripped.rstrip("0") or "0"
+    k, e = len(digits), point  # value = 0.<digits> * 10**e
+    if k <= e <= 21:
+        out = digits + "0" * (e - k)
+    elif 0 < e <= 21:
+        out = digits[:e] + "." + digits[e:]
+    elif -6 < e <= 0:
+        out = "0." + "0" * -e + digits
+    else:
+        x = e - 1
+        out = digits[0] + ("." + digits[1:] if k > 1 else "") + "e" + ("+" if x > 0 else "-") + str(abs(x))
+    return sign + out
+
+
+def _js_json(v):
+    """``JSON.stringify(v)`` for the values an identity holds (str, bool, number, dict, list, None)."""
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return _js_number(v) if math.isfinite(v) else "null"
+    if isinstance(v, str):
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, dict):  # insertion order, undefined (None) members dropped, as JSON.stringify does
+        return "{" + ",".join(f"{_js_json(str(k))}:{_js_json(x)}" for k, x in v.items() if x is not None) + "}"
+    return "[" + ",".join(_js_json(x) for x in v) + "]"
+
+
 def _canonical(options):
-    return json.dumps([[k, options[k]] for k in sorted(options)], separators=(",", ":"), sort_keys=True)
+    """The Node SDK's canonical form, byte for byte: ``JSON.stringify`` of the [key, value] pairs sorted by
+    the (camelCase) Node option name, so a parameter-only ``_p<hash>`` id is the same in every SDK."""
+    pairs = sorted(((_camel(k), v) for k, v in options.items()),
+                   key=lambda kv: kv[0].encode("utf-16-be"))
+    return _js_json([[k, v] for k, v in pairs])
 
 
 def parse_connection_identity(query):
@@ -139,7 +191,8 @@ def parse_connection_identity(query):
                 if not seed_ok(value):
                     raise MultiplexRequestError(400, "fingerprint must match [A-Za-z0-9][A-Za-z0-9._-]{0,127}")
                 if value in _RESERVED_IDS:
-                    raise MultiplexRequestError(400, f"fingerprint '{value}' is reserved; choose another seed")
+                    raise MultiplexRequestError(
+                        400, f"fingerprint '{value}' is reserved for the no-parameter browser; pick another seed")
                 seed = value
                 options["fingerprint"] = value
             elif name == "timezone":
@@ -208,6 +261,14 @@ def rewrite_ws_url(url, ws_base, ident_id):
     return f"{ws_base}{_prefix(ident_id)}{m.group(1)}"
 
 
+def _rewrite_frontend_url(url, host_part, prefix):
+    """"/devtools/inspector.html?ws=127.0.0.1:<childport>/devtools/page/<id>" -> via the multiplexer.
+    Only the first ``ws=``/``wss=``, as the Node SDK does. A function replacement: the forwarded host is
+    data, never a pattern."""
+    return re.sub(r"([?&]wss?=)[^/&]+(/devtools/)",
+                  lambda m: f"{m.group(1)}{host_part}{prefix}{m.group(2)}", url, count=1)
+
+
 def origin_allowed(origin, extra=()):
     """Origin allowed to talk to the endpoint: none (non-browser client), loopback, or listed."""
     if origin is None:
@@ -253,13 +314,19 @@ def host_allowed(host_header, extra=()):
 def request_forbidden(headers, allow_origins=(), allow_hosts=()):
     """Why a request must be refused (403), or None. ``headers`` maps lower-cased names to values."""
     site = (headers.get("sec-fetch-site") or "").strip().lower()
-    if site in ("cross-site", "same-site"):
+    origin = headers.get("origin")
+    # An explicitly allowed Origin is a site the operator chose to let in, cross-site or not.
+    if site in ("cross-site", "same-site") and not (origin and origin in (allow_origins or ())):
         return "Forbidden: cross-site request"
     if "origin" in headers and not origin_allowed(headers.get("origin"), allow_origins):
         return "Forbidden origin"
     if not host_allowed(headers.get("host"), allow_hosts):
         return "Forbidden host"
     return None
+
+
+# A /json, /json/version or /json/list path appended to the query (see MultiplexServer._route).
+_QUERY_TAIL_PATH = re.compile(r"^(.*?)(/json(?:/version|/list)?)/?$", re.S)
 
 
 def _idle_timeout_from_env():
@@ -474,7 +541,7 @@ class MultiplexServer:
             srv = await _maybe_await(await self._loop.run_in_executor(None, starter, opts))
         if self._closing:
             await self._call_close(srv)
-            raise MultiplexRequestError(503, "the multiplexer is shutting down")
+            raise MultiplexRequestError(503, "shutting down")
         child = _Child(ident, srv)
         self._children[ident["id"]] = child
         self._schedule_idle(child)
@@ -487,7 +554,7 @@ class MultiplexServer:
 
     async def _ensure_child(self, ident):
         if self._closing:
-            raise MultiplexRequestError(503, "the multiplexer is shutting down")
+            raise MultiplexRequestError(503, "shutting down")
         canonical = ident.get("canonical", _canonical(ident.get("options") or {}))
         existing = self._children.get(ident["id"])
         if existing:
@@ -625,6 +692,14 @@ class MultiplexServer:
         try:
             u = urlsplit(target)
             path = u.path.rstrip("/") or "/"
+            query = u.query
+            # Playwright clients up to 1.49 build the discovery URL by appending "/json/version/" to the
+            # endpoint string, so connect_over_cdp("http://host:port?fingerprint=a") asks for
+            # GET /?fingerprint=a/json/version/: the path lands at the end of the query. (Newer releases
+            # append it to the URL's path.) A seed cannot contain '/', so nothing else matches.
+            tail = _QUERY_TAIL_PATH.match(query) if path == "/" else None
+            if tail:
+                query, path = tail.group(1), tail.group(2)
             ws_base = public_ws_base(headers, f"{self.host}:{self.port}")
             if method == "GET" and path == "/":
                 return 200, self._status()
@@ -635,10 +710,10 @@ class MultiplexServer:
                 ident_id = unquote(m.group(1))
                 return 200, {"id": ident_id, "terminated": await self._close_identity(ident_id)}
             if method == "GET" and path in ("/json/version", "/json/list", "/json"):
-                ident = parse_connection_identity(u.query)
+                ident = parse_connection_identity(query)
                 child = await self._ensure_child(ident)
                 if self._children.get(child.id) is not child or child.id in self._doomed:
-                    raise MultiplexRequestError(503, f"identity '{child.id}' was closed while it started")
+                    raise MultiplexRequestError(503, f"identity '{child.id}' was closed while starting")
                 data = await self._child_json(child.srv.port, "/json/list" if path == "/json" else path)
                 host_part = re.sub(r"^wss?://", "", ws_base)
                 prefix = _prefix(child.id)
@@ -648,11 +723,7 @@ class MultiplexServer:
                         if isinstance(o.get("webSocketDebuggerUrl"), str):
                             o["webSocketDebuggerUrl"] = rewrite_ws_url(o["webSocketDebuggerUrl"], ws_base, child.id)
                         if isinstance(o.get("devtoolsFrontendUrl"), str):
-                            # A function replacement: the forwarded host is data, never a pattern.
-                            o["devtoolsFrontendUrl"] = re.sub(
-                                r"([?&]wss?=)[^/&]+(/devtools/)",
-                                lambda mm: f"{mm.group(1)}{host_part}{prefix}{mm.group(2)}",
-                                o["devtoolsFrontendUrl"])
+                            o["devtoolsFrontendUrl"] = _rewrite_frontend_url(o["devtoolsFrontendUrl"], host_part, prefix)
                     return o
 
                 return 200, ([fix(o) for o in data] if isinstance(data, list) else fix(data))

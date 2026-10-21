@@ -9,6 +9,8 @@ namespace Clearcote;
 public class LicenseError : Exception
 {
     public string Code { get; }
+    /// HTTP status of the answer this error reports; null when the licence server never answered.
+    public int? Status { get; internal set; }
     public LicenseError(string message, string code = "LICENSE_ERROR") : base(message) => Code = code;
 }
 
@@ -227,6 +229,134 @@ public static class License
         return null;
     }
 
+    // ── the saved licence key and what device login recorded about it (license.ts) ──
+    // The same files as the Node and Python SDKs and the clearcote CLI, so all of them share one saved key.
+
+    /// Where <c>clearcote login</c> stores the key: ~/.clearcote/license.key.
+    public static string LicenseKeyPath() => Path.Combine(Native.ClearcoteDir, "license.key");
+
+    /// Save a licence key for every later launch (owner-only permissions where the OS supports it). Returns the path.
+    public static string SaveLicenseKey(string key)
+    {
+        var k = (key ?? "").Trim();
+        if (k.Length == 0) throw new LicenseError("Empty licence key.", "LICENSE_EMPTY");
+        var p = LicenseKeyPath();
+        Directory.CreateDirectory(Native.ClearcoteDir);
+        WriteOwnerOnly(p, k + "\n");
+        return p;
+    }
+
+    /// Remove the saved key (and what device login recorded about it). True when the key file was removed.
+    public static bool RemoveLicenseKey()
+    {
+        RemoveLicenseMeta();
+        var p = LicenseKeyPath();
+        if (!File.Exists(p)) return false;
+        try { File.Delete(p); } catch { return false; }
+        return true;
+    }
+
+    /// Where the key a launch would use comes from ("option", "env", "file" or "none"), and the key masked
+    /// (its first 7 and last 4 characters), never the key itself.
+    public static LicenseKeySourceInfo LicenseKeySource(string? @explicit = null)
+    {
+        static string Mask(string k) => k.Length > 12 ? $"{k[..7]}\u2026{k[^4..]}" : "\u2026";
+        if (!string.IsNullOrWhiteSpace(@explicit)) return new("option", Mask(@explicit.Trim()));
+        var env = Environment.GetEnvironmentVariable("CLEARCOTE_LICENSE_KEY");
+        if (!string.IsNullOrWhiteSpace(env)) return new("env", Mask(env.Trim()));
+        try
+        {
+            var p = LicenseKeyPath();
+            if (File.Exists(p))
+            {
+                var v = File.ReadAllText(p).Trim();
+                if (v.Length > 0) return new("file", Mask(v));
+            }
+        }
+        catch { /* ignore */ }
+        return new("none", null);
+    }
+
+    // What `clearcote login --device` learned about the key it saved. No licence endpoint reports a key's expiry, so
+    // the device-token answer is the one source. Bound to the key by its SHA-256, so a key saved later (pasted, or set
+    // in CLEARCOTE_LICENSE_KEY) is never described by another key's record.
+    private const string ExpiryNote = "as the site reported it at `clearcote login --device`; no licence endpoint reports a key's expiry";
+    private const string ExpiryUnknownNote = "not known: only `clearcote login --device` records it, and no licence endpoint reports a key's expiry";
+
+    /// ~/.clearcote/license.meta.json: the plan and expiry device login recorded for the saved key.
+    public static string LicenseMetaPath() => Path.Combine(Native.ClearcoteDir, "license.meta.json");
+
+    private static string KeyDigest(string key) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key.Trim()))).ToLowerInvariant();
+
+    /// Record the plan and expiry the device login returned for <paramref name="key"/> (never the key itself).
+    /// Returns the path.
+    public static string SaveLicenseMeta(string key, string? plan = null, string? expiresAt = null)
+    {
+        var p = LicenseMetaPath();
+        Directory.CreateDirectory(Native.ClearcoteDir);
+        var record = new
+        {
+            key_sha256 = KeyDigest(key), plan, expires_at = expiresAt, source = "device-login",
+            recorded_at = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
+        };
+        WriteOwnerOnly(p, JsonSerializer.Serialize(record) + "\n");
+        return p;
+    }
+
+    /// Remove the device-login record; with <paramref name="unlessKey"/>, only when it describes a different key.
+    public static bool RemoveLicenseMeta(string? unlessKey = null)
+    {
+        var p = LicenseMetaPath();
+        if (!File.Exists(p)) return false;
+        if (unlessKey is not null)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(p));
+                if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("key_sha256", out var h)
+                    && h.ValueKind == JsonValueKind.String && h.GetString() == KeyDigest(unlessKey)) return false;
+            }
+            catch { /* unreadable: replace it */ }
+        }
+        try { File.Delete(p); } catch { return false; }
+        return true;
+    }
+
+    /// The expiry of the key a launch would use (license.ts licenseExpiry): source "device-login" when device login
+    /// recorded it for this very key (<see cref="LicenseExpiryInfo.ExpiresAt"/> null = no expiry); source "unknown" for any
+    /// other key; null without a key.
+    public static LicenseExpiryInfo? LicenseExpiry(string? @explicit = null)
+    {
+        var key = ResolveLicenseKey(@explicit);
+        if (key is null) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(LicenseMetaPath()));
+            var r = doc.RootElement;
+            if (r.ValueKind == JsonValueKind.Object && r.TryGetProperty("key_sha256", out var h) && h.ValueKind == JsonValueKind.String
+                && h.GetString() == KeyDigest(key))
+            {
+                string? S(string k) => r.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+                return new LicenseExpiryInfo("device-login", S("expires_at"), S("recorded_at"), ExpiryNote);
+            }
+        }
+        catch { /* no record */ }
+        return new LicenseExpiryInfo("unknown", null, null, ExpiryUnknownNote);
+    }
+
+    // Owner-only (0600) where the OS supports it: created so before the content goes in.
+    private static void WriteOwnerOnly(string path, string content)
+    {
+        if (OperatingSystem.IsWindows()) { File.WriteAllText(path, content); return; }
+        using (var fs = new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.Create, Access = FileAccess.Write, UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite,
+        }))
+        using (var w = new StreamWriter(fs, new UTF8Encoding(false))) w.Write(content);
+        try { File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite); } catch { /* not supported on this filesystem */ }
+    }
+
     /// A STABLE per-machine id so a restart REUSES its concurrency slot instead of spawning a second
     /// lease. Order: CLEARCOTE_INSTANCE_ID env &gt; ~/.clearcote/instance_id file &gt; a freshly generated id
     /// (persisted). Falls back to an ephemeral id if the file can't be written.
@@ -309,21 +439,24 @@ public static class License
     /// Send one lease call over <paramref name="route"/>. On the default route a lease server that does not
     /// answer (network error, timeout, 502/503/504/520-527/530, or a challenge page) gets the call sent once to
     /// the fallback, and is skipped for <see cref="PrimarySkipFor"/> after that.
-    internal static async Task<HttpResponseMessage> SendLeaseAsync(LeaseRoute route, Func<string, Task<HttpResponseMessage>> send)
+    /// <paramref name="via"/>: the proxy the call goes through, if any: a proxied route's skip is kept apart from
+    /// the direct one (the lease server can be unreachable from one network path and not the other).
+    internal static async Task<HttpResponseMessage> SendLeaseAsync(LeaseRoute route, Func<string, Task<HttpResponseMessage>> send, ProxySpec? via = null)
     {
         if (route.Fallback is null) return await send(route.Primary).ConfigureAwait(false);
-        if (_primaryDownUntil.TryGetValue(route.Primary, out var until) && Environment.TickCount64 < until)
+        var key = $"{route.Primary}|{via?.ServerString ?? ""}";
+        if (_primaryDownUntil.TryGetValue(key, out var until) && Environment.TickCount64 < until)
             return await send(route.Fallback).ConfigureAwait(false);
         HttpResponseMessage res;
         try { res = await send(route.Primary).ConfigureAwait(false); }
         catch (Exception e) when (IsNetworkError(e))
         {
-            _primaryDownUntil[route.Primary] = Environment.TickCount64 + (long)PrimarySkipFor.TotalMilliseconds;
+            _primaryDownUntil[key] = Environment.TickCount64 + (long)PrimarySkipFor.TotalMilliseconds;
             return await send(route.Fallback).ConfigureAwait(false);
         }
         if (!await NotAnsweredAsync(res).ConfigureAwait(false)) return res;
         res.Dispose();
-        _primaryDownUntil[route.Primary] = Environment.TickCount64 + (long)PrimarySkipFor.TotalMilliseconds;
+        _primaryDownUntil[key] = Environment.TickCount64 + (long)PrimarySkipFor.TotalMilliseconds;
         return await send(route.Fallback).ConfigureAwait(false);
     }
 
@@ -355,28 +488,34 @@ public static class License
     /// one, so a slow heartbeat cannot roll it back. Written to a temporary file and renamed into place.
     private static readonly object _graceLock = new();   // two browsers' heartbeats: compare and write as one step
 
-    private static void WriteGrace(string licenseKey, string token, long exp)
+    internal static void WriteGrace(string licenseKey, string token, long exp)
     {
         lock (_graceLock)
         {
             try
             {
                 if (ReadGrace(licenseKey) is { } held && (TokenIat(token) ?? 0) < (TokenIat(held.token) ?? 0)) return;
-                Directory.CreateDirectory(Native.ClearcoteDir);
-                var path = GracePath(licenseKey);
-                var tmp = $"{path}.tmp-{Guid.NewGuid():N}";
-                File.WriteAllText(tmp, JsonSerializer.Serialize(new { token, exp }));
-                for (var attempt = 0; ; attempt++)
-                {
-                    try { File.Move(tmp, path, overwrite: true); return; }
-                    catch (Exception e) when (OperatingSystem.IsWindows() && attempt < 9 && e is IOException or UnauthorizedAccessException)
-                    {
-                        Thread.Sleep(50); // Windows: a reader has the old one open this instant
-                    }
-                    catch { try { File.Delete(tmp); } catch { } throw; }
-                }
+                WriteAtomic(GracePath(licenseKey), JsonSerializer.Serialize(new { token, exp }));
             }
             catch { /* best-effort, like the lease cache */ }
+        }
+    }
+
+    /// Write <paramref name="path"/> through a temporary file renamed into place, so another process never reads
+    /// half of it. Throws on failure (the temporary file is removed).
+    private static void WriteAtomic(string path, string content)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var tmp = $"{path}.tmp-{Guid.NewGuid():N}";
+        File.WriteAllText(tmp, content);
+        for (var attempt = 0; ; attempt++)
+        {
+            try { File.Move(tmp, path, overwrite: true); return; }
+            catch (Exception e) when (OperatingSystem.IsWindows() && attempt < 9 && e is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(50); // Windows: a reader has the old one open this instant
+            }
+            catch { try { File.Delete(tmp); } catch { } throw; }
         }
     }
 
@@ -468,12 +607,12 @@ public static class License
     public static string NewLaunchId() => Guid.NewGuid().ToString("N");
 
     // token/exp/lease_id exactly as older SDKs read them; scope "machine" only for a confirmed machine lease.
-    private static void WriteCache(string licenseKey, string token, long exp, string? leaseId, bool machine)
+    internal static void WriteCache(string licenseKey, string token, long exp, string? leaseId, bool machine)
     {
         try
         {
-            Directory.CreateDirectory(Native.ClearcoteDir);
-            File.WriteAllText(CachePath(licenseKey), machine
+            // Atomically: another process reading it mid-write would see no cache and check out a lease of its own.
+            WriteAtomic(CachePath(licenseKey), machine
                 ? JsonSerializer.Serialize(new { token, exp, lease_id = leaseId, scope = "machine" })
                 : JsonSerializer.Serialize(new { token, exp, lease_id = leaseId }));
         }
@@ -546,7 +685,7 @@ public static class License
                 "The licence server could not be reached: a firewall in front of it answered with a security challenge " +
                 $"(HTTP {status}, {why}) instead of a licence verdict, so your licence was not checked (it is not revoked). " +
                 "This is usually temporary and tied to this machine's network: retry later, or send the licence calls " +
-                "through your proxy (LicenseThroughProxy = true).");
+                "through your proxy (LicenseThroughProxy = true).") { Status = status };
         try
         {
             using var doc = JsonDocument.Parse(text);
@@ -559,12 +698,12 @@ public static class License
         if (status == 429 && code == RateLimitedCode)
             throw new LicenseNoVerdictError(
                 $"{msg} The licence server limits how many requests one IP address sends; this is not your licence's " +
-                "browser limit. Retry in a minute.", RateLimitedCode, "rate limited");
-        if (status == 429 || code == "CONCURRENCY_LIMIT_EXCEEDED") throw new ConcurrencyLimitError(msg);
+                "browser limit. Retry in a minute.", RateLimitedCode, "rate limited") { Status = status };
+        if (status == 429 || code == "CONCURRENCY_LIMIT_EXCEEDED") throw new ConcurrencyLimitError(msg) { Status = status };
         if (status == 403 || code == "LICENSE_REVOKED" || code == "LICENSE_EXPIRED")
-            throw new LicenseRevokedError(msg);
-        if (status >= 500) throw new LicenseNoVerdictError(msg, code ?? $"HTTP_{status}", $"HTTP {status}");
-        throw new LicenseError(msg, code ?? $"HTTP_{status}");
+            throw new LicenseRevokedError(msg) { Status = status };
+        if (status >= 500) throw new LicenseNoVerdictError(msg, code ?? $"HTTP_{status}", $"HTTP {status}") { Status = status };
+        throw new LicenseError(msg, code ?? $"HTTP_{status}") { Status = status };
     }
 
     private const string RateLimitedCode = "RATE_LIMITED";
@@ -877,7 +1016,7 @@ public static class License
 
         /// A licence call over this lease's route (direct or through the proxy, with the default route's fallback).
         internal Task<HttpResponseMessage> PostAsync(string path, object body)
-            => SendLeaseAsync(_route, b => PostJsonAsync($"{b}{path}", _key, body, _proxy));
+            => SendLeaseAsync(_route, b => PostJsonAsync($"{b}{path}", _key, body, _proxy), _proxy);
 
         /// A per-browser lease's new run-token: remember the plan, and keep a paid one as the grace token.
         internal void OnBrowserToken(string token, long? exp)
@@ -1277,7 +1416,7 @@ public static class License
                 req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                 req.Headers.UserAgent.ParseAdd(LicenseUserAgent);
                 return await client.SendAsync(req, cts.Token).ConfigureAwait(false); // the body is read in full here
-            }).ConfigureAwait(false);
+            }, via).ConfigureAwait(false);
             var status = (int)res.StatusCode;
             int? used = null, limit = null;
             string? plan = null, error = null;
@@ -1332,3 +1471,12 @@ public static class License
         return outEnv;
     }
 }
+
+/// Where the licence key a launch would use comes from (<see cref="License.LicenseKeySource"/>): "option", "env",
+/// "file" or "none", and the key masked (null for "none").
+public sealed record LicenseKeySourceInfo(string Source, string? Masked);
+
+/// What is known about a licence key's expiry (<see cref="License.LicenseExpiry"/>). <see cref="Source"/>
+/// "device-login": <see cref="ExpiresAt"/> as the site reported it at <c>clearcote login --device</c> (null = no
+/// expiry), recorded at <see cref="RecordedAt"/>; "unknown": nothing recorded for this key.
+public sealed record LicenseExpiryInfo(string Source, string? ExpiresAt, string? RecordedAt, string Note);

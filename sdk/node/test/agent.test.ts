@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { agentArgs, splitAgentOptions, AGENT_KEYS, OPENROUTER_BASE_URL } from "../src/agent.js";
+import { agentArgs, splitAgentOptions, runAgentTask, AGENT_KEYS, OPENROUTER_BASE_URL } from "../src/agent.js";
 
 describe("agentArgs", () => {
   it("is off unless a key or url is set", () => {
@@ -64,5 +64,39 @@ describe("splitAgentOptions", () => {
     expect(new Set(AGENT_KEYS)).toEqual(
       new Set(["agentLlmUrl", "agentLlmKey", "agentModel", "agentToolMode", "agentTyping"])
     );
+  });
+});
+
+describe("runAgentTask", () => {
+  function fakePage(withBrowser: boolean) {
+    const log: Array<[string, string, unknown]> = [];
+    const session = (name: string) => ({
+      async send(method: string, params?: unknown) {
+        log.push([name, method, params]);
+        if (method === "Target.getTargetInfo") return { targetInfo: { targetId: "T1" } };
+        return { success: true, finalText: "done", stepsJson: '[{"action":"click"}]' };
+      },
+    });
+    const browser = { newBrowserCDPSession: async () => session("browser") };
+    // Older Playwright clients: a persistent context has no Browser.
+    const context = { browser: () => (withBrowser ? browser : null), newCDPSession: async () => session("page") };
+    return { page: { context: () => context } as never, log };
+  }
+
+  it("sends Browser.agentRunTask on a browser session when there is one", async () => {
+    const { page, log } = fakePage(true);
+    const r = await runAgentTask(page, "goal", { maxSteps: 3 });
+    expect(log.at(-1)).toEqual(["browser", "Browser.agentRunTask", { targetId: "T1", goal: "goal", maxSteps: 3 }]);
+    expect(r).toEqual({ success: true, finalText: "done", steps: [{ action: "click" }], stepsJson: '[{"action":"click"}]' });
+  });
+
+  it("falls back to the page's own session when context.browser() is null", async () => {
+    const { page, log } = fakePage(false);
+    const r = await runAgentTask(page, "goal", { model: "m" });
+    expect(log).toEqual([
+      ["page", "Target.getTargetInfo", undefined],
+      ["page", "Browser.agentRunTask", { targetId: "T1", goal: "goal", model: "m" }],
+    ]);
+    expect(r.success).toBe(true);
   });
 });

@@ -10,8 +10,10 @@ namespace Clearcote.Tests;
 ///
 /// WHY. The Node and Python engine route (Browser.dispatchPointerPath) walks in the browser process without waiting
 /// for the page, and a fresh headless browser's first page dropped that walk (SC 216, r38 and r40: 2-4 moves, some
-/// with no press). .NET has no engine route: every leg is a Playwright mouse move (Input.dispatchMouseEvent, which
-/// the renderer acknowledges), so its first click walked in full (measured 2026-10-13). This keeps it that way.
+/// with no press); the route now waits for two animation frames before it walks (IsolatedWorld.Frames). The .NET
+/// engine route takes coordinate clicks (and, with Engine "all", targeted ones); the locator clicks below stay on the
+/// SDK planner by default, where every leg is a Playwright mouse move (Input.dispatchMouseEvent, which the renderer
+/// acknowledges), so their first click walked in full (measured 2026-10-13). This keeps it that way.
 public class HumanizeFirstClickLiveTests
 {
     private static string? LiveExe => Environment.GetEnvironmentVariable("CLEARCOTE_LIVE_ENGINE");

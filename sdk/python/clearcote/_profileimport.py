@@ -40,16 +40,33 @@ def index_entry_from_profile(pid: str, profile: dict[str, Any]) -> Optional[dict
 
     ua = str(nav.get("user_agent") or "")
     platform = str(nav.get("platform") or "")
+    # UA-CH. Checked FIRST because it is the only source present on some real inputs: converted
+    # chrome-fingerprints records carry ``uadata.platform`` while leaving ``user_agent`` and
+    # ``platform`` null (the converter deliberately drops the browser version). Reading only the
+    # UA string silently skipped every one of those.
+    uadata = nav.get("uadata") if isinstance(nav.get("uadata"), dict) else {}
+    high = uadata.get("high_entropy") if isinstance(uadata.get("high_entropy"), dict) else {}
+    ch_platform = uadata.get("platform")
+    if ch_platform is None:
+        ch_platform = high.get("platform")
+    ch_platform = str(ch_platform or "")
+    ch_mobile = uadata.get("mobile")
+    if ch_mobile is None:
+        ch_mobile = high.get("mobile")
+    ch_mobile = bool(ch_mobile)
 
-    # navigator.platform first (stable across UA reduction), UA as the fallback.
-    if re.search(r"win", platform, re.I) or re.search(r"Windows", ua, re.I):
-        os_family = "windows"
-    elif re.search(r"mac", platform, re.I) or re.search(r"Mac OS X", ua, re.I):
-        os_family = "macos"
-    elif re.search(r"linux|x11", platform, re.I) or re.search(r"Linux", ua, re.I):
-        os_family = "linux"
-    elif re.search(r"android", ua, re.I):
+    # Same order as Node: UA-CH, then navigator.platform (stable across UA reduction), then the UA.
+    if ch_mobile or re.search(r"android", ch_platform, re.I) or re.search(r"android", ua, re.I):
         os_family = "android"
+    elif (re.search(r"windows|win", ch_platform, re.I) or re.search(r"win", platform, re.I)
+          or re.search(r"Windows", ua, re.I)):
+        os_family = "windows"
+    elif (re.search(r"macos|mac", ch_platform, re.I) or re.search(r"mac", platform, re.I)
+          or re.search(r"Mac OS X", ua, re.I)):
+        os_family = "macos"
+    elif (re.search(r"linux|chrome ?os|x11", ch_platform, re.I)
+          or re.search(r"linux|x11", platform, re.I) or re.search(r"Linux", ua, re.I)):
+        os_family = "linux"
     else:
         return None  # unclassifiable: skip rather than mislabel and mis-serve it
 

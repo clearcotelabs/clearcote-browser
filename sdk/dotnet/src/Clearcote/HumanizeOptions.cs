@@ -19,8 +19,10 @@ public sealed record HumanizeOptions
     /// <summary>Throw <see cref="HumanizeStrictException"/> instead of handing an action to Playwright's own call.</summary>
     public bool Strict { get; init; }
 
-    /// <summary>"auto" | "all" | "coords" | "off": which clicks the engine's pointer path walks. The .NET SDK has no
-    /// engine route yet; the value is kept (<see cref="Humanize.OptionsFor"/>) for parity with Python and Node.</summary>
+    /// <summary>"auto" | "all" | "coords" | "off": which clicks the engine's pointer path (Browser.dispatchPointerPath)
+    /// walks. "auto" reads <see cref="Humanize.EngineClicksEnv"/> (default "coords"); "coords" coordinate clicks
+    /// (<c>page.HumanClickAsync(x, y)</c>) only; "all" targeted selector / locator clicks too; "off" never, and no
+    /// engine typed run (Browser.dispatchKeySequence) either: everything stays on the SDK planner.</summary>
     public string Engine { get; init; } = "auto";
 
     /// <summary>"off" | "load" | "idle" (null = "off"): pointer activity without a target, read by the ambient code.</summary>
@@ -47,6 +49,19 @@ public sealed record HumanizeOptions
 
     /// <summary>Strict mode, all else default (Python's <c>humanize="strict"</c>).</summary>
     public static HumanizeOptions StrictMode => new() { Strict = true };
+
+    /// <summary>The JSON-able options (no callback, unset values left out): what a cloud launch sends as the session's
+    /// <c>humanizeOptions</c> (Node <c>humanizePayload</c>, Python <c>HumanizeOptions.to_payload</c>).</summary>
+    public System.Text.Json.Nodes.JsonObject ToPayload()
+    {
+        var o = new System.Text.Json.Nodes.JsonObject { ["preset"] = Preset, ["strict"] = Strict, ["engine"] = Engine };
+        if (Ambient is not null) o["ambient"] = Ambient;
+        if (TypoRate is { } t) o["typoRate"] = t;
+        if (Handedness is not null) o["handedness"] = Handedness;
+        if (DeviceHz is { } h) o["deviceHz"] = h;
+        if (InputDevice is not null) o["inputDevice"] = InputDevice;
+        return o;
+    }
 
     /// <summary>Throws <see cref="ArgumentException"/> on a value the other SDKs would refuse.</summary>
     public void Validate()

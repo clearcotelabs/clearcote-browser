@@ -76,6 +76,37 @@ public class ProMetaCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task Another_process_reuses_the_answer_kept_on_disk()
+    {
+        if (OperatingSystem.IsMacOS()) return;
+        await using var srv = new FakeBuildServer();
+        var cache = Cache();
+        var exe = await Ensure(srv, cache, key: "cc_lic_b");
+        Download.ForgetProMeta();                       // a fresh process: nothing in memory, the file on disk
+        Assert.Equal(exe, await Ensure(srv, cache, key: "cc_lic_b"));
+        Assert.Equal(1, srv.MetaHits);
+    }
+
+    [Fact]
+    public async Task The_in_process_memo_follows_the_file_so_another_home_asks_again()
+    {
+        // Keyed by the file's full path, as download.ts keys it: a home without the file has no answer kept.
+        if (OperatingSystem.IsMacOS()) return;
+        await using var srv = new FakeBuildServer();
+        var cache = Cache();
+        await Ensure(srv, cache);
+        Assert.Equal(1, srv.MetaHits);
+        using (var other = new Sandbox())
+        {
+            other.TempHome();
+            await Ensure(srv, cache);
+            Assert.Equal(2, srv.MetaHits);
+        }
+        await Ensure(srv, cache);                       // back home: the memo for this file still answers
+        Assert.Equal(2, srv.MetaHits);
+    }
+
+    [Fact]
     public async Task A_missing_build_asks_for_fresh_metadata_and_downloads_again()
     {
         if (OperatingSystem.IsMacOS()) return;

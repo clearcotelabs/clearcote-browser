@@ -1014,6 +1014,16 @@ def _info(container):
     return {k: container[k] for k in ("id", "image", "endpoint", "serve_protocol")}
 
 
+def _warn_request_api_unproxied(kwargs):
+    """The browser in the container uses the proxy; Playwright's request API runs here, over CDP, with no
+    proxy of its own (_reqproxy.py), so it connects from this machine."""
+    if kwargs.get("proxy"):
+        from ._reqproxy import warn_request_api
+        warn_request_api("clearcote: with docker, context.request / page.request do not use the proxy and connect "
+                         "from this machine's IP; make API calls inside the page (page.evaluate(\"fetch(...)\")) "
+                         "instead.", kwargs.get("quiet", False))
+
+
 def launch_docker(kwargs: dict):
     """``clearcote.launch()`` on macOS (see the module docstring): the Playwright Browser of a Clearcote
     container. ``close()`` disconnects and stops the container."""
@@ -1022,6 +1032,7 @@ def launch_docker(kwargs: dict):
     from ._humanize import install_humanize, install_humanize_on_context
 
     container = start_container(kwargs, quiet=kwargs.get("quiet", False))
+    _warn_request_api_unproxied(kwargs)
     disconnect = None
     try:
         browser = _playwright().chromium.connect_over_cdp(container["endpoint"], **_connect_options(kwargs))
@@ -1069,6 +1080,7 @@ async def launch_docker_async(kwargs: dict):
     from .async_api import _bind_driver, _install_headed_viewport, _start_driver
 
     container = await asyncio.to_thread(start_container, kwargs, kwargs.get("quiet", False))
+    _warn_request_api_unproxied(kwargs)
     pw = disconnect = None
     try:
         pw = await _start_driver()

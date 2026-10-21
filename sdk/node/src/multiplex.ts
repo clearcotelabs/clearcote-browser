@@ -243,6 +243,9 @@ export function originAllowed(origin: string | undefined, extra: readonly string
   }
 }
 
+/** A /json, /json/version or /json/list path appended to the query (see the request handler). */
+const QUERY_TAIL_PATH = /^(\?.*?)(\/json(?:\/version|\/list)?)\/?$/s;
+
 function idleTimeoutFromEnv(): number {
   const n = Number((process.env.CLEARCOTE_SERVE_IDLE_TIMEOUT ?? "").trim());
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -273,7 +276,10 @@ function optionsKey(options: Record<string, unknown>): string {
 export function hostAllowed(hostHeader: string | undefined, extra: readonly string[] = []): boolean {
   if (hostHeader === undefined) return true; // HTTP/1.0 client; nothing a browser page can omit
   const h = hostHeader.trim().toLowerCase();
-  const name = h.startsWith("[") ? h.slice(1, h.indexOf("]")) : h.replace(/:\d+$/, "");
+  // "[v6]:port", "name:port", or a name / bare IPv6 literal ("::1": several colons, no port to strip).
+  const name = h.startsWith("[")
+    ? h.slice(1, h.includes("]") ? h.indexOf("]") : undefined)
+    : (h.split(":").length === 2 ? h.slice(0, h.indexOf(":")) : h);
   if (!name) return false;
   if (net.isIP(name) || name === "localhost") return true;
   return extra.some((e) => e.toLowerCase() === name || e.toLowerCase() === h);
@@ -450,7 +456,17 @@ export async function serveMultiplex(options: MultiplexOptions = {}): Promise<Mu
       const refusal = requestRefusal(req.headers, allowOrigins, allowHosts);
       if (refusal) return sendJson(res, 403, { error: refusal });
       const u = new URL(req.url ?? "/", "http://mux.invalid");
-      const path = u.pathname.replace(/\/+$/, "") || "/";
+      let path = u.pathname.replace(/\/+$/, "") || "/";
+      let search = u.searchParams;
+      // Playwright clients up to 1.49 build the discovery URL by appending "/json/version/" to the
+      // endpoint string, so connectOverCDP("http://host:port?fingerprint=a") asks for
+      // GET /?fingerprint=a/json/version/: the path lands at the end of the query. (Newer releases
+      // append it to the URL's path.) A seed cannot contain '/', so nothing else matches.
+      const tail = path === "/" ? QUERY_TAIL_PATH.exec(u.search) : null;
+      if (tail) {
+        search = new URLSearchParams(tail[1]);
+        path = tail[2];
+      }
       const wsBase = publicWsBase(req.headers, `${host}:${actualPort()}`);
 
       if (req.method === "GET" && path === "/") return sendJson(res, 200, status());
@@ -463,7 +479,7 @@ export async function serveMultiplex(options: MultiplexOptions = {}): Promise<Mu
       }
 
       if (req.method === "GET" && (path === "/json/version" || path === "/json/list" || path === "/json")) {
-        const ident = parseConnectionIdentity(u.searchParams);
+        const ident = parseConnectionIdentity(search);
         const child = await ensureChild(ident);
         const upstream = await fetch(`http://127.0.0.1:${child.srv.port}${path === "/json" ? "/json/list" : path}`, {
           signal: AbortSignal.timeout(10_000),

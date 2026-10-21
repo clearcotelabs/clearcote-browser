@@ -84,10 +84,35 @@ def agent_args(opts):
     return args
 
 
-def _page_target_id(page):
-    session = page.context.new_cdp_session(page)
-    info = session.send("Target.getTargetInfo")
-    return info["targetInfo"]["targetId"]
+def _task_params(target_id, goal, model, max_steps, plan_json):
+    params = {"targetId": target_id, "goal": goal}
+    if max_steps is not None:
+        params["maxSteps"] = max_steps
+    if model is not None:
+        params["model"] = model
+    if plan_json is not None:
+        params["planJson"] = plan_json
+    return params
+
+
+def _task_failed(exc):
+    return RuntimeError(
+        "Browser.agentRunTask failed -- make sure this is a Clearcote build with the AI agent "
+        "and that the browser was launched with agent_llm_key/agent_llm_url set. "
+        f"Underlying error: {exc}")
+
+
+def _task_result(res):
+    try:
+        steps = json.loads(res.get("stepsJson") or "[]")
+    except ValueError:
+        steps = []
+    return {
+        "success": bool(res.get("success")),
+        "finalText": res.get("finalText", ""),
+        "steps": steps,
+        "stepsJson": res.get("stepsJson", "[]"),
+    }
 
 
 def run_agent_task(page, goal, model=None, max_steps=None, plan_json=None):
@@ -100,32 +125,30 @@ def run_agent_task(page, goal, model=None, max_steps=None, plan_json=None):
     ``model`` overrides the launch-time model for just this task. Returns a dict with keys
     ``success`` (bool), ``finalText`` (str), ``steps`` (parsed per-step journal) and ``stepsJson``
     (the raw string)."""
+    page_session = page.context.new_cdp_session(page)
+    target_id = page_session.send("Target.getTargetInfo")["targetInfo"]["targetId"]
+    # Sent on a browser session. Older Playwright clients give a PERSISTENT context (the one
+    # launch_agent returns) no Browser, though, so there the page's own session carries it: the
+    # engine serves the Browser domain on a page target's session too and finds the tab by targetId.
     browser = page.context.browser
-    if browser is None:
-        raise RuntimeError("run_agent_task: page is not attached to a Browser")
-    session = browser.new_browser_cdp_session()
-    params = {"targetId": _page_target_id(page), "goal": goal}
-    if max_steps is not None:
-        params["maxSteps"] = max_steps
-    if model is not None:
-        params["model"] = model
-    if plan_json is not None:
-        params["planJson"] = plan_json
+    session = browser.new_browser_cdp_session() if browser is not None else page_session
+    params = _task_params(target_id, goal, model, max_steps, plan_json)
     try:
         res = session.send("Browser.agentRunTask", params)
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            "Browser.agentRunTask failed -- make sure this is a Clearcote build with the AI agent "
-            "and that the browser was launched with agent_llm_key/agent_llm_url set. "
-            f"Underlying error: {exc}"
-        ) from exc
+        raise _task_failed(exc) from exc
+    return _task_result(res)
+
+
+async def run_agent_task_async(page, goal, model=None, max_steps=None, plan_json=None):
+    """:func:`run_agent_task` for an async Playwright ``page`` (``clearcote.async_api.run_agent_task``)."""
+    page_session = await page.context.new_cdp_session(page)
+    target_id = (await page_session.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
+    browser = page.context.browser  # None for a persistent context on older Playwright: see above
+    session = await browser.new_browser_cdp_session() if browser is not None else page_session
+    params = _task_params(target_id, goal, model, max_steps, plan_json)
     try:
-        steps = json.loads(res.get("stepsJson") or "[]")
-    except ValueError:
-        steps = []
-    return {
-        "success": bool(res.get("success")),
-        "finalText": res.get("finalText", ""),
-        "steps": steps,
-        "stepsJson": res.get("stepsJson", "[]"),
-    }
+        res = await session.send("Browser.agentRunTask", params)
+    except Exception as exc:  # noqa: BLE001
+        raise _task_failed(exc) from exc
+    return _task_result(res)

@@ -85,6 +85,7 @@ import { offlineKeyPath, requireOfflineBinary } from "./offline.js";
 export { OfflineKeyError, offlineLease, loadOfflineKey, OFFLINE_KEY_ENV } from "./offline.js";
 import { Cloud, cloudRequested, launchCloud, verifyWebhook, type CloudLaunchOptions, type CloudProfile } from "./cloud.js";
 import { dockerRequested, launchDocker, type DockerOption } from "./docker.js";
+import { closeOnFailure, requestProxyUpstream, routeRequestApi } from "./reqproxy.js";
 export { DockerUnavailableError, type DockerContainer, type DockerOption } from "./docker.js";
 
 export {
@@ -1115,10 +1116,15 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // SOCKS5-with-credentials must go through --proxy-server (Playwright rejects it); drop it from PW.
   const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
+  // Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
+  // instead of no proxy at all, which sent it from this machine's IP (./reqproxy.ts).
+  const reqRoute = proxy === undefined ? await routeRequestApi(proxyOpt as PwProxy | undefined, proxyArgs, quiet) : null;
   // proxy unchanged unless it was rerouted to --proxy-server (drop it from Playwright) or its URL
   // carried the credentials (hand Playwright the fields it reads)
-  if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
+  if (reqRoute) (pwOptions as PlaywrightLaunchOptions).proxy = reqRoute.proxy.playwrightProxy as PlaywrightLaunchOptions["proxy"];
+  else if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
   else (pwOptions as PlaywrightLaunchOptions).proxy = proxy as PlaywrightLaunchOptions["proxy"];
+  if (reqRoute) proxyArgs.push(...reqRoute.args);
   const stockArgs = stockRuntimeArgs(exe, stockRuntime, args ?? [], quiet);  // engine r32+, opt-in
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless,
@@ -1163,7 +1169,8 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
       ...(env ? { env } : {}),
       args: finalArgs,
     });
-  }, exe)), launchToken);
+  }, exe)), launchToken).catch(closeOnFailure(reqRoute));
+  if (reqRoute) browser.on("disconnected", () => { void reqRoute.proxy.close(); });
   // Release the concurrency slot + remove the run-token file when the browser closes.
   if (lease) browser.on("disconnected", () => { void lease.stop(); launchToken?.release(); });
   if (headed && headedLinuxFit(engineArgs, process.platform, exe)) {
@@ -1235,8 +1242,12 @@ async function launchLocalPersistentContext(
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
   const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
-  if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
+  // As launch(): the request API reaches the proxy through a local forwarder (./reqproxy.ts).
+  const reqRoute = proxy === undefined ? await routeRequestApi(proxyOpt as PwProxy | undefined, proxyArgs, quiet) : null;
+  if (reqRoute) (pwOptions as PlaywrightLaunchOptions).proxy = reqRoute.proxy.playwrightProxy as PlaywrightLaunchOptions["proxy"];
+  else if (proxy === undefined) delete (pwOptions as Record<string, unknown>).proxy;
   else (pwOptions as PlaywrightLaunchOptions).proxy = proxy as PlaywrightLaunchOptions["proxy"];
+  if (reqRoute) proxyArgs.push(...reqRoute.args);
   const stockArgs = stockRuntimeArgs(exe, stockRuntime, args ?? [], quiet);  // engine r32+, opt-in
   emitCoherenceWarnings(
     { ...fingerprint, proxy: proxyOpt, geoip, headless: (pwOptions as PlaywrightLaunchOptions).headless,
@@ -1305,7 +1316,8 @@ async function launchLocalPersistentContext(
   const headedFit = opts.headless === false && headedLinuxFit(engineArgs, process.platform, exe);
   const launchArgs = [...engineArgs, ...(geom?.args ?? []), ...widevineCdm];
   // the readiness probe's port must bypass a launch proxy, so its server starts first
-  if (crlsetPlan) launchArgs.push(...(await crlsetPlan.beforeLaunch(opts as { proxy?: { bypass?: string } })));
+  // The forwarder (reqRoute) is a proxy Playwright holds but the browser does not use: no <-loopback> to work around.
+  if (crlsetPlan) launchArgs.push(...(await crlsetPlan.beforeLaunch(reqRoute ? {} : opts as { proxy?: { bypass?: string } })));
   let context: BrowserContext;
   try {
     context = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
@@ -1322,8 +1334,10 @@ async function launchLocalPersistentContext(
     }, exe)), launchToken);
   } catch (e) {
     crlsetPlan?.close();
+    await reqRoute?.proxy.close().catch(() => {});
     throw e;
   }
+  if (reqRoute) context.on("close", () => { void reqRoute.proxy.close(); });
   if (lease) context.on("close", () => { void lease.stop(); launchToken?.release(); });
   if (crlsetPlan) await crlsetPlan.wait(context);  // before anything touches the first tab: it must stay idle on about:blank
   if (geom || headedFit) await installWindowFixup(context, engineArgs, geom ?? FIT_PLAN);
@@ -1561,6 +1575,10 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // passProxy: what is left for a plain --proxy-server once credentials went to the engine's own
   // switches (undefined then — proxyArgs already carries --proxy-server).
   const { args: proxyArgs, proxy: passProxy } = resolveProxy(proxyOpt, engineSupportsSwitch(exe, "proxy-auth"));
+  // A client attached over CDP runs Playwright's request API in its own process with no proxy of its
+  // own (./reqproxy.ts): nothing here can route it, so say so.
+  if (!quiet && !process.env.CLEARCOTE_NO_WARN && requestProxyUpstream(proxyOpt, proxyArgs))
+    console.warn("clearcote: context.request / page.request of a client attached over CDP do not use this proxy and connect from the client's own IP; make API calls inside the page (page.evaluate(() => fetch(...))) instead.");
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt, quiet);
   const stockArgs = stockRuntimeArgs(exe, stockRuntime, userArgs ?? [], quiet);  // engine r32+, opt-in
   emitCoherenceWarnings(

@@ -196,6 +196,8 @@ const browser = await launch({
 
 **WebRTC won't leak your real IP.** The engine *fabricates* the WebRTC server-reflexive (`srflx`) candidate at `webrtcIp` and sends **no real STUN** from your host — so WebRTC reports the proxy IP and your real IP never leaks at the packet level. A plain candidate "relabel" doesn't stop the leak (the real STUN packet still goes out from your host); Clearcote sends none. Raw host candidates are suppressed, and the candidate set stays coherent (not empty/disabled).
 
+**`context.request` and `page.request` use the proxy too.** Playwright sends its request API from the driver, not the browser, through the proxy in Playwright's own options. A proxy with credentials is handed to the engine instead (credentials in Playwright's options switch on request interception for the whole context, a detectable side effect), so from 0.59.0 the SDK starts a small proxy on `127.0.0.1` for the request API: it adds your credentials and tunnels to your proxy (HTTP, HTTPS or SOCKS5; SOCKS5 resolves names at the proxy). The browser itself still connects to your proxy directly. Before 0.59.0 these calls connected from your own IP. The request API still uses Node's TLS stack, not Chrome's, so for requests a site should see as the browser, call `fetch` inside the page (`page.evaluate(() => fetch(url))`). A client attached to `serve()` over CDP runs the request API in its own process, where the SDK cannot route it.
+
 ### Auto geo-match (`geoip`)
 
 Set `geoip: true` and Clearcote resolves the **proxy's exit IP** (looked up *through* the proxy) and auto-fills any unset `timezone`, `acceptLanguage`, `location`, **and `webrtcIp`** so the whole identity — clock, language, geo, and WebRTC IP — matches the proxy's region:
@@ -647,7 +649,7 @@ schema (`--fingerprint-schema=1`..`3`) keeps its previous window too, unless you
 `--fingerprint-window=on`.
 
 >
-> **Proxies:** a SOCKS5 proxy with credentials — written in the URL (`socks5://user:pass@host:port`) or passed as `username`/`password` — is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor), and the credentials are passed to the engine, which implements SOCKS5 username/password authentication (RFC 1929). Stock Chromium does not, so no local relay is needed.
+> **Proxies:** a SOCKS5 proxy with credentials — written in the URL (`socks5://user:pass@host:port`) or passed as `username`/`password` — is routed via `--proxy-server` (Playwright rejects credentials in its SOCKS descriptor), and the credentials are passed to the engine, which implements SOCKS5 username/password authentication (RFC 1929). Stock Chromium does not, so the browser needs no local relay; only Playwright's request API goes through the SDK's local forwarder (see *Through a proxy*).
 
 ## Personas & Client Hints coherence
 

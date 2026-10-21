@@ -494,6 +494,39 @@ public sealed class DockerLaunchTests : IDisposable
         Assert.DoesNotContain("published a few minutes", e.Message);
     }
 
+    [Fact]
+    public async Task LaunchEphemeralProfileAsync_on_a_Mac_without_the_native_build_runs_the_image_too()
+    {
+        // index.ts launch(): the ephemeral-profile launch is the default there, and on a Mac without the native PRO
+        // build it starts the Docker image. LaunchEphemeralProfileAsync is that launch in .NET: same routing.
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        var (fakeBrowser, fake) = CloudTests.FakeBrowser.Make();
+        DockerLaunch.ConnectOverride = (_, _) => Task.FromResult(fakeBrowser);
+        var context = await Clearcote.LaunchEphemeralProfileAsync(new LaunchOptions { Fingerprint = "seed-1", Quiet = true });
+        Assert.Contains("create", _docker.Commands);
+        Assert.Equal("c0ffee1234", Clearcote.DockerContainerOf(context)?.Id);
+        Assert.Same(fake.Context, ((CloudLaunch.ContextProxy)(object)context).Target);   // the container browser's own context
+        Assert.NotSame(fakeBrowser, context.Browser);                                    // the container's browser proxy
+        await context.CloseAsync();                                                      // closes the browser: the container stops
+        Assert.True(fake.Closed);
+        Assert.Contains("stop", _docker.Commands);
+        // An option only a local launch can take is refused by name, as LaunchAsync refuses it.
+        var e = await Assert.ThrowsAsync<ArgumentException>(() => Clearcote.LaunchEphemeralProfileAsync(
+            new LaunchOptions { PortableProfile = true, Quiet = true }));
+        Assert.Contains("PortableProfile", e.Message);
+    }
+
+    [Fact]
+    public void The_new_local_only_options_are_refused_by_Docker_and_cloud_launches()
+    {
+        foreach (var name in new[] { "PortableProfile", "EncryptionKey", "PlaywrightLaunchOptions", "PlaywrightContextOptions" })
+        {
+            Assert.Contains(DockerLaunch.RefusedOptions, p => p.Name == name);
+            Assert.Contains(CloudLaunch.LocalOnlyOptions, p => p.Name == name);
+        }
+    }
+
     // ── CloseAsync: the container is gone when it returns ───────────────────────────────────────────
 
     /// An IBrowser whose CloseAsync does nothing: what BrowserProxy closes besides the container.
@@ -943,6 +976,26 @@ public sealed class DockerLaunchTests : IDisposable
         await Assert.ThrowsAsync<PlaywrightException>(() => Clearcote.LaunchAsync(new LaunchOptions { Quiet = true }));
         Assert.Equal(new[] { "stop", "rm", "ps" }, _docker.Commands[^3..]);
         Assert.Equal(new[] { new[] { "--time", "10", "c0ffee1234" }, new[] { "-f", "-v", "c0ffee1234" } }, _docker.StopsAndRms);
+    }
+
+    [Fact]
+    public async Task A_proxy_warns_that_the_request_api_does_not_use_it()
+    {
+        // Playwright's request API runs in this process over CDP, with no proxy of its own (RequestProxy).
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Marks = new() { ServeState("licensed", "http://proxy.example:8080", 30, true, "engine") };
+        DockerLaunch.ConnectOverride = (_, _) => throw new PlaywrightException("connect failed");
+        using (var err = new StderrCapture())
+        {
+            await Assert.ThrowsAsync<PlaywrightException>(() => Clearcote.LaunchAsync(Keyed()));
+            Assert.Contains(RequestProxy.DockerWarning, err.Text);
+        }
+        using (var quiet = new StderrCapture())
+        {
+            await Assert.ThrowsAsync<PlaywrightException>(() => Clearcote.LaunchAsync(Keyed(new LaunchOptions { Quiet = true })));
+            Assert.DoesNotContain(RequestProxy.DockerWarning, quiet.Text);
+        }
     }
 
     [Fact]

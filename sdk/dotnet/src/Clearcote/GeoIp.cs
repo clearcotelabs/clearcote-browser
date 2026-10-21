@@ -349,15 +349,20 @@ public static class GeoIp
            "sticky session (most providers take a session id in the proxy username).";
 
     // geoip resolves the exit once; a proxy that hands out a new exit per connection makes that answer
-    // stale at once. Checked in the background (it never blocks or fails the launch), one warning.
-    private static void WarnOnEgressDrift(ProxyOptions? proxy, string? firstIp, bool quiet)
+    // stale at once. Checked alongside the launch (it never fails it), one warning. The launch awaits the
+    // returned task before it returns (geoip.ts startEgressDriftCheck), so the warning lands with the launch.
+    internal static Task StartEgressDriftCheck(ProxyOptions? proxy, string? firstIp, bool quiet)
     {
         if (quiet || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLEARCOTE_NO_WARN")) ||
-            string.IsNullOrEmpty(proxy?.Server) || string.IsNullOrEmpty(firstIp)) return;
-        _ = Task.Run(async () =>
+            string.IsNullOrEmpty(proxy?.Server) || string.IsNullOrEmpty(firstIp)) return Task.CompletedTask;
+        return Task.Run(async () =>
         {
-            var newIp = await CheckEgressDriftAsync(proxy, firstIp).ConfigureAwait(false);
-            if (newIp is not null) Console.Error.WriteLine($"clearcote: warning: {EgressDriftMessage(firstIp!, newIp)}");
+            try
+            {
+                var newIp = await CheckEgressDriftAsync(proxy, firstIp).ConfigureAwait(false);
+                if (newIp is not null) Console.Error.WriteLine($"clearcote: warning: {EgressDriftMessage(firstIp!, newIp)}");
+            }
+            catch { /* never fails the launch */ }
         });
     }
 
@@ -369,6 +374,11 @@ public static class GeoIp
     internal static Func<ProxyOptions?, bool, int?, Task<GeoResult>> Resolver = ResolveDetailedAsync;
 
     public static async Task ApplyAsync(FingerprintOptions fp, ProxyOptions? proxy, bool quiet = false, int? timeoutMs = null)
+        => _ = await ApplyForLaunchAsync(fp, proxy, quiet, timeoutMs).ConfigureAwait(false);   // the drift check runs on in the background
+
+    /// <see cref="ApplyAsync"/> for a launch: returns the egress-drift check it started, which the launch awaits
+    /// before it returns.
+    internal static async Task<Task> ApplyForLaunchAsync(FingerprintOptions fp, ProxyOptions? proxy, bool quiet = false, int? timeoutMs = null)
     {
         var result = await Resolver(proxy, quiet, timeoutMs).ConfigureAwait(false);
         var geo = result.Geo;
@@ -377,7 +387,7 @@ public static class GeoIp
             if (!string.IsNullOrEmpty(fp.Timezone) && !string.IsNullOrEmpty(fp.AcceptLanguage))
             {
                 if (!quiet) Console.Error.WriteLine($"clearcote: geoip could not resolve the region ({result.Reason}); using the explicit timezone and acceptLanguage.");
-                return;
+                return Task.CompletedTask;
             }
             var whose = string.IsNullOrEmpty(proxy?.Server) ? "connection's" : "proxy's";
             throw new GeoipException(
@@ -389,7 +399,7 @@ public static class GeoIp
         if (string.IsNullOrEmpty(fp.AcceptLanguage) && !string.IsNullOrEmpty(geo.AcceptLanguage)) fp.AcceptLanguage = geo.AcceptLanguage;
         if (string.IsNullOrEmpty(fp.Location) && !string.IsNullOrEmpty(geo.Location)) fp.Location = geo.Location;
         if (string.IsNullOrEmpty(fp.WebrtcIp) && !string.IsNullOrEmpty(geo.Ip)) fp.WebrtcIp = geo.Ip;
-        WarnOnEgressDrift(proxy, geo.Ip, quiet);
+        return StartEgressDriftCheck(proxy, geo.Ip, quiet);
     }
 
     // country (ISO-3166 alpha-2) -> the OS locale a machine there most plausibly runs. ONE tag, not a

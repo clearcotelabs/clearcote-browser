@@ -185,20 +185,7 @@ public static partial class Humanize
     /// a FrameLocator, and a locator made on a child <see cref="IFrame"/> is told by the frame it was made on (read
     /// through Playwright's Locator._frame); false when that cannot be read, which takes Playwright's own box.</summary>
     internal static bool InMainFrame(ILocator loc)
-    {
-        if (IsFrameLocator(loc)) return false;
-        try
-        {
-            const BindingFlags F = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-            for (var t = loc.GetType(); t is not null; t = t.BaseType)
-                if (t.GetField("_frame", F)?.GetValue(loc) is IFrame f) return f.ParentFrame is null;
-        }
-        catch (Exception)
-        {
-            // not this Playwright's shape
-        }
-        return false;
-    }
+        => !IsFrameLocator(loc) && FrameOf(loc) is { ParentFrame: null };   // FrameOf: Frames.cs
 
     private static async Task<bool> PressAndHoldCoreAsync(ILocator loc, PressAndHoldOptions o, MouseButton button,
         double total, CancellationToken ct)

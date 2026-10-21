@@ -124,9 +124,33 @@ public class LaunchOptsTests
         var (a2, p2) = LaunchOpts.ResolveProxy(socksNoCreds);
         Assert.Empty(a2); Assert.Same(socksNoCreds, p2);
 
+        // an engine without --proxy-auth (before r19): http(s) credentials stay with Playwright
         var httpAuth = new ProxyOptions { Server = "http://h:8080", Username = "u", Password = "p" };
         var (a3, p3) = LaunchOpts.ResolveProxy(httpAuth);
         Assert.Empty(a3); Assert.Same(httpAuth, p3);
+        var (a3b, p3b) = LaunchOpts.ResolveProxy(httpAuth, engineSupportsProxyAuth: false);
+        Assert.Empty(a3b); Assert.Same(httpAuth, p3b);
+    }
+
+    // Parity with Node's and Python's resolveProxy: on an engine with --proxy-auth (r19+) http(s) credentials go
+    // to the engine too, so Playwright never turns on Fetch interception + setCacheDisabled for them.
+    [Fact]
+    public void ResolveProxy_moves_http_credentials_to_proxy_auth_when_the_engine_has_it()
+    {
+        var (a, p) = LaunchOpts.ResolveProxy(new ProxyOptions { Server = "http://h:8080", Username = "u", Password = "p:w" }, engineSupportsProxyAuth: true);
+        Assert.Equal(new[] { "--proxy-server=http://h:8080", "--proxy-auth=u:p:w" }, a);
+        Assert.Null(p);
+        // https, URL credentials (decoded, stripped from --proxy-server), and the bypass list travelling along
+        var (a2, p2) = LaunchOpts.ResolveProxy(new ProxyOptions { Server = "HTTPS://us%40er:p%21@h:443", Bypass = " *.internal " }, engineSupportsProxyAuth: true);
+        Assert.Equal(new[] { "--proxy-server=HTTPS://h:443", "--proxy-auth=us@er:p!", "--proxy-bypass-list=*.internal" }, a2);
+        Assert.Null(p2);
+        // no credentials: nothing to move
+        var plain = new ProxyOptions { Server = "http://h:8080" };
+        var (a3, p3) = LaunchOpts.ResolveProxy(plain, engineSupportsProxyAuth: true);
+        Assert.Empty(a3); Assert.Same(plain, p3);
+        // SOCKS5 is unchanged by the flag
+        var (a4, _) = LaunchOpts.ResolveProxy(new ProxyOptions { Server = "socks5://h:1080", Username = "u", Password = "p" }, engineSupportsProxyAuth: true);
+        Assert.Equal(new[] { "--proxy-server=socks5://h:1080", "--socks5-credentials=u:p" }, a4);
     }
 
     // Regression (found 2026-09-24, proven at runtime on r27): credentials written INTO the URL were
