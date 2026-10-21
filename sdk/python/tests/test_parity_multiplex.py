@@ -18,6 +18,8 @@ from clearcote._multiplex import (
     QUERY_PARAMS,
     SEED_PATTERN,
     MultiplexRequestError,
+    _js_number,
+    _rewrite_frontend_url,
     host_allowed,
     origin_allowed,
     parse_connection_identity,
@@ -86,6 +88,24 @@ def test_parameter_only_identity_is_stable():
     assert p("platform=linux")["id"] != a["id"]
 
 
+def test_parameter_only_ids_match_the_node_sdk():
+    # Computed with the Node SDK (JSON.stringify of the sorted [key, value] pairs); the same vectors are
+    # in sdk/node/test/parity-multiplex.test.ts and the .NET MultiplexTests.
+    from urllib.parse import quote
+    assert p("platform=macos&brand=Edge")["id"] == "_p9bebdd7bbfdbb6c2"
+    assert p("hardware-concurrency=8&device-pixel-ratio=1.25&fingerprint-noise=false&locale=de-DE"
+             "&timezone=Europe/Berlin&proxy=" + quote("socks5://u:p+w@h.test:1080", safe=""))["id"] == "_p07a2e37476a5fbf5"
+    # Number("1.0") === 1 in Node: the same identity as "1".
+    assert p("device-pixel-ratio=1.0")["id"] == p("device-pixel-ratio=1")["id"]
+
+
+def test_js_number_prints_like_javascript():
+    for n, js in ((1.0, "1"), (8, "8"), (1.25, "1.25"), (-0.5, "-0.5"), (0.0, "0"), (1e-7, "1e-7"),
+                  (0.000001, "0.000001"), (1e16, "10000000000000000"), (1e21, "1e+21"),
+                  (123456789012345680000.0, "123456789012345680000"), (1.5e300, "1.5e+300"), (2.5e-10, "2.5e-10")):
+        assert _js_number(n) == js, n
+
+
 def test_engine_extras_are_kebab_params():
     assert QUERY_PARAMS["allow-third-party-cookies"] == "allow_third_party_cookies"
     assert QUERY_PARAMS["transparent-proxy"] == "transparent_proxy"
@@ -124,8 +144,17 @@ def test_host_allowed():
     assert host_allowed("cdp.example.com:443", ["CDP.example.com"])
 
 
+def test_rewrite_frontend_url_only_the_first_ws():
+    url = "/devtools/inspector.html?ws=127.0.0.1:1/devtools/page/p1&x=1&ws=127.0.0.1:1/devtools/page/p2"
+    assert _rewrite_frontend_url(url, "h:9", "/fingerprint/a") ==         "/devtools/inspector.html?ws=h:9/fingerprint/a/devtools/page/p1&x=1&ws=127.0.0.1:1/devtools/page/p2"
+
+
 def test_request_forbidden():
     assert request_forbidden({"host": "127.0.0.1"}) is None
+    # As in Node: an explicitly allowed Origin may come cross-site.
+    allowed = {"host": "127.0.0.1", "sec-fetch-site": "cross-site", "origin": "https://tool.example"}
+    assert request_forbidden(allowed, ["https://tool.example"]) is None
+    assert request_forbidden(allowed) == "Forbidden: cross-site request"
     assert request_forbidden({"host": "127.0.0.1", "sec-fetch-site": "cross-site"})
     assert request_forbidden({"host": "127.0.0.1", "sec-fetch-site": "same-site"})
     assert request_forbidden({"host": "127.0.0.1", "sec-fetch-site": "none"}) is None
@@ -277,6 +306,21 @@ def test_routes_per_identity_reuses_seed_and_rewrites(mux):
     assert a2["webSocketDebuggerUrl"] == a1["webSocketDebuggerUrl"]
     assert "/fingerprint/acct-2/devtools/browser/" in b["webSocketDebuggerUrl"]
     assert d["webSocketDebuggerUrl"] == f"ws://127.0.0.1:{m.port}/devtools/browser/uuid-1"
+
+
+def test_playwright_149_query_tail_path(mux):
+    # Playwright <= 1.49 appends "/json/version/" to the whole endpoint string, query included.
+    m, browsers = mux()
+    code, a = get_json(f"{m.url}/?fingerprint=old-pw&platform=windows/json/version/")
+    assert code == 200
+    assert a["webSocketDebuggerUrl"] == f"ws://127.0.0.1:{m.port}/fingerprint/old-pw/devtools/browser/uuid-1"
+    assert browsers[0].options["platform"] == "windows"
+    code, lst = get_json(f"{m.url}/?fingerprint=old-pw&platform=windows/json/list")
+    assert code == 200 and lst[0]["id"] == "p1"
+    assert get_json(f"{m.url}/?fingerprint=old-pw&platform=windows/json")[0] == 200
+    assert len(browsers) == 1
+    assert get_json(f"{m.url}/?fingerprint=a/b")[0] == 200  # not a /json tail: the status page
+    assert get_json(f"{m.url}/json/version?fingerprint=a/b")[0] == 400
 
 
 def test_conflicting_parameters_for_running_identity_409(mux):

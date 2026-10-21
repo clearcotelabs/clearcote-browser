@@ -32,6 +32,26 @@ DEFAULT_LOCAL_DIR = os.environ.get("CLEARCOTE_PROFILE_SOURCE") or os.path.join(
 )
 
 
+#: First engine major that implements ``--fingerprint-profile``.
+#:
+#: BACKWARDS COMPATIBILITY, AND WHY THIS IS A HARD GATE. The free 149 build has no persona-profile
+#: patch, so it does not merely apply the profile badly -- it ignores the switch entirely, and
+#: Chromium discards unknown switches silently. A 149 user who asked for a profile would launch
+#: with NO persona while believing they had one, which is strictly worse than the seed farbling
+#: 149 does support. So a profile is never sent to an engine that cannot read it.
+MIN_PROFILE_ENGINE_MAJOR = 150
+
+
+def engine_supports_profiles(browser_major: Any) -> bool:
+    """Whether this engine can actually apply an imported profile."""
+    if isinstance(browser_major, bool):
+        return False
+    try:
+        return int(browser_major) >= MIN_PROFILE_ENGINE_MAJOR
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def local_setup_hint(directory: str) -> str:
     """How to populate a local backup directory.
 
@@ -73,28 +93,44 @@ def _local_index_cache_path() -> str:
     return os.path.join(profile_cache_dir(), "local-index.json")
 
 
+def _same_mtime(cached: dict[str, Any], mtime_ms: float, mtime_s: float) -> bool:
+    """Whether a cached local index was taken at this directory mtime.
+
+    Node's ``statSync().mtimeMs`` and ``st_mtime_ns / 1e6`` can differ in the last float bits, so
+    ``mtimeMs`` is compared to the microsecond rather than for exact equality.
+    """
+    ms = cached.get("mtimeMs")
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool):
+        return abs(ms - mtime_ms) < 0.001
+    return cached.get("mtime") == mtime_s  # written by an older Python SDK
+
+
 def load_local_index(directory: str) -> list[dict[str, Any]]:
     """Index a directory, cached and invalidated by its mtime.
 
     Reading every file for a 10k-profile directory is seconds of I/O — far too slow to repeat per
     launch. Keying on mtime means newly converted profiles are picked up without a manual step.
     """
-    mtime = os.stat(directory).st_mtime
+    st = os.stat(directory)
+    # The cache file is shared with the Node SDK, which keys it on ``mtimeMs`` (milliseconds,
+    # fractional). Writing a different key made each SDK re-index after the other, so this one
+    # writes Node's key and still reads the older ``mtime`` (seconds) entries it used to write.
+    mtime_ms = st.st_mtime_ns / 1e6
     path = _local_index_cache_path()
     if os.path.isfile(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 c = json.load(f)
-            if c.get("dir") == directory and c.get("mtime") == mtime:
+            if c.get("dir") == directory and _same_mtime(c, mtime_ms, st.st_mtime):
                 return c["index"]
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             pass  # fall through and re-index
 
     index = import_directory(directory)["index"]
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"dir": directory, "mtime": mtime, "index": index}, f)
+            json.dump({"dir": directory, "mtimeMs": mtime_ms, "index": index}, f)
     except OSError:
         pass  # a cache write failure must never fail a launch
     return index

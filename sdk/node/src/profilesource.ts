@@ -8,8 +8,8 @@
 // free. That is why this module caches aggressively on disk: a sticky identity must resolve to
 // the same profile every launch without spending budget or requiring the network.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { PROFILE_DIR } from "./profile.js";
 import {
   selectProfile,
@@ -58,19 +58,45 @@ export function hostOsFamily(): string {
 // one-off no-persona launch. That is expensive (a browser start), so the result is cached on
 // disk and keyed by the engine binary — a different build may report a different GL string.
 
-interface CachedHost extends HostFacts { _exe: string; _at: string; }
+// `_at` is an ISO time when this SDK wrote it and epoch seconds when the Python or .NET SDK did.
+interface CachedHost extends HostFacts { _exe: string; _at: string | number; }
 
 function hostCachePath(): string {
   return join(cacheDir(), "host.json");
 }
 
+/**
+ * One cache key per BINARY, not per spelling of its path, computed as the Python SDK does it
+ * (`os.path.normcase(os.path.realpath(exe))`) so both SDKs hit the same host.json entry: symlinks
+ * resolved, and on Windows lower-cased with backslashes. A path that does not resolve keeps its
+ * absolute form, as Python's non-strict realpath does.
+ */
+export function hostExeKey(exe: string): string {
+  let p: string;
+  try {
+    p = realpathSync.native(exe);
+  } catch {
+    p = resolve(exe);
+  }
+  return process.platform === "win32" ? p.replace(/\//g, "\\").toLowerCase() : p;
+}
+
+/** `_at` as epoch milliseconds, from either format; NaN when unreadable (treated as expired). */
+function cachedAtMs(v: unknown): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v * 1000;
+  if (typeof v === "string" && v) return Date.parse(v);
+  return Number.NaN;
+}
+
 export function readCachedHost(exe: string): HostFacts | null {
   try {
     const c = JSON.parse(readFileSync(hostCachePath(), "utf8")) as CachedHost;
-    if (c._exe !== exe) return null;               // different binary: re-measure
+    // Different binary: re-measure. The literal path, as older Node SDKs wrote it, is still honoured.
+    if (c._exe !== hostExeKey(exe) && c._exe !== exe) return null;
     // Host hardware does not change often, but a monitor or driver swap does; a month is a
     // reasonable compromise between staleness and paying for a launch every run.
-    if (Date.now() - Date.parse(c._at) > 30 * 86_400_000) return null;
+    const at = cachedAtMs(c._at);
+    if (!(Date.now() - at <= 30 * 86_400_000)) return null;
     return c;
   } catch {
     return null;
@@ -79,7 +105,7 @@ export function readCachedHost(exe: string): HostFacts | null {
 
 export function writeCachedHost(exe: string, facts: HostFacts): void {
   try {
-    writeFileSync(hostCachePath(), JSON.stringify({ ...facts, _exe: exe, _at: new Date().toISOString() }, null, 1));
+    writeFileSync(hostCachePath(), JSON.stringify({ ...facts, _exe: hostExeKey(exe), _at: new Date().toISOString() }, null, 1));
   } catch {
     /* a cache write failure must never fail a launch */
   }

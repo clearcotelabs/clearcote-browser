@@ -279,9 +279,28 @@ def _write_cache(license_key: str, token: str, exp: float, lease_id: str | None 
     try:
         p = _cache_path(license_key)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(d))
+        _replace_atomically(p, json.dumps(d))
     except OSError:
         pass
+
+
+def _replace_atomically(p: Path, text: str) -> None:
+    """Write ``text`` to ``p`` whole, then rename it into place.
+
+    Another process (or this one's next launch) reading the file while a heartbeat replaces it must see the old
+    content or the new, never an empty or half-written file. Raises OSError; callers treat a write as optional."""
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(text)
+        for _ in range(10):
+            try:
+                os.replace(tmp, p)
+                break
+            except PermissionError:  # Windows: a reader has the file open for a moment
+                time.sleep(0.02)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def _grace_path(license_key: str) -> Path:
@@ -325,20 +344,7 @@ def _write_grace(license_key: str, token, exp) -> None:
             if kept_iat is not None and (new_iat is None or new_iat < kept_iat):
                 return
             p.parent.mkdir(parents=True, exist_ok=True)
-            # Written whole, then renamed into place: another process (or this one's next launch) reading the file
-            # while a heartbeat replaces it must see the old token or the new one, never an empty file.
-            tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-            try:
-                tmp.write_text(json.dumps({"token": token, "exp": exp}))
-                for _ in range(10):
-                    try:
-                        os.replace(tmp, p)
-                        break
-                    except PermissionError:  # Windows: a reader has the file open for a moment
-                        time.sleep(0.02)
-            finally:
-                if tmp.exists():
-                    tmp.unlink()
+            _replace_atomically(p, json.dumps({"token": token, "exp": exp}))
         except OSError:
             pass
 
@@ -823,12 +829,14 @@ class _MachineLease:
                         # Not a machine lease (no launch asked for it): give it back, retry on the next beat.
                         self._send("/api/v1/lease/checkin", {"lease_id": b2.get("lease_id")})
                     elif st2 == 200:
+                        # Re-checkout without a launch_id keeps a machine lease a machine lease, but it does
+                        # not CONFIRM one: _machine_known stays as it was (as in Node), so a lease kept alive
+                        # from an unmarked file is not newly written as "machine".
                         with self._lock:
                             self.lease_id = b2["lease_id"]
                             self.token = b2["token"]
                             self.exp = float(b2["exp"])
-                            self._machine_known = True
-                        _write_cache(self._key, b2["token"], b2["exp"], b2["lease_id"])
+                        _write_cache(self._key, b2["token"], b2["exp"], b2["lease_id"], self._cache_scope())
                 elif status == 200 and body.get("token"):
                     with self._lock:
                         self.token = body["token"]

@@ -184,16 +184,41 @@ def _exe_key(exe: str) -> str:
         return os.path.normcase(exe)
 
 
+def _cached_at(v: Any) -> Optional[float]:
+    """``_at`` as epoch seconds, or None when unreadable.
+
+    host.json is shared by the three SDKs: this one (and .NET) writes epoch seconds, Node writes an
+    ISO time. Reading only the number made a Node-written cache raise TypeError and fail
+    ``profile="auto"`` outright, instead of being reused or, at worst, re-measured.
+    """
+    from datetime import datetime, timezone
+
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str) and v:
+        try:
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    return None
+
+
 def read_cached_host(exe: str) -> Optional[dict[str, Any]]:
     import time
 
     try:
         with open(_host_cache_path(), "r", encoding="utf-8") as f:
             c = json.load(f)
-        if c.get("_exe") != _exe_key(exe):
+        if not isinstance(c, dict) or c.get("_exe") != _exe_key(exe):
             return None  # different binary: re-measure
-        if time.time() - c.get("_at", 0) > _HOST_CACHE_MAX_AGE:
-            return None
+        at = _cached_at(c.get("_at"))
+        if at is None or time.time() - at > _HOST_CACHE_MAX_AGE:
+            return None  # unreadable or stale: a miss, never a launch failure
         return c
     except (OSError, ValueError):
         return None

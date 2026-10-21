@@ -75,7 +75,16 @@ export interface AutoResult {
 // far too slow to repeat per launch. The cache is keyed by directory and invalidated by its
 // mtime, so adding or converting more profiles is picked up without a manual step.
 
-interface CachedLocalIndex { dir: string; mtimeMs: number; index: ProfileIndexEntry[]; }
+// The file is shared with the Python SDK. `mtimeMs` is the format both write now; `mtime` (seconds) is what
+// older Python SDKs wrote and read, so it is written too and accepted when `mtimeMs` is absent.
+interface CachedLocalIndex { dir: string; mtimeMs?: number; mtime?: number; index: ProfileIndexEntry[]; }
+
+/** The cached directory mtime in milliseconds, from either field; NaN when absent. */
+function cachedMtimeMs(c: CachedLocalIndex): number {
+  if (typeof c.mtimeMs === "number") return c.mtimeMs;
+  if (typeof c.mtime === "number") return c.mtime * 1000;
+  return Number.NaN;
+}
 
 function localCachePath(): string {
   const d = join(PROFILE_DIR, "library");
@@ -89,14 +98,16 @@ export function loadLocalIndex(dir: string): ProfileIndexEntry[] {
   if (existsSync(path)) {
     try {
       const c = JSON.parse(readFileSync(path, "utf8")) as CachedLocalIndex;
-      if (c.dir === dir && c.mtimeMs === mtimeMs) return c.index;
+      // Within a microsecond, not exact: seconds * 1000 (and another SDK's own conversion) can differ
+      // from Node's mtimeMs in the last float bits, and no filesystem stamps finer than 100 ns.
+      if (c.dir === dir && Math.abs(cachedMtimeMs(c) - mtimeMs) < 0.001 && Array.isArray(c.index)) return c.index;
     } catch {
       /* fall through and re-index */
     }
   }
   const { index } = importDirectory(dir);
   try {
-    writeFileSync(path, JSON.stringify({ dir, mtimeMs, index } satisfies CachedLocalIndex));
+    writeFileSync(path, JSON.stringify({ dir, mtimeMs, mtime: mtimeMs / 1000, index } satisfies CachedLocalIndex));
   } catch {
     /* a cache write failure must never fail a launch */
   }

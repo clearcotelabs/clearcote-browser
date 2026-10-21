@@ -1401,8 +1401,21 @@ def _keep_pro_meta(cache_key, meta):
     try:
         path = _pro_meta_path(cache_key)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(entry, f)
+        # Written whole, then renamed into place: another process reading it mid-write must see the old
+        # answer or the new one, never a truncated file (which reads as a miss and spends a download call).
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(entry, f)
+            for _ in range(10):
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:  # Windows: a reader has the file open for a moment
+                    time.sleep(0.02)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
     except OSError:
         pass  # this process still has it
 
