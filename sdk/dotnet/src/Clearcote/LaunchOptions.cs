@@ -69,6 +69,23 @@ public class LaunchOptions : FingerprintOptions
     /// its own (false is accepted, and ignored, by cloud and Docker launches; true is refused there). See
     /// <see cref="global::Clearcote.Widevine"/>.</para>
     public bool? Widevine { get; set; }
+    /// Chrome's certificate revocation list (CRLSet), which the engine never downloads, so revoked or distrusted
+    /// CA keys stay trusted without it. OPT-IN, persistent and ephemeral-profile launches only.
+    ///
+    /// <para>True seeds the current CRLSet into the profile (fetched from Google's component updater on first use,
+    /// cached in CLEARCOTE_CRLSET_DIR, else ~/.clearcote/crlset, refreshed every 6 h) and the launch waits, a few
+    /// seconds, until the engine has it live. False turns it off. Null (the default) follows CLEARCOTE_CRLSET
+    /// (1/true/on/yes: on, nowait: on without waiting, anything else: off). Never fails a launch: a problem is
+    /// said once on stderr and the launch goes on. See <see cref="global::Clearcote.Crlset"/>.</para>
+    public bool? Crlset { get; set; }
+    /// Seed this CRLSet (a crl-set file, or a component directory such as Chrome's CertificateRevocation) instead
+    /// of the cached one; turns the CRLSet on unless <see cref="Crlset"/> is false.
+    public string? CrlsetPath { get; set; }
+    /// True: seed the CRLSet without waiting for it (live once the first tab has been idle for a moment); turns the
+    /// CRLSet on unless <see cref="Crlset"/> is false.
+    public bool? CrlsetNoWait { get; set; }
+    /// The longest the launch waits for the CRLSet to be live, in seconds. Null = CLEARCOTE_CRLSET_TIMEOUT, else 15.
+    public double? CrlsetTimeout { get; set; }
 
     // ── binary resolution ────────────────────────────────────────────────────
     /// Explicit chrome binary path (wins over everything, incl. CLEARCOTE_BINARY and the auto-download).
