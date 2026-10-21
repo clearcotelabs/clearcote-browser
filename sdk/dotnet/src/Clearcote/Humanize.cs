@@ -388,23 +388,6 @@ public static partial class Humanize
     private static double Rand(double lo, double hi) => lo + Rnd.NextDouble() * (hi - lo);
 
     /// <summary>
-    /// Give the pointer an origin when it has never had one: start somewhere plausible rather than
-    /// teleporting from (0,0), which is itself a shape a real session does not produce.
-    /// </summary>
-    /// <summary>
-    /// The REAL viewport, in CSS px — NOT <c>page.ViewportSize</c>.
-    ///
-    /// Clearcote.cs sets <c>ViewportSize = ViewportSize.NoViewport</c> on every headed context launch
-    /// (and on headless ones where the engine's persona owns the screen), so
-    /// that innerWidth tracks the real OS window instead of Playwright's emulated 1280x720 (an
-    /// emulated viewport on a headed window is itself a tell). With NoViewport, page.ViewportSize is
-    /// null for the life of the page, so a <c>?? 1280 / ?? 800</c> fallback was taken on EVERY headed
-    /// run: the scroll anchor's "is the pointer inside the viewport" test then compared against a box
-    /// unrelated to the window, and on a maximized display a cursor legitimately at x=1400 read as
-    /// out-of-bounds and got re-homed on every scroll — the exact motion that gate exists to avoid.
-    /// innerWidth/innerHeight are correct in both modes; the constant is a last resort only.
-    /// </summary>
-    /// <summary>
     /// Is this Playwright failure a TIMEOUT?
     ///
     /// Playwright for .NET exports exactly ONE exception type — <c>PlaywrightException</c>. There is
@@ -428,6 +411,19 @@ public static partial class Humanize
     private static bool IsTimeoutError(Exception e) =>
         e is System.TimeoutException || (e is PlaywrightException pe && IsTimeout(pe));
 
+    /// <summary>
+    /// The REAL viewport, in CSS px — NOT <c>page.ViewportSize</c>.
+    ///
+    /// Clearcote.cs sets <c>ViewportSize = ViewportSize.NoViewport</c> on every headed context launch
+    /// (and on headless ones where the engine's persona owns the screen), so
+    /// that innerWidth tracks the real OS window instead of Playwright's emulated 1280x720 (an
+    /// emulated viewport on a headed window is itself a tell). With NoViewport, page.ViewportSize is
+    /// null for the life of the page, so a <c>?? 1280 / ?? 800</c> fallback was taken on EVERY headed
+    /// run: the scroll anchor's "is the pointer inside the viewport" test then compared against a box
+    /// unrelated to the window, and on a maximized display a cursor legitimately at x=1400 read as
+    /// out-of-bounds and got re-homed on every scroll — the exact motion that gate exists to avoid.
+    /// innerWidth/innerHeight are correct in both modes; the constant is a last resort only.
+    /// </summary>
     private static async Task<(double W, double H)> ViewportAsync(IPage page)
     {
         try
@@ -445,6 +441,10 @@ public static partial class Humanize
         return (vp?.Width ?? 1280, vp?.Height ?? 800);
     }
 
+    /// <summary>
+    /// Give the pointer an origin when it has never had one: start somewhere plausible rather than
+    /// teleporting from (0,0), which is itself a shape a real session does not produce.
+    /// </summary>
     private static async Task SeedPointerAsync(IPage page, Persona p, PointerState st)
     {
         if (st.Known) return;
@@ -458,20 +458,22 @@ public static partial class Humanize
     /// <summary>
     /// Glide the cursor to a point along a planned path, dispatching every sample. <c>settle</c> adds
     /// the seating jiggle a hand makes when it stops on a target — what a range thumb needs at the end
-    /// of a drag leg to register the final value.
+    /// of a drag leg to register the final value. <c>held</c>: a button is down (<see cref="HumanMoveAsync"/> between
+    /// <see cref="HumanMouseDownAsync"/> and <see cref="HumanMouseUpAsync"/>), so the move is a drag leg planned by
+    /// <see cref="Motion.PlanDrag"/>, on the line from grab to drop, and scored as one.
     /// </summary>
     private static async Task GlideAsync(IPage page, Persona p, PointerState st, double toX, double toY,
-        double targetW, bool settle = false)
+        double targetW, bool settle = false, bool held = false)
     {
         KeysOf(page).Typed = null;   // the hand left the keyboard: no submit / Tab pause owed
         // A page the pointer has not been over yet (nothing placed it): the path comes in over the top edge, as the
         // engine's own first path does (pro-r43-13), and the samples still above the view are not sent
         // (Motion.EntryPoint / EnterFromTop) -- the page's first pointer event is at the edge, not mid-page (lab row
-        // H 13). A seating drag never starts a page: its press glided first.
-        bool entering = !st.Known && !settle;
+        // H 13). A seating drag or a held leg never starts a page: its press glided first.
+        bool entering = !st.Known && !settle && !held;
         var vp = await ViewBoundsAsync(page, st).ConfigureAwait(false);
         var from = entering ? Motion.EntryPoint(new Point(toX, toY), vp?.W ?? 0) : new Point(st.X, st.Y);
-        var steps = Motion.PlanMove(from, new Point(toX, toY), p, targetW, settle);
+        var steps = Motion.PlanMove(from, new Point(toX, toY), p, targetW, settle, held: held);
         if (entering) steps = Motion.EnterFromTop(steps, from);
         double tempo = Tempo(page);   // HumanizeOptions.Preset: every planned duration x1.4 / x1.0 / x0.7
         if (tempo != 1.0) steps = steps.ConvertAll(s => s with { SleepMs = s.SleepMs * tempo });
@@ -484,7 +486,8 @@ public static partial class Humanize
         // the ~27 ms move round trip to every 6-8 ms sample: a 1.05 s planned glide took 3.5-5.4 s on
         // PRO r38 (SC 209).
         await Pacing.WalkAsync(vp is { } v ? Pacing.KeepInView(steps, v.W, v.H) : steps,
-            (x, y) => page.Mouse.MoveAsync((float)x, (float)y)).ConfigureAwait(false);
+            (x, y) => page.Mouse.MoveAsync((float)x, (float)y), kind: held ? "drag" : "glide", buttons: held ? 1 : 0)
+            .ConfigureAwait(false);
         st.X = toX;
         st.Y = toY;
         st.Known = true;
@@ -1966,7 +1969,6 @@ public static partial class Humanize
         await page.Keyboard.TypeAsync(ch).ConfigureAwait(false);
     }
 
-    /// <summary>Lane A's preset scales on the persona (Tempo, PauseScale) when this build has them, else 1.</summary>
     /// <summary>The focused field's current value, read in the isolated world (null if unknown).</summary>
     private static async Task<string?> ActiveValueAsync(IPage page)
     {
@@ -2466,6 +2468,36 @@ public static partial class Humanize
     }
 
     /// <summary>
+    /// The first element matching <paramref name="selector"/>, focused as
+    /// <see cref="HumanFocusAsync(ILocator,float?)"/> does (page actions are not strict); Playwright's
+    /// <c>page.FocusAsync</c> for an activatable target out of Tab reach (reported) and for anything the humane
+    /// route cannot do. Python/Node <c>page.focus(selector)</c> under humanize.
+    /// </summary>
+    public static async Task HumanFocusAsync(this IPage page, string selector, float? timeout = null)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        ArgumentNullException.ThrowIfNull(selector);
+        var loc = page.Locator(selector).First;
+        await SerialAsync(page, async () =>
+        {
+            string why;
+            try
+            {
+                if (await RoutableAsync(loc, strict: false).ConfigureAwait(false)
+                    && await FocusTargetAsync(loc, timeout).ConfigureAwait(false))
+                    return;
+                why = "an activatable target out of Tab reach";
+            }
+            catch (Exception e) when (!Propagates(e))
+            {
+                why = "native focus";
+            }
+            Report(page, "HumanFocusAsync", why, selector);
+            await page.FocusAsync(selector, new PageFocusOptions { Timeout = timeout }).ConfigureAwait(false);
+        }).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Leave the focused element the way the persona leaves fields: Tab to the next stop, or a click on a blank
     /// point beside it (Keys.BlankPoint; Tab when there is none), verified; Playwright's BlurAsync otherwise.
     /// </summary>
@@ -2781,12 +2813,12 @@ public static partial class Humanize
             .ConfigureAwait(false);
         // Every pause here is the persona's (TimingTraits.PauseScale): the windows were one fixed set for every identity.
         await Task.Delay((int)Motion.PauseMs(p, 220, 480)).ConfigureAwait(false);   // the list opens; the eye finds the option
-        double tempo = Motion.TimingTraitsOf(p).PauseScale;
+        double pace = Motion.TimingTraitsOf(p).PauseScale * Tempo(page);   // the persona's deliberation x the preset
         foreach (var ch in plan.Keys)
         {
             await page.Keyboard.PressAsync(ch.ToString(), new KeyboardPressOptions { Delay = (float)Motion.KeyDwell(p) })
                 .ConfigureAwait(false);
-            await Task.Delay((int)Math.Max(40, Gauss(100, 35) * tempo)).ConfigureAwait(false);   // well inside type-ahead's 1 s window
+            await Task.Delay((int)Math.Max(40, Gauss(100, 35) * pace)).ConfigureAwait(false);   // well inside type-ahead's 1 s window
         }
         if (plan.Arrows != 0)
         {
@@ -3797,6 +3829,10 @@ public static partial class Humanize
     /// <summary>This click: on the label? An unseeded draw (Random.Shared, or a test's own) against the share.</summary>
     internal static bool LabelDraw(Persona p, Random? rng = null) => (rng ?? Rnd).NextDouble() < LabelShareOf(p);
 
+    // Test seam: this page's visible-checkbox clicks all take (true) or skip (false) the label, in place of the draw
+    // (Python's monkeypatched label_draw, Node's persona.labelShare = 1).
+    internal static readonly ConditionalWeakTable<IPage, StrongBox<bool>> LabelDrawOverride = new();
+
     /// <summary>The persona's trait (lane B's aim traits, a salted stream of its seed, 0.25-0.55): the share of
     /// visible-checkbox clicks that land on the label text. <see cref="LabelShare"/> is the old single value.</summary>
     internal static double LabelShareOf(Persona p) => Motion.AimTraitsOf(p).LabelShare;
@@ -3832,7 +3868,8 @@ public static partial class Humanize
             if (lab is not { ValueKind: JsonValueKind.Object } l || !l.TryGetProperty("label", out var lb)
                 || lb.ValueKind != JsonValueKind.Object || (l.TryGetProperty("hidden", out var h) && h.ValueKind == JsonValueKind.True))
                 return null;
-            if (!LabelDraw(PersonaFor(page))) return null;   // the persona's share; THIS click's choice is unseeded
+            bool onLabel = LabelDrawOverride.TryGetValue(page, out var forced) ? forced.Value : LabelDraw(PersonaFor(page));
+            if (!onLabel) return null;   // the persona's share; THIS click's choice is unseeded
             // A label that WRAPS its control: LabelOf's text rect is the content clear of the input's box (SC 239 box
             // probe, 10-17: the first content rect IS the input's box, and taking it for the text put every "label"
             // click on the input -- lab F_label_visible 0/60, verifier B 0/20). No text left (a label holding only the
@@ -3904,7 +3941,8 @@ public static partial class Humanize
             await GlideAsync(page, p, st, x, y, 24).ConfigureAwait(false);
             st.Known = true;
             await PressAtAsync(page, p, o).ConfigureAwait(false);
-        }).ConfigureAwait(false);
+            ScheduleMoveOff(page, p, st);   // the hand drifts off afterwards, as after a targeted click (Node mouse.click)
+        }, coords: true).ConfigureAwait(false);
     }
 
     /// <summary>

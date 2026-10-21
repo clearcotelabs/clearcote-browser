@@ -141,6 +141,7 @@ public static partial class Clearcote
         if (CloudLaunch.Requested(options)) return await CloudLaunch.LaunchBrowserAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         // macOS without the native PRO build: the Clearcote Docker image, connected over CDP.
         if (DockerLaunch.Requested(options)) return await DockerLaunch.LaunchBrowserAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
+        var hz = HumanizeLaunch.Of(options, cloud: false);   // Humanize / ShowCursor: a bad option throws before anything starts
         CheckPlaywrightPassThrough(options);
         var prepared = await PrepareLaunchAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         options = prepared.Options;
@@ -215,7 +216,8 @@ public static partial class Clearcote
             };
         }
         await egressDrift.ConfigureAwait(false);   // a rotating proxy's warning lands before the launch returns
-        return browser;
+        // Every page and context it makes (and their popups) gets the persona of the fingerprint seed.
+        return (hz with { Seed = options.Fingerprint }).Wrap(browser);
     }
 
     static readonly System.Runtime.CompilerServices.ConditionalWeakTable<IBrowser, Task> LeaseReleases = new();
@@ -294,6 +296,7 @@ public static partial class Clearcote
     {
         if (CloudLaunch.Requested(options))
             return await CloudLaunch.LaunchContextAsync(options!, persistent: true, userDataDir).ConfigureAwait(false);
+        var hz = HumanizeLaunch.Of(options, cloud: false);   // Humanize / ShowCursor: a bad option throws before anything starts
         CheckPlaywrightPassThrough(options, context: true);
         var prepared = await PrepareLaunchAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         options = prepared.Options;
@@ -401,6 +404,8 @@ public static partial class Clearcote
         if (geometry.Mode != Geometry.Mode.None || headedFit)
             await Geometry.InstallWindowFixupAsync(context, args, geometry).ConfigureAwait(false);
         await egressDrift.ConfigureAwait(false);   // a rotating proxy's warning lands before the launch returns
+        // Every page (and popup) of the context gets the persona of the fingerprint seed.
+        Humanize.Install(context, hz with { Seed = options.Fingerprint });
         return context;
     }
 

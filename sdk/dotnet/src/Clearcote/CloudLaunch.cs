@@ -35,7 +35,9 @@ internal static class CloudLaunch
 
     // ... and those handled on THIS side: the switch, the account, and Playwright's connect options. StockRuntime
     // (engine r32+) is a local and Docker option: a cloud launch only says once that it was not applied.
-    internal static readonly string[] SdkSideOptions = { "Cloud", "CloudClient", "ApiKey", "ApiUrl", "Quiet", "SlowMo", "Timeout", "StockRuntime" };
+    // Humanize / HumanizeOptions / ShowCursor run in the SDK, exactly as for a local browser (HumanizeSession).
+    internal static readonly string[] SdkSideOptions = { "Cloud", "CloudClient", "ApiKey", "ApiUrl", "Quiet", "SlowMo", "Timeout", "StockRuntime",
+        "Humanize", "HumanizeOptions", "ShowCursor" };
 
     // How long the connect waits when the caller gives no Timeout (Playwright's own default is 30 s).
     // The browser starts as the client connects, and a launch with a country can take over 30 s; a
@@ -99,10 +101,29 @@ internal static class CloudLaunch
 
     internal static async Task<IBrowser> LaunchBrowserAsync(LaunchOptions o)
     {
-        var body = Cloud.SessionBody(SessionOptionsOf(o), run: false);
+        var session = SessionOptionsOf(o);
+        var hz = HumanizeSession(session, o);
+        var body = Cloud.SessionBody(session, run: false);
         LaunchOpts.WarnStockRuntimeCloud(o.StockRuntime, o.Quiet);
-        var (browser, _) = await ConnectAsync(o, body, persistent: false).ConfigureAwait(false);
+        var (browser, _) = await ConnectAsync(o, body, persistent: false, hz).ConfigureAwait(false);
         return browser;
+    }
+
+    /// <summary>
+    /// A cloud launch humanizes in the SDK by default, exactly as a local launch with Humanize: the persona's
+    /// cadence, clicks and the wheel. The hosted browser would also move the client's mouse along human paths by
+    /// itself, so the session says <c>humanize: false</c>: two humanizers would fight over the cursor. Humanize = false
+    /// turns the SDK's off as well (none at all). An options object runs in the SDK too; the session carries a copy as
+    /// <c>humanizeOptions</c> (a separate key: the API answers 400 to a non-boolean humanize). The persona seed is the
+    /// fingerprint, else the identity label, so one identity keeps one hand across sessions. (Node cloud.ts, Python
+    /// cloud.py.) Throws on a bad option before the session is created.
+    /// </summary>
+    internal static HumanizeLaunch HumanizeSession(CloudSessionOptions session, LaunchOptions o)
+    {
+        var hz = HumanizeLaunch.Of(o, cloud: true, seed: (object?)o.Fingerprint ?? o.Identity);
+        session.Humanize = false;
+        if (hz.Options is not null && o.HumanizeOptions is not null) session.HumanizeOptions = hz.Options;
+        return hz;
     }
 
     /// <paramref name="persistent"/>: a cloud profile is required, loaded and saved back on close (the
@@ -112,6 +133,7 @@ internal static class CloudLaunch
     {
         if (userDataDir is not null) throw new ArgumentException(UserDataDirMsg);
         var session = SessionOptionsOf(o);
+        var hz = HumanizeSession(session, o);
         LaunchOpts.WarnStockRuntimeCloud(o.StockRuntime, o.Quiet);
         if (persistent)
         {
@@ -120,14 +142,15 @@ internal static class CloudLaunch
                     "LaunchPersistentContextAsync with Cloud needs Profile = \"name\": the cloud profile whose cookies it loads and saves back when it closes");
             session.Profile = new CloudProfile { Name = session.Profile.Name, Persist = session.Profile.Persist ?? true };
         }
-        var (_, context) = await ConnectAsync(o, Cloud.SessionBody(session, run: false), persistent: true).ConfigureAwait(false);
+        var (_, context) = await ConnectAsync(o, Cloud.SessionBody(session, run: false), persistent: true, hz).ConfigureAwait(false);
         return context!;
     }
 
     /// Create the session and connect; nothing is left behind when a step after the create fails: the
     /// connection is closed and the session stopped (keep-alive or not), so a failed launch never keeps a
     /// billed browser running.
-    private static async Task<(IBrowser Browser, IBrowserContext? Context)> ConnectAsync(LaunchOptions o, JsonObject body, bool persistent)
+    private static async Task<(IBrowser Browser, IBrowserContext? Context)> ConnectAsync(LaunchOptions o, JsonObject body, bool persistent,
+        HumanizeLaunch hz)
     {
         var client = o.CloudClient ?? new Cloud(o.ApiKey, o.ApiUrl);
         var created = await client.Browsers.CreateRawAsync(body).ConfigureAwait(false);
@@ -150,13 +173,15 @@ internal static class CloudLaunch
 
             var info = created is JsonObject obj ? (JsonObject)obj.DeepClone() : new JsonObject();
             info.Remove("connectUrl");   // single-use and holds a token
-            var browser = BrowserProxy.Wrap(real, state);
+            // the session's own context and its tabs, and every page and context made later, are humanized
+            var browser = hz.Wrap(BrowserProxy.Wrap(real, state));
             Sessions.AddOrUpdate(real, info);
             Sessions.AddOrUpdate(browser, info);
             if (!persistent) return (browser, null);
 
             var ctx = real.Contexts.FirstOrDefault()
                 ?? await real.NewContextAsync(new BrowserNewContextOptions { ViewportSize = ViewportSize.NoViewport }).ConfigureAwait(false);
+            Humanize.Install(ctx, hz);   // made past the wrapper when the session had none (a no-op when hooked)
             var context = ContextProxy.Wrap(ctx, browser);
             Sessions.AddOrUpdate(ctx, info);
             Sessions.AddOrUpdate(context, info);

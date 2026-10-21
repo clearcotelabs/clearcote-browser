@@ -274,7 +274,8 @@ public static partial class Humanize
     private static async Task IdleDriftAsync(IPage page, Persona p, PointerState st, double ms)
     {
         Trace(AfterOf(page), "drift", ms);
-        await SeedPointerAsync(page, p, st).ConfigureAwait(false);
+        // No placing glide first: AmbientPlan itself comes in over the top edge on a page the pointer has not been
+        // over yet, inside the drift's budget (Node idleDrift, Python _idle_drift; SC 239).
         var (w, h) = await ViewportAsync(page).ConfigureAwait(false);
         var steps = Pacing.TrimTo(AmbientPlan(st, p, w, h, ms, AfterRngOf(page, p)), ms);
         await WalkStepsAsync(page, st, steps).ConfigureAwait(false);

@@ -213,6 +213,24 @@ public partial class LaunchOptions : FingerprintOptions
     /// it replaces only the User-Agent string, not the rest of the persona.
     public BrowserTypeLaunchPersistentContextOptions? PlaywrightContextOptions { get; set; }
 
+    // ── humanize (local, Docker and cloud launches; an SDK option, never sent to the browser) ──
+    /// Attach a motor persona to every page the launch makes: each page of the browser or context, every page a
+    /// new context opens, and every popup (window.open, target=_blank), seeded from <see cref="FingerprintOptions.Fingerprint"/>
+    /// so an identity moves the same way on every launch and in every SDK (no fingerprint: a random persona per
+    /// launch). The .NET input methods stay explicit (<c>HumanClickAsync</c> beside <c>ClickAsync</c>, see
+    /// <see cref="global::Clearcote.Humanize"/>); this gives them the identity's persona and <see cref="HumanizeOptions"/>.
+    /// True turns it on, false off. Null: off for a local or Docker launch, on for a cloud launch (where the SDK
+    /// humanizes and the hosted browser's own mouse humanizer is switched off: <c>humanize: false</c> in the session).
+    /// Python/Node <c>humanize=</c>.
+    public bool? Humanize { get; set; }
+    /// The humanize options every page is attached with (preset, strict, engine, ambient, ...); setting it turns
+    /// <see cref="Humanize"/> on unless that is false. A bad value throws before anything starts. A cloud launch also
+    /// sends them as the session's <c>humanizeOptions</c>.
+    public HumanizeOptions? HumanizeOptions { get; set; }
+    /// Show a red cursor dot that follows the pointer on every page (a visualization: <see cref="global::Clearcote.Humanize.CursorOverlay"/>).
+    /// Python <c>show_cursor</c>, Node <c>showCursor</c>.
+    public bool? ShowCursor { get; set; }
+
     // ── macOS: the Clearcote Docker image ────────────────────────────────────
     // Without the native PRO build (a licence key on an Apple Silicon Mac), LaunchAsync on macOS runs the
     // Clearcote Docker image and connects to it (see Clearcote.LaunchAsync).

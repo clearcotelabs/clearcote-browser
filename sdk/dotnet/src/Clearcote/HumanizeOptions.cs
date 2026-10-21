@@ -50,6 +50,19 @@ public sealed record HumanizeOptions
     /// <summary>Strict mode, all else default (Python's <c>humanize="strict"</c>).</summary>
     public static HumanizeOptions StrictMode => new() { Strict = true };
 
+    /// <summary>The JSON-able options (no callback, unset values left out): what a cloud launch sends as the session's
+    /// <c>humanizeOptions</c> (Node <c>humanizePayload</c>, Python <c>HumanizeOptions.to_payload</c>).</summary>
+    public System.Text.Json.Nodes.JsonObject ToPayload()
+    {
+        var o = new System.Text.Json.Nodes.JsonObject { ["preset"] = Preset, ["strict"] = Strict, ["engine"] = Engine };
+        if (Ambient is not null) o["ambient"] = Ambient;
+        if (TypoRate is { } t) o["typoRate"] = t;
+        if (Handedness is not null) o["handedness"] = Handedness;
+        if (DeviceHz is { } h) o["deviceHz"] = h;
+        if (InputDevice is not null) o["inputDevice"] = InputDevice;
+        return o;
+    }
+
     /// <summary>Throws <see cref="ArgumentException"/> on a value the other SDKs would refuse.</summary>
     public void Validate()
     {
