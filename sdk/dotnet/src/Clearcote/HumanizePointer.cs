@@ -31,7 +31,9 @@ public static partial class Humanize
         await SerialAsync(page, async () =>
         {
             var p = PersonaFor(page);
-            // seam: an engine pointer path takes the move here when it can (a held leg needs the buttons carried)
+            // r43 engine (SC 232 lane H): a held leg takes the engine route, buttons carried on every sample, answered
+            // after the walk (Node mouse.move). A bare move stays on the SDK glide (the engine overruns its walk).
+            if (held && await EngineHeldLegAsync(page, x, y, st.HeldButton).ConfigureAwait(false)) return;
             await GlideAsync(page, p, st, x, y, 24, held: st.Held).ConfigureAwait(false);
         }, after: !held, coords: true).ConfigureAwait(false);
         if (held) AfterOf(page).LastEnd = NowMs();
@@ -59,6 +61,7 @@ public static partial class Humanize
                 await PrePressAsync(PersonaFor(page)).ConfigureAwait(false);
             }
             st.Held = true;
+            st.HeldButton = options?.Button switch { MouseButton.Right => "right", MouseButton.Middle => "middle", _ => "left" };
             try
             {
                 await page.Mouse.DownAsync(options).ConfigureAwait(false);

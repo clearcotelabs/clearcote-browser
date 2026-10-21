@@ -197,6 +197,7 @@ public static partial class Humanize
         public double X; public double Y; public bool Known; public bool Ambient; public int NotchPx;
         public long ViewAt = long.MinValue; public (double W, double H)? View;   // ViewBoundsAsync's cache
         public bool Held;               // a button is down (a drag): the wheel anchor must not move the pointer
+        public string HeldButton = "left";   // which one (HumanMouseDownAsync): an engine held leg carries it
         public string? Platform;        // the platform the page claims (NotchPxAsync)
         public string? Device;          // "mouse" | "trackpad" (DeviceAsync)
         public int DragLegs;            // legs of the last HumanDragByAsync (1-3)
