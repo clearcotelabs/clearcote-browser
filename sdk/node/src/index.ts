@@ -71,6 +71,7 @@ import {
 } from "./launchopts.js";
 import { RELEASE } from "./release.js";
 import { fetchWidevine, seedWidevine, widevineArgs, widevineLaunchArgs, widevineMode } from "./widevine.js";
+import { applyCrlsetLaunch, fetchCrlset, installCrlset, type CrlsetOption } from "./crlset.js";
 import { emitCoherenceWarnings, emitWarnings, serveExposureWarnings } from "./warnings.js";
 import { checkFontDirs, fontLaunchEnv } from "./fonts.js";
 import { withShaderDialect, type ShaderDialect } from "./shaderdialect.js";
@@ -167,6 +168,7 @@ export {
 } from "./agent.js";
 export { RELEASE } from "./release.js";
 export { fetchWidevine, seedWidevine } from "./widevine.js";
+export { fetchCrlset, installCrlset } from "./crlset.js";
 export { checkRenderCoherence, type RenderVerdict } from "./render.js";
 export {
   resolveLicenseKey,
@@ -318,6 +320,24 @@ interface WidevineOption {
   widevine?: boolean;
 }
 
+/** Chrome's certificate revocation list (CRLSet), see ./crlset.ts. */
+interface CrlsetLaunchOption {
+  /**
+   * CRLSET (opt-in). The engine never downloads Chrome's certificate revocation list (CRLSet), so revoked
+   * or distrusted CA keys stay trusted. `true` (or CLEARCOTE_CRLSET=1) seeds the current CRLSet into the
+   * profile (fetched from Google's component updater on first use, cached in ~/.clearcote/crlset,
+   * refreshed every 6 h) and the launch waits, a few seconds, until the engine has it live. `"nowait"`
+   * seeds without waiting (live once the first tab has been idle for a moment), `"<path>"` seeds that
+   * file (a crl-set file or a component directory). Needs a profile: launch() (its throwaway profile),
+   * `userDataDir` and launchPersistentContext() take it; `ephemeralProfile: false` launches without one
+   * and says so. Never fails a launch: without a CRLSet it warns once and goes on.
+   */
+  crlset?: CrlsetOption;
+  /** How long the launch waits for the seeded CRLSet to be live, in seconds (default
+   * CLEARCOTE_CRLSET_TIMEOUT, else 15). */
+  crlsetTimeout?: number;
+}
+
 /** Opt-in SOCKS5 UDP relaying (see {@link socks5UdpArgs}). */
 interface Socks5UdpOption {
   /** Relay WebRTC's UDP through the SOCKS5 proxy using UDP ASSOCIATE, instead of letting it egress
@@ -345,7 +365,7 @@ interface CloudSwitchOption {
 }
 
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeLaunchOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, PersonaEnvOption, FontDirsOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption, DockerOption, WidevineOption {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeLaunchOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, PersonaEnvOption, FontDirsOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption, DockerOption, WidevineOption, CrlsetLaunchOption {}
 
 /** The account options a local launch drops (see CloudSwitchOption). */
 function withoutCloudOptions<T extends object>(options: T): T {
@@ -371,7 +391,8 @@ export interface PersistentContextOptions
     Socks5UdpOption,
     EngineExtrasOption,
     CloudSwitchOption,
-    WidevineOption {}
+    WidevineOption,
+    CrlsetLaunchOption {}
 
 
 
@@ -1062,7 +1083,12 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // profile= a saved persona: its options are the base, explicit options override. ("auto" is
   // resolved later, once the executable is known.)
   const merged = mergeSavedProfile(options);
-  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, offlineKey, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, ...rest } = merged;
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, crlset, crlsetTimeout, version, licenseKey, licenseApiBase, licenseThroughProxy, offlineKey, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, ...rest } = merged;
+  // incognito has no profile to seed a CRLSet into (see ./crlset.ts): drop the options, warn if asked for
+  if (crlset !== undefined && crlset !== null && crlset !== false) {
+    process.stderr.write("clearcote: crlset: ephemeralProfile: false has no profile to seed a CRLSet into; launching without one\n");
+  }
+  void crlsetTimeout;
   resolveHumanize(humanize); // true | "strict" | HumanizeOptions: an unknown option throws before anything starts
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
@@ -1191,7 +1217,7 @@ async function launchLocalPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = mergeSavedProfile(options);
-  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, offlineKey, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, ...rest } = merged;
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, crlset, crlsetTimeout, version, licenseKey, licenseApiBase, licenseThroughProxy, offlineKey, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, ...rest } = merged;
   resolveHumanize(humanize); // true | "strict" | HumanizeOptions: an unknown option throws before anything starts
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
@@ -1245,6 +1271,11 @@ async function launchLocalPersistentContext(
       if (!quiet) process.stderr.write(`[clearcote] [widevine] setup failed (continuing without DRM): ${String(e)}\n`);
     }
   }
+  // CRLSet: Chrome's revocation list, which the engine never downloads (see ./crlset.ts). Seeded into the
+  // profile with the component updater un-suppressed; the launch then waits until it is live.
+  const crlsetLaunch = { crlset, crlsetTimeout, ignoreDefaultArgs };
+  const crlsetPlan = await applyCrlsetLaunch(userDataDir, crlsetLaunch, quiet);
+  ignoreDefaultArgs = crlsetLaunch.ignoreDefaultArgs;
   // A 1022 engine registers the CDM from --widevine-cdm-path in every profile; the seeding above keeps
   // older engines working. On by default for a licensed launch (`pro`), bounded + fail-soft; asked for,
   // best-effort as always: [] on any failure, and the launch goes on.
@@ -1273,19 +1304,28 @@ async function launchLocalPersistentContext(
     : applyHeadlessGeometry(opts as unknown as Record<string, unknown>, fingerprint.fingerprint, engineArgs, fingerprint, exe);
   const headedFit = opts.headless === false && headedLinuxFit(engineArgs, process.platform, exe);
   const launchArgs = [...engineArgs, ...(geom?.args ?? []), ...widevineCdm];
-  const context = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
-    // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
-    const { args: finalArgs, env } = applyPersonaEnv(exe, launchArgs, runtimeEnv(), personaEnv);
-    return chromium.launchPersistentContext(userDataDir, {
-      // r32+: the persona's colour scheme reaches the page instead of Playwright's emulated light.
-      ...(engineDecidesColorScheme(exe) ? defaultColorScheme(opts) : opts),
-      ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
-      executablePath: exePath,
-      ...(env ? { env } : {}),
-      args: finalArgs,
-    });
-  }, exe)), launchToken);
+  // the readiness probe's port must bypass a launch proxy, so its server starts first
+  if (crlsetPlan) launchArgs.push(...(await crlsetPlan.beforeLaunch(opts as { proxy?: { bypass?: string } })));
+  let context: BrowserContext;
+  try {
+    context = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
+      // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
+      const { args: finalArgs, env } = applyPersonaEnv(exe, launchArgs, runtimeEnv(), personaEnv);
+      return chromium.launchPersistentContext(userDataDir, {
+        // r32+: the persona's colour scheme reaches the page instead of Playwright's emulated light.
+        ...(engineDecidesColorScheme(exe) ? defaultColorScheme(opts) : opts),
+        ignoreDefaultArgs,  // keep AutomationControlled off (+ component updater on when widevine)
+        executablePath: exePath,
+        ...(env ? { env } : {}),
+        args: finalArgs,
+      });
+    }, exe)), launchToken);
+  } catch (e) {
+    crlsetPlan?.close();
+    throw e;
+  }
   if (lease) context.on("close", () => { void lease.stop(); launchToken?.release(); });
+  if (crlsetPlan) await crlsetPlan.wait(context);  // before anything touches the first tab: it must stay idle on about:blank
   if (geom || headedFit) await installWindowFixup(context, engineArgs, geom ?? FIT_PLAN);
   installHumanizeOnContext(context, { humanize, showCursor, seed: fingerprint.fingerprint }); // seed => stable motor persona
   await egressDrift;
@@ -1647,6 +1687,8 @@ export default {
   loadProfile,
   fetchWidevine,
   seedWidevine,
+  fetchCrlset,
+  installCrlset,
   Cloud,
   verifyWebhook,
   RELEASE,

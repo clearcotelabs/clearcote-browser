@@ -367,6 +367,39 @@ await ctx.close();
 - Cloud launches (`cloud: true`) are unchanged: hosted browsers load Widevine on the server.
 - Software-secure (L3) playback. Hardware-secure (L1) paths are out of scope.
 
+### Certificate revocation (`crlset`, opt-in)
+
+Real Chrome receives Google's **CRLSet** — the list of revoked and distrusted certificate keys — in the
+background, which is how a CA compromise reaches browsers within hours. A Clearcote engine never downloads
+it, so on its own it keeps trusting certificates that Chrome already blocks. `crlset: true` closes that gap
+for every engine the SDK launches, old builds included:
+
+- The SDK fetches the current CRLSet **from Google** (`update.googleapis.com`, the same service as the
+  Widevine CDM), checks its SHA-256 and caches it under `~/.clearcote/crlset` (`CLEARCOTE_CRLSET_DIR`
+  overrides; the cache is shared with the Python and .NET SDKs). A cache older than 6 hours is refreshed in
+  the background; the launch uses the cached copy.
+- It places the CRLSet in the profile and lets the engine's component updater load it (it makes no network
+  request of its own). The launch then **waits until the CRLSet is live**, usually a few seconds, so the
+  first page you open is already protected.
+- `crlset: "nowait"` skips the wait: the CRLSet goes live once the first tab has been idle for a moment.
+  `crlset: "<path>"` seeds that file instead. `crlsetTimeout` bounds the wait (default 15 s).
+- Fail-soft: if the first download fails or the CRLSet is not confirmed in time, the launch goes on and
+  prints one warning (`quiet: true` or `CLEARCOTE_NO_WARN=1` silences it).
+- `CLEARCOTE_CRLSET=1` turns it on for every launch. It needs a profile: `launch()` (which uses a temporary
+  one) and `launchPersistentContext()`; an incognito launch (`ephemeralProfile: false`) prints a warning
+  and goes on without it.
+
+```ts
+import { launch } from "clearcote";
+
+const browser = await launch({ crlset: true });
+const page = await browser.newPage();
+await page.goto("https://dv-g3b-emudhra.we-have-a-problem.com/"); // net::ERR_CERT_REVOKED, as in Chrome
+```
+
+- Fetch it ahead of time with `fetchCrlset()`, or point `CLEARCOTE_CRLSET_URL` at your own mirror of the raw
+  `crl-set` file.
+
 ### AI agent (OpenRouter)
 
 Drive a page with an **in-browser AI agent** — it perceives the live page, asks an LLM what to do,
