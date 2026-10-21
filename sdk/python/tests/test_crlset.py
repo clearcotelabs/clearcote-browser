@@ -32,6 +32,9 @@ def _isolated(tmp_path, monkeypatch):
     for name in ("CLEARCOTE_CRLSET", "CLEARCOTE_CRLSET_FILE", "CLEARCOTE_CRLSET_TIMEOUT", "CLEARCOTE_CRLSET_URL"):
         monkeypatch.delenv(name, raising=False)
     _crlset._WARNED.clear()
+    # a stale cache starts a real background refresh (Google, and the module's urlopen) that would outlive the
+    # test and race the next one's patches; the test that checks it patches it itself
+    monkeypatch.setattr(_crlset, "_refresh_in_background", lambda: None)
 
 
 def write(path, data):
