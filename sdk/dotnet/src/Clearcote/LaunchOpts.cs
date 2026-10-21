@@ -294,24 +294,32 @@ public static class LaunchOpts
     /// reading only the fields used to hand a URL-credentialed SOCKS5 proxy to Playwright, which
     /// rebuilds the server as scheme://host:port, and the browser offered the proxy no
     /// authentication at all. Everything else passes through, minus any userinfo in the server.
+    /// <para>An http:// / https:// proxy WITH credentials takes the same route via <c>--proxy-auth</c>
+    /// when <paramref name="engineSupportsProxyAuth"/> (the engine answers the proxy's 407 itself, r19+;
+    /// see <see cref="EngineSupportsSwitch"/>). Credentials given to Playwright make its driver enable
+    /// Fetch interception and Network.setCacheDisabled for the whole context, a transport tell unrelated
+    /// to the persona. An older engine keeps Playwright's handling: routing blindly would hand the
+    /// credentials to a switch it ignores, and every request would get a 407.</para>
     /// Returns the extra args + the (possibly nulled) proxy to hand to Playwright.
-    public static (List<string> Args, ProxyOptions? Proxy) ResolveProxy(ProxyOptions? proxy)
+    public static (List<string> Args, ProxyOptions? Proxy) ResolveProxy(ProxyOptions? proxy, bool engineSupportsProxyAuth = false)
     {
         if (proxy is null) return (new(), null);
         var (server, user, pass) = ProxyCredentials(proxy);
         var isSocks = server.StartsWith("socks", StringComparison.OrdinalIgnoreCase);
+        // http(s) credentials go to the engine only when it implements --proxy-auth (r19+).
+        var isHttp = engineSupportsProxyAuth && Regex.IsMatch(server, "^https?://", RegexOptions.IgnoreCase);
         var hasCreds = user.Length > 0 || pass.Length > 0;
-        if (isSocks && hasCreds)
+        if (server.Length > 0 && hasCreds && (isSocks || isHttp))
         {
             // `server` has no userinfo; the engine takes it via its own switch. Userinfo left in
             // --proxy-server is rejected by Chromium's proxy parser and the entry dropped: every
             // request then fails with ERR_NO_SUPPORTED_PROXIES (measured on r27).
-            var args = new List<string> { $"--proxy-server={server}", $"--socks5-credentials={user}:{pass}" };
+            var args = new List<string> { $"--proxy-server={server}", $"{(isSocks ? "--socks5-credentials=" : "--proxy-auth=")}{user}:{pass}" };
             if (!string.IsNullOrWhiteSpace(proxy.Bypass)) args.Add($"--proxy-bypass-list={proxy.Bypass.Trim()}");
             return (args, null);
         }
         // Left to Playwright. It drops userinfo from the server, so credentials written there are
-        // handed over as the fields it reads.
+        // handed over as the fields it reads (an http proxy on an engine without --proxy-auth).
         if (server != (proxy.Server?.Trim() ?? string.Empty))
             return (new(), new ProxyOptions
             {
@@ -540,6 +548,41 @@ public static class LaunchOpts
         catch { return false; }
     }
 
+    /// A string literal only engines from 154 r37 carry: the persona schema-4 GPU pool's Intel Arc row. Pool tables
+    /// are frozen with their schema (3 keeps r36's rows, which name this chip "Arc(TM) Pro"), so the literal stays in
+    /// every later engine, and <see cref="EngineSupportsSwitch"/>'s NUL-delimited search finds it like a switch name.
+    public const string Schema4EngineMarker = "ANGLE (Intel, Intel(R) Arc(TM) Graphics (0x00007D55) Direct3D11 vs_5_0 ps_5_0, D3D11)";
+
+    /// Warn (never throw) for each option the resolved engine cannot honour: Chromium ignores an unknown
+    /// switch, so an older engine launches fine -- but silently, which is worse than a warning. Returns the
+    /// warnings; prints them to stderr unless <paramref name="quiet"/>.
+    public static List<string> WarnUnsupportedEngineOptions(string? exe, FingerprintOptions? fingerprint, ProxyOptions? proxy, bool quiet = false)
+    {
+        var outList = new List<string>();
+        try
+        {
+            // Each schema arrived with an engine: 2 with 151 r19 (--fingerprint-schema itself), 3 with 154 r36 (which
+            // also introduced --block-third-party-cookies) and 4 with 154 r37 (Schema4EngineMarker). An engine knows
+            // nothing of a schema past its own newest and derives that one instead, silently.
+            var schema = fingerprint?.PersonaSchema?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "";
+            if (schema == "2" && !EngineSupportsSwitch(exe, "fingerprint-schema"))
+                outList.Add("clearcote: PersonaSchema = 2 (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
+            if (schema == "3" && !EngineSupportsSwitch(exe, "block-third-party-cookies"))
+                outList.Add("clearcote: PersonaSchema = 3 (engine 154 r36+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
+            if (schema == "4" && !EngineSupportsSwitch(exe, Schema4EngineMarker))
+                outList.Add("clearcote: PersonaSchema = 4 (engine 154 r37+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
+            if (fingerprint?.RealGpuHost == true && !EngineSupportsSwitch(exe, "fingerprint-gpu-backend-real"))
+                outList.Add("clearcote: RealGpuHost (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
+            var (server, user, pass) = proxy is null ? ("", "", "") : ProxyCredentials(proxy);
+            if (server.Length > 0 && server.StartsWith("socks", StringComparison.OrdinalIgnoreCase) && (user.Length > 0 || pass.Length > 0)
+                && !EngineSupportsSwitch(exe, "socks5-credentials"))
+                outList.Add("clearcote: this engine build cannot authenticate to a SOCKS5 proxy (needs r17+); the proxy will reject the connection.");
+            if (!quiet) foreach (var m in outList) Console.Error.WriteLine(m);
+        }
+        catch { /* never block a launch over a warning */ }
+        return outList;
+    }
+
     // ── new engine switches (152 r22+) ───────────────────────────────────────
 
     /// Switches introduced in engine 152 r22, with the option that asked for each. Gated per binary.
@@ -635,6 +678,12 @@ public static class LaunchOpts
         }
         return userArgs.Contains(StockRuntimeSwitch) ? new() : new() { StockRuntimeSwitch };
     }
+
+    /// Whether this launch's browser runs with <see cref="StockRuntimeSwitch"/>: <paramref name="args"/> (the SDK's
+    /// own and the caller's) carry it and the engine implements it. The coherence notes leave the one about
+    /// console events out then.
+    public static bool StockRuntimeRunning(string? exe, IEnumerable<string> args)
+        => args.Contains(StockRuntimeSwitch) && EngineSupportsSwitch(exe, StockRuntimeSwitch[2..]);
 
     /// A cloud browser does not take StockRuntime: say so once per process when it is on.
     public static void WarnStockRuntimeCloud(bool? enabled, bool quiet = false)

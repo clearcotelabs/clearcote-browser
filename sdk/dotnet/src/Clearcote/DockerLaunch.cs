@@ -1081,6 +1081,31 @@ internal static class DockerLaunch
         }
     }
 
+    /// LaunchEphemeralProfileAsync on macOS without the native PRO build: the container browser's own context (the
+    /// image runs Chrome on a throwaway profile of its own), with no emulated viewport. Closing the context closes
+    /// the browser, which stops the container; <c>context.Browser</c> is the container's browser.
+    internal static async Task<IBrowserContext> LaunchContextAsync(LaunchOptions o)
+    {
+        var browser = await LaunchBrowserAsync(o).ConfigureAwait(false);
+        try
+        {
+            var ctx = browser.Contexts.FirstOrDefault()
+                ?? await browser.NewContextAsync(new BrowserNewContextOptions { ViewportSize = ViewportSize.NoViewport }).ConfigureAwait(false);
+            var context = CloudLaunch.ContextProxy.Wrap(ctx, browser);
+            if (Containers.TryGetValue(browser, out var container))
+            {
+                Containers.AddOrUpdate(ctx, container);
+                Containers.AddOrUpdate(context, container);
+            }
+            return context;
+        }
+        catch
+        {
+            try { await browser.CloseAsync().ConfigureAwait(false); } catch { /* the failure is what matters */ }
+            throw;
+        }
+    }
+
     /// Stops the container at most once.
     internal sealed class ContainerState
     {

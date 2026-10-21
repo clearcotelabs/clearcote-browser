@@ -170,6 +170,30 @@ public class LaunchOptions : FingerprintOptions
     /// engine. Applies to the persistent and ephemeral-profile launches.
     public ColorScheme? ColorScheme { get; set; }
 
+    // ── profile portability + the rest of Playwright's launch options ─────────
+    // Local launches only: a cloud or Docker launch refuses them by name.
+
+    /// Keep the cookie encryption key in the profile, so the user data directory is portable between
+    /// machines (<c>--portable-profile</c>). Opt-in: the cookie database is then effectively unencrypted at rest.
+    public bool? PortableProfile { get; set; }
+    /// Derive the profile encryption key from this secret instead (<c>--profile-encryption-key</c>), writing
+    /// nothing to disk. Preferred when the profile is synced to shared storage; wins over <see cref="PortableProfile"/>.
+    public string? EncryptionKey { get; set; }
+    /// The rest of Playwright's launch options for <see cref="Clearcote.LaunchAsync"/> (ChromiumSandbox,
+    /// DownloadsPath, TracesDir, HandleSIGINT/SIGTERM/SIGHUP, IgnoreAllDefaultArgs, ...). Copied, then the SDK
+    /// fills its own fields on the copy. The fields this class already has (ExecutablePath, Args, Env, Headless,
+    /// Channel, SlowMo, Timeout, IgnoreDefaultArgs, Proxy) must be set here instead: setting one on this object
+    /// throws, naming it. Devtools = true gets the same warning as <c>--auto-open-devtools-for-tabs</c>.
+    public BrowserTypeLaunchOptions? PlaywrightLaunchOptions { get; set; }
+    /// The rest of Playwright's persistent-context options for <see cref="Clearcote.LaunchPersistentContextAsync(string, LaunchOptions?)"/>
+    /// and <see cref="Clearcote.LaunchEphemeralProfileAsync"/> (Locale, UserAgent, Geolocation, Permissions,
+    /// RecordVideoDir, IgnoreHTTPSErrors, AcceptDownloads, ExtraHTTPHeaders, ChromiumSandbox, DownloadsPath, ...).
+    /// Copied, then the SDK fills its own fields on the copy. The fields this class already has (those of
+    /// <see cref="PlaywrightLaunchOptions"/>, plus ViewportSize, ScreenSize and ColorScheme) must be set here
+    /// instead: setting one on this object throws, naming it. A UserAgent gets the custom-user-agent warning:
+    /// it replaces only the User-Agent string, not the rest of the persona.
+    public BrowserTypeLaunchPersistentContextOptions? PlaywrightContextOptions { get; set; }
+
     // ── macOS: the Clearcote Docker image ────────────────────────────────────
     // Without the native PRO build (a licence key on an Apple Silicon Mac), LaunchAsync on macOS runs the
     // Clearcote Docker image and connects to it (see Clearcote.LaunchAsync).

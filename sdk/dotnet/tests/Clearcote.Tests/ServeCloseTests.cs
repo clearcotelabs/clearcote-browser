@@ -122,6 +122,51 @@ public class ServeCloseTests
     }
 
     [Fact]
+    public async Task CloseAsync_stops_the_engine_gracefully_first_and_Pid_names_it()
+    {
+        // index.ts Server.close(): SIGTERM, which Chrome answers by shutting down cleanly (the stand-in writes its
+        // profile back on TERM, as Chrome does), then a kill only after 10 s. CloseAsync used to kill at once.
+        if (OperatingSystem.IsWindows()) return;
+        var exe = WriteStandin();
+        var profile = TestTemp.Create("cc-profile-");
+        var (sb, temp) = Isolated();
+        try
+        {
+            await using var cdp = new CdpEndpoint(temp, profile);
+            var srv = await Clearcote.ServeAsync(new ServeOptions { ExecutablePath = exe, Port = cdp.Port, Quiet = true, UserDataDir = profile });
+            Assert.True(srv.Pid > 0);
+            Assert.Equal(srv.Pid, System.Diagnostics.Process.GetProcessById(srv.Pid).Id);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            await srv.CloseAsync();
+            Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5), watch.Elapsed.ToString());   // it exited on its own
+            Assert.False(srv.IsAlive);
+            Assert.True(File.Exists(Path.Combine(profile, "Default", "Shutdown 9")));   // its whole clean shutdown ran
+            Assert.Empty(Left(temp));
+        }
+        finally { sb.Dispose(); TestTemp.Remove(temp); TestTemp.Remove(profile); TestTemp.Remove(Path.GetDirectoryName(exe)!); }
+    }
+
+    [Fact]
+    public async Task CloseAsync_kills_an_engine_that_ignores_the_graceful_stop_after_the_grace()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var exe = WriteStandin();
+        File.WriteAllText(exe, Standin.Replace("trap shutdown TERM", "trap '' TERM").Replace("\r\n", "\n"));
+        var (sb, temp) = Isolated();
+        var grace = Server.CloseGrace;
+        Server.CloseGrace = TimeSpan.FromMilliseconds(500);
+        try
+        {
+            await using var cdp = new CdpEndpoint(temp);
+            var srv = await Clearcote.ServeAsync(new ServeOptions { ExecutablePath = exe, Port = cdp.Port, Quiet = true });
+            await srv.CloseAsync();
+            Assert.False(srv.IsAlive);
+            Assert.Empty(Left(temp));
+        }
+        finally { Server.CloseGrace = grace; sb.Dispose(); TestTemp.Remove(temp); TestTemp.Remove(Path.GetDirectoryName(exe)!); }
+    }
+
+    [Fact]
     public async Task CloseAsync_with_a_real_engine_leaves_nothing_in_the_temp_directory()
     {
         var exe = Environment.GetEnvironmentVariable("CLEARCOTE_TEST_BINARY") is { Length: > 0 } b ? b
