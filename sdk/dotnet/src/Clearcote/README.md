@@ -301,6 +301,24 @@ work area), or pass your own `--window-size` / `--screen-info` in `Args` to opt 
 persona windows a seeded `ServeAsync` opens the persona's own window instead (see
 [Window geometry](#the-personas-own-window-r39)); `WindowSize` still wins.
 
+### Many identities on one endpoint (`ServeMultiplexAsync`)
+
+One port, one browser per identity, chosen by the connection URL:
+
+```csharp
+await using var mux = await Clearcote.Clearcote.ServeMultiplexAsync(new MultiplexOptions { Port = 9222, IdleTimeoutSec = 300, DataDir = "./profiles" });
+var a = await playwright.Chromium.ConnectOverCDPAsync("http://127.0.0.1:9222?fingerprint=acct-1&timezone=Europe/Berlin");
+var b = await playwright.Chromium.ConnectOverCDPAsync(
+    $"http://127.0.0.1:9222?fingerprint=acct-2&proxy={Uri.EscapeDataString("socks5://u:p@host:1080")}&geoip=true");
+```
+
+- Query options: `fingerprint`, `timezone`, `locale`, `proxy`, `geoip`, plus any fingerprint option in kebab-case (`platform`, `hardware-concurrency`, `allow-third-party-cookies`, ...). Unknown options are rejected (400).
+- The same identity reuses its browser. Asking for a running identity with *different* options returns 409; close it first.
+- `GET /` lists running browsers (`mux.Status()` in code); `POST /fingerprint/<id>/close` stops one (`mux.CloseIdentityAsync(id)`); `IdleTimeoutSec` (or `CLEARCOTE_SERVE_IDLE_TIMEOUT`) closes a browser after its last client disconnects; `MaxBrowsers` caps them (default 16, then 429).
+- Every other `MultiplexOptions` setting (`ExecutablePath`, `Headless`, `Proxy`, persona defaults, `LicenseKey`, ...) is the base each identity's browser starts from; the query overrides it.
+- Behind a reverse proxy, WebSocket URLs honour `X-Forwarded-Host` / `X-Forwarded-Proto`; add the public name to `AllowHosts`.
+- Binds `127.0.0.1` by default. Requests a web page could make (cross-site fetches, a foreign `Origin`, a `Host` that isn't an IP / `localhost` / allowed) are refused.
+
 ## Just the binary
 
 ```csharp

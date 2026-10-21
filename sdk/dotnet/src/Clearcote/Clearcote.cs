@@ -474,6 +474,13 @@ public static class Clearcote
         return srv;
     }
 
+    /// One CDP endpoint, many identities: an HTTP/WebSocket front on <see cref="MultiplexOptions.Port"/>
+    /// (default 9222) that starts one <see cref="ServeAsync"/> browser per identity, chosen by the
+    /// connection URL (<c>ConnectOverCDPAsync("http://127.0.0.1:9222?fingerprint=acct-1&amp;platform=windows")</c>).
+    /// See <see cref="MultiplexServer"/> and the comment at the top of Multiplex.cs.
+    public static Task<MultiplexServer> ServeMultiplexAsync(MultiplexOptions? options = null)
+        => MultiplexServer.StartAsync(options);
+
     // ── internals ────────────────────────────────────────────────────────────
 
     /// Copy the caller's options (never mutate them) and apply geoip, which fails closed BEFORE the
@@ -607,6 +614,8 @@ public sealed class Server
 
     public string Host { get; }
     public int Port { get; }
+    /// The engine's process id (null once it can no longer be read).
+    public int? Pid { get { try { return _proc.Id; } catch { return null; } } }
 
     /// The CDP base URL, e.g. "http://127.0.0.1:9222" — pass to ConnectOverCDP.
     public string CdpUrl => $"http://{Host}:{Port}";
