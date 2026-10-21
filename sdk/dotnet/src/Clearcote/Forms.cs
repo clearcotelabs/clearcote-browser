@@ -327,6 +327,67 @@ internal static class Forms
     public static bool EnginePathOk(NormalizedClick o)
         => o.Button == "left" && o.ClickCount == 1 && o.Modifiers.Count == 0 && o.Delay is null;
 
+    // r43 engine (SC 232 lane H): Browser.dispatchPointerPath also takes fromX/fromY, button, clickCount, modifiers,
+    // buttons (held) and settle, and answers after its last event; Browser.dispatchKeySequence types a paced run.
+    internal const string EngineKeySequence = "Browser.dispatchKeySequence";
+    private static readonly Dictionary<string, int> CdpModifierBits = new() { ["Alt"] = 1, ["Control"] = 2, ["Meta"] = 4, ["Shift"] = 8 };
+    private static readonly Dictionary<string, int> ButtonBits = new() { ["left"] = 1, ["right"] = 2, ["middle"] = 4 };
+
+    /// <summary>Extra dispatchPointerPath parameters for a click an r43 engine performs itself (empty = plain left
+    /// click), or null (a caller-chosen hold, an unknown button, more than 3 clicks). Modifier KEYS are still pressed
+    /// by the SDK around the call (the engine only sets the event flags). Same as Node engineClickParams.</summary>
+    internal static Dictionary<string, object>? EngineClickParams(NormalizedClick o)
+    {
+        if (o.Delay is not null || !ButtonBits.ContainsKey(o.Button) || o.ClickCount < 1 || o.ClickCount > 3) return null;
+        var p = new Dictionary<string, object>();
+        if (o.Button != "left") p["button"] = o.Button;
+        if (o.ClickCount != 1) p["clickCount"] = o.ClickCount;
+        int bits = 0;
+        foreach (var m in o.Modifiers) bits |= CdpModifierBits.TryGetValue(m, out var b) ? b : 0;
+        if (bits != 0) p["modifiers"] = bits;
+        return p;
+    }
+
+    /// <summary>dispatchPointerPath <c>buttons</c> for a held button name.</summary>
+    internal static int EngineHeldBits(string? button) => ButtonBits.TryGetValue(string.IsNullOrEmpty(button) ? "left" : button, out var b) ? b : 1;
+
+    // US-layout DOM codes for the punctuation keys (letters, digits and space need none: the engine knows them).
+    private static readonly Dictionary<string, string> UsCodes = new()
+    {
+        [","] = "Comma", ["."] = "Period", ["/"] = "Slash", [";"] = "Semicolon", ["'"] = "Quote", ["["] = "BracketLeft",
+        ["]"] = "BracketRight", ["-"] = "Minus", ["="] = "Equal", ["`"] = "Backquote", ["\\"] = "Backslash",
+        ["<"] = "Comma", [">"] = "Period", ["?"] = "Slash", [":"] = "Semicolon", ["\""] = "Quote", ["{"] = "BracketLeft",
+        ["}"] = "BracketRight", ["_"] = "Minus", ["+"] = "Equal", ["~"] = "Backquote", ["|"] = "Backslash",
+        ["!"] = "Digit1", ["@"] = "Digit2", ["#"] = "Digit3", ["$"] = "Digit4", ["%"] = "Digit5", ["^"] = "Digit6",
+        ["&"] = "Digit7", ["*"] = "Digit8", ["("] = "Digit9", [")"] = "Digit0",
+    };
+
+    /// <summary>Browser.dispatchKeySequence keys for <paramref name="text"/> (US layout), or null when a character has
+    /// no plain key. <paramref name="gapMs"/>(ch, next) is the caller's cadence model (lane D's bigram flight), after
+    /// every key but the last; Shift (modifiers 8) for the characters <paramref name="needsShift"/> says. Same as Node
+    /// engineKeyPlan.</summary>
+    internal static List<Dictionary<string, object>>? EngineKeyPlan(string text, Func<double> dwellMs,
+        Func<string, string, double> gapMs, Func<string, bool> needsShift)
+    {
+        var chars = Chars(text);
+        var keys = new List<Dictionary<string, object>>(chars.Length);
+        for (int i = 0; i < chars.Length; i++)
+        {
+            var ch = chars[i];
+            Dictionary<string, object> k;
+            if (ch == "\n") k = new() { ["key"] = "Enter", ["code"] = "Enter" };
+            else if (ch == "\t") k = new() { ["key"] = "Tab", ["code"] = "Tab" };
+            else if (ch.Length == 1 && (char.IsAsciiLetterOrDigit(ch[0]) || ch[0] == ' ')) k = new() { ["key"] = ch };
+            else if (UsCodes.TryGetValue(ch, out var code)) k = new() { ["key"] = ch, ["code"] = code };
+            else return null;
+            k["dwellMs"] = dwellMs();
+            k["gapMs"] = i < chars.Length - 1 ? gapMs(ch, chars[i + 1]) : 0.0;
+            if (needsShift(ch)) k["modifiers"] = 8;
+            keys.Add(k);
+        }
+        return keys;
+    }
+
     // ------------------------------------------------------------------- <select> type-ahead plan
     /// <summary>Blink compares FoldCase()d labels with leading whitespace stripped (type_ahead.cc).</summary>
     internal static string Fold(string? s) => CaseFold((s ?? "").TrimStart());

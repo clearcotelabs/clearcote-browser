@@ -19,8 +19,10 @@ public sealed record HumanizeOptions
     /// <summary>Throw <see cref="HumanizeStrictException"/> instead of handing an action to Playwright's own call.</summary>
     public bool Strict { get; init; }
 
-    /// <summary>"auto" | "all" | "coords" | "off": which clicks the engine's pointer path walks. The .NET SDK has no
-    /// engine route yet; the value is kept (<see cref="Humanize.OptionsFor"/>) for parity with Python and Node.</summary>
+    /// <summary>"auto" | "all" | "coords" | "off": which clicks the engine's pointer path (Browser.dispatchPointerPath)
+    /// walks. "auto" reads <see cref="Humanize.EngineClicksEnv"/> (default "coords"); "coords" coordinate clicks
+    /// (<c>page.HumanClickAsync(x, y)</c>) only; "all" targeted selector / locator clicks too; "off" never, and no
+    /// engine typed run (Browser.dispatchKeySequence) either: everything stays on the SDK planner.</summary>
     public string Engine { get; init; } = "auto";
 
     /// <summary>"off" | "load" | "idle" (null = "off"): pointer activity without a target, read by the ambient code.</summary>

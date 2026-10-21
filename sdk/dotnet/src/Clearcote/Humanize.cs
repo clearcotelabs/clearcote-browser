@@ -622,7 +622,8 @@ public static partial class Humanize
     {
         if (!await RoutableAsync(locator, strict).ConfigureAwait(false))
         {
-            await native().ConfigureAwait(false);
+            try { await native().ConfigureAwait(false); }
+            finally { EngineOutOfSync(locator.Page); }   // Playwright moved the pointer: not from the engine's stale point
             return;
         }
         await TargetedClickAsync(locator, options, options.Normalize(), noClick: false, native).ConfigureAwait(false);
@@ -657,7 +658,8 @@ public static partial class Humanize
         Task Native() => locator.DblClickAsync(options.ToDblClick());
         if (!await RoutableAsync(locator, strict).ConfigureAwait(false))
         {
-            await Native().ConfigureAwait(false);
+            try { await Native().ConfigureAwait(false); }
+            finally { EngineOutOfSync(locator.Page); }   // Playwright moved the pointer: not from the engine's stale point
             return;
         }
         await TargetedClickAsync(locator, options, options.Normalize(defaultCount: 2), noClick: false, Native).ConfigureAwait(false);
@@ -690,7 +692,8 @@ public static partial class Humanize
         Task Native() => locator.HoverAsync(options.ToHover());
         if (!await RoutableAsync(locator, strict).ConfigureAwait(false))
         {
-            await Native().ConfigureAwait(false);
+            try { await Native().ConfigureAwait(false); }
+            finally { EngineOutOfSync(locator.Page); }   // Playwright moved the pointer: not from the engine's stale point
             return;
         }
         await TargetedClickAsync(locator, options, options.Normalize(), noClick: true, Native).ConfigureAwait(false);
@@ -815,6 +818,16 @@ public static partial class Humanize
                 }
                 if (!goNative)
                 {
+                    if (!noClick && !o.Force && EngineModeFor(page) == "all")
+                    {
+                        // Opt-in (Engine "all" / CLEARCOTE_HUMANIZE_ENGINE_CLICKS=all): the engine walks the approach
+                        // and clicks the point the hit test above proved. A plain left click takes the r42 route (while
+                        // the engine knows where the pointer is; an r43 engine re-syncs from the SDK's position,
+                        // fromX/fromY); a right / double / modified click takes the r43 extensions (verifier A's R5).
+                        // Otherwise: the planner.
+                        if (Forms.EnginePathOk(o) && await EngineGlideAsync(page, st, x, y, false).ConfigureAwait(false)) return;
+                        if (await EngineExtClickAsync(page, st, x, y, o).ConfigureAwait(false)) return;
+                    }
                     if (noClick && o.Modifiers.Count > 0)
                     {
                         // hover with modifiers: Playwright holds them across the move
@@ -861,7 +874,13 @@ public static partial class Humanize
         {
             goNative = Report(page, api, "error: " + e.Message, SelectorOf(loc));
         }
-        if (goNative) await native().ConfigureAwait(false);
+        if (goNative)
+        {
+            // Playwright's own click moves the real pointer to the element: the engine path must not walk from its
+            // own stale point afterwards (verifier A #6).
+            try { await native().ConfigureAwait(false); }
+            finally { EngineOutOfSync(page); }
+        }
     }
 
     // Test seam: told why a humanized route handed an action to Playwright (the live tests print it when
@@ -1778,6 +1797,26 @@ public static partial class Humanize
         bool search = allow && !exact && string.Equals(fld?.Type, "search", StringComparison.OrdinalIgnoreCase);
         double floor = Math.Max(0, floorMs);
         bool extShift = ks.Held.ContainsKey("Shift");
+        // ROLLOVER, decided up front: the pairs this run overlaps (index of the first key), one unseeded draw per
+        // eligible pair at the persona's rollover rate. Eligible: two different plain keys, never under a caller's
+        // delay floor. Drawn before the route is chosen so the engine run below is taken exactly for the runs that
+        // would have had no rollover, and the per-key path realises the persona's share on the others.
+        var rolls = new HashSet<int>();
+        if (floor <= 0)
+            for (int i = 0; i + 1 < chars.Length; i++)
+                if (CanRoll(chars[i]) && CanRoll(chars[i + 1]) && chars[i] != chars[i + 1] && Rnd.NextDouble() < rollover) rolls.Add(i);
+        // r43 engine (SC 232 lane H, EngineRoute.cs): a run with no slip to plan (typos off, or a field where a slip is
+        // a failure), no caller-held Shift and NO ROLLOVER goes out as ONE Browser.dispatchKeySequence -- the same
+        // dwell and flight draws, paced in the browser, so the rhythm carries no CDP round trips. A run the persona
+        // rolls over stays per key: the command cannot overlap keys, and an identity whose credential fields typed
+        // with zero overlap next to text fields with its 12-38 % would contradict itself (verifier A's R3b). Not with
+        // engine "off" (R3a): that is the documented way to keep everything SDK-side.
+        if (!allow && chars.Length > 1 && !extShift && rolls.Count == 0 && EngineModeFor(page) != "off"
+            && await EngineExtOkAsync(page).ConfigureAwait(false) && await EngineTypeAsync(page, p, text, floor).ConfigureAwait(false))
+        {
+            ks.Typed = Environment.TickCount64;   // a following Enter / Tab still waits (AfterTypingAsync)
+            return;
+        }
         // the score hook records this run's keys (RecKey at the press sites) and scores it as "typed" at the end
         bool outerRec = ks.Rec is not null;
         if (!outerRec && HumanizeTrace.Enabled) ks.Rec = new List<KeySample>();
@@ -1820,8 +1859,7 @@ public static partial class Humanize
                 // Rollover: one press per character never overlaps two keys, and a real typist's fast
                 // pairs do (0 overlapping keydowns in 32 keys, measured on r32/r33). Only two different
                 // plain keys, never under Shift, never next to a slip.
-                if (!typo && !shift && floor <= 0 && i + 1 < chars.Length && CanRoll(ch) && CanRoll(chars[i + 1]) && ch != chars[i + 1]
-                    && Rnd.NextDouble() < rollover && await RollPairAsync(page, ch, chars[i + 1], p).ConfigureAwait(false))
+                if (!typo && !shift && rolls.Contains(i) && await RollPairAsync(page, ch, chars[i + 1], p).ConfigureAwait(false))
                     ch = chars[++i];   // both typed: carry on as if after the second
                 else if (!consumed)
                     await PressOrInsertAsync(page, ch, p).ConfigureAwait(false);
@@ -3837,6 +3875,9 @@ public static partial class Humanize
         {
             var p = PersonaFor(page);
             var st = StateFor(page);
+            // The engine route (EngineRoute.cs): a plain left click walked and pressed by the engine while it knows
+            // where the pointer is; on an r43 engine also right/double/modified clicks. Otherwise the planner.
+            if (await EngineClickAsync(page, st, x, y, o).ConfigureAwait(false)) return;
             await GlideAsync(page, p, st, x, y, 24).ConfigureAwait(false);
             st.Known = true;
             await PressAtAsync(page, p, o).ConfigureAwait(false);
