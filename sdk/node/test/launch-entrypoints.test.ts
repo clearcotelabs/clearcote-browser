@@ -464,8 +464,17 @@ describe("launch() proxy options", () => {
   it("routes SOCKS5 credentials written in the URL to the engine, not Playwright", async () => {
     const browser = await launch({ ...base(), proxy: { server: "socks5://user:pass@127.0.0.1:1080" } });
     const call = stub.launches.at(-1)!;
-    expect(call.opts.args).toEqual(expect.arrayContaining(["--proxy-server=socks5://127.0.0.1:1080", "--socks5-credentials=user:pass"]));
-    expect(call.opts.proxy).toBeUndefined();
+    expect(call.opts.args).toEqual(expect.arrayContaining(["--proxy-server=socks5://127.0.0.1:1080", "--socks5-credentials=user:pass", "--proxy-bypass-list="]));
+    // Playwright gets only the credential-less local forwarder its request API uses (../src/reqproxy.ts)
+    expect(call.opts.proxy).toEqual({ server: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/) });
+    await browser.close();
+  });
+
+  it("leaves a proxy without credentials to Playwright, with no forwarder", async () => {
+    const browser = await launch({ ...base(), proxy: { server: "http://127.0.0.1:3128" } });
+    const call = stub.launches.at(-1)!;
+    expect(call.opts.proxy).toEqual({ server: "http://127.0.0.1:3128" });
+    expect(call.opts.args).not.toEqual(expect.arrayContaining(["--proxy-bypass-list="]));
     await browser.close();
   });
 });

@@ -57,6 +57,17 @@ var browser = await Clearcote.Clearcote.LaunchAsync(new LaunchOptions
 });
 ```
 
+Credentials stay off Playwright: a SOCKS5 proxy's always, and an http(s) proxy's on an engine with
+`--proxy-auth` (r19+), go to the browser's own switches, because credentials handed to Playwright make it turn
+on request interception and disable the cache for the whole context (a detectable transport tell). Playwright's
+request API (`context.APIRequest`, `page.APIRequest`) does not go through the browser, so for those launches the
+SDK runs a small forwarder on `127.0.0.1` that adds the credentials and tunnels to your proxy (HTTP/HTTPS
+`CONNECT`, or SOCKS5 with username/password); Playwright is given that forwarder, without credentials, and it
+stops when the browser or context closes. Loopback targets (`localhost`, `127.x`) are connected directly, as the
+browser does. A client attached to `ServeAsync` over CDP runs the request API in its own process, so
+`ServeAsync` warns that its `APIRequest` calls leave from that client's IP; make API calls inside the page
+(`fetch` in `EvaluateAsync`) there instead.
+
 ## PRO tier (license key)
 
 By default you get the **free** build. With a PRO license key the SDK pulls the license-gated browser and
@@ -397,6 +408,27 @@ foreach (var line in ClearcoteHost.Lines(ClearcoteHost.Info())) Console.WriteLin
 ```
 
 It runs fewer browsers than asked when free RAM looks too small (`Force = true` runs them all). Each browser holds a licence seat while it runs. Paste the lines into a support request; proxy credentials are never printed.
+
+## Font report (what `clearcote info` says about fonts)
+
+The Python and Node SDKs print the fonts a launch would see with `clearcote info`; this SDK has no CLI, so the
+same report is an API. On Linux it says whether the build bundles its Windows font clones, which of 29 scripts
+the fonts can draw (the bundle plus `FontDirs` / `CLEARCOTE_FONT_DIRS` and `CLEARCOTE_FALLBACK_FONT_DIRS`) and
+which are missing (a page sees those as empty boxes), and which key Windows families your own fonts provide for
+real. Off Linux the browser uses the host's fonts and the report says so.
+
+```csharp
+var report = await Clearcote.Clearcote.FontReportAsync(new LaunchOptions { FontDirs = new[] { "/srv/winfonts" } });
+Console.WriteLine(report);              // the lines `clearcote info` prints
+foreach (var script in report.ScriptsMissing ?? Array.Empty<string>()) Console.WriteLine($"missing: {script}");
+// or for a build you already have, without resolving or downloading one:
+var r = Clearcote.Clearcote.FontReportFor("/opt/clearcote/chrome");
+```
+
+`FontReportAsync` resolves the build as a launch would (downloading it when it is not cached yet);
+`FontReportFor` only reads files. The result's properties: `Bundled`, `Note`, `ScriptsCovered`,
+`ScriptsMissing`, `FontDirs`, `FallbackFontDirs`, `IgnoredFontDirs`, `GenuineWindowsFamilies`,
+`LookalikeWindowsFamilies`, `GenuineFacesSupported`; `Lines()` / `ToString()` give the CLI text.
 
 ## Options (subset)
 

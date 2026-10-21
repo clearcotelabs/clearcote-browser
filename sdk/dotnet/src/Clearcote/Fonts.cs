@@ -533,4 +533,136 @@ internal static class Fonts
         outEnv["FONTCONFIG_FILE"] = conf;
         return outEnv;
     }
+
+    // --- the font report (what Node's and Python's `clearcote info` print) -------------------------------
+
+    /// The Windows families the bundle stands in for with a lookalike; the report says which of them your own
+    /// fonts provide for real.
+    internal static readonly string[] KeyWindowsFamilies =
+    {
+        "Arial", "Segoe UI", "Calibri", "Cambria", "Consolas", "Courier New", "Georgia",
+        "Times New Roman", "Verdana", "Tahoma", "Trebuchet MS", "Comic Sans MS", "Impact",
+    };
+
+    /// One character per script that Windows 10/11 renders out of the box. A script with no font for its
+    /// character draws empty boxes, which a page tells apart from real glyphs with one fillText.
+    internal static readonly (string Name, int Cp)[] ScriptSamples =
+    {
+        ("Latin", 0x0041), ("Greek", 0x03a9), ("Cyrillic", 0x0416), ("Hebrew", 0x05d0), ("Arabic", 0x0628),
+        ("Armenian", 0x0531), ("Georgian", 0x10d0), ("Devanagari", 0x0915), ("Bengali", 0x0995),
+        ("Gurmukhi", 0x0a15), ("Gujarati", 0x0a95), ("Oriya", 0x0b15), ("Tamil", 0x0b95), ("Telugu", 0x0c15),
+        ("Kannada", 0x0c95), ("Malayalam", 0x0d15), ("Sinhala", 0x0d9a), ("Thai", 0x0e01), ("Lao", 0x0e81),
+        ("Tibetan", 0x0f40), ("Myanmar", 0x1000), ("Ethiopic", 0x1200), ("Cherokee", 0x13a0),
+        ("Khmer", 0x1780), ("Mongolian", 0x1820), ("Hangul", 0xac00), ("Kana", 0x3042),
+        ("CJK ideographs", 0x4e2d), ("Emoji", 0x1f600),
+    };
+
+    internal const string NoBundleNote = "this build ships no font bundle; a Windows persona on this host may render with Linux fonts";
+    internal const string NotLinuxNote = "fonts are wired on Linux only; on this host the browser uses the fonts installed here";
+
+    /// The Linux font report for the build at <paramref name="exePath"/>: whether it bundles fonts, which
+    /// scripts the fonts a launch would see can draw (bundle + <paramref name="fontDirs"/> / CLEARCOTE_FONT_DIRS +
+    /// CLEARCOTE_FALLBACK_FONT_DIRS), and which of the key Windows families your own fonts provide for real.
+    /// Null when the build ships no bundle. Mirrors Node's linuxFontReport and Python's linux_font_report.
+    internal static FontReport? LinuxFontReport(string exePath, IEnumerable<string>? fontDirs = null, Func<string, string?>? getEnv = null)
+    {
+        var fontsDir = Path.Join(Path.GetDirectoryName(Path.GetFullPath(exePath)), "fonts");
+        if (!File.Exists(Path.Join(fontsDir, "fonts.conf.template"))) return null;
+        var (user, fallback, ignored) = ResolveFontDirs(fontDirs, getEnv, isLinux: true);
+        var wanted = ScriptSamples.Select(s => s.Cp).ToArray();
+        var covered = new HashSet<int>();
+        var color = new HashSet<int>();
+        foreach (var path in FontFiles(new[] { fontsDir }.Concat(user).Concat(fallback)))
+        {
+            var f = ReadFont(path, wanted);
+            covered.UnionWith(f.Covered);
+            if (f.Color) color.UnionWith(f.Covered);
+        }
+        // Emoji count only from a colour font: a monochrome glyph (DejaVu has one) is not what Windows draws.
+        var ok = ScriptSamples.Where(s => (s.Name == "Emoji" ? color : covered).Contains(s.Cp)).Select(s => s.Name).ToList();
+        var report = new FontReport
+        {
+            Bundled = true,
+            Note = "metric-compatible Windows font clones are bundled with this build",
+            ScriptsCovered = ok,
+            ScriptsMissing = ScriptSamples.Select(s => s.Name).Where(n => !ok.Contains(n)).ToList(),
+            FontDirs = user,
+            FallbackFontDirs = fallback,
+            IgnoredFontDirs = ignored,
+        };
+        if (user.Count > 0)
+        {
+            var genuine = DirFamilies(user);
+            report.GenuineWindowsFamilies = KeyWindowsFamilies.Where(f => genuine.Contains(f.ToLowerInvariant())).ToList();
+            report.LookalikeWindowsFamilies = KeyWindowsFamilies.Where(f => !genuine.Contains(f.ToLowerInvariant())).ToList();
+            report.GenuineFacesSupported = EngineHonoursGenuineFaces(exePath);
+        }
+        return report;
+    }
+
+    /// <see cref="LinuxFontReport"/> for any host: off Linux, or for a build with no bundle, a report that says so.
+    internal static FontReport Report(string exePath, IEnumerable<string>? fontDirs = null, bool? isLinux = null, Func<string, string?>? getEnv = null)
+    {
+        if (!(isLinux ?? OperatingSystem.IsLinux())) return new FontReport { Bundled = false, Note = NotLinuxNote };
+        return LinuxFontReport(exePath, fontDirs, getEnv) ?? new FontReport { Bundled = false, Note = NoBundleNote };
+    }
+
+    /// The font lines of `clearcote info` (same text as the Node and Python CLIs).
+    internal static List<string> FontLines(FontReport f)
+    {
+        var lines = new List<string> { $"Fonts           {f.Note}" };
+        if (f.ScriptsCovered is not null && f.ScriptsMissing is not null)
+        {
+            var total = f.ScriptsCovered.Count + f.ScriptsMissing.Count;
+            lines.Add(f.ScriptsMissing.Count > 0
+                ? $"Scripts         {f.ScriptsCovered.Count} of {total} render; no font for {string.Join(", ", f.ScriptsMissing)} (they draw as empty boxes)"
+                : $"Scripts         all {total} render");
+        }
+        foreach (var d in f.FontDirs) lines.Add($"Your fonts      {d}");
+        if (f.FontDirs.Count > 0)
+        {
+            var genuine = f.GenuineWindowsFamilies ?? Array.Empty<string>();
+            var lookalike = f.LookalikeWindowsFamilies ?? Array.Empty<string>();
+            lines.Add($"                real: {(genuine.Count > 0 ? string.Join(", ", genuine) : "none of the key Windows families")}");
+            if (lookalike.Count > 0) lines.Add($"                lookalike: {string.Join(", ", lookalike)}");
+            if (genuine.Count > 0 && f.GenuineFacesSupported == false)
+                lines.Add("                this engine still draws its lookalikes for them (real faces need PRO r32 or newer)");
+        }
+        foreach (var d in f.FallbackFontDirs) lines.Add($"Fallback fonts  {d}");
+        foreach (var d in f.IgnoredFontDirs) lines.Add($"Ignored         {d} (not a directory)");
+        return lines;
+    }
+}
+
+/// What a launch's fonts can draw on this host: the font section of Node's and Python's <c>clearcote info</c>.
+/// Get one from <see cref="Clearcote.FontReportAsync"/> or <see cref="Clearcote.FontReportFor"/>;
+/// <see cref="Lines"/> / <see cref="ToString"/> give the same text those CLIs print.
+public sealed class FontReport
+{
+    /// Whether the build bundles its metric-compatible Windows font clones (Linux builds do). False off Linux.
+    public bool Bundled { get; init; }
+    /// One line on the state of the fonts.
+    public string Note { get; init; } = "";
+    /// The scripts the fonts a launch would see can draw (one sample character each; Emoji only from a colour
+    /// font). Null when there is no bundle to read.
+    public IReadOnlyList<string>? ScriptsCovered { get; init; }
+    /// The scripts with no font: a page draws them as empty boxes, which one fillText tells apart from real glyphs.
+    public IReadOnlyList<string>? ScriptsMissing { get; init; }
+    /// Your own fonts: <see cref="LaunchOptions.FontDirs"/> then CLEARCOTE_FONT_DIRS.
+    public IReadOnlyList<string> FontDirs { get; init; } = Array.Empty<string>();
+    /// CLEARCOTE_FALLBACK_FONT_DIRS: fonts used only for characters nothing else covers.
+    public IReadOnlyList<string> FallbackFontDirs { get; init; } = Array.Empty<string>();
+    /// Entries of the two variables that are not directories (and so are not used).
+    public IReadOnlyList<string> IgnoredFontDirs { get; init; } = Array.Empty<string>();
+    /// With your own fonts: which key Windows families they provide for real...
+    public IReadOnlyList<string>? GenuineWindowsFamilies { get; internal set; }
+    /// ...and which still come from the bundle's lookalikes.
+    public IReadOnlyList<string>? LookalikeWindowsFamilies { get; internal set; }
+    /// With your own fonts: whether this engine draws a genuine face instead of its lookalike (PRO r32+).
+    public bool? GenuineFacesSupported { get; internal set; }
+
+    /// The report as the lines <c>clearcote info</c> prints.
+    public IReadOnlyList<string> Lines() => Fonts.FontLines(this);
+
+    public override string ToString() => string.Join(Environment.NewLine, Lines());
 }

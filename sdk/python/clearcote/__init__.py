@@ -74,6 +74,8 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     webrtc_default_deny_args,
 )
 from ._profile import Profile, list_profiles, load_profile, resolve_profile_options
+from ._reqproxy import (close_on_failure, request_proxy_args, request_proxy_upstream, route_request_api,
+                        warn_request_api)
 # Profile library: real captured personas, selected for coherence with THIS host.
 from ._profilelib import (
     DEFAULT_MAX_ENCODED, default_sticky_key, eligible, gpu_vendor_class,
@@ -457,6 +459,25 @@ def apply_geoip(fp, proxy, quiet=False):
     warn_on_egress_drift(proxy, geo.get("ip"), quiet=quiet)
 
 
+_REQUEST_ROUTE_KEY = "_cc_request_route"  # _prepare -> the launch: (proxy, proxy_args, quiet) to route
+
+
+def _start_request_route(pw_kwargs):
+    """Start the forwarder _prepare asked for (see _reqproxy.py) and hand Playwright its proxy; the
+    route to close with the browser, or None. Always pops the request, so it never reaches Playwright."""
+    pending = pw_kwargs.pop(_REQUEST_ROUTE_KEY, None)
+    route = route_request_api(*pending) if pending else None
+    if route is not None:
+        pw_kwargs["proxy"] = route.proxy.playwright_proxy
+    return route
+
+
+def _close_route_with(target, event, route):
+    """Stop the forwarder when ``target`` (a Browser, "disconnected"; a context, "close") goes."""
+    if route is not None:
+        target.on(event, lambda *_a: route.proxy.close())
+
+
 def _prepare(kwargs):
     # profile="auto" is NOT a saved option-set — it resolves a real captured fingerprint later,
     # once the executable (and therefore the engine's Chromium major) is known. See
@@ -565,6 +586,21 @@ def _prepare(kwargs):
         kwargs.pop("proxy", None)
     else:
         kwargs["proxy"] = proxy
+    if proxy is None and request_proxy_upstream(proxy_opt, proxy_args):
+        if direct_launch:
+            # serve(): a client attached over CDP runs Playwright's request API in its own process with
+            # no proxy of its own (_reqproxy.py): nothing here can route it, so say so.
+            warn_request_api("clearcote: context.request / page.request of a client attached over CDP do not use "
+                             "this proxy and connect from the client's own IP; make API calls inside the page "
+                             "(page.evaluate(\"fetch(...)\")) instead.", quiet)
+        else:
+            # Credentials moved to the engine: Playwright's request API gets a local credential-less
+            # forwarder instead of no proxy at all, which sent it from this machine's IP (_reqproxy.py).
+            # The engine's bypass-list override goes on now; the forwarder itself is started by the
+            # launch, right before Playwright (_start_request_route), so a launch that fails earlier
+            # leaves nothing running. The key never reaches Playwright: every launch pops it.
+            proxy_args = proxy_args + request_proxy_args(proxy_args)
+            kwargs[_REQUEST_ROUTE_KEY] = (proxy_opt, proxy_args, quiet)
     base = (fingerprint_args(fp) + agent_args(agent) + extension_args(extensions)
             + portable_args(portable_profile, encryption_key) + proxy_args)
     base += quic_args(proxy_opt)  # behind a proxy, disable QUIC so no HTTP/3 UDP egresses around it
@@ -1216,10 +1252,15 @@ def launch(cloud=None, **kwargs):
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args, exe)
     launch_args = _with_geometry_args(args, geom)
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
-    browser = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
-        lease, pw_kwargs, launch_token, lambda: _win_av_retry(
-            lambda e: _playwright().chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe
-        )), launch_token)
+    # Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
+    # instead of no proxy at all, which sent it from this machine's IP (_reqproxy.py).
+    req_route = _start_request_route(pw_kwargs)
+    with close_on_failure(req_route):
+        browser = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
+            lease, pw_kwargs, launch_token, lambda: _win_av_retry(
+                lambda e: _playwright().chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe
+            )), launch_token)
+    _close_route_with(browser, "disconnected", req_route)
     if lease:  # release the concurrency slot + remove the run-token file when the browser closes
         def _on_disconnect(_b=None, _lease=lease, _lt=launch_token, _own=owns_lease):
             if _own:  # a borrowed slot belongs to the caller: only drop this launch's token file
@@ -1313,18 +1354,23 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     if crlset_plan:  # the readiness probe's port must bypass a launch proxy, so its server starts first
         launch_args = launch_args + crlset_plan.before_launch(pw_kwargs)
+    # As launch(): the request API reaches the proxy through a local forwarder (_reqproxy.py). Started
+    # after the CRLSet probe: the forwarder is a proxy the browser never uses, with no <-loopback> to route around.
+    req_route = _start_request_route(pw_kwargs)
     try:
-        context = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
-            lease, pw_kwargs, launch_token, lambda: _win_av_retry(
-                lambda e: _playwright().chromium.launch_persistent_context(
-                    user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
-                ),
-                exe,
-            )), launch_token)
+        with close_on_failure(req_route):
+            context = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
+                lease, pw_kwargs, launch_token, lambda: _win_av_retry(
+                    lambda e: _playwright().chromium.launch_persistent_context(
+                        user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
+                    ),
+                    exe,
+                )), launch_token)
     except BaseException:
         if crlset_plan:
             crlset_plan.close()
         raise
+    _close_route_with(context, "close", req_route)
     if lease:  # release the concurrency slot + remove the run-token file when the context closes
         def _on_close(_c=None, _lease=lease, _lt=launch_token, _own=owns_lease):
             if _own:  # a borrowed slot belongs to the caller: only drop this launch's token file

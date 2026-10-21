@@ -815,6 +815,26 @@ public sealed class DockerLaunchTests : IDisposable
     }
 
     [Fact]
+    public async Task A_proxy_warns_that_the_request_api_does_not_use_it()
+    {
+        // Playwright's request API runs in this process over CDP, with no proxy of its own (RequestProxy).
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        _docker.Marks = new() { ServeState("licensed", "http://proxy.example:8080", 30, true, "engine") };
+        DockerLaunch.ConnectOverride = (_, _) => throw new PlaywrightException("connect failed");
+        using (var err = new StderrCapture())
+        {
+            await Assert.ThrowsAsync<PlaywrightException>(() => Clearcote.LaunchAsync(Keyed()));
+            Assert.Contains(RequestProxy.DockerWarning, err.Text);
+        }
+        using (var quiet = new StderrCapture())
+        {
+            await Assert.ThrowsAsync<PlaywrightException>(() => Clearcote.LaunchAsync(Keyed(new LaunchOptions { Quiet = true })));
+            Assert.DoesNotContain(RequestProxy.DockerWarning, quiet.Text);
+        }
+    }
+
+    [Fact]
     public async Task A_cloud_launch_refuses_the_docker_options()
     {
         var e = await Assert.ThrowsAsync<ArgumentException>(() => Clearcote.LaunchAsync(new LaunchOptions { Cloud = true, Docker = true, ApiKey = "k" }));

@@ -124,7 +124,9 @@ public partial class LaunchOptions : FingerprintOptions
     // ── Playwright pass-through / SDK arg knobs ──────────────────────────────
     /// Headless mode. Null = Playwright default (headless). Set false for a headed window.
     public bool? Headless { get; set; }
-    /// Proxy (credentialed SOCKS5 is auto-rerouted to --proxy-server; QUIC is disabled when a proxy is set).
+    /// Proxy. Credentials go to the engine's own switches (SOCKS5 always; http(s) on an engine with
+    /// --proxy-auth, r19+), and Playwright's request API (context.APIRequest / page.APIRequest) then reaches
+    /// the proxy through a local credential-less forwarder (see RequestProxy). QUIC is disabled when a proxy is set.
     public ProxyOptions? Proxy { get; set; }
     /// Extra Chromium args appended last (after the SDK's persona + default args).
     public IReadOnlyList<string>? Args { get; set; }
