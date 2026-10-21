@@ -464,16 +464,20 @@ describe("softwareWebgpuArgs", () => {
 
   it("the r48 marker switch stands in for the revision", async () => {
     const { softwareWebgpuArgs } = await import("../src/launchopts.js");
-    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const path = await import("node:path");
     const dir = mkdtempSync(path.join(tmpdir(), "cc-webgpu-"));
-    const exe = path.join(dir, "chrome");
-    writeFileSync(exe, Buffer.from("xx\0fingerprint-platform\0yy", "latin1"));
-    expect(softwareWebgpuArgs(exe, "windows", "linux")).toEqual([]);
-    const marked = path.join(dir, "chrome2");
-    writeFileSync(marked, Buffer.from("xx\0fingerprint-software-webgpu\0yy", "latin1"));
-    expect(softwareWebgpuArgs(marked, "windows", "linux")).toEqual(three);
+    try {
+      const exe = path.join(dir, "chrome");
+      writeFileSync(exe, Buffer.from("xx\0fingerprint-platform\0yy", "latin1"));
+      expect(softwareWebgpuArgs(exe, "windows", "linux")).toEqual([]);
+      const marked = path.join(dir, "chrome2");
+      writeFileSync(marked, Buffer.from("xx\0fingerprint-software-webgpu\0yy", "latin1"));
+      expect(softwareWebgpuArgs(marked, "windows", "linux")).toEqual(three);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });  // CI fails a run that leaves its temp directory dirty
+    }
   });
 
   it("never adds a switch twice", async () => {

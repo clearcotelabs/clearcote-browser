@@ -219,5 +219,8 @@ def test_serve_py_asks_the_probe_and_passes_no_sandbox_only_when_it_says_no():
         serve = fh.read()
     assert "sandbox_check.decide(args + extra, os.geteuid())" in serve
     assert '(["--no-sandbox"] if not sandbox and "--no-sandbox" not in args + extra else [])' in serve
-    assert serve.count('"--no-sandbox"') == 2  # that line, and nowhere else
+    # That line, plus the persona-display validator (a --clearcote-validate-persona run that exits before any
+    # window; it is not the browser the probe decides for), and nowhere else.
+    assert serve.count('"--no-sandbox"') == 3
+    assert '"--headless=new", "--no-sandbox"] + persona_switches' in serve
     assert '"sandbox": sandbox,' in serve and "SERVE_PROTOCOL = 3" in serve
