@@ -171,6 +171,7 @@ In code: `clearcote.serve_multiplex(port=9222, idle_timeout=300, data_dir="./pro
 ```bash
 clearcote install [--version 152] [--channel preview]
 clearcote info [--quick] [--json] [--proxy <url>]   # alias: doctor
+clearcote bench [--concurrency 3] [--url <url>] [--proxy <url>] [--duration 30] [--json]
 clearcote login [key]      # validates the key, saves it to ~/.clearcote/license.key
 clearcote logout
 clearcote clear-cache
@@ -178,7 +179,9 @@ clearcote serve [--port 9222] ...
 clearcote cloud run|sessions|stop|events|recording|profile sync|webhooks ...   # the hosted API, see Local or cloud
 ```
 
-`info` never downloads: it reports the SDK, the cached builds, which engine features the binary supports, a launch test (skipped with `--quick`), licence seats, fonts and missing system libraries.
+`info` never downloads: it reports the SDK, this machine (CPU, RAM, VM or not, and whether there is a GPU Chromium can draw with), the cached builds, which engine features the binary supports, a launch test (skipped with `--quick`), licence seats, fonts and missing system libraries.
+
+`bench` answers "why is my CPU at 100 %" and "how many browsers can I run": it starts `--concurrency` browsers (headless, temporary profiles, deleted afterwards), loads `--url` in each for `--duration` seconds, through `--proxy` if you give one, and prints what each browser costs in CPU threads and RAM on this machine, page timings (DOMContentLoaded, load, network idle), errors, about how many browsers the machine runs at once, and what to change. It runs fewer browsers than asked when free RAM looks too small (`--force` runs them all). Each browser holds a licence seat while it runs. Paste the output into a support request; proxy credentials are never printed.
 
 Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the side-by-side configuration is incorrect"; this happens when the SDK runs inside an MSIX-packaged app, whose writes to `%LOCALAPPDATA%` Windows redirects), launches use one copy of that build in `~/.clearcote/recovered/` instead, made once and reused by every later launch from Python or Node. `clear-cache` removes those copies too.
 

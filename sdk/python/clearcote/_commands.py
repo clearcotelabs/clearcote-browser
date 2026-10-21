@@ -2,6 +2,7 @@
 
     clearcote install [--version 152] [--channel preview]   download + verify the binary
     clearcote info    [--quick] [--json] [--proxy URL]      diagnostics (alias: doctor)
+    clearcote bench   [--concurrency 3] [--proxy URL] ...     what N browsers cost on this machine
     clearcote update  [--channel preview]                   fetch a newer build if one exists
     clearcote clear-cache                                   delete every cached binary
     clearcote login   [key] | --device                      save a licence key (validated first), or sign in
@@ -20,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +31,7 @@ USAGE = """clearcote {version} -- manage and diagnose the Clearcote browser.
 USAGE
   clearcote install [--version <v>] [--channel stable|preview]
   clearcote info [--quick] [--json] [--proxy <url>]      (alias: doctor)
+  clearcote bench [--concurrency 3] [--url <url>] [--proxy <url>] [--duration 30] [--headed] [--force] [--json]
   clearcote update [--channel stable|preview]
   clearcote clear-cache
   clearcote login [key]
@@ -48,6 +51,14 @@ INFO FLAGS
   --quick          skip everything that needs the network or a launch (seat count, launch test)
   --json           machine-readable output
   --proxy <url>    resolve the exit IP, timezone and language a launch through this proxy would use
+
+BENCH FLAGS
+  --concurrency <n>  browsers at once (default 3; capped by free RAM unless --force)
+  --url <url>        the page every browser loads over and over (default https://en.wikipedia.org/wiki/Web_browser)
+  --proxy <url>      load it through this proxy, as your script does
+  --duration <s>     how long to keep loading (default 30)
+  --headed           show the windows (default headless)
+  --json             machine-readable output
 
 ENVIRONMENT
   CLEARCOTE_LICENSE_KEY, CLEARCOTE_RELEASE_CHANNEL, CLEARCOTE_GEOIP_TIMEOUT_SECONDS,
@@ -193,6 +204,7 @@ def build_info(quick=False, proxy=None, launch_fn=None):
     import platform as _platform
 
     from ._launchopts import GATED_ENGINE_SWITCHES, QUIET_GATED_ENGINE_SWITCHES, engine_supports_switch
+    from ._bench import host_info
     from ._license import get_session_seats, license_expiry, license_key_source, resolve_license_key
     from .download import _auto_update_requested, list_cached_builds, resolve_release_channel
     from .release import RELEASE
@@ -222,6 +234,7 @@ def build_info(quick=False, proxy=None, launch_fn=None):
     report = {
         "sdk": {"version": _sdk_version(), "python": _platform.python_version(),
                 "platform": f"{sys.platform}-{_platform.machine().lower()}"},
+        "host": host_info(),
         "license": license_info,
         "binary": binary,
         "geoip": {"databaseCached": os.path.exists(_geo_db_path()), "path": _geo_db_path()},
@@ -283,6 +296,10 @@ def print_info(r):
         return "yes" if b else "no"
 
     _out(f"clearcote SDK   {r['sdk']['version']}  (python {r['sdk']['python']}, {r['sdk']['platform']})")
+    if r.get("host"):
+        from ._bench import host_lines
+        for line in host_lines(r["host"]):
+            _out(line)
     lic = r["license"]
     _out("Licence         " + ("none (free build)" if lic["source"] == "none" else f"{lic.get('key')} from {lic['source']}"))
     exp = lic.get("expiry")
@@ -381,7 +398,11 @@ COMMAND_NOTES = {
               "  --device   sign in from a browser instead: shows a link and a code, and saves the key the\n"
               "             site issues once you approve it there. Nothing to copy or paste."),
     "logout": "Removes the saved key (and what device login recorded about it).",
-    "info": "Reports the SDK, the licence, the cached builds and what a launch would use. Never downloads.",
+    "info": "Reports the SDK, this machine, the licence, the cached builds and what a launch would use. Never downloads.",
+    "bench": ("Starts N browsers, loads a page in each for a while, and reports what each browser costs in CPU\n"
+              "  and RAM on this machine, how long pages take, and about how many browsers it runs at once.\n"
+              "  Paste the output into a support request. Every browser counts against your licence's seats while\n"
+              "  it runs; profiles are temporary and deleted afterwards."),
     "install": "Downloads and verifies the build a launch would use.",
     "update": "Fetches a newer build if one exists.",
     "clear-cache": "Deletes every cached browser build (nothing else in the cache directory), and on Windows the "
@@ -403,8 +424,8 @@ def command_usage(cmd):
         if keep:
             picked.append(line)
     text = "USAGE\n" + "\n".join(picked)
-    if cmd == "info":
-        flags = lines[lines.index("INFO FLAGS"):]
+    if cmd in ("info", "bench"):
+        flags = lines[lines.index("INFO FLAGS" if cmd == "info" else "BENCH FLAGS"):]
         text += "\n\n" + "\n".join(flags[:flags.index("") if "" in flags else len(flags)])
     note = COMMAND_NOTES.get(cmd)
     return f"clearcote {cmd} -- {note}\n\n{text}" if note else text
@@ -541,6 +562,14 @@ def _non_negative(name):
     return conv
 
 
+def _at_least_one(name):
+    def conv(v):
+        if not re.fullmatch(r"[1-9][0-9]*", v or ""):
+            raise argparse.ArgumentTypeError(f"--{name} must be a whole number of at least 1")
+        return int(v)
+    return conv
+
+
 def _parser():
     ap = argparse.ArgumentParser(prog="clearcote", add_help=False)
     sub = ap.add_subparsers(dest="cmd")
@@ -549,6 +578,14 @@ def _parser():
     info.add_argument("--no-launch", action="store_true")
     info.add_argument("--json", action="store_true")
     info.add_argument("--proxy")
+    bench = sub.add_parser("bench", add_help=False)
+    bench.add_argument("--concurrency", type=_at_least_one("concurrency"), default=3)
+    bench.add_argument("--url", default="https://en.wikipedia.org/wiki/Web_browser")
+    bench.add_argument("--proxy")
+    bench.add_argument("--duration", type=_at_least_one("duration"), default=30)
+    bench.add_argument("--headed", action="store_true")
+    bench.add_argument("--force", action="store_true")
+    bench.add_argument("--json", action="store_true")
     for name in ("install", "update"):
         p = sub.add_parser(name, add_help=False)
         p.add_argument("--version")
@@ -926,7 +963,7 @@ def _run(argv):
         return 0
     if argv[0] == "cloud":
         return _cloud(argv[1:])
-    known = ("info", "doctor", "install", "update", "clear-cache", "login", "logout", "serve")
+    known = ("info", "doctor", "bench", "install", "update", "clear-cache", "login", "logout", "serve")
     if argv[0] not in known:
         fail(f"unknown command '{argv[0]}'. Run `clearcote --help`.", 2)
     if any(a in ("-h", "--help") for a in argv[1:]):
@@ -951,6 +988,38 @@ def _run(argv):
             _out(json.dumps(report, indent=2, ensure_ascii=False))
         else:
             print_info(report)
+        return 0
+
+    if cmd == "bench":
+        import asyncio
+
+        from ._bench import bench_lines, run_bench, summarize_bench
+        from ._license import resolve_license_key
+        from ._net import to_proxy_spec
+        from .async_api import launch_persistent_context
+        from .download import _auto_update_requested, list_cached_builds
+        proxy = None
+        if a.proxy:
+            try:
+                proxy = to_proxy_spec(a.proxy)
+            except ValueError as e:
+                fail(str(e), 2)
+        pick, _why = launch_build(list_cached_builds(), os.environ.get("CLEARCOTE_BINARY"), resolve_license_key(),
+                                  _auto_update_requested(None), os.environ.get("CLEARCOTE_BROWSER_VERSION"))
+
+        def launch_fn(d, **opts):
+            # cloud=False: this measures THIS machine, whatever CLEARCOTE_CLOUD says.
+            return launch_persistent_context(d, cloud=False, **opts)
+
+        raw = asyncio.run(run_bench(a.concurrency, a.url, a.duration, not a.headed, launch_fn, proxy=proxy,
+                                    force=a.force, exe_name=os.path.basename(pick["path"]) if pick else "chrome.exe",
+                                    progress=lambda line: _err(f"[clearcote] {line}")))
+        report = summarize_bench(raw)
+        if a.json:
+            _out(json.dumps(report, indent=2, ensure_ascii=False))
+        else:
+            for line in bench_lines(report):
+                _out(line)
         return 0
 
     if cmd in ("install", "update"):
