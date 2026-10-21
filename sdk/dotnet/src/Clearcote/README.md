@@ -2,12 +2,16 @@
 
 A Playwright drop-in for the [Clearcote](https://github.com/clearcotelabs/clearcote-browser) anti-fingerprint
 Chromium build. `Clearcote.LaunchAsync()` returns a standard **Microsoft.Playwright `IBrowser`** backed by
-the verified Clearcote binary — auto-downloaded and **SHA-256-checked** on first use, then cached. Every
+the verified Clearcote binary — auto-downloaded, cached, and **SHA-256-checked again before every launch** (the
+executable, and `chrome.dll` on Windows). Every
 persona knob maps to the engine's fingerprint switches; a PRO license key pulls the license-gated build and
 checks out a floating-concurrency lease.
 
 The .NET SDK mirrors the [npm `clearcote`](https://www.npmjs.com/package/clearcote) and
-[PyPI `clearcote`](https://pypi.org/project/clearcote/) SDKs. Windows x64 + Linux x64.
+[PyPI `clearcote`](https://pypi.org/project/clearcote/) SDKs feature for feature (the command-line tools excepted:
+`clearcote` and `clearcote-agent` ship with the npm and pip packages). Windows x64, Linux x64 and macOS on Apple
+Silicon (the native PRO build; without it, `Docker = true` / `CLEARCOTE_DOCKER=1` runs the browser in the Clearcote
+Docker image, which `LaunchAsync` and `LaunchEphemeralProfileAsync` pick on their own on such a Mac).
 
 ## Install
 
@@ -345,9 +349,15 @@ var b = await playwright.Chromium.ConnectOverCDPAsync(
 
 ```csharp
 var exe = await Clearcote.Clearcote.ExecutablePathAsync(new LaunchOptions { LicenseKey = "cc_lic_..." });
-// download/verify only, no launch:
-var path = await Clearcote.Clearcote.DownloadAsync();
+// download/verify only, no launch: picks the build a launch would (CLEARCOTE_BINARY, a catalog Version, PRO when a
+// licence key resolves, else free)
+var path = await Clearcote.Clearcote.DownloadAsync(new DownloadOptions { Version = "155" });
+foreach (var b in Download.ListCachedBuilds()) Console.WriteLine($"{b.Tag} {b.Path}");
 ```
+
+The licence key file the `clearcote login` command writes is shared by all three SDKs: `License.SaveLicenseKey`,
+`License.RemoveLicenseKey`, `License.LicenseKeySource()` (where the key in effect comes from) and
+`License.LicenseExpiry()` read and write the same `~/.clearcote` files.
 
 Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the side-by-side configuration is incorrect"; this happens when the SDK runs inside an MSIX-packaged app, whose writes to `%LOCALAPPDATA%` Windows redirects), launches use one copy of that build in `~/.clearcote/recovered/` instead, made once and reused by every later launch from .NET, Python or Node. `WinLaunch.ClearRecovered()` removes those copies, as `clearcote clear-cache` does.
 
@@ -376,6 +386,14 @@ Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the 
 | `FontDirs` | Linux: your own fonts, listed ahead of the bundled lookalikes (see below) |
 | `PersonaEnv = false` | keep the persona switches on the browser's command line (see below) |
 | `StockRuntime = true` | stock DevTools behaviour for debugging (see below) |
+| `PortableProfile` / `EncryptionKey` | a profile directory that opens on another machine (engine switch) |
+| `PlaywrightLaunchOptions` / `PlaywrightContextOptions` | any other Playwright launch / persistent-context field (`DownloadsPath`, `Locale`, `RecordVideoDir`, `StorageStatePath`, ...); a field `LaunchOptions` has its own property for throws |
+| `Humanize` / `HumanizeOptions` / `ShowCursor` | humanize every page of the launch, seeded from `Fingerprint` (see [Human input](#human-input-humanize)) |
+| `AgentLlmUrl` / `AgentLlmKey` / `AgentModel` / `AgentToolMode` / `AgentTyping` | the in-browser AI agent (see below) |
+
+An HTTP(S) proxy with a username and password goes to the engine's own `--proxy-auth` (r19+) instead of
+Playwright's request interception, which pages can notice; SOCKS5 credentials go to `--socks5-credentials`. An
+option the engine is too old for (`PersonaSchema` 2-4, `RealGpuHost`, SOCKS5 credentials) warns and is ignored.
 
 ## Window geometry
 
@@ -428,9 +446,34 @@ Precedence, first match wins:
 `--fingerprint-window=off` in `Args` keeps a seeded launch on the previous behaviour; a pinned
 `--fingerprint-schema=1`..`3` keeps it too unless you add `--fingerprint-window=on`.
 
+## In-browser AI agent (`LaunchAgentAsync`)
+
+The engine has its own agent that reads and drives the page with an LLM (OpenRouter by default, or any
+OpenAI-compatible endpoint):
+
+```csharp
+await using var ctx = await Clearcote.Clearcote.LaunchAgentAsync(new LaunchOptions { AgentLlmKey = "sk-or-..." });
+var page = ctx.Pages[0];
+await page.GotoAsync("https://example.com");
+var result = await Clearcote.Clearcote.RunAgentTaskAsync(page, "Find the price of the cheapest plan");
+Console.WriteLine(result.FinalText);
+```
+
+## Render coherence (`CheckRenderCoherenceAsync`)
+
+`await Clearcote.Clearcote.CheckRenderCoherenceAsync(page)` reads what WebGL reports on the running page and returns
+a `RenderVerdict`: whether the GPU it claims is a software renderer, below a desktop GPU's capability floor, or a
+different family from the one you expected (`claimedGpu`), with a warning per finding.
+
 ## Environment variables
 
-`CLEARCOTE_LICENSE_KEY`, `CLEARCOTE_LICENSE_API`, `CLEARCOTE_LEASE_API`, `CLEARCOTE_INSTANCE_ID`, `CLEARCOTE_BINARY`,
+`CLEARCOTE_LICENSE_KEY`, `CLEARCOTE_LICENSE_API`, `CLEARCOTE_LEASE_API`, `CLEARCOTE_LICENSE_THROUGH_PROXY`,
+`CLEARCOTE_OFFLINE_KEY`, `CLEARCOTE_INSTANCE_ID`, `CLEARCOTE_RUN_TOKEN_FILE`, `CLEARCOTE_BINARY`,
+`CLEARCOTE_BROWSER_VERSION`, `CLEARCOTE_RELEASE_CHANNEL`, `CLEARCOTE_DOCKER`, `CLEARCOTE_DOCKER_IMAGE`,
+`CLEARCOTE_DOCKER_CACHE_VOLUME`, `CLEARCOTE_DOCKER_IDLE_EXIT`, `CLEARCOTE_PROFILE_DIR`, `CLEARCOTE_PROFILE_API`,
+`CLEARCOTE_PROFILE_SOURCE`, `CLEARCOTE_PROFILE_KEY`, `CLEARCOTE_SERVE_IDLE_TIMEOUT`, `CLEARCOTE_SHADER_DIALECT`,
+`CLEARCOTE_HUMANIZE_ENGINE_CLICKS`, `CLEARCOTE_HUMANIZE_ENGINE_EXT`, `CLEARCOTE_HUMANIZE_SCORE`,
+`CLEARCOTE_HUMANIZE_SCORE_FILE`,
 `CLEARCOTE_CACHE`, `CLEARCOTE_AUTO_UPDATE`, `CLEARCOTE_STOCK_RUNTIME`, `CLEARCOTE_PERSONA_ENV`,
 `CLEARCOTE_FONT_DIRS`, `CLEARCOTE_FALLBACK_FONT_DIRS`, `CLEARCOTE_GEOIP_TIMEOUT_SECONDS`, `CLEARCOTE_GEOIP_ECHO_URL`,
 `CLEARCOTE_GEOIP_IPAPI`, `CLEARCOTE_NO_WARN`, `CLEARCOTE_WIDEVINE`, `CLEARCOTE_WIDEVINE_DIR`,
@@ -450,9 +493,9 @@ This SDK covers the core: persona → engine switches, free + PRO binary resolut
 extract / cache, with the Windows first-launch AV-race work-around), the full floating-concurrency licensing
 client, `LaunchAsync` / `LaunchPersistentContextAsync` / `ServeAsync` / `ExecutablePathAsync`, the default
 stealth args, and cloud mode with the full hosted API (see [Local or cloud](#local-or-cloud)). The Widevine/EME helper is here too since 0.48.0 (see [Widevine / DRM](#widevine--drm-widevine)). The
-higher-level add-ons in the Node/Python SDKs — the humanized cursor, in-browser AI agent,
-saved-profile manager, and render-coherence linter — are planned follow-ups; the
-underlying engine switches are all reachable today via `Args`.
+higher-level add-ons of the Node/Python SDKs are here as well: the humanized cursor and keyboard (with the engine
+pointer route and humanized child frames), saved personas and `LocalProfile = "auto"`, the multi-identity endpoint,
+the in-browser AI agent and the render-coherence check. Only the command-line tools are Node/Python-only.
 
 Also available (0.29.0): `Geoip = true` (through the proxy, incl. SOCKS5; one
 `CLEARCOTE_GEOIP_TIMEOUT_SECONDS` deadline; throws `GeoipException` before launch if unresolved unless
