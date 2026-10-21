@@ -268,3 +268,39 @@ def test_readiness_starts_the_probe_before_launch_and_closes_it(tmp_path):
     plan.close()
     assert plan.server is None
     assert plan.wait(context=None) is False  # nothing to wait with once closed
+
+
+class _Opened:
+    def __init__(self, *times):
+        self.opened = list(times)
+
+    def count(self):
+        return len(self.opened)
+
+    def reopened_after(self, moment):
+        return any(t > moment for t in self.opened[1:])
+
+
+def test_a_drop_before_startup_completes_does_not_count():
+    # a network change at launch (Linux) dropped the pooled connection: re-opened at t=2, startup at t=5
+    state = _crlset._ReadinessState(_Opened(1.0, 2.0))
+    assert not state.ready(3.0)
+    state.note_startup(True, first_check=False, now=5.0)
+    assert not state.ready(5.1)
+    state.server.opened.append(5.6)  # the CRLSet's drop
+    assert state.ready(5.7)
+
+
+def test_startup_already_complete_at_the_first_check_waits_a_grace_then_counts():
+    state = _crlset._ReadinessState(_Opened(10.0))
+    state.note_startup(True, first_check=True, now=10.0)
+    assert not state.ready(10.5)
+    assert state.ready(10.0 + _crlset.ALREADY_STARTED_GRACE_SECONDS)
+
+
+def test_without_the_histogram_the_first_drop_counts():
+    state = _crlset._ReadinessState(_Opened(1.0))
+    state.histogram = False
+    assert not state.ready(2.0)
+    state.server.opened.append(2.5)
+    assert state.ready(2.6)

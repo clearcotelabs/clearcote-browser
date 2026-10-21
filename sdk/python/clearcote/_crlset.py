@@ -22,9 +22,10 @@ The engine still knows how to use one. This module:
 
 Readiness signal: applying a CRLSet changes the cert verifier, and the network service then closes its
 idle pooled connections, plain HTTP ones included. The probe keeps one keep-alive HTTP connection to a
-local server and waits for that connection to be dropped and re-opened. Measured 5/5 on a 155 engine (and
-6/6 with an HTTPS probe): a revoked host navigated right after is ERR_CERT_REVOKED. It adds a few seconds
-to a launch.
+local server and waits for that connection to be dropped and re-opened AFTER startup has completed (the
+``Startup.AfterStartupTaskCount`` histogram, read over CDP): a network change at launch drops it too
+(seen on Linux) and must not count. Measured 5/5 on a 155 engine (and 6/6 with an HTTPS probe): a revoked
+host navigated right after is ERR_CERT_REVOKED. It adds a few seconds to a launch.
 
 OPT-IN: ``crlset=True`` (or CLEARCOTE_CRLSET=1). Where the CRLSet comes from, first match wins:
 ``crlset="<path>"`` (a crl-set file or a component directory), CLEARCOTE_CRLSET_FILE, then the newest
@@ -334,7 +335,7 @@ def apply_crlset_launch(user_data_dir, kwargs, quiet=False):
 
 
 class _ProbeServer:
-    """HTTP on 127.0.0.1 that counts the connections the browser opens to it."""
+    """HTTP on 127.0.0.1 that records when the browser opens each connection to it."""
 
     def __init__(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -347,7 +348,7 @@ class _ProbeServer:
             def setup(self):
                 super().setup()
                 with server.lock:
-                    server.connections += 1
+                    server.opened.append(time.monotonic())
 
             def do_GET(self):
                 self.send_response(204)
@@ -359,7 +360,7 @@ class _ProbeServer:
                 pass
 
         self.lock = threading.Lock()
-        self.connections = 0
+        self.opened = []  # time.monotonic() of each connection
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.httpd.daemon_threads = True
         self.host_port = "127.0.0.1:%d" % self.httpd.server_address[1]
@@ -369,7 +370,12 @@ class _ProbeServer:
 
     def count(self):
         with self.lock:
-            return self.connections
+            return len(self.opened)
+
+    def reopened_after(self, moment):
+        """A connection other than the first was opened after ``moment``: the pooled one was dropped."""
+        with self.lock:
+            return any(t > moment for t in self.opened[1:])
 
     def close(self):
         self.httpd.shutdown()
@@ -377,6 +383,38 @@ class _ProbeServer:
 
 
 _PROBE_JS = "u => fetch(u, {cache: 'no-store'}).then(r => r.status, e => 0)"
+STARTUP_HISTOGRAM = "Startup.AfterStartupTaskCount"  # recorded once, when startup completes
+ALREADY_STARTED_GRACE_SECONDS = 1.5  # startup was complete before the wait began: the drop may be past
+
+
+class _ReadinessState:
+    """When the CRLSet is live, from the probe's connections and the startup histogram.
+
+    Not every dropped connection is the CRLSet: a network change (seen on Linux at launch) drops them too.
+    The CRLSet is read only after startup completes (its loader is a BEST_EFFORT task), so only a drop
+    seen after the histogram appeared counts. If startup was already complete at the first check, the drop
+    may have happened before the probe connected: a short grace, then it counts as live. Without the
+    histogram (CDP refused it) the first drop counts, as before."""
+
+    def __init__(self, server):
+        self.server = server
+        self.started_at = None  # monotonic time the histogram was first seen
+        self.already_started = False
+        self.histogram = True  # False once the browser refused Browser.getHistogram
+
+    def note_startup(self, present, first_check, now):
+        if self.started_at is None and present:
+            self.started_at = now
+            self.already_started = first_check
+
+    def ready(self, now):
+        if not self.histogram:
+            return self.server.count() >= 2
+        if self.started_at is None:
+            return False
+        if self.server.reopened_after(self.started_at):
+            return True
+        return self.already_started and now - self.started_at >= ALREADY_STARTED_GRACE_SECONDS
 
 
 def proxy_bypass_args(pw_kwargs, rule):
@@ -428,11 +466,23 @@ class CRLSetReadiness:
         if self.server is None:
             return False
         deadline = time.monotonic() + self.timeout
+        state = _ReadinessState(self.server)
+        cdp = None
         try:
             page = context.pages[0] if context.pages else context.new_page()
+            cdp = context.new_cdp_session(page)
+            first = True
             while time.monotonic() < deadline:
+                if state.histogram and state.started_at is None:  # checked BEFORE the probe: see _ReadinessState
+                    try:
+                        cdp.send("Browser.getHistogram", {"name": STARTUP_HISTOGRAM})
+                        state.note_startup(True, first, time.monotonic())
+                    except Exception as exc:  # noqa: BLE001 - not recorded yet, or the method is refused
+                        if "cannot find histogram" not in str(exc).lower():
+                            state.histogram = False
+                first = False
                 page.evaluate(_PROBE_JS, self.server.url)
-                if self.server.count() >= 2:  # the pooled connection was dropped: the cert verifier changed
+                if state.ready(time.monotonic()):
                     return True
                 time.sleep(0.05)
             return self._timed_out()
@@ -440,6 +490,11 @@ class CRLSetReadiness:
             _warn_once("wait", "readiness check failed (%s: %s)" % (type(exc).__name__, exc), self.quiet)
             return False
         finally:
+            if cdp is not None:
+                try:
+                    cdp.detach()
+                except Exception:  # noqa: BLE001 - the browser may be gone
+                    pass
             self.close()
 
     async def wait_async(self, context):
@@ -449,11 +504,23 @@ class CRLSetReadiness:
         if self.server is None:
             return False
         deadline = time.monotonic() + self.timeout
+        state = _ReadinessState(self.server)
+        cdp = None
         try:
             page = context.pages[0] if context.pages else await context.new_page()
+            cdp = await context.new_cdp_session(page)
+            first = True
             while time.monotonic() < deadline:
+                if state.histogram and state.started_at is None:
+                    try:
+                        await cdp.send("Browser.getHistogram", {"name": STARTUP_HISTOGRAM})
+                        state.note_startup(True, first, time.monotonic())
+                    except Exception as exc:  # noqa: BLE001 - not recorded yet, or the method is refused
+                        if "cannot find histogram" not in str(exc).lower():
+                            state.histogram = False
+                first = False
                 await page.evaluate(_PROBE_JS, self.server.url)
-                if self.server.count() >= 2:
+                if state.ready(time.monotonic()):
                     return True
                 await asyncio.sleep(0.05)
             return self._timed_out()
@@ -461,6 +528,11 @@ class CRLSetReadiness:
             _warn_once("wait", "readiness check failed (%s: %s)" % (type(exc).__name__, exc), self.quiet)
             return False
         finally:
+            if cdp is not None:
+                try:
+                    await cdp.detach()
+                except Exception:  # noqa: BLE001 - the browser may be gone
+                    pass
             self.close()
 
     def close(self):

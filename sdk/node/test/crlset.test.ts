@@ -7,9 +7,11 @@ import { Agent } from "node:http";
 import path from "node:path";
 import { crc32 } from "node:zlib";
 import {
+  ALREADY_STARTED_GRACE_SECONDS,
   CRLSET_APP_ID,
   CrlsetReadiness,
   ProbeServer,
+  ReadinessState,
   applyCrlsetLaunch,
   crlsetMode,
   crlsetRefreshInFlight,
@@ -382,8 +384,10 @@ describe("readiness probe", () => {
     await plan.beforeLaunch({});
     const server = plan.server!;
     let calls = 0;
-    const page = { evaluate: async () => { calls += 1; if (calls === 3) server.connections = 2; return 204; } };
-    const context = { pages: () => [page], newPage: async () => page };
+    // startup completes before the 2nd probe; the pooled connection is replaced at the 3rd
+    const cdp = { send: async () => { if (calls < 1) throw new Error("Cannot find histogram: x"); return {}; }, detach: async () => undefined };
+    const page = { evaluate: async () => { calls += 1; if (calls === 3) server.opened.push(performance.now()); else if (calls === 1) server.opened.push(performance.now()); return 204; } };
+    const context = { pages: () => [page], newPage: async () => page, newCDPSession: async () => cdp };
     expect(await plan.wait(context as never)).toBe(true);
     expect(calls).toBe(3);
     expect(plan.server).toBeUndefined();
@@ -393,11 +397,46 @@ describe("readiness probe", () => {
     const plan = new CrlsetReadiness(0.2, 42);
     await plan.beforeLaunch({});
     const page = { evaluate: async () => 204 };
-    expect(await plan.wait({ pages: () => [page] } as never)).toBe(false);
+    const cdp = { send: async () => { throw new Error("Cannot find histogram: x"); }, detach: async () => undefined };
+    expect(await plan.wait({ pages: () => [page], newCDPSession: async () => cdp } as never)).toBe(false);
     expect(err()).toContain("CRLSet not confirmed live within 0.2 s");
     const broken = new CrlsetReadiness(1, 42);
     await broken.beforeLaunch({});
     expect(await broken.wait({ pages: () => { throw new Error("gone"); } } as never)).toBe(false);
     expect(err()).toContain("readiness check failed (Error: gone)");
+  });
+});
+
+describe("readiness gate: only a drop after startup counts", () => {
+  const opened = (...times: number[]) => ({
+    times,
+    count() { return this.times.length; },
+    reopenedAfter(m: number) { return this.times.slice(1).some((t) => t > m); },
+  });
+
+  it("ignores a drop before startup completes (network change at launch)", () => {
+    const server = opened(1000, 2000);
+    const state = new ReadinessState(server);
+    expect(state.ready(3000)).toBe(false);
+    state.noteStartup(true, false, 5000);
+    expect(state.ready(5100)).toBe(false);
+    server.times.push(5600); // the CRLSet's drop
+    expect(state.ready(5700)).toBe(true);
+  });
+
+  it("counts after a grace when startup was complete at the first check", () => {
+    const state = new ReadinessState(opened(10_000));
+    state.noteStartup(true, true, 10_000);
+    expect(state.ready(10_500)).toBe(false);
+    expect(state.ready(10_000 + ALREADY_STARTED_GRACE_SECONDS * 1000)).toBe(true);
+  });
+
+  it("falls back to the first drop without the histogram", () => {
+    const server = opened(1000);
+    const state = new ReadinessState(server);
+    state.histogram = false;
+    expect(state.ready(2000)).toBe(false);
+    server.times.push(2500);
+    expect(state.ready(2600)).toBe(true);
   });
 });

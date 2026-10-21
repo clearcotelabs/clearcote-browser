@@ -22,9 +22,10 @@
 //
 // Readiness signal: applying a CRLSet changes the cert verifier, and the network service then closes its
 // idle pooled connections, plain HTTP ones included. The probe keeps one keep-alive HTTP connection to a
-// local server on 127.0.0.1 and waits for that connection to be dropped and re-opened (no certificate, no
-// CDP). Measured 5/5 live: an eMudhra host navigated right after is ERR_CERT_REVOKED. It adds a few seconds
-// to a launch.
+// local server on 127.0.0.1 and waits for that connection to be dropped and re-opened (no certificate) AFTER
+// startup has completed (the `Startup.AfterStartupTaskCount` histogram, read over CDP): a network change at
+// launch drops it too (seen on Linux) and must not count. Measured live on Windows and Linux: an eMudhra
+// host navigated right after is ERR_CERT_REVOKED. It adds a few seconds to a launch.
 //
 // OPT-IN: `crlset: true` (or CLEARCOTE_CRLSET=1). Where the CRLSet comes from, first match wins:
 // `crlset: "<path>"` (a crl-set file or a component directory), CLEARCOTE_CRLSET_FILE, then the newest
@@ -42,7 +43,7 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import extract from "extract-zip";
-import type { BrowserContext } from "playwright-core";
+import type { BrowserContext, CDPSession } from "playwright-core";
 import { OMAHA_URL, crx3ToZip, omahaRequestBody, omahaUserAgent, parseUpdate, postJson, unsuppressComponentUpdate, withTimeout } from "./widevine.js";
 
 export const COMPONENT_DIR = "CertificateRevocation";
@@ -369,9 +370,9 @@ export async function applyCrlsetLaunch(userDataDir: string, options: CrlsetLaun
   }
 }
 
-/** HTTP/1.1 on 127.0.0.1 that counts the TCP connections the browser opens to it. */
+/** HTTP/1.1 on 127.0.0.1 that records when the browser opens each TCP connection to it. */
 export class ProbeServer {
-  connections = 0;
+  opened: number[] = []; // performance.now() of each connection
   url = "";
   private constructor(private readonly server: Server) {}
 
@@ -384,7 +385,7 @@ export class ProbeServer {
     // would be re-opened and read as the CRLSet's drop.
     server.keepAliveTimeout = 0;
     const probe = new ProbeServer(server);
-    server.on("connection", () => { probe.connections += 1; });
+    server.on("connection", () => { probe.opened.push(performance.now()); });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(0, "127.0.0.1", () => { server.off("error", reject); resolve(); });
@@ -395,7 +396,12 @@ export class ProbeServer {
   }
 
   count(): number {
-    return this.connections;
+    return this.opened.length;
+  }
+
+  /** A connection other than the first was opened after `moment`: the pooled one was dropped. */
+  reopenedAfter(moment: number): boolean {
+    return this.opened.slice(1).some((t) => t > moment);
   }
 
   close(): void {
@@ -406,6 +412,39 @@ export class ProbeServer {
 
 // runs in the page (the browser's fetch takes `cache`; Node's RequestInit type does not list it)
 const probeJs = (u: string) => fetch(u, { cache: "no-store" } as RequestInit).then((r) => r.status, () => 0);
+export const STARTUP_HISTOGRAM = "Startup.AfterStartupTaskCount"; // recorded once, when startup completes
+export const ALREADY_STARTED_GRACE_SECONDS = 1.5; // startup was complete before the wait began: the drop may be past
+
+/**
+ * When the CRLSet is live, from the probe's connections and the startup histogram.
+ *
+ * Not every dropped connection is the CRLSet: a network change (seen on Linux at launch) drops them too.
+ * The CRLSet is read only after startup completes (its loader is a BEST_EFFORT task), so only a drop seen
+ * after the histogram appeared counts. If startup was already complete at the first check, the drop may have
+ * happened before the probe connected: a short grace, then it counts as live. Without the histogram (CDP
+ * refused it) the first drop counts, as before.
+ */
+export class ReadinessState {
+  startedAt: number | undefined; // performance.now() the histogram was first seen
+  alreadyStarted = false;
+  histogram = true; // false once the browser refused Browser.getHistogram
+
+  constructor(readonly server: Pick<ProbeServer, "count" | "reopenedAfter">) {}
+
+  noteStartup(present: boolean, firstCheck: boolean, now: number): void {
+    if (this.startedAt === undefined && present) {
+      this.startedAt = now;
+      this.alreadyStarted = firstCheck;
+    }
+  }
+
+  ready(now: number): boolean {
+    if (!this.histogram) return this.server.count() >= 2;
+    if (this.startedAt === undefined) return false;
+    if (this.server.reopenedAfter(this.startedAt)) return true;
+    return this.alreadyStarted && now - this.startedAt >= ALREADY_STARTED_GRACE_SECONDS * 1000;
+  }
+}
 
 /**
  * Launch args that send `rule` around a Playwright-handled proxy, else []. Playwright adds `<-loopback>`
@@ -453,11 +492,24 @@ export class CrlsetReadiness {
       return false;
     }
     const deadline = performance.now() + this.timeout * 1000;
+    const state = new ReadinessState(server);
+    let cdp: CDPSession | undefined;
     try {
       const page = context.pages()[0] ?? (await context.newPage());
+      cdp = await context.newCDPSession(page);
+      let first = true;
       while (performance.now() < deadline) {
+        if (state.histogram && state.startedAt === undefined) { // checked BEFORE the probe: see ReadinessState
+          try {
+            await cdp.send("Browser.getHistogram", { name: STARTUP_HISTOGRAM });
+            state.noteStartup(true, first, performance.now());
+          } catch (e) { // not recorded yet, or the method is refused
+            if (!/cannot find histogram/i.test(errText(e))) state.histogram = false;
+          }
+        }
+        first = false;
         await page.evaluate(probeJs, server.url);
-        if (server.count() >= 2) return true; // the pooled connection was dropped: the cert verifier changed
+        if (state.ready(performance.now())) return true;
         await new Promise((r) => setTimeout(r, 50));
       }
       warnOnce("timeout", `CRLSet not confirmed live within ${this.timeout} s; the browser may still trust revoked ` +
@@ -467,6 +519,7 @@ export class CrlsetReadiness {
       warnOnce("wait", `readiness check failed (${errName(e)}: ${errText(e)})`, this.quiet);
       return false;
     } finally {
+      await cdp?.detach().catch(() => undefined); // the browser may be gone
       this.close();
     }
   }
