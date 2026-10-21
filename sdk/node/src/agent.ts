@@ -141,12 +141,6 @@ export interface AgentTaskResult {
   stepsJson: string;
 }
 
-async function pageTargetId(page: Page): Promise<string> {
-  const s = await page.context().newCDPSession(page);
-  const info: any = await s.send("Target.getTargetInfo");
-  return info.targetInfo.targetId;
-}
-
 /**
  * Run an autonomous AI-agent task against `page`: the engine perceives the page, asks the LLM
  * (OpenRouter by default) what to do, and executes the actions until the goal is met or `maxSteps`
@@ -157,10 +151,15 @@ export async function runAgentTask(
   goal: string,
   opts: AgentTaskOptions = {}
 ): Promise<AgentTaskResult> {
+  const pageSession = await page.context().newCDPSession(page);
+  const info: any = await pageSession.send("Target.getTargetInfo");
+  const targetId: string = info.targetInfo.targetId;
+  // Sent on a browser session. Older Playwright clients give a PERSISTENT context (the one
+  // launchAgent returns) no Browser, though, so there the page's own session carries it: the
+  // engine serves the Browser domain on a page target's session too and finds the tab by targetId.
   const browser = page.context().browser();
-  if (!browser) throw new Error("runAgentTask: page is not attached to a Browser");
-  const session = await browser.newBrowserCDPSession();
-  const params: Record<string, unknown> = { targetId: await pageTargetId(page), goal };
+  const session = browser ? await browser.newBrowserCDPSession() : pageSession;
+  const params: Record<string, unknown> = { targetId, goal };
   if (opts.maxSteps != null) params.maxSteps = opts.maxSteps;
   if (opts.model != null) params.model = opts.model;
   if (opts.planJson != null) params.planJson = opts.planJson;

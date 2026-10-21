@@ -23,7 +23,6 @@ hosted session instead; :class:`AsyncCloud` is the asyncio client for the rest o
 """
 
 import asyncio
-import json
 import os
 import sys
 import tempfile
@@ -46,6 +45,7 @@ from ._colorscheme import (default_color_scheme, engine_decides_color_scheme,
                            install_color_scheme_default_async)
 from ._humanize_async import install_humanize, install_humanize_on_context
 from ._hzoptions import ClearcoteStrictError, HumanizeOptions  # noqa: F401  (re-exported)
+from ._agent import run_agent_task_async
 from ._profile import Profile, list_profiles, load_profile
 from ._render_async import check_render_coherence
 from .download import ensure_binary, warm_files
@@ -444,34 +444,4 @@ async def launch_agent(user_data_dir=None, **kwargs):
 async def run_agent_task(page, goal, model=None, max_steps=None, plan_json=None):
     """Run an autonomous AI-agent task against an async ``page`` (see the sync ``run_agent_task``).
     The browser must have been launched with ``agent_llm_key``."""
-    browser = page.context.browser
-    if browser is None:
-        raise RuntimeError("run_agent_task: page is not attached to a Browser")
-    session = await browser.new_browser_cdp_session()
-    tsession = await page.context.new_cdp_session(page)
-    info = await tsession.send("Target.getTargetInfo")
-    params = {"targetId": info["targetInfo"]["targetId"], "goal": goal}
-    if max_steps is not None:
-        params["maxSteps"] = max_steps
-    if model is not None:
-        params["model"] = model
-    if plan_json is not None:
-        params["planJson"] = plan_json
-    try:
-        res = await session.send("Browser.agentRunTask", params)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            "Browser.agentRunTask failed -- make sure this is a Clearcote build with the AI agent "
-            "and that the browser was launched with agent_llm_key/agent_llm_url set. "
-            f"Underlying error: {exc}"
-        ) from exc
-    try:
-        steps = json.loads(res.get("stepsJson") or "[]")
-    except ValueError:
-        steps = []
-    return {
-        "success": bool(res.get("success")),
-        "finalText": res.get("finalText", ""),
-        "steps": steps,
-        "stepsJson": res.get("stepsJson", "[]"),
-    }
+    return await run_agent_task_async(page, goal, model=model, max_steps=max_steps, plan_json=plan_json)
