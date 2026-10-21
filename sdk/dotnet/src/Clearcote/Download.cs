@@ -16,6 +16,16 @@ public class DownloadOptions
     public bool Quiet { get; set; }
     /// Opt in to downloading the LATEST GitHub release instead of the pinned one (also CLEARCOTE_AUTO_UPDATE=1).
     public bool? AutoUpdate { get; set; }
+    /// <see cref="Clearcote.DownloadAsync"/>: a catalog build ("150", "150.0.7871.115", "latest", or a PRO rebuild
+    /// "150.0.7871.114-r7" / "r7") instead of the pinned one. Null = CLEARCOTE_BROWSER_VERSION.
+    public string? Version { get; set; }
+    /// <see cref="Clearcote.DownloadAsync"/>: the PRO release channel. Null = CLEARCOTE_RELEASE_CHANNEL, else stable.
+    public ReleaseChannel? ReleaseChannel { get; set; }
+    /// <see cref="Clearcote.DownloadAsync"/>: the licence key that selects the PRO build. Null = CLEARCOTE_LICENSE_KEY,
+    /// else ~/.clearcote/license.key; none = the free build.
+    public string? LicenseKey { get; set; }
+    /// <see cref="Clearcote.DownloadAsync"/>: the licence backend base URL for the PRO download.
+    public string? LicenseApiBase { get; set; }
 }
 
 /// Options for <see cref="Download.ProEnsureBinaryAsync"/>.
@@ -43,6 +53,10 @@ public enum ReleaseChannel
     Preview,
 }
 
+/// A verified browser build in the download cache (<see cref="Download.ListCachedBuilds"/>): its release tag
+/// (the cache directory's name) and its executable.
+public sealed record CachedBuild(string Tag, string Path);
+
 /// A resolved version plan: a free release to download, or a pro version to fetch via the licensed route.
 public sealed record VersionPlan(string Kind, ReleaseInfo? Rel, string? Version);
 
@@ -52,11 +66,39 @@ public static class Download
 {
     private static void Log(bool quiet, string msg) { if (!quiet) Console.Error.WriteLine($"[clearcote] {msg}"); }
 
-    private static bool AutoUpdateRequested(bool? opt)
+    /// Whether the LATEST GitHub release is wanted instead of the pinned one: an explicit value wins, else
+    /// CLEARCOTE_AUTO_UPDATE=1|true.
+    public static bool AutoUpdateRequested(bool? opt)
     {
         if (opt.HasValue) return opt.Value;
         var env = Environment.GetEnvironmentVariable("CLEARCOTE_AUTO_UPDATE");
         return env is "1" or "true";
+    }
+
+    /// Per-OS cache root for downloaded browsers (CLEARCOTE_CACHE overrides): %LOCALAPPDATA%\clearcote\Cache,
+    /// ~/Library/Caches/clearcote, or $XDG_CACHE_HOME/clearcote (~/.cache/clearcote).
+    public static string DefaultCacheRoot() => Native.CacheRoot();
+
+    /// Verified browser builds already in the cache (<paramref name="cacheDir"/>, default <see cref="DefaultCacheRoot"/>),
+    /// newest first (by directory mtime). Never downloads and never deletes: unlike the resolve path, a damaged entry
+    /// is simply left out of the list.
+    public static IReadOnlyList<CachedBuild> ListCachedBuilds(string? cacheDir = null)
+    {
+        var root = cacheDir ?? DefaultCacheRoot();
+        if (!Directory.Exists(root)) return Array.Empty<CachedBuild>();
+        var binary = Native.IsWindows ? "chrome.exe" : Native.OsTag == "macos" ? "Chromium" : "chrome";
+        var found = new List<(DateTime Mtime, CachedBuild Build)>();
+        string[] dirs;
+        try { dirs = Directory.GetDirectories(root); } catch { return Array.Empty<CachedBuild>(); }
+        foreach (var @base in dirs)
+        {
+            if (!File.Exists(Path.Combine(@base, ".verified"))) continue;
+            var browserDir = Path.Combine(@base, "browser");
+            var exe = Directory.Exists(browserDir) ? FindFile(browserDir, binary) : null;
+            if (exe is null) continue;
+            found.Add((Directory.GetLastWriteTimeUtc(@base), new CachedBuild(Path.GetFileName(@base), exe)));
+        }
+        return found.OrderByDescending(f => f.Mtime).Select(f => f.Build).ToList();
     }
 
     /// <c>&lt;X&gt;.app/Contents/MacOS/&lt;name&gt;</c> at the top of <paramref name="dir"/> (or one folder down),
@@ -1208,7 +1250,8 @@ public static class Download
     /// Forget this process's PRO metadata (tests).
     internal static void ForgetProMeta() => ProMetaMemo.Clear();
 
-    // One entry per licence key and request url, so licences, platforms, version pins and channels never mix.
+    // One entry per licence key and request url, so licences, platforms, version pins and channels never mix. The
+    // in-process memo is keyed by the file's full path (as download.ts keys it), so it follows a changed home dir.
     private static string ProMetaId(string licenseKey, string proUrl) =>
         Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(licenseKey + "\n" + proUrl))).ToLowerInvariant()[..16];
 
@@ -1220,7 +1263,7 @@ public static class Download
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
         // A time ahead of this clock is no proof of age: a miss.
         bool Fresh(double at) => now - at >= 0 && now - at < ProMetaTtl.TotalSeconds;
-        if (ProMetaMemo.TryGetValue(id, out var memo) && Fresh(memo.At)) return memo.Meta;
+        if (ProMetaMemo.TryGetValue(ProMetaPath(id), out var memo) && Fresh(memo.At)) return memo.Meta;
         try
         {
             using var doc = JsonDocument.Parse(File.ReadAllText(ProMetaPath(id)));
@@ -1229,7 +1272,7 @@ public static class Download
                 && root.TryGetProperty("at", out var at) && at.ValueKind == JsonValueKind.Number && Fresh(at.GetDouble())
                 && root.TryGetProperty("meta", out var meta) && meta.ValueKind == JsonValueKind.Object)
             {
-                ProMetaMemo[id] = (at.GetDouble(), meta.GetRawText());
+                ProMetaMemo[ProMetaPath(id)] = (at.GetDouble(), meta.GetRawText());
                 return meta.GetRawText();
             }
         }
@@ -1242,7 +1285,7 @@ public static class Download
     private static void KeepProMeta(string id, string metaJson)
     {
         var at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
-        ProMetaMemo[id] = (at, metaJson);
+        ProMetaMemo[ProMetaPath(id)] = (at, metaJson);
         try
         {
             Directory.CreateDirectory(Native.ClearcoteDir);
