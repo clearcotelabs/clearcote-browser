@@ -98,9 +98,14 @@ internal sealed record OriginRequest(string Method, string Url, List<KeyValuePai
 internal sealed class TestOrigin : LocalServer
 {
     private readonly Func<OriginRequest, (int Status, string Body)> _handler;
+    private readonly string _contentType;
     public readonly ConcurrentQueue<OriginRequest> Log = new();
 
-    public TestOrigin(Func<OriginRequest, (int Status, string Body)> handler) => _handler = handler;
+    public TestOrigin(Func<OriginRequest, (int Status, string Body)> handler, string contentType = "application/json")
+    {
+        _handler = handler;
+        _contentType = contentType;
+    }
 
     protected override async Task HandleAsync(NetworkStream s, CancellationToken ct)
     {
@@ -118,7 +123,7 @@ internal sealed class TestOrigin : LocalServer
         Log.Enqueue(req);
         var (status, text) = _handler(req);
         var bytes = Encoding.UTF8.GetBytes(text);
-        var resp = $"HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {bytes.Length}\r\nConnection: close\r\n\r\n";
+        var resp = $"HTTP/1.1 {status} X\r\nContent-Type: {_contentType}\r\nContent-Length: {bytes.Length}\r\nConnection: close\r\n\r\n";
         await s.WriteAsync(Encoding.Latin1.GetBytes(resp), ct);
         await s.WriteAsync(bytes, ct);
         await s.FlushAsync(ct);

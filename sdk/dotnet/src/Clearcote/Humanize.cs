@@ -620,6 +620,7 @@ public static partial class Humanize
 
     private static async Task ClickCoreAsync(ILocator locator, HumanClickOptions options, bool strict, Func<Task> native)
     {
+        if (await FrameClickAsync(locator, options, options.Normalize(), noClick: false, native).ConfigureAwait(false)) return;
         if (!await RoutableAsync(locator, strict).ConfigureAwait(false))
         {
             await native().ConfigureAwait(false);
@@ -655,6 +656,7 @@ public static partial class Humanize
     private static async Task DblClickCoreAsync(ILocator locator, HumanClickOptions options, bool strict)
     {
         Task Native() => locator.DblClickAsync(options.ToDblClick());
+        if (await FrameClickAsync(locator, options, options.Normalize(defaultCount: 2), noClick: false, Native).ConfigureAwait(false)) return;
         if (!await RoutableAsync(locator, strict).ConfigureAwait(false))
         {
             await Native().ConfigureAwait(false);
@@ -688,6 +690,7 @@ public static partial class Humanize
     private static async Task HoverCoreAsync(ILocator locator, HumanClickOptions options, bool strict)
     {
         Task Native() => locator.HoverAsync(options.ToHover());
+        if (await FrameClickAsync(locator, options, options.Normalize(), noClick: true, Native).ConfigureAwait(false)) return;
         if (!await RoutableAsync(locator, strict).ConfigureAwait(false))
         {
             await Native().ConfigureAwait(false);
@@ -731,12 +734,13 @@ public static partial class Humanize
     internal static bool IsFrameLocator(ILocator locator)
         => locator.ToString()?.Contains("internal:control=enter-frame", StringComparison.Ordinal) == true;
 
-    /// <summary>May the humanized route act on this locator? Not inside a frame, and (for locator actions)
-    /// not when it matches more than one element.</summary>
+    /// <summary>May the main-frame humanized route act on this locator? Not inside a child frame (a FrameLocator's
+    /// locator, or one made on a child IFrame: the actions that have a frame route took it before this, Frames.cs), and
+    /// (for locator actions) not when it matches more than one element.</summary>
     private static async Task<bool> RoutableAsync(ILocator locator, bool strict, [CallerMemberName] string member = "")
     {
-        if (IsFrameLocator(locator))
-            return !Report(locator.Page, ApiName(member), "frame locators go to Playwright", SelectorOf(locator));
+        if (FrameWhy(locator) is { } why)
+            return !Report(locator.Page, ApiName(member), why, SelectorOf(locator));
         return !strict || await StrictOkAsync(locator).ConfigureAwait(false);
     }
 
@@ -1659,6 +1663,8 @@ public static partial class Humanize
         var page = locator.Page;
         await SerialAsync(page, async () =>
         {
+            Task Native() => locator.PressSequentiallyAsync(text, delay is null ? null : new LocatorPressSequentiallyOptions { Delay = delay });
+            if (await FrameTypeAsync(locator, text, delay, Native).ConfigureAwait(false)) return;
             if (await RoutableAsync(locator, strict: true).ConfigureAwait(false)
                 && await ClickIntoAsync(locator, null).ConfigureAwait(false))
             {
@@ -1667,7 +1673,7 @@ public static partial class Humanize
                 await TypeTextAsync(page, p, text, null, typos: true, floorMs: delay ?? 0, exact: false).ConfigureAwait(false);
                 return;
             }
-            await locator.PressSequentiallyAsync(text, delay is null ? null : new LocatorPressSequentiallyOptions { Delay = delay }).ConfigureAwait(false);
+            await Native().ConfigureAwait(false);
         }).ConfigureAwait(false);
     }
 
@@ -2364,6 +2370,14 @@ public static partial class Humanize
         var page = locator.Page;
         await SerialAsync(page, async () =>
         {
+            // a child frame: its own route; the fallback is Playwright's focus, then the humanized key (as below)
+            if (await FramePressAsync(locator, key, repeat, delay, async () =>
+                {
+                    await locator.FocusAsync().ConfigureAwait(false);
+                    await KeySleep(Rand(40, 120)).ConfigureAwait(false);
+                    await PressFocusedAsync(page, key, repeat, delay).ConfigureAwait(false);
+                }).ConfigureAwait(false))
+                return;
             bool done = false;
             if (await RoutableAsync(locator, strict: true).ConfigureAwait(false))
             {
@@ -2647,6 +2661,8 @@ public static partial class Humanize
                 Report(loc.Page, "HumanSelectOptionAsync", "option values the humane route cannot match (several fields, or none)", SelectorOf(loc));
                 return await native().ConfigureAwait(false);
             }
+            var fr = await FrameSelectAsync(loc, wants, timeout, force, native).ConfigureAwait(false);
+            if (fr.Done) return fr.Result!;
             if (!await RoutableAsync(loc, strict).ConfigureAwait(false))
                 return await native().ConfigureAwait(false);
             try
@@ -2981,6 +2997,9 @@ public static partial class Humanize
         ArgumentNullException.ThrowIfNull(value);
         await SerialAsync(locator.Page, async () =>
         {
+            if (await FrameFillAsync(locator, "HumanFillAsync", value, options?.Timeout, options?.Force == true,
+                    () => locator.FillAsync(value, options)).ConfigureAwait(false))
+                return;
             if (await RoutableAsync(locator, strict: true).ConfigureAwait(false)
                 && await FillHumanizedAsync(locator, value, options?.Timeout, options?.Force == true).ConfigureAwait(false))
                 return;
@@ -2998,6 +3017,9 @@ public static partial class Humanize
         var loc = strict ? page.Locator(selector) : page.Locator(selector).First;
         await SerialAsync(page, async () =>
         {
+            if (await FrameFillAsync(loc, "HumanFillAsync", value, options?.Timeout, options?.Force == true,
+                    () => page.FillAsync(selector, value, options)).ConfigureAwait(false))
+                return;
             if (await RoutableAsync(loc, strict).ConfigureAwait(false)
                 && await FillHumanizedAsync(loc, value, options?.Timeout, options?.Force == true).ConfigureAwait(false))
                 return;
@@ -3692,6 +3714,7 @@ public static partial class Humanize
         bool trial, bool strict, Func<Task> native)
         => SerialAsync(loc.Page, after: !trial, body: async () =>
         {
+            if (await FrameSetCheckedAsync(loc, want, timeout, force, position, trial, native).ConfigureAwait(false)) return;
             if (!await RoutableAsync(loc, strict).ConfigureAwait(false))
             {
                 await native().ConfigureAwait(false);   // strict and frame cases are Playwright's
@@ -3853,6 +3876,9 @@ public static partial class Humanize
         ArgumentNullException.ThrowIfNull(locator);
         await SerialAsync(locator.Page, async () =>
         {
+            if (await FrameFillAsync(locator, "HumanClearAsync", "", options?.Timeout, options?.Force == true,
+                    () => locator.ClearAsync(options)).ConfigureAwait(false))
+                return;
             if (await RoutableAsync(locator, strict: true).ConfigureAwait(false)
                 && await FillHumanizedAsync(locator, "", options?.Timeout, options?.Force == true).ConfigureAwait(false))
                 return;
