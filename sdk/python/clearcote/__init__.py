@@ -82,7 +82,8 @@ from ._profilelib import (
 from ._profileimport import import_directory, index_entry_from_profile, load_imported_profile
 from ._profilesource import fetch_index, fetch_profile, host_os_family, measure_host
 from ._profileauto import (
-    DEFAULT_LOCAL_DIR, load_local_index, local_setup_hint, resolve_auto, resolve_local,
+    DEFAULT_LOCAL_DIR, MIN_PROFILE_ENGINE_MAJOR, engine_supports_profiles, load_local_index,
+    local_setup_hint, resolve_auto, resolve_local,
 )
 from ._render import check_render_coherence
 from ._warnings import emit_coherence_warnings
@@ -181,6 +182,8 @@ __all__ = [
     "load_local_index",
     "local_setup_hint",
     "DEFAULT_LOCAL_DIR",
+    "MIN_PROFILE_ENGINE_MAJOR",
+    "engine_supports_profiles",
     "load_profile",
     "check_render_coherence",
     "fetch_widevine",
@@ -393,6 +396,22 @@ def _apply_auto_profile(fp, exe, select, quiet=False, pro=None, lease=None):
         exe,
         major,
     )
+    # BACKWARDS COMPATIBILITY. The free 149 engine has no persona-profile patch, and Chromium
+    # discards unknown switches silently -- so sending it a profile would leave the user with NO
+    # persona while believing they had one. Fall back to the seed path that engine does support,
+    # and say so, rather than failing or silently doing nothing.
+    if not engine_supports_profiles(host.get("browser_major")):
+        if fp.get("fingerprint") is None:
+            # A stable per-machine seed, so this degrades to a CONSISTENT identity rather than a
+            # new one per launch -- same reasoning as keyless "rotate".
+            fp["fingerprint"] = default_sticky_key()
+        if not quiet:
+            sys.stderr.write(
+                f"[clearcote] [profile] engine {host.get('browser_major')} does not support "
+                f"imported profiles (added in {MIN_PROFILE_ENGINE_MAJOR}) — using the seed "
+                'persona instead. Upgrade with version="150" (PRO) for the profile path.\n'
+            )
+        return
     result = resolve_auto(host, license_key=license_key, api_base=api_base, quiet=quiet, **select)
     # The corpus never probed the Windows 11 system fonts; a Windows 11 donor gets them back.
     fp["fingerprint_profile"] = profile_with_windows11_faces(result["profile"])

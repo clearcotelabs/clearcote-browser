@@ -291,7 +291,22 @@ def test_keeping_an_unmarked_fallback_alive_never_marks_it(env):
     assert rotated["lease_id"] == "L-old" and rotated["token"] != tok("pro", 2, 2) and "scope" not in rotated
     server.answers.append(("heartbeat", 409, {"code": "LEASE_EXPIRED"}))
     beats = iter([False, True])
-    ml._heartbeat_loop(270)                            # the lease is gone: a checkout answers machine
+    ml._heartbeat_loop(270)                            # the lease is gone: re-checkout with no launch_id
+    # A re-checkout without a launch_id keeps the lease alive but confirms nothing (as in Node): still unmarked.
+    rechecked = json.loads(L._cache_path(key).read_text())
+    assert rechecked["lease_id"] != "L-old" and "scope" not in rechecked
+    assert ml._machine_known is False
+
+
+def test_a_409_recheckout_keeps_a_confirmed_lease_marked(env):
+    key, server = env("pro", cap=2)
+    L.acquire_lease(quiet=True)                        # a checkout offered the browser scope and got machine
+    ml = next(iter(L._MACHINE_LEASES.values()))
+    assert ml._machine_known is True
+    server.answers.append(("heartbeat", 409, {"code": "LEASE_EXPIRED"}))
+    beats = iter([False, True])
+    ml._stop.wait = lambda interval: next(beats)
+    ml._heartbeat_loop(270)
     assert json.loads(L._cache_path(key).read_text())["scope"] == "machine"
 
 
