@@ -214,7 +214,7 @@ function sha256FileSync(file: string): string {
   return hash.digest("hex");
 }
 
-async function downloadTo(url: string, dest: string, expectedSize: number, quiet: boolean | undefined): Promise<void> {
+export async function downloadTo(url: string, dest: string, expectedSize: number, quiet: boolean | undefined): Promise<void> {
   // Idle-timeout the stream: a 60s timer reset on every chunk aborts a stalled connection (no data
   // for 60s) without capping the total time of the large (~242 MB) binary download.
   const ctrl = new AbortController();
