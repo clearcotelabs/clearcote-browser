@@ -142,8 +142,11 @@ npx clearcote login [key]      # validates the key, saves it to ~/.clearcote/lic
 npx clearcote logout
 npx clearcote clear-cache
 npx clearcote serve [--port 9222] ...
+npx clearcote connect [<code>]   # start the helper for the web profile manager (app.clearcotelabs.com)
 npx clearcote cloud run|sessions|stop|events|recording|profile sync|webhooks ...   # the hosted API, see Local or cloud
 ```
+
+`connect` starts the Clearcote Helper in that terminal, so the web profile manager at https://app.clearcotelabs.com can launch your profiles on this computer. Copy the command with its code from the profile manager's Connect window and that tab connects by itself. The first run downloads the helper release this SDK pins and checks its SHA-256; Ctrl+C closes the helper and its browsers.
 
 `info` never downloads: it reports the SDK, this machine (CPU, RAM, VM or not, and whether there is a GPU Chromium can draw with), the cached builds, which engine features the binary supports, a launch test (skipped with `--quick`), licence seats, fonts and missing system libraries.
 

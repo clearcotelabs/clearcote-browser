@@ -9,6 +9,7 @@
 //                                                           from a browser and save the key it issues
 //   clearcote logout                                        remove the saved key
 //   clearcote serve   [--port 9222] [--idle-timeout 300] …  multi-identity CDP endpoint
+//   clearcote connect [CODE]                                start the helper for the web profile manager
 //   clearcote cloud   run|sessions|stop|events|recording|profile sync|webhooks …  the hosted API
 //
 // `info` never downloads: it reports what is already cached and what a launch would resolve to.
@@ -45,6 +46,7 @@ import { toProxySpec } from "./net.js";
 import { clearRecovered, recoverRoot } from "./winlaunch.js";
 import { Cloud, CloudError, announceHandoff, type Json, type RunOptions } from "./cloud.js";
 import { benchLines, hostInfo, hostLines, runBench, summarizeBench, type HostReport } from "./bench.js";
+import { connect } from "./connect.js";
 
 const SDK_VERSION: string = (() => {
   try {
@@ -69,6 +71,7 @@ USAGE
                   [--max-browsers 16] [--allow-origin <origin>]... [--allow-host <name>]... [--headed]
                   [--fingerprint <seed>] [--platform <os>] [--proxy <url>] [--timezone <tz>]
                   [--accept-language <l>] [--geoip]
+  clearcote connect [<code>] [--port <n>] [--allow-origin <origin>]... [--no-open]
   clearcote cloud run <task> [--url <url>] [--schema <file.json>] [--secret <name>=<value>]... [--json]
   clearcote cloud sessions | stop <id> | events <id> | recording <id> [-o <file.mp4>]
   clearcote cloud profile sync <name> (--from-profile <dir> | --from-cdp <url> | --from-file <file> | --login <url>)
@@ -485,6 +488,15 @@ const COMMAND_NOTES: Record<string, string> = {
   "clear-cache": "Deletes every cached browser build (nothing else in the cache directory), and on Windows the " +
                  "recovered copies in ~/.clearcote/recovered.",
   serve: "A CDP endpoint that gives every connection its own browser and identity.",
+  connect: "Starts the Clearcote Helper in this terminal, so the web profile manager at\n"
+    + "  https://app.clearcotelabs.com can launch your profiles on this computer. The first time it downloads\n"
+    + "  the helper release this SDK pins and checks its SHA-256. Keep the terminal open; Ctrl+C closes the\n"
+    + "  helper and its browsers.\n"
+    + "  <code>          the code the profile manager shows (like 4F7-K2Q): that tab connects without asking again\n"
+    + "  (no code)       opens the profile manager; press Connect this computer there and approve the pairing\n"
+    + "  --port <n>      listen on this port only (default: the first free of 47821-47823)\n"
+    + "  --allow-origin  also let this site pair, e.g. http://localhost:3000 (repeatable)\n"
+    + "  --no-open       open nothing in the browser",
 };
 
 /** `clearcote <cmd> --help`: that command's lines from USAGE (with their flag sections) and a note. */
@@ -536,7 +548,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
-  const known = ["info", "doctor", "bench", "install", "update", "clear-cache", "login", "logout", "serve"];
+  const known = ["info", "doctor", "bench", "install", "update", "clear-cache", "login", "logout", "serve", "connect"];
   if (known.includes(cmd) && rest.some((a) => a === "-h" || a === "--help")) {
     out(commandUsage(cmd));
     return;
@@ -653,6 +665,29 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     const removed = removeLicenseKey();
     out(removed ? `removed ${licenseKeyPath()}` : "no saved key");
     if (process.env.CLEARCOTE_LICENSE_KEY) out("note: CLEARCOTE_LICENSE_KEY is still set in this environment and will keep being used");
+    return;
+  }
+
+  if (cmd === "connect") {
+    const { values, positionals } = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      options: { port: { type: "string" }, "allow-origin": { type: "string", multiple: true }, "no-open": { type: "boolean" } },
+    });
+    if (positionals.length > 1) fail("give one code, like `clearcote connect 4F7-K2Q`", 2);
+    if (values.port !== undefined && !/^[1-9][0-9]{0,4}$/.test(values.port)) fail("--port must be a port number", 2);
+    let code: number;
+    try {
+      code = await connect({
+        code: positionals[0],
+        port: values.port ? Number(values.port) : undefined,
+        allowOrigins: values["allow-origin"],
+        noOpen: !!values["no-open"],
+      });
+    } catch (e) {
+      return fail(String((e as Error)?.message || e));
+    }
+    if (code) process.exitCode = code;
     return;
   }
 

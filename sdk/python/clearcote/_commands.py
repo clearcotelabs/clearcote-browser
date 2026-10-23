@@ -9,6 +9,7 @@
                                                             from a browser and save the key it issues
     clearcote logout                                        remove the saved key
     clearcote serve   [--port 9222] [--idle-timeout 300] ...  multi-identity CDP endpoint
+    clearcote connect [CODE]                                start the helper for the web profile manager
     clearcote cloud   run|sessions|stop|events|recording|profile sync|webhooks ...  the hosted API
     clearcote version
 
@@ -41,6 +42,7 @@ USAGE
                   [--max-browsers 16] [--allow-origin <origin>]... [--allow-host <name>]... [--headed]
                   [--fingerprint <seed>] [--platform <os>] [--proxy <url>] [--timezone <tz>]
                   [--accept-language <l>] [--geoip]
+  clearcote connect [<code>] [--port <n>] [--allow-origin <origin>]... [--no-open]
   clearcote cloud run <task> [--url <url>] [--schema <file.json>] [--secret <name>=<value>]... [--json]
   clearcote cloud sessions | stop <id> | events <id> | recording <id> [-o <file.mp4>]
   clearcote cloud profile sync <name> (--from-profile <dir> | --from-cdp <url> | --from-file <file> | --login <url>)
@@ -408,6 +410,15 @@ COMMAND_NOTES = {
     "clear-cache": "Deletes every cached browser build (nothing else in the cache directory), and on Windows the "
                    "recovered copies in ~/.clearcote/recovered.",
     "serve": "A CDP endpoint that gives every connection its own browser and identity.",
+    "connect": ("Starts the Clearcote Helper in this terminal, so the web profile manager at\n"
+                "  https://app.clearcotelabs.com can launch your profiles on this computer. The first time it downloads\n"
+                "  the helper release this SDK pins and checks its SHA-256. Keep the terminal open; Ctrl+C closes the\n"
+                "  helper and its browsers.\n"
+                "  <code>          the code the profile manager shows (like 4F7-K2Q): that tab connects without asking again\n"
+                "  (no code)       opens the profile manager; press Connect this computer there and approve the pairing\n"
+                "  --port <n>      listen on this port only (default: the first free of 47821-47823)\n"
+                "  --allow-origin  also let this site pair, e.g. http://localhost:3000 (repeatable)\n"
+                "  --no-open       open nothing in the browser"),
 }
 
 
@@ -954,6 +965,28 @@ def _cloud_command(cloud, a, secrets, schema, run_options=None):
     return 0
 
 
+def _connect_cmd(argv):
+    """``clearcote connect [CODE] [--port N] [--allow-origin O]... [--no-open]``."""
+    from ._connect import connect
+    p = argparse.ArgumentParser(prog="clearcote connect", add_help=False)
+    p.add_argument("code", nargs="?")
+    p.add_argument("--port")
+    p.add_argument("--allow-origin", action="append", default=[])
+    p.add_argument("--no-open", action="store_true")
+    p.error = lambda message: fail(message, 2)
+    a, extra = p.parse_known_args(argv)
+    if extra:
+        fail("give one code, like `clearcote connect 4F7-K2Q`" if not extra[0].startswith("-") else f"unknown option {extra[0]}", 2)
+    if a.port is not None and not re.fullmatch(r"[1-9][0-9]{0,4}", a.port):
+        fail("--port must be a port number", 2)
+    try:
+        return connect(code=a.code, port=int(a.port) if a.port else None, allow_origins=a.allow_origin,
+                       no_open=a.no_open)
+    except (ValueError, RuntimeError, OSError) as e:
+        fail(str(e))
+        return 1
+
+
 def _run(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
         _out(usage())
@@ -963,12 +996,14 @@ def _run(argv):
         return 0
     if argv[0] == "cloud":
         return _cloud(argv[1:])
-    known = ("info", "doctor", "bench", "install", "update", "clear-cache", "login", "logout", "serve")
+    known = ("info", "doctor", "bench", "install", "update", "clear-cache", "login", "logout", "serve", "connect")
     if argv[0] not in known:
         fail(f"unknown command '{argv[0]}'. Run `clearcote --help`.", 2)
     if any(a in ("-h", "--help") for a in argv[1:]):
         _out(command_usage(argv[0]))
         return 0
+    if argv[0] == "connect":
+        return _connect_cmd(argv[1:])
 
     parser = _parser()
 
