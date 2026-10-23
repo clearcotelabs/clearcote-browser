@@ -30,8 +30,9 @@ import { PROXIED_REQUEST_SCHEMES, proxiedRequest, toProxySpec, type ProxySpec } 
 const MMDB_URL = "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb.zip";
 const MMDB_MAX_AGE_DAYS = 30;
 /** @internal Public IP-echo services with no usage limit, tried in order; CLEARCOTE_GEOIP_ECHO_URL replaces
- * them. Mutable so tests can point the exit-IP echo at a local server. */
-export const IPECHO_URLS: string[] = ["http://api.ipify.org", "http://icanhazip.com"];
+ * them. Mutable so tests can point the exit-IP echo at a local server. https: some proxies answer every
+ * plain-http request with a 301 to https, so an http echo failed on a proxy that browses fine. */
+export const IPECHO_URLS: string[] = ["https://api.ipify.org", "https://icanhazip.com"];
 export const ECHO_URL_ENV = "CLEARCOTE_GEOIP_ECHO_URL";
 export const IPAPI_ENV = "CLEARCOTE_GEOIP_IPAPI";
 /** @internal mutable so tests can point the ip-api fallback at a local server */

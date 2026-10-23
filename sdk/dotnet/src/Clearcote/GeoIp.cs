@@ -42,7 +42,9 @@ public sealed class GeoipException : Exception
 public static class GeoIp
 {
     /// Public IP-echo services with no usage limit, tried in order; CLEARCOTE_GEOIP_ECHO_URL replaces them.
-    internal static string[] IpEchoUrls = { "http://api.ipify.org", "http://icanhazip.com" };
+    /// https: some proxies answer every plain-http request with a 301 to https, so an http echo failed on a
+    /// proxy that browses fine.
+    internal static string[] IpEchoUrls = { "https://api.ipify.org", "https://icanhazip.com" };
     internal static string IpApiUrl = "http://ip-api.com/json/?fields=status,message,countryCode,timezone,lat,lon,query";
     internal static string MmdbUrl = "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb.zip";
     private const int MmdbMaxAgeDays = 30;

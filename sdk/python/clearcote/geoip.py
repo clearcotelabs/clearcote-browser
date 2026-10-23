@@ -42,7 +42,9 @@ except ImportError:
 MMDB_URL = "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb.zip"
 MMDB_MAX_AGE_DAYS = 30
 # Public IP-echo services with no usage limit, tried in order. CLEARCOTE_GEOIP_ECHO_URL replaces them.
-IPECHO_URLS = ("http://api.ipify.org", "http://icanhazip.com")
+# https: some proxies answer every plain-http request with a 301 to https, so an http echo failed
+# on a proxy that browses fine.
+IPECHO_URLS = ("https://api.ipify.org", "https://icanhazip.com")
 ECHO_URL_ENV = "CLEARCOTE_GEOIP_ECHO_URL"
 IPAPI_ENV = "CLEARCOTE_GEOIP_IPAPI"
 IPAPI_URL = "http://ip-api.com/json/?fields=status,message,countryCode,timezone,lat,lon,query"

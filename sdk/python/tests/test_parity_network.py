@@ -238,7 +238,7 @@ def test_geoip_echo_url_setting_replaces_the_public_echoes(servers, monkeypatch)
 
 def test_geoip_echo_settings_and_answers():
     from clearcote import geoip
-    assert geoip.echo_urls({}) == ("http://api.ipify.org", "http://icanhazip.com")
+    assert geoip.echo_urls({}) == ("https://api.ipify.org", "https://icanhazip.com")
     assert not any("ip-api" in u for u in geoip.echo_urls({}))
     assert geoip.echo_urls({"CLEARCOTE_GEOIP_ECHO_URL": "http://a/ip, http://b/ip"}) == ("http://a/ip", "http://b/ip")
     assert geoip.echo_urls({"CLEARCOTE_GEOIP_ECHO_URL": " , "}) == geoip.IPECHO_URLS

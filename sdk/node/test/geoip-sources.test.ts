@@ -71,7 +71,7 @@ describe("geoip sources", () => {
   });
 
   it("settings and echo answers", () => {
-    expect(echoUrls({})).toEqual(["http://api.ipify.org", "http://icanhazip.com"]);
+    expect(echoUrls({})).toEqual(["https://api.ipify.org", "https://icanhazip.com"]);
     expect(echoUrls({}).some((u) => u.includes("ip-api"))).toBe(false);
     expect(echoUrls({ CLEARCOTE_GEOIP_ECHO_URL: "http://a/ip, http://b/ip" })).toEqual(["http://a/ip", "http://b/ip"]);
     expect(echoUrls({ CLEARCOTE_GEOIP_ECHO_URL: " , " })).toEqual(IPECHO_URLS);
