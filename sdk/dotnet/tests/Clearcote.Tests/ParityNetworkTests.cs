@@ -155,7 +155,7 @@ public class ParityNetworkTests : IDisposable
     {
         GeoIp.IpEchoUrls = _savedEcho;  // the shipped defaults, not the constructor's unroutable stand-in
         var none = new Dictionary<string, string?>();
-        Assert.Equal(new[] { "http://api.ipify.org", "http://icanhazip.com" }, GeoIp.EchoUrls(none));
+        Assert.Equal(new[] { "https://api.ipify.org", "https://icanhazip.com" }, GeoIp.EchoUrls(none));
         Assert.DoesNotContain(GeoIp.EchoUrls(none), u => u.Contains("ip-api"));
         Assert.Equal(new[] { "http://a/ip", "http://b/ip" }, GeoIp.EchoUrls(new Dictionary<string, string?> { [GeoIp.EchoUrlEnv] = "http://a/ip, http://b/ip" }));
         Assert.Equal(GeoIp.IpEchoUrls, GeoIp.EchoUrls(new Dictionary<string, string?> { [GeoIp.EchoUrlEnv] = " , " }));
