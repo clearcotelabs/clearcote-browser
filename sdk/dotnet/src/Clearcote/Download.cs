@@ -57,6 +57,20 @@ public enum ReleaseChannel
 /// (the cache directory's name) and its executable.
 public sealed record CachedBuild(string Tag, string Path);
 
+/// An archive download the server refused; <see cref="RetryAfterSec"/> is its Retry-After, when it sent one.
+public sealed class DownloadHttpException : Exception
+{
+    public DownloadHttpException(string message, int status, int? retryAfterSec) : base(message)
+    {
+        Status = status;
+        RetryAfterSec = retryAfterSec;
+    }
+    /// The HTTP status the archive URL answered.
+    public int Status { get; }
+    /// Seconds from its Retry-After header; null when absent or unreadable.
+    public int? RetryAfterSec { get; }
+}
+
 /// A resolved version plan: a free release to download, or a pro version to fetch via the licensed route.
 public sealed record VersionPlan(string Kind, ReleaseInfo? Rel, string? Version);
 
@@ -368,12 +382,30 @@ public static class Download
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
 
+    /// Sent on the archive download, so a server log can tell which SDK fetched a build (it used to send none).
+    public static readonly string DownloadUserAgent = $"clearcote-sdk/{Clearcote.Version} (dotnet)";
+
+    /// Seconds from a Retry-After header (delta-seconds or an HTTP date); null when absent or unreadable.
+    public static int? RetryAfterSeconds(string? value, DateTimeOffset? now = null)
+    {
+        var v = (value ?? "").Trim();
+        if (v.Length == 0) return null;
+        if (Regex.IsMatch(v, @"^\d+$")) return int.TryParse(v, out var sec) ? sec : int.MaxValue;
+        if (!DateTimeOffset.TryParse(v, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var at))
+            return null;
+        return (int)Math.Max(0, Math.Ceiling((at - (now ?? DateTimeOffset.UtcNow)).TotalSeconds));
+    }
+
     private static async Task DownloadToAsync(string url, string dest, long expectedSize, bool quiet)
     {
         using var client = SdkHttp.Create();
-        using var res = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.TryAddWithoutValidation("User-Agent", DownloadUserAgent);
+        using var res = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
         if (!res.IsSuccessStatusCode)
-            throw new Exception($"Clearcote download failed: HTTP {(int)res.StatusCode} {res.ReasonPhrase} for {url}");
+            throw new DownloadHttpException($"Clearcote download failed: HTTP {(int)res.StatusCode} {res.ReasonPhrase} for {url}",
+                (int)res.StatusCode, RetryAfterSeconds(res.Headers.TryGetValues("Retry-After", out var ra) ? ra.FirstOrDefault() : null));
         var total = res.Content.Headers.ContentLength ?? expectedSize;
         await using var input = await res.Content.ReadAsStreamAsync().ConfigureAwait(false);
         await using var output = File.Create(dest);
@@ -1336,7 +1368,9 @@ public static class Download
     }
 
     /// Download + verify the PRO (license-gated) browser and return its chrome path. Throws on any
-    /// failure — a licensed caller must get the PRO build, never a silent free fall-back.
+    /// failure — a licensed caller must get the PRO build, never a silent free fall-back. A failed download of
+    /// a new PRO build launches the newest installed PRO build of the same Chromium major instead (unless the
+    /// caller pinned an exact revision), and pauses that download for a while (see the backoff section below).
     public static async Task<string> ProEnsureBinaryAsync(string licenseKey, ProDownloadOptions? opts = null)
     {
         opts ??= new ProDownloadOptions();
@@ -1389,7 +1423,150 @@ public static class Download
             var cached = Cached(@base, rel.Binary, opts.Quiet, repair: false, integrity: rel);
             if (cached is not null) return cached;
         }
-        return await FetchAndVerifyAsync(rel, @base, opts.Quiet).ConfigureAwait(false);
+        // An exact revision ("r48", "pro-…-r48") is a pin: the caller gets that build or an error, never another.
+        var mayFallBack = !IsProRevisionSelector(opts.Version);
+        CachedBuild? Fallback() => mayFallBack ? ProFallbackBuild(cacheRoot, rel, opts.Version, opts.Quiet) : null;
+        string StandIn(CachedBuild fb, string why, long until)
+        {
+            // Always said, even when quiet: the caller asked for one build and is getting another.
+            Console.Error.WriteLine($"[clearcote] {rel.Tag} is not installed and {why}; launching the installed {fb.Tag} instead " +
+                                    $"(the download is tried again after {IsoTime(until)}).");
+            return fb.Path;
+        }
+
+        var pending = ReadDownloadBackoff(cacheRoot, rel.Tag);
+        if (pending is not null)
+        {
+            if (Fallback() is { } fb) return StandIn(fb, $"its download is paused ({pending.Reason})", pending.Until);
+            if (pending.Status == 429)
+                throw new Exception($"Clearcote PRO {rel.Tag} is not installed and its download is paused until " +
+                                    $"{IsoTime(pending.Until)} ({pending.Reason}). {ProCacheHint}");
+        }
+        try
+        {
+            var exe = await FetchAndVerifyAsync(rel, @base, opts.Quiet).ConfigureAwait(false);
+            ClearDownloadBackoff(cacheRoot, rel.Tag);
+            return exe;
+        }
+        catch (Exception e)
+        {
+            var fb = Fallback();
+            int? status = e is DownloadHttpException he ? he.Status : null;
+            var firstLine = e.Message.Split('\n')[0];
+            var reason = status is not null ? $"HTTP {status}" : firstLine[..Math.Min(firstLine.Length, 120)];
+            if (status == 429)
+                WriteDownloadBackoff(cacheRoot, rel.Tag, ((DownloadHttpException)e).RetryAfterSec ?? 60, 429, "download limit reached (HTTP 429)");
+            else if (fb is not null)
+                WriteDownloadBackoff(cacheRoot, rel.Tag, DownloadBackoffSec, status, $"download failed: {reason}");
+            var pause = ReadDownloadBackoff(cacheRoot, rel.Tag);
+            if (fb is not null)
+                return StandIn(fb, $"its download failed ({reason})", pause?.Until ?? NowMs() + DownloadBackoffSec * 1000L);
+            if (status == 429) throw new Exception($"{e.Message}\n{ProCacheHint}", e);
+            throw;
+        }
+    }
+
+    /// The site's own advice on a 429, kept short here; the route's error text has the full sentence.
+    private const string ProCacheHint =
+        "Keep the downloaded build: point CLEARCOTE_CACHE at a directory that survives restarts, " +
+        "so each machine downloads a new build once instead of on every start.";
+
+    // ── PRO download backoff + fall-back to an installed build ───────────────
+    // A new release used to break every launch that could not download it: the SDK asked for "latest", found
+    // it missing from the cache, and threw on any failed download -- a 429 from the per-licence download budget
+    // included -- while an older build sat verified on disk. A caller that relaunches on failure then hit the
+    // route in a tight loop (CR 2026-10-24: one licence, 4,048 attempts in a day). Now a failed download of a
+    // newer build launches the newest installed build of the same Chromium major (unless the caller pinned an
+    // exact revision), and the failure is remembered in <cache>/.download-backoff-<tag>.json until the server's
+    // Retry-After (429) or for 5 minutes (anything else), so the launches in between skip the attempt. Without
+    // an installed build to fall back on, a 429 backoff fails the launch at once with the time it ends instead
+    // of asking again. The file is shared with the Node and Python SDKs: {until (epoch ms), status, reason}.
+    private const int DownloadBackoffSec = 300;
+    private const int DownloadBackoffMaxSec = 86_400;
+
+    /// A pending download backoff: <see cref="Until"/> in epoch milliseconds, as download.ts writes it.
+    internal sealed record DownloadBackoff(long Until, int? Status, string Reason);
+
+    private static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    private static string IsoTime(long epochMs) =>
+        DateTimeOffset.FromUnixTimeMilliseconds(epochMs).UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string BackoffPath(string cacheRoot, string tag) =>
+        Path.Combine(cacheRoot, $".download-backoff-{Regex.Replace(tag, @"[^A-Za-z0-9_.-]", "_")}.json");
+
+    /// The pending backoff for a tag; null when none, expired, or unreadable.
+    internal static DownloadBackoff? ReadDownloadBackoff(string cacheRoot, string tag, long? now = null)
+    {
+        var t = now ?? NowMs();
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(BackoffPath(cacheRoot, tag)));
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("until", out var u) || u.ValueKind != JsonValueKind.Number)
+                return null;
+            var until = (long)u.GetDouble();
+            if (until <= t) return null;
+            // A deadline further out than the cap is no proof of anything (a clock jumped, a hand-edited file).
+            if (until - t > DownloadBackoffMaxSec * 1000L) return null;
+            int? status = root.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.Number ? (int)st.GetDouble() : null;
+            var reason = root.TryGetProperty("reason", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() ?? "" : "";
+            return new DownloadBackoff(until, status, reason);
+        }
+        catch { return null; }
+    }
+
+    /// Best-effort, like the metadata cache: a backoff file is never a reason to fail a launch. Written to a
+    /// temporary file and renamed into place, so another process never reads half of it.
+    private static void WriteDownloadBackoff(string cacheRoot, string tag, int seconds, int? status, string reason)
+    {
+        var path = BackoffPath(cacheRoot, tag);
+        var until = NowMs() + Math.Min(Math.Max(seconds, 1), DownloadBackoffMaxSec) * 1000L;
+        var tmp = $"{path}.tmp-{Convert.ToHexString(RandomNumberGenerator.GetBytes(4)).ToLowerInvariant()}";
+        try
+        {
+            Directory.CreateDirectory(cacheRoot);
+            File.WriteAllText(tmp, JsonSerializer.Serialize(new { until, status, reason }));
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch { TryDelete(tmp); }
+    }
+
+    private static void ClearDownloadBackoff(string cacheRoot, string tag) => TryDelete(BackoffPath(cacheRoot, tag));
+
+    /// "pro-155.0.8059.39-r48": the Chromium version and the revision.
+    private static readonly Regex ProTagRe = new(@"^pro-(\d+(?:\.\d+){3})-r(\d+)$");
+
+    /// The newest installed, intact PRO build that may stand in for <paramref name="rel"/>: same Chromium major
+    /// (same exact version when the caller asked for one), never <paramref name="rel"/> itself, highest revision
+    /// first. Null when none. Checked without repair: a damaged tree is skipped, never touched.
+    internal static CachedBuild? ProFallbackBuild(string cacheRoot, ReleaseInfo rel, string? selector, bool quiet)
+    {
+        var m = ProTagRe.Match(rel.Tag);
+        var want = m.Success ? m.Groups[1].Value : rel.Version;
+        var major = want.Split('.')[0];
+        var exact = Regex.IsMatch((selector ?? "").Trim(), @"^\d+(?:\.\d+){3}$");
+        if (major.Length == 0 || !Directory.Exists(cacheRoot)) return null;
+        var candidates = new List<(string Tag, long Rev)>();
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories(cacheRoot))
+            {
+                var name = Path.GetFileName(dir);
+                var t = ProTagRe.Match(name);
+                if (name == rel.Tag || !t.Success || !long.TryParse(t.Groups[2].Value, out var rev)) continue;
+                var version = t.Groups[1].Value;
+                if (version.Split('.')[0] != major || (exact && version != want)) continue;
+                candidates.Add((name, rev));
+            }
+        }
+        catch { return null; }
+        foreach (var c in candidates.OrderByDescending(c => c.Rev))
+        {
+            var exe = Cached(Path.Combine(cacheRoot, c.Tag), rel.Binary, quiet, repair: false);
+            if (exe is not null) return new CachedBuild(c.Tag, exe);
+        }
+        return null;
     }
 
     // ── Version catalog resolver ─────────────────────────────────────────────

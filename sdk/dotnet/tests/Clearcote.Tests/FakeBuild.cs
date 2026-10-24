@@ -48,6 +48,14 @@ internal sealed class FakeBuildServer : LocalServer
     public int MetaHits => Volatile.Read(ref _asked);
     /// The download route's status: anything but 200 answers a JSON error instead of the metadata.
     public int MetaStatus { get; set; } = 200;
+    /// The tag and version the download route names (default <see cref="Tag"/>, 0.0.0).
+    public string MetaTag { get; set; } = Tag;
+    public string MetaVersion { get; set; } = "0.0.0";
+    /// The archive's status: anything but 200 answers a JSON error (with <see cref="RetryAfter"/>, when set).
+    public int ArchiveStatus { get; set; } = 200;
+    public string? RetryAfter { get; set; }
+    /// The User-Agent of every archive request so far.
+    public System.Collections.Concurrent.ConcurrentQueue<string> UserAgents { get; } = new();
     /// Completes on the first request to the download route.
     public TaskCompletionSource MetaSeen { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -101,7 +109,7 @@ internal sealed class FakeBuildServer : LocalServer
             }
             body = JsonSerializer.SerializeToUtf8Bytes(new
             {
-                tag = Tag, version = "0.0.0", url = $"{Url}/fake.zip", sha256 = Sha, exe_sha256 = _exeSha,
+                tag = MetaTag, version = MetaVersion, url = $"{Url}/fake.zip", sha256 = Sha, exe_sha256 = _exeSha,
                 chrome_dll_sha256 = _dllSha, asset = "fake.zip",
                 archive = "zip", binary = Binary, size = _archive.Length,
             });
@@ -110,6 +118,19 @@ internal sealed class FakeBuildServer : LocalServer
         else if (target == "/fake.zip")
         {
             Interlocked.Increment(ref _archiveHits);
+            UserAgents.Enqueue(head.Value.Lines.Skip(1)
+                .Where(l => l.StartsWith("user-agent:", StringComparison.OrdinalIgnoreCase))
+                .Select(l => l["user-agent:".Length..].Trim()).FirstOrDefault() ?? "");
+            if (ArchiveStatus != 200)
+            {
+                var err = Encoding.UTF8.GetBytes("{\"error\":\"Download limit reached\",\"code\":\"DOWNLOAD_RATE_LIMITED\"}");
+                await s.WriteAsync(Encoding.ASCII.GetBytes(
+                    $"HTTP/1.1 {ArchiveStatus} X\r\nContent-Type: application/json\r\n" +
+                    (RetryAfter is null ? "" : $"Retry-After: {RetryAfter}\r\n") +
+                    $"Content-Length: {err.Length}\r\nConnection: close\r\n\r\n"), ct);
+                await s.WriteAsync(err, ct);
+                return;
+            }
             _onArchive?.Invoke(); // e.g. another installer finishes while this one downloads
             await Task.Delay(_archiveDelayMs, ct); // long enough for a second installer to arrive meanwhile
             body = _archive;

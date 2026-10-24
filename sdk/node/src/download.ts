@@ -214,6 +214,32 @@ function sha256FileSync(file: string): string {
   return hash.digest("hex");
 }
 
+const SDK_VERSION: string = (() => {
+  try {
+    return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
+  } catch {
+    return "unknown";
+  }
+})();
+/** Sent on the archive download, so a server log can tell which SDK fetched a build (it used to say "node"). */
+export const DOWNLOAD_USER_AGENT = `clearcote-sdk/${SDK_VERSION} (node)`;
+
+/** An archive download the server refused; `retryAfterSec` is its Retry-After, when it sent one. */
+export class DownloadHttpError extends Error {
+  constructor(message: string, readonly status: number, readonly retryAfterSec: number | null) {
+    super(message);
+  }
+}
+
+/** Seconds from a Retry-After header (delta-seconds or an HTTP date); null when absent or unreadable. */
+export function retryAfterSeconds(value: string | null | undefined, now: number = Date.now()): number | null {
+  const v = (value ?? "").trim();
+  if (!v) return null;
+  if (/^\d+$/.test(v)) return Number(v);
+  const at = Date.parse(v);
+  return Number.isNaN(at) ? null : Math.max(0, Math.ceil((at - now) / 1000));
+}
+
 export async function downloadTo(url: string, dest: string, expectedSize: number, quiet: boolean | undefined): Promise<void> {
   // Idle-timeout the stream: a 60s timer reset on every chunk aborts a stalled connection (no data
   // for 60s) without capping the total time of the large (~242 MB) binary download.
@@ -226,9 +252,10 @@ export async function downloadTo(url: string, dest: string, expectedSize: number
   };
   bump();
   try {
-    const res = await fetch(url, { redirect: "follow", signal: ctrl.signal });
+    const res = await fetch(url, { redirect: "follow", headers: { "User-Agent": DOWNLOAD_USER_AGENT }, signal: ctrl.signal });
     if (!res.ok || !res.body) {
-      throw new Error(`Clearcote download failed: HTTP ${res.status} ${res.statusText} for ${url}`);
+      throw new DownloadHttpError(`Clearcote download failed: HTTP ${res.status} ${res.statusText} for ${url}`,
+        res.status, retryAfterSeconds(res.headers.get("retry-after")));
     }
     const total = Number(res.headers.get("content-length")) || expectedSize;
     let seen = 0;
@@ -1541,6 +1568,86 @@ function writeProMeta(licenseKey: string, proUrl: string, meta: ProMeta): void {
   }
 }
 
+// ── PRO download backoff + fall-back to an installed build ──────────────────────────────────────────
+// A new release used to break every launch that could not download it: the SDK asked for "latest",
+// found it missing from the cache, and threw on any failed download -- a 429 from the per-licence
+// download budget included -- while an older build sat verified on disk. A caller that relaunches on
+// failure then hit the route in a tight loop (CR 2026-10-24: one licence, 4,048 attempts in a day).
+// Now a failed download of a newer build launches the newest installed build of the same Chromium
+// major (unless the caller pinned an exact revision), and the failure is remembered in
+// <cache>/.download-backoff-<tag>.json until the server's Retry-After (429) or for 5 minutes (anything
+// else), so the launches in between skip the attempt. Without an installed build to fall back on, a
+// 429 backoff fails the launch at once with the time it ends instead of asking again.
+const DOWNLOAD_BACKOFF_SEC = 300;
+const DOWNLOAD_BACKOFF_MAX_SEC = 86_400;
+
+interface DownloadBackoff { until: number; status: number | null; reason: string }
+
+function backoffPath(cacheRoot: string, tag: string): string {
+  return path.join(cacheRoot, `.download-backoff-${tag.replace(/[^\w.-]/g, "_")}.json`);
+}
+
+/** The pending backoff for a tag; null when none, expired, or unreadable. */
+export function readDownloadBackoff(cacheRoot: string, tag: string, now: number = Date.now()): DownloadBackoff | null {
+  try {
+    const d = JSON.parse(readFileSync(backoffPath(cacheRoot, tag), "utf8")) as Partial<DownloadBackoff>;
+    if (typeof d.until !== "number" || d.until <= now) return null;
+    // A deadline further out than the cap is no proof of anything (a clock jumped, a hand-edited file).
+    if (d.until - now > DOWNLOAD_BACKOFF_MAX_SEC * 1000) return null;
+    return { until: d.until, status: typeof d.status === "number" ? d.status : null, reason: String(d.reason ?? "") };
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort, like the metadata cache: a backoff file is never a reason to fail a launch. */
+function writeDownloadBackoff(cacheRoot: string, tag: string, seconds: number, status: number | null, reason: string): void {
+  const p = backoffPath(cacheRoot, tag);
+  const entry: DownloadBackoff = { until: Date.now() + Math.min(Math.max(seconds, 1), DOWNLOAD_BACKOFF_MAX_SEC) * 1000, status, reason };
+  const tmp = `${p}.tmp-${randomBytes(4).toString("hex")}`;
+  try {
+    mkdirSync(cacheRoot, { recursive: true });
+    writeFileSync(tmp, JSON.stringify(entry));
+    renameSync(tmp, p);
+  } catch {
+    rmSync(tmp, { force: true });
+  }
+}
+
+function clearDownloadBackoff(cacheRoot: string, tag: string): void {
+  rmSync(backoffPath(cacheRoot, tag), { force: true });
+}
+
+/** "pro-155.0.8059.39-r48" -> { version: "155.0.8059.39", rev: 48 }; null for anything else. */
+function parseProTag(tag: string): { version: string; rev: number } | null {
+  const m = /^pro-(\d+(?:\.\d+){3})-r(\d+)$/.exec(tag);
+  return m ? { version: m[1], rev: Number(m[2]) } : null;
+}
+
+/**
+ * The newest installed, intact PRO build that may stand in for `rel`: same Chromium major (same exact
+ * version when the caller asked for one), never `rel` itself, highest revision first. Null when none.
+ */
+export function proFallbackBuild(cacheRoot: string, rel: { tag: string; version: string; binary?: string },
+  selector: string | undefined, quiet?: boolean): { tag: string; path: string } | null {
+  const want = parseProTag(rel.tag)?.version || rel.version;
+  const major = want.split(".")[0];
+  const exact = /^\d+(?:\.\d+){3}$/.test(String(selector || "").trim());
+  if (!major || !existsSync(cacheRoot)) return null;
+  const candidates: Array<{ tag: string; rev: number }> = [];
+  for (const e of readdirSync(cacheRoot, { withFileTypes: true })) {
+    if (!e.isDirectory() || e.name === rel.tag) continue;
+    const t = parseProTag(e.name);
+    if (!t || t.version.split(".")[0] !== major || (exact && t.version !== want)) continue;
+    candidates.push({ tag: e.name, rev: t.rev });
+  }
+  for (const c of candidates.sort((a, b) => b.rev - a.rev)) {
+    const exe = cachedBinary(path.join(cacheRoot, c.tag), rel.binary || "chrome.exe", quiet, false);
+    if (exe) return { tag: c.tag, path: exe };
+  }
+  return null;
+}
+
 /** Whether an answer names a build this platform can install. */
 function proMetaUsable(meta: ProMeta, plat: "windows" | "linux" | "macos"): boolean {
   return !!meta.url && !!meta.sha256 && !!meta.exe_sha256 && (plat !== "windows" || !!meta.chrome_dll_sha256);
@@ -1592,13 +1699,57 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
   const rel = proRelease(meta, plat);
   writeProMeta(licenseKey, proUrl, meta);
 
-  const base = path.join(opts.cacheDir || defaultCacheRoot(), rel.tag);
+  const cacheRoot = opts.cacheDir || defaultCacheRoot();
+  const base = path.join(cacheRoot, rel.tag);
   {
     const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet, false, undefined, launchIntegrity(rel));
     if (cached) return cached;
   }
-  return fetchAndVerify(rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
+  // An exact revision ("r48", "pro-…-r48") is a pin: the caller gets that build or an error, never another.
+  const mayFallBack = !isProRevisionSelector(opts.version);
+  const fallback = () => (mayFallBack ? proFallbackBuild(cacheRoot, rel, opts.version, opts.quiet) : null);
+  const standIn = (fb: { tag: string; path: string }, why: string, until: number) => {
+    // Always said, even when quiet: the caller asked for one build and is getting another.
+    process.stderr.write(`[clearcote] ${rel.tag} is not installed and ${why}; launching the installed ${fb.tag} instead ` +
+      `(the download is tried again after ${new Date(until).toISOString()}).\n`);
+    return fb.path;
+  };
+
+  const pending = readDownloadBackoff(cacheRoot, rel.tag);
+  if (pending) {
+    const fb = fallback();
+    if (fb) return standIn(fb, `its download is paused (${pending.reason})`, pending.until);
+    if (pending.status === 429) {
+      throw new Error(`Clearcote PRO ${rel.tag} is not installed and its download is paused until ` +
+        `${new Date(pending.until).toISOString()} (${pending.reason}). ${PRO_CACHE_HINT}`);
+    }
+  }
+  try {
+    const exe = await fetchAndVerify(rel, base, { cacheDir: opts.cacheDir, quiet: opts.quiet });
+    clearDownloadBackoff(cacheRoot, rel.tag);
+    return exe;
+  } catch (e) {
+    const fb = fallback();
+    const status = e instanceof DownloadHttpError ? e.status : null;
+    const reason = status !== null ? `HTTP ${status}` : String((e as Error)?.message || e).split("\n")[0].slice(0, 120);
+    if (status === 429) {
+      writeDownloadBackoff(cacheRoot, rel.tag, (e as DownloadHttpError).retryAfterSec ?? 60, 429, "download limit reached (HTTP 429)");
+    } else if (fb) {
+      writeDownloadBackoff(cacheRoot, rel.tag, DOWNLOAD_BACKOFF_SEC, status, `download failed: ${reason}`);
+    }
+    const pause = readDownloadBackoff(cacheRoot, rel.tag);
+    if (fb) return standIn(fb, `its download failed (${reason})`, pause?.until ?? Date.now() + DOWNLOAD_BACKOFF_SEC * 1000);
+    if (status === 429) {
+      throw new Error(`${(e as Error).message}\n${PRO_CACHE_HINT}`);
+    }
+    throw e;
+  }
 }
+
+/** The site's own advice on a 429, kept short here; the route's error text has the full sentence. */
+const PRO_CACHE_HINT =
+  "Keep the downloaded build: point CLEARCOTE_CACHE at a directory that survives restarts, " +
+  "so each machine downloads a new build once instead of on every start.";
 
 function logResolvedChannel(meta: ProMeta, plat: "windows" | "linux" | "macos", channel: ReleaseChannel, quiet?: boolean): void {
   if (channel === "preview" && meta.resolved_channel && meta.resolved_channel !== "preview") {
