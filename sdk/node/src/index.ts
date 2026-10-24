@@ -76,6 +76,7 @@ import { emitCoherenceWarnings, emitWarnings, serveExposureWarnings } from "./wa
 import { checkFontDirs, fontLaunchEnv } from "./fonts.js";
 import { withShaderDialect, type ShaderDialect } from "./shaderdialect.js";
 import { apply as applyPersonaEnv } from "./personaenv.js";
+import { preparePersonaLaunch } from "./persona.js";  // r51+: server-side personas (the signed persona token)
 import {
   applyHeadlessGeometry, fitServedWindow, headedLinuxFit, installWindowFixup, placeWindow, servedGeometry,
   FIT_PLAN, type WindowPlan,
@@ -1156,9 +1157,11 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     ? null
     : applyHeadlessGeometry({ ...(pwOptions as Record<string, unknown>) }, fingerprint.fingerprint, engineArgs, fingerprint, exe);
   const launchArgs = [...engineArgs, ...(geom?.args ?? []), ...widevineCdm];
+  // r51+: the signed persona token, fetched once before the launch; every attempt's env carries it.
+  const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined);
   const browser = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
     // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
-    const { args: finalArgs, env } = applyPersonaEnv(exe, launchArgs, runtimeEnv(), personaEnv);
+    const { args: finalArgs, env } = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(runtimeEnv()), personaEnv);
     return chromium.launch({
       // Drop Playwright's --enable-automation (keeps AutomationControlled off), --enable-unsafe-swiftshader
       // (see DEFAULT_IGNORED_ARGS; paired with --ignore-gpu-blocklist in assembleArgs) and the headless
@@ -1320,9 +1323,11 @@ async function launchLocalPersistentContext(
   if (crlsetPlan) launchArgs.push(...(await crlsetPlan.beforeLaunch(reqRoute ? {} : opts as { proxy?: { bypass?: string } })));
   let context: BrowserContext;
   try {
+    // r51+: the signed persona token, fetched once before the launch; every attempt's env carries it.
+    const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined);
     context = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
       // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
-      const { args: finalArgs, env } = applyPersonaEnv(exe, launchArgs, runtimeEnv(), personaEnv);
+      const { args: finalArgs, env } = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(runtimeEnv()), personaEnv);
       return chromium.launchPersistentContext(userDataDir, {
         // r32+: the persona's colour scheme reaches the page instead of Playwright's emulated light.
         ...(engineDecidesColorScheme(exe) ? defaultColorScheme(opts) : opts),
@@ -1632,7 +1637,8 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
-  const persona = applyPersonaEnv(exe, engineArgs, env, personaEnv);  // persona off the browser's argv (1021)
+  const personaLaunch = await preparePersonaLaunch(exe, engineArgs, lease, licenseThroughProxy ? proxyOpt : undefined);  // r51+ persona token
+  const persona = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(env), personaEnv);  // persona off the browser's argv (1021)
   const proc = await releaseLeaseOnFailure(lease, () => winAvRetry(
     (exePath) => new Promise<ChildProcess>((resolve, reject) => {
       let settled = false;
