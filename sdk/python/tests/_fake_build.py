@@ -43,14 +43,19 @@ def verified_tree(base):
 
 
 class FakeBuildServer:
-    def __init__(self, meta_barrier=1, archive_delay=0.0, exe_sha256=None, on_archive=None):
+    def __init__(self, meta_barrier=1, archive_delay=0.0, exe_sha256=None, on_archive=None, tag=TAG,
+                 version="0.0.0"):
         self.archive = fake_archive()
+        self.tag, self.version = tag, version  # the build the route names
         self.sha = hashlib.sha256(self.archive).hexdigest()
         self.code_sha = hashlib.sha256(b"x" * 64).hexdigest()
         self.exe_sha256 = exe_sha256 or self.code_sha
         self.archive_hits = 0
         self.meta_hits = 0  # requests to the download route
         self.meta_status = 200  # set to an error status to make the route refuse
+        self.archive_status = 200  # likewise for the archive, with a Retry-After header when retry_after is set
+        self.retry_after = None
+        self.user_agents = []  # the User-Agent of each archive download
         self.meta_seen = threading.Event()
         self._count = threading.Lock()
         self._barrier = threading.Barrier(meta_barrier) if meta_barrier > 1 else None
@@ -78,7 +83,7 @@ class FakeBuildServer:
                         self.end_headers()
                         self.wfile.write(body)
                         return
-                    body = json.dumps({"tag": TAG, "version": "0.0.0", "url": f"{server.url}/fake.zip",
+                    body = json.dumps({"tag": server.tag, "version": server.version, "url": f"{server.url}/fake.zip",
                                        "sha256": server.sha, "exe_sha256": server.exe_sha256,
                                        "chrome_dll_sha256": server.code_sha, "asset": "fake.zip",
                                        "archive": "zip", "binary": BINARY, "size": len(server.archive)}).encode()
@@ -86,6 +91,17 @@ class FakeBuildServer:
                 elif self.path == "/fake.zip":
                     with server._count:
                         server.archive_hits += 1
+                        server.user_agents.append(self.headers.get("User-Agent", ""))
+                    if server.archive_status != 200:
+                        body = b'{"error":"Download limit reached","code":"DOWNLOAD_RATE_LIMITED"}'
+                        self.send_response(server.archive_status)
+                        self.send_header("Content-Type", "application/json")
+                        if server.retry_after:
+                            self.send_header("Retry-After", server.retry_after)
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
                     if on_archive:
                         on_archive()  # e.g. another installer finishes while this one downloads
                     time.sleep(archive_delay)  # long enough for a second installer to arrive meanwhile

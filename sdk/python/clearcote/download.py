@@ -17,8 +17,11 @@ only runs if a ``gpg`` executable is on PATH.
 """
 
 import contextlib
+import datetime
+import email.utils
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
@@ -29,6 +32,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
@@ -338,13 +342,58 @@ def _http_get(url):
         return resp.read()
 
 
+def _download_user_agent():
+    """Sent on the archive download, so a server log can tell which SDK fetched a build (it used to say
+    "clearcote-sdk"). Resolved per call: this module is imported before the package sets __version__."""
+    try:
+        from . import __version__
+    except ImportError:
+        __version__ = "unknown"
+    return f"clearcote-sdk/{__version__} (python)"
+
+
+class DownloadHttpError(RuntimeError):
+    """An archive download the server refused; ``retry_after_sec`` is its Retry-After, when it sent one."""
+
+    def __init__(self, message, status, retry_after_sec=None):
+        super().__init__(message)
+        self.status = status
+        self.retry_after_sec = retry_after_sec
+
+
+def _retry_after_seconds(value, now=None):
+    """Seconds from a Retry-After header (delta-seconds or an HTTP date); None when absent or unreadable.
+    ``now`` is epoch seconds."""
+    v = str(value or "").strip()
+    if not v:
+        return None
+    if re.fullmatch(r"\d+", v):
+        return int(v)
+    try:
+        at = email.utils.parsedate_to_datetime(v)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if at is None:
+        return None
+    if at.tzinfo is None:  # "-0000" and obsolete zones: RFC 9110 dates are always GMT
+        at = at.replace(tzinfo=datetime.timezone.utc)
+    return max(0, math.ceil(at.timestamp() - (time.time() if now is None else now)))
+
+
 def _download(url, dest, expected_size, quiet):
     """Stream the download to dest, hashing as we go; return the hex digest."""
     h = hashlib.sha256()
-    req = urllib.request.Request(url, headers={"User-Agent": "clearcote-sdk"})
+    req = urllib.request.Request(url, headers={"User-Agent": _download_user_agent()})
     # 60s socket idle timeout: aborts a stalled stream (no bytes for 60s) without capping the
     # total time of the large (~242 MB) binary download, since the timeout resets each read.
-    with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as out:  # noqa: S310
+    try:
+        resp = urllib.request.urlopen(req, timeout=60)  # noqa: S310
+    except urllib.error.HTTPError as e:
+        retry = _retry_after_seconds(e.headers.get("Retry-After") if e.headers else None)
+        e.close()
+        raise DownloadHttpError(f"Clearcote download failed: HTTP {e.code} {e.reason} for {url}",
+                                e.code, retry) from None
+    with resp, open(dest, "wb") as out:
         total = int(resp.headers.get("Content-Length") or expected_size or 0)
         seen = 0
         last = -1
@@ -1395,29 +1444,134 @@ def _kept_pro_meta(cache_key):
         return None  # missing or corrupt: a miss
 
 
+def _replace_json(path, entry):
+    """Write ``entry`` to ``path`` whole, then rename it into place: another process reading it mid-write
+    sees the old content or the new, never a truncated file. Raises OSError."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(entry, f)
+        for _ in range(10):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:  # Windows: a reader has the file open for a moment
+                time.sleep(0.02)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def _keep_pro_meta(cache_key, meta):
     entry = {"at": time.time(), "meta": meta}
     _pro_meta_memo[cache_key] = entry
     try:
-        path = _pro_meta_path(cache_key)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        # Written whole, then renamed into place: another process reading it mid-write must see the old
-        # answer or the new one, never a truncated file (which reads as a miss and spends a download call).
-        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(entry, f)
-            for _ in range(10):
-                try:
-                    os.replace(tmp, path)
-                    break
-                except PermissionError:  # Windows: a reader has the file open for a moment
-                    time.sleep(0.02)
-        finally:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
+        # A truncated file would read as a miss and spend a download call.
+        _replace_json(_pro_meta_path(cache_key), entry)
     except OSError:
         pass  # this process still has it
+
+
+# ── PRO download backoff + fall-back to an installed build ──────────────────────────────────────────
+# A new release used to break every launch that could not download it: the SDK asked for "latest", found
+# it missing from the cache, and raised on any failed download -- a 429 from the per-licence download
+# budget included -- while an older build sat verified on disk. A caller that relaunches on failure then
+# hit the route in a tight loop (CR 2026-10-24: one licence, 4,048 attempts in a day).
+# Now a failed download of a newer build launches the newest installed build of the same Chromium major
+# (unless the caller pinned an exact revision), and the failure is remembered in
+# <cache>/.download-backoff-<tag>.json until the server's Retry-After (429) or for 5 minutes (anything
+# else), so the launches in between skip the attempt. Without an installed build to fall back on, a 429
+# backoff fails the launch at once with the time it ends instead of asking again.
+# ``until`` is epoch MILLISECONDS, as the Node SDK writes it: all three SDKs share the file.
+_DOWNLOAD_BACKOFF_SEC = 300
+_DOWNLOAD_BACKOFF_MAX_SEC = 86_400
+
+# The site's own advice on a 429, kept short here; the route's error text has the full sentence.
+_PRO_CACHE_HINT = ("Keep the downloaded build: point CLEARCOTE_CACHE at a directory that survives restarts, "
+                   "so each machine downloads a new build once instead of on every start.")
+
+
+def _now_ms():
+    return int(time.time() * 1000)
+
+
+def _iso_ms(ms):
+    """Epoch milliseconds as the Node SDK prints them: 2026-10-24T10:00:00.000Z."""
+    at = datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc)
+    return at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _backoff_path(cache_root, tag):
+    return os.path.join(cache_root, f".download-backoff-{re.sub(r'[^A-Za-z0-9_.-]', '_', tag)}.json")
+
+
+def _read_download_backoff(cache_root, tag, now_ms=None):
+    """The pending backoff for a tag as ``{until, status, reason}``; None when none, expired, or unreadable."""
+    now_ms = _now_ms() if now_ms is None else now_ms
+    try:
+        with open(_backoff_path(cache_root, tag), encoding="utf-8") as f:
+            d = json.load(f)
+        until = d["until"]
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if isinstance(until, bool) or not isinstance(until, (int, float)) or until <= now_ms:
+        return None
+    # A deadline further out than the cap is no proof of anything (a clock jumped, a hand-edited file).
+    if until - now_ms > _DOWNLOAD_BACKOFF_MAX_SEC * 1000:
+        return None
+    status = d.get("status")
+    return {"until": until, "status": status if isinstance(status, int) and not isinstance(status, bool) else None,
+            "reason": str(d.get("reason") or "")}
+
+
+def _write_download_backoff(cache_root, tag, seconds, status, reason):
+    """Best-effort, like the metadata cache: a backoff file is never a reason to fail a launch."""
+    entry = {"until": _now_ms() + int(min(max(seconds, 1), _DOWNLOAD_BACKOFF_MAX_SEC) * 1000),
+             "status": status, "reason": reason}
+    try:
+        _replace_json(_backoff_path(cache_root, tag), entry)
+    except OSError:
+        pass
+
+
+def _clear_download_backoff(cache_root, tag):
+    try:
+        os.remove(_backoff_path(cache_root, tag))
+    except OSError:
+        pass
+
+
+def _parse_pro_tag(tag):
+    """"pro-155.0.8059.39-r48" -> ("155.0.8059.39", 48); None for anything else."""
+    m = re.fullmatch(r"pro-(\d+(?:\.\d+){3})-r(\d+)", str(tag or ""))
+    return (m.group(1), int(m.group(2))) if m else None
+
+
+def _pro_fallback_build(cache_root, rel, selector, quiet=False):
+    """The newest installed, intact PRO build that may stand in for ``rel``: same Chromium major (same exact
+    version when the caller asked for one), never ``rel`` itself, highest revision first. Returns
+    ``{"tag", "path"}`` or None."""
+    parsed = _parse_pro_tag(rel["tag"])
+    want = (parsed[0] if parsed else "") or str(rel.get("version") or "")
+    major = want.split(".")[0]
+    exact = bool(re.fullmatch(r"\d+(?:\.\d+){3}", str(selector or "").strip()))
+    if not major or not os.path.isdir(cache_root):
+        return None
+    candidates = []
+    for name in os.listdir(cache_root):
+        if name == rel["tag"] or not os.path.isdir(os.path.join(cache_root, name)):
+            continue
+        t = _parse_pro_tag(name)
+        if not t or t[0].split(".")[0] != major or (exact and t[0] != want):
+            continue
+        candidates.append((t[1], name))
+    for _rev, name in sorted(candidates, reverse=True):
+        # No repair: this process is not installing that build, so it never touches its tree.
+        exe = _cached(os.path.join(cache_root, name), rel.get("binary") or "chrome.exe", quiet, repair=False)
+        if exe:
+            return {"tag": name, "path": exe}
+    return None
 
 
 def _pro_release(meta, plat):
@@ -1458,6 +1612,10 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     URL + sha256, then reuses the SAME verify+extract path as the free binary
     (``_fetch_and_verify``, sha256-only — no GPG). Cached per PRO tag. Raises on any
     failure — a licensed caller must get the PRO build, never a silent free fall-back.
+    One exception: when the download of a build that is not installed fails, the newest installed
+    PRO build of the same Chromium major is launched instead (with a warning on stderr), unless
+    ``version`` pins an exact revision; the failure pauses that download for a while (see
+    _read_download_backoff).
 
     The answer is kept for _PRO_META_TTL seconds (in this process and in
     ``~/.clearcote/pro-meta-<hash>.json``) and reused only while the build it names is installed and
@@ -1466,8 +1624,6 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     ``release_channel="preview"`` (or CLEARCOTE_RELEASE_CHANNEL=preview) gets the newest build for
     this platform, preview or stable. An exact version pin overrides the channel.
     """
-    import urllib.error
-
     base_url = (api_base or os.environ.get("CLEARCOTE_LICENSE_API")
                 or "https://www.clearcotelabs.com").rstrip("/")
     plat = pro_platform_key()  # raises on an Intel Mac: the macOS build is Apple Silicon only
@@ -1510,4 +1666,47 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     cached = _cached(dst, rel["binary"], quiet, repair=False, integrity=_launch_integrity(rel))
     if cached:
         return cached
-    return _fetch_and_verify(rel, dst, quiet)
+
+    # An exact revision ("r48", "pro-…-r48") is a pin: the caller gets that build or an error, never another.
+    may_fall_back = not is_pro_revision_selector(version)
+
+    def fallback():
+        return _pro_fallback_build(root, rel, version, quiet) if may_fall_back else None
+
+    def stand_in(fb, why, until):
+        # Always said, even when quiet: the caller asked for one build and is getting another.
+        sys.stderr.write(f"[clearcote] {rel['tag']} is not installed and {why}; launching the installed "
+                         f"{fb['tag']} instead (the download is tried again after {_iso_ms(until)}).\n")
+        sys.stderr.flush()
+        return fb["path"]
+
+    pending = _read_download_backoff(root, rel["tag"])
+    if pending:
+        fb = fallback()
+        if fb:
+            return stand_in(fb, f"its download is paused ({pending['reason']})", pending["until"])
+        if pending["status"] == 429:
+            raise RuntimeError(
+                f"Clearcote PRO {rel['tag']} is not installed and its download is paused until "
+                f"{_iso_ms(pending['until'])} ({pending['reason']}). {_PRO_CACHE_HINT}")
+    try:
+        exe = _fetch_and_verify(rel, dst, quiet)
+    except Exception as e:
+        fb = fallback()
+        status = e.status if isinstance(e, DownloadHttpError) else None
+        reason = f"HTTP {status}" if status is not None else (str(e) or type(e).__name__).split("\n")[0][:120]
+        if status == 429:
+            retry = e.retry_after_sec
+            _write_download_backoff(root, rel["tag"], 60 if retry is None else retry, 429,
+                                    "download limit reached (HTTP 429)")
+        elif fb:
+            _write_download_backoff(root, rel["tag"], _DOWNLOAD_BACKOFF_SEC, status, f"download failed: {reason}")
+        pause = _read_download_backoff(root, rel["tag"])
+        if fb:
+            until = pause["until"] if pause else _now_ms() + _DOWNLOAD_BACKOFF_SEC * 1000
+            return stand_in(fb, f"its download failed ({reason})", until)
+        if status == 429:
+            raise DownloadHttpError(f"{e}\n{_PRO_CACHE_HINT}", 429, e.retry_after_sec) from e
+        raise
+    _clear_download_backoff(root, rel["tag"])
+    return exe
