@@ -186,6 +186,25 @@ for each one first, so an older engine launches exactly as before.
 
 Also: `licenseThroughProxy: true` (or `CLEARCOTE_LICENSE_THROUGH_PROXY=1`) sends the licence calls through the launch proxy; `releaseChannel: "preview"` (or `CLEARCOTE_RELEASE_CHANNEL`) picks up PRO preview builds; `getSessionSeats()` reports seats in use.
 
+### Personas come from the persona service (engine r51+)
+
+From engine r51 the browser carries no persona generator: after the lease, every launch asks the persona service
+(`persona.clearcotelabs.com`, with `persona-us.clearcotelabs.com` as the fallback) for a signed persona for exactly the
+persona switches it is about to use, and passes it to the engine in `CLEARCOTE_PERSONA_TOKEN`. The SDK does this by
+itself; nothing changes in your code. What you may notice:
+
+- One extra HTTPS request per distinct persona per day (the answer is cached per lease and selector); a launch without a
+  persona fetches too and gets exactly what earlier engines computed locally, so nothing changes in what pages see.
+- The machine needs outbound HTTPS to those two hosts, like it already needs it for the lease. With
+  `licenseThroughProxy: true` the persona request goes through the launch proxy as well.
+- A captured profile (`fingerprintProfile`) is uploaded once and comes back signed; the 24,000-byte limit on profiles
+  passed on the command line is gone.
+- Daily limits per licence on *new* personas apply (relaunching the same profiles is free). A refusal or an unreachable
+  service throws `PersonaServiceError` with the reason; the engine cannot start without a persona.
+- Self-hosting or testing: `CLEARCOTE_PERSONA_API=https://host[,https://host2]` overrides the hosts.
+
+Engines before r51 keep deriving personas themselves; the SDK detects the engine and leaves them as they were.
+
 ### Through a proxy (report the proxy's IP, not your host's)
 
 ```ts
