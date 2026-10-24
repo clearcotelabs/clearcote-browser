@@ -237,11 +237,32 @@ export interface PersonaLaunch {
  */
 export async function preparePersonaLaunch(exe: string, args: readonly string[], lease: LeaseLike | null | undefined, proxy: unknown = undefined,
   deps: { supports?: Probe; runner?: FactsRunner; fetch?: Fetcher; env?: Env } = {}): Promise<PersonaLaunch> {
-  if (!lease?.token || !engineWantsPersonaToken(exe, deps.supports)) return { args: [...args], env: (b) => b };
+  const l = lease?.token ? lease : leaseFromEnv(deps.env);
+  if (!l?.token || !engineWantsPersonaToken(exe, deps.supports)) return { args: [...args], env: (b) => b };
   const { sel, profileJson, args: out } = selectorFromArgs(args);
-  const host = hostFacts(exe, out, lease.token, deps.runner, deps.env);
-  const token = await personaTokenFor(lease, sel, host, profileJson, proxy, deps.fetch);
+  const host = hostFacts(exe, out, l.token, deps.runner, deps.env);
+  const token = await personaTokenFor(l, sel, host, profileJson, proxy, deps.fetch);
   return { args: out, env: (b) => injectPersonaToken(b ?? { ...process.env }, token) };
+}
+
+/**
+ * A lease-like view of a run token the CALLER put in the environment (CLEARCOTE_RUN_TOKEN, or _FILE): the hosted
+ * gateway mints its own run tokens and hands them to serve() this way with no SDK lease. The lease id is read from
+ * the token's payload without verifying it (the engine and the persona service verify; here it only keys the cache).
+ */
+export function leaseFromEnv(env: Env | undefined): LeaseLike | null {
+  const e = env ?? process.env;
+  let token = (e.CLEARCOTE_RUN_TOKEN ?? "").trim();
+  if (!token && e.CLEARCOTE_RUN_TOKEN_FILE) {
+    try { token = readFileSync(e.CLEARCOTE_RUN_TOKEN_FILE, "utf8").trim(); } catch { /* no file: no lease */ }
+  }
+  if (!token) return null;
+  let leaseId: string | null = null;
+  try {
+    const body = token.split(".")[0];
+    leaseId = (JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as { lease?: unknown }).lease as string ?? null;
+  } catch { /* junk token: still fetch, the service will refuse it */ }
+  return { token, leaseId };
 }
 
 export function clearPersonaCaches(): void {

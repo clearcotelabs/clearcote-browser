@@ -1159,7 +1159,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     : applyHeadlessGeometry({ ...(pwOptions as Record<string, unknown>) }, fingerprint.fingerprint, engineArgs, fingerprint, exe);
   const launchArgs = [...engineArgs, ...(geom?.args ?? []), ...widevineCdm];
   // r51+: the signed persona token, fetched once before the launch; every attempt's env carries it.
-  const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined);
+  const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env: runtimeEnv() });
   const browser = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
     // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
     const { args: finalArgs, env } = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(runtimeEnv()), personaEnv);
@@ -1325,7 +1325,7 @@ async function launchLocalPersistentContext(
   let context: BrowserContext;
   try {
     // r51+: the signed persona token, fetched once before the launch; every attempt's env carries it.
-    const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined);
+    const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env: runtimeEnv() });
     context = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
       // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
       const { args: finalArgs, env } = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(runtimeEnv()), personaEnv);
@@ -1638,7 +1638,8 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // Launched DIRECTLY (no Playwright) => no --enable-automation => navigator.webdriver stays false.
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
-  const personaLaunch = await preparePersonaLaunch(exe, engineArgs, lease, licenseThroughProxy ? proxyOpt : undefined);  // r51+ persona token
+  // r51+ persona token; `env` so a caller's own CLEARCOTE_RUN_TOKEN (the hosted gateway) counts as the lease.
+  const personaLaunch = await preparePersonaLaunch(exe, engineArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env });
   const persona = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(env), personaEnv);  // persona off the browser's argv (1021)
   const proc = await releaseLeaseOnFailure(lease, () => winAvRetry(
     (exePath) => new Promise<ChildProcess>((resolve, reject) => {

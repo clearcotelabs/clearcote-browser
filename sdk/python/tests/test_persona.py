@@ -140,6 +140,16 @@ def test_r51_launch_fetches_and_injects_the_token(exe, service, facts_runner):
     assert env["CLEARCOTE_RUN_TOKEN"] == "hdr.sig" and _persona.TOKEN_ENV not in env
 
 
+def test_a_callers_own_run_token_counts_as_the_lease(exe, service, facts_runner):
+    """The hosted gateway mints its own run tokens and launches with no SDK lease."""
+    payload = base64.urlsafe_b64encode(json.dumps({"lic": "lic_g", "lease": "gw-lease-7"}).encode()).decode().rstrip("=")
+    env = {"CLEARCOTE_RUN_TOKEN": f"{payload}.sig"}
+    args, out = apply(exe, ["--fingerprint=9"], env, None, supports=R51, runner=facts_runner)
+    assert out[_persona.TOKEN_ENV].startswith("tok-")
+    assert service.requests[0][1]["token"] == f"{payload}.sig"
+    assert facts_runner.calls[0][1]["CLEARCOTE_RUN_TOKEN"] == f"{payload}.sig"
+
+
 def test_seedless_launch_still_fetches_a_default_persona(exe, service, facts_runner):
     pw = {}
     apply_to_pw_kwargs(exe, ["--fingerprint-platform=windows", "--window-size=1,1"], pw, FakeLease(),

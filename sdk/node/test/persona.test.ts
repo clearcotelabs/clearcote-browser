@@ -105,6 +105,15 @@ describe("server-side personas (r51)", () => {
     expect(runnerCalls[0].env.CLEARCOTE_RUN_TOKEN).toBe("hdr.sig");
   });
 
+  it("a caller's own CLEARCOTE_RUN_TOKEN counts as the lease (the hosted gateway path)", async () => {
+    const payload = Buffer.from(JSON.stringify({ lic: "lic_g", lease: "gw-lease-7" })).toString("base64url");
+    const env = { HOME: dir, LOCALAPPDATA: dir, CLEARCOTE_RUN_TOKEN: `${payload}.sig` };
+    const p = await preparePersonaLaunch(exe, ["--fingerprint=9"], null, undefined, { supports: R51, runner, env });
+    expect(p.env({})?.[TOKEN_ENV]).toMatch(/^tok-/);
+    expect(svc.requests[0].body.token).toBe(`${payload}.sig`);
+    expect(runnerCalls[0].env.CLEARCOTE_RUN_TOKEN).toBe(`${payload}.sig`);
+  });
+
   it("fetches a default persona for a seedless launch", async () => {
     const p = await preparePersonaLaunch(exe, ["--fingerprint-platform=windows", "--window-size=1,1"], lease, undefined, deps());
     expect(svc.requests[0].body.sel).toEqual({ "fingerprint-platform": "windows" });

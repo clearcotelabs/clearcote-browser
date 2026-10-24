@@ -253,11 +253,40 @@ def inject_persona_token(env: dict, token: str) -> dict:
     return env
 
 
+class _EnvLease:
+    """A run token the CALLER put in the environment (``CLEARCOTE_RUN_TOKEN`` or ``_FILE``), as a lease: a
+    launcher that mints its own run tokens (the hosted gateway does) gets a persona token too."""
+
+    def __init__(self, token):
+        self.token = token
+        try:
+            body = token.split(".")[0]
+            body += "=" * (-len(body) % 4)
+            self.lease_id = json.loads(base64.urlsafe_b64decode(body.encode()).decode("utf-8")).get("lease")
+        except Exception:  # noqa: BLE001 -- junk token: still fetch, the service refuses it
+            self.lease_id = None
+
+
+def _lease_from_env(env):
+    e = os.environ if env is None else env
+    token = (e.get("CLEARCOTE_RUN_TOKEN") or "").strip()
+    if not token and e.get("CLEARCOTE_RUN_TOKEN_FILE"):
+        try:
+            with open(e["CLEARCOTE_RUN_TOKEN_FILE"], encoding="utf-8") as f:
+                token = f.read().strip()
+        except OSError:
+            token = ""
+    return _EnvLease(token) if token else None
+
+
 def apply(exe, args, env, lease, supports=None, runner=None, fetch=None):
-    """``(args, env)`` for a launch of ``exe``: on an r51+ engine with a lease, the launch gets its persona
-    token (and a profile moves off the command line); otherwise both come back unchanged."""
+    """``(args, env)`` for a launch of ``exe``: on an r51+ engine with a lease (the SDK's, or a run token the caller
+    put in the environment), the launch gets its persona token (and a profile moves off the command line); otherwise
+    both come back unchanged."""
     args = list(args or [])
-    if lease is None or not getattr(lease, "token", None) or not engine_wants_persona_token(exe, supports):
+    if lease is None or not getattr(lease, "token", None):
+        lease = _lease_from_env(env)
+    if lease is None or not engine_wants_persona_token(exe, supports):
         return args, env
     sel, profile_json, args = selector_from_args(args)
     facts = host_facts(exe, args, lease.token, runner=runner)
