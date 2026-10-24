@@ -188,6 +188,7 @@ export {
   type LicenseOptions,
   type LeaseSession,
 } from "./license.js";
+export { PersonaServiceError } from "./persona.js";  // r51+: the persona service refused or could not be reached
 
 /** When true (and a proxy is set), resolve the proxy's exit-IP geo and auto-fill any unset
  * `timezone` + `acceptLanguage` (+ `location`) so they match the proxy region. */
