@@ -57,15 +57,19 @@ async function route() {
     retryAfter: null as string | null,
     archiveHits: 0,
     userAgents: [] as string[],
+    metaUserAgents: [] as string[],
+    metaExtra: {} as Record<string, unknown>,
   };
   let base = "";
   const srv = createServer((req, res) => {
     const url = req.url ?? "";
     if (url.startsWith("/api/v1/download/pro")) {
+      state.metaUserAgents.push(String(req.headers["user-agent"] ?? ""));
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         tag: NEW, version: "155.0.8059.39", url: `${base}/a.zip`, sha256: createHash("sha256").update(archive).digest("hex"),
         exe_sha256: codeSha, chrome_dll_sha256: codeSha, asset: "fake.zip", archive: "zip", binary: BINARY, size: archive.length,
+        ...state.metaExtra,
       }));
       return;
     }
@@ -223,5 +227,27 @@ describe.runIf(proPlatform)("PRO download fall-back and backoff", () => {
     await dl.proEnsureBinary("cc_lic_fb9", { apiBase: r.base, cacheDir: cache, quiet: true });
     expect(r.state.userAgents[0]).toMatch(/^clearcote-sdk\/\d+\.\d+\.\d+ \(node\)$/);
     expect(dl.DOWNLOAD_USER_AGENT).toBe(r.state.userAgents[0]);
+  }, 30_000);
+
+  it("the download route is asked with the SDK version, and its notice is printed", async () => {
+    // Since 156-r51 a build can carry a minimum client version; the route holds back a client that
+    // names no version (every SDK before 0.63 sent plain "clearcote-sdk" here), so the version must go.
+    const { cache, dl } = await setup();
+    const r = await route();
+    r.state.metaExtra = { notice: "Clearcote 156-r51 needs a newer client; you were given 155-r50 instead." };
+    const lines: string[] = [];
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write);
+    try {
+      await dl.proEnsureBinary("cc_lic_fb10", { apiBase: r.base, cacheDir: cache, quiet: false });
+    } finally {
+      err.mockRestore();
+    }
+    expect(r.state.metaUserAgents[0]).toMatch(/^clearcote-sdk-node\/\d+\.\d+\.\d+/);
+    const { licenseUserAgent } = await import("../src/license.js");
+    expect(r.state.metaUserAgents[0]).toBe(licenseUserAgent());
+    expect(lines.join("")).toMatch(/needs a newer client/);
   }, 30_000);
 });

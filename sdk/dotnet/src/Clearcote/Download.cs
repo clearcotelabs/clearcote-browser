@@ -1277,6 +1277,8 @@ public static class Download
 
     /// How long a PRO metadata answer is reused.
     internal static readonly TimeSpan ProMetaTtl = TimeSpan.FromSeconds(600);
+    /// <summary>The User-Agent of the download-route (metadata) request: this SDK and its version.</summary>
+    public static readonly string ProMetaUserAgent = $"clearcote-sdk-dotnet/{Clearcote.Version}";
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double At, string Meta)> ProMetaMemo = new();
 
     /// Forget this process's PRO metadata (tests).
@@ -1403,7 +1405,9 @@ public static class Download
         using var client = SdkHttp.Create();
         var req = new HttpRequestMessage(HttpMethod.Get, proUrl);
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", licenseKey);
-        req.Headers.UserAgent.ParseAdd("clearcote-sdk");
+        // Named with the SDK version (clearcote-sdk-dotnet/<v>): since 156-r51 a build can need a minimum
+        // client (the persona token), and the route holds back a client that names no version.
+        req.Headers.UserAgent.ParseAdd(ProMetaUserAgent);
         using var res = await client.SendAsync(req).ConfigureAwait(false);
         if (!res.IsSuccessStatusCode)
         {

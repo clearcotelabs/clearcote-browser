@@ -56,6 +56,8 @@ internal sealed class FakeBuildServer : LocalServer
     public string? RetryAfter { get; set; }
     /// The User-Agent of every archive request so far.
     public System.Collections.Concurrent.ConcurrentQueue<string> UserAgents { get; } = new();
+    /// The User-Agent of every download-route (metadata) request so far.
+    public System.Collections.Concurrent.ConcurrentQueue<string> MetaUserAgents { get; } = new();
     /// Completes on the first request to the download route.
     public TaskCompletionSource MetaSeen { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -96,6 +98,9 @@ internal sealed class FakeBuildServer : LocalServer
         string type;
         if (target.StartsWith("/api/v1/download/pro", StringComparison.Ordinal))
         {
+            MetaUserAgents.Enqueue(head.Value.Lines.Skip(1)
+                .Where(l => l.StartsWith("user-agent:", StringComparison.OrdinalIgnoreCase))
+                .Select(l => l["user-agent:".Length..].Trim()).FirstOrDefault() ?? "");
             MetaSeen.TrySetResult();
             if (Interlocked.Increment(ref _asked) >= _metaBarrier) _allAsked.TrySetResult();
             await Task.WhenAny(_allAsked.Task, Task.Delay(30_000, ct));
