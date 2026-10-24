@@ -18,6 +18,7 @@ Chrome runs WITH its sandbox whenever the container allows it (sandbox_check.py)
 --security-opt seccomp=<the profile at /etc/clearcote/seccomp.json>. Without it, --no-sandbox, and a log
 line saying why.
 """
+import base64  # r51+: the persona token's payload carries the display (see _persona_token_display)
 import json
 import os
 import re
@@ -32,6 +33,10 @@ from clearcote._fingerprint import fingerprint_args
 from clearcote._fonts import linux_font_env
 from clearcote._fingerprint import persona_platform
 from clearcote._launchopts import merge_feature_flags, serve_infobar_args, web_bluetooth_args
+try:  # r51+: server-side personas (the signed persona token); an older SDK in the image has no module
+    from clearcote import _persona as _persona_mod
+except ImportError:
+    _persona_mod = None
 try:
     from clearcote._launchopts import mesa_egl_available
 except ImportError:  # an image built with an SDK older than this entrypoint: same check, inline
@@ -291,6 +296,8 @@ def _persona_display(seed):
         seed_i = int(str(seed).strip())
     except ValueError:
         return None
+    if _persona_mod is not None and _persona_mod.engine_wants_persona_token(exe):
+        return _persona_token_display()  # r51+: the validator left the engine; the token says what it serves
     companion = seed_i + 1 if seed_i < 2 ** 63 - 1 else seed_i - 1
     udd = tempfile.mkdtemp(prefix="cc-persona-")
     out = os.path.join(udd, "report.txt")
@@ -324,6 +331,31 @@ def _persona_display(seed):
                 return sw, sh, aw, ah, dpr
         except (KeyError, ValueError):
             return None
+    return None
+
+
+def _persona_token_display():
+    """r51+: the screen, work area and DPR the engine will serve, read from the persona token the service signs for
+    this launch's switches (the same token the launch below reuses from the SDK's cache). None when there is no
+    lease, when the service cannot be reached, or when the token does not carry a display."""
+    if not (_lease and _lease.token):
+        return None
+    try:
+        _args, penv = _persona_mod.apply(exe, fingerprint_args(dict(opts)), {}, _lease)
+        token = penv.get(_persona_mod.TOKEN_ENV)
+        if not token:
+            import gzip
+            token = gzip.decompress(base64.b64decode(penv[_persona_mod.TOKEN_GZ_ENV])).decode("ascii")
+        body = token.split(".")[0]
+        body += "=" * (-len(body) % 4)
+        p = json.loads(base64.urlsafe_b64decode(body.encode()).decode("utf-8"))["p"]["persona"]
+        sw, sh = int(p["screen_width"]), int(p["screen_height"])
+        aw, ah = int(p["avail_screen_width"]), int(p["avail_screen_height"])
+        dpr = float(p.get("device_pixel_ratio") or 1)
+        if sw > 0 and sh > 0 and 0 < aw <= sw and 0 < ah <= sh and dpr > 0:
+            return sw, sh, aw, ah, dpr
+    except Exception as exc:  # noqa: BLE001 -- the launch itself reports a persona-service failure
+        print("[clearcote] persona display: %s: %s" % (type(exc).__name__, exc), flush=True)
     return None
 
 
@@ -727,6 +759,14 @@ try:
 except ImportError:
     _personaenv = None
 _persona_env = False
+if _persona_mod is not None and _lease and _lease.token:
+    # r51+: the signed persona token in CLEARCOTE_PERSONA_TOKEN (a captured profile leaves the command line for
+    # its hash). Nothing changes on an engine before r51. A refusal or an unreachable service stops the container
+    # with the reason: the engine cannot start without a persona.
+    _argv, env = _persona_mod.apply(exe, cmd[1:], env, _lease)
+    cmd = [exe] + _argv
+    if _persona_mod.TOKEN_ENV in env or _persona_mod.TOKEN_GZ_ENV in env:
+        print("[clearcote] persona: signed by the persona service (r51+)", flush=True)
 if _personaenv is not None:
     _argv, _env = _personaenv.apply(exe, cmd[1:], env)
     _persona_env = _env is not env  # a new environment only when the switches moved
