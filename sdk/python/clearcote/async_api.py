@@ -42,6 +42,7 @@ from ._geometry import apply_headless_geometry, place_window_async
 from ._license import inject_run_token
 from ._fonts import apply_font_env, check_font_dirs
 from ._shaderdialect import apply_shader_dialect
+from . import _persona  # r51+: server-side personas (the signed persona token)
 from . import _personaenv
 from ._colorscheme import (default_color_scheme, engine_decides_color_scheme,
                            install_color_scheme_default_async)
@@ -299,6 +300,7 @@ async def launch(cloud=None, **kwargs):
     # new_page/new_context (see _geometry).
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args, exe)
     launch_args = _with_geometry_args(args, geom)
+    launch_args = await asyncio.to_thread(_persona.apply_to_pw_kwargs, exe, launch_args, pw_kwargs, lease)  # r51+ persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     # Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
     # instead of no proxy at all (_reqproxy.py, mirror sync).
@@ -378,6 +380,7 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     if await asyncio.to_thread(engine_decides_color_scheme, exe):  # r32+ (mirror sync)
         default_color_scheme(pw_kwargs)
     launch_args = _with_geometry_args(args, geom)  # carries --widevine-cdm-path when on (see _prepare)
+    launch_args = await asyncio.to_thread(_persona.apply_to_pw_kwargs, exe, launch_args, pw_kwargs, lease)  # r51+ persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     if crlset_plan:  # the readiness probe's port must bypass a launch proxy, so its server starts first
         launch_args = launch_args + crlset_plan.before_launch(pw_kwargs)
