@@ -494,3 +494,62 @@ def test_free_auto_profile_probe_runs_on_the_callers_slot(env, monkeypatch, tmp_
     assert ctx is not None
     assert probe["browser"] is not None          # the probe really did launch
     assert len(be.eps("checkout")) == 1          # ...on the caller's slot, not a second one
+
+
+# SC 283: a browser still open when the process ended kept its run-token file, and a process killed
+# outright runs no hook at all. Real child processes: sys.exit() runs atexit, os._exit() runs nothing.
+_CHILD = (
+    "import os, sys, clearcote._license as L\n"
+    "path, _rel = L._TokenFileSet().bind('tok.sig')\n"
+    "print(path, flush=True)\n"
+    "sys.exit(0) if sys.argv[1] == 'exit' else os._exit(0)\n"
+)
+
+
+def _child_token(tmp_path, how):
+    import subprocess
+    import sys
+    env = dict(os.environ, TMP=str(tmp_path), TEMP=str(tmp_path), TMPDIR=str(tmp_path),
+               PYTHONPATH=os.path.dirname(os.path.dirname(os.path.abspath(L.__file__))))
+    out = subprocess.run([sys.executable, "-c", _CHILD, how], env=env, capture_output=True, text=True,
+                         timeout=60, check=True)
+    return out.stdout.strip()
+
+
+def test_run_token_file_name_carries_pid_and_host(env):
+    _, _be = env("pro", limit=5)
+    h = L.acquire_lease(quiet=True)
+    try:
+        path, rel = h.bind_launch()
+        assert re.match(rf"^clearcote-rt-{os.getpid()}-{L._token_host_tag()}-[0-9a-f-]{{36}}\.tok$",
+                        os.path.basename(path))
+        rel()
+    finally:
+        h.stop()
+
+
+def test_run_token_file_removed_when_the_process_exits_with_it_bound(tmp_path):
+    path = _child_token(tmp_path, "exit")
+    assert os.path.dirname(path) == str(tmp_path)
+    assert not os.path.exists(path)
+
+
+def test_run_token_file_of_a_killed_process_is_swept_by_the_next(tmp_path):
+    path = _child_token(tmp_path, "kill")
+    assert os.path.exists(path)  # no hook ran
+    assert L._sweep_dead_token_files(str(tmp_path)) == 1
+    assert not os.path.exists(path)
+
+
+def test_sweep_keeps_live_other_host_and_legacy_files(tmp_path):
+    tag = L._token_host_tag()
+    other = "00000000" if tag != "00000000" else "11111111"
+    u = "12390cc9-7546-487c-8321-b3a52ee2ddc6"
+    keep = [f"clearcote-rt-{os.getpid()}-{tag}-{u}.tok",       # this process
+            f"clearcote-rt-999999-{other}-{u}.tok",            # another host's (shared temp dir)
+            f"clearcote-rt-{u}.tok"]                           # pre-fix name: no owner, never touched
+    for n in keep + [f"clearcote-rt-999999-{tag}-{u}.tok"]:
+        (tmp_path / n).write_text("t")
+    assert L._sweep_dead_token_files(str(tmp_path), alive=lambda pid: True) == 0  # live/reused pid kept
+    assert L._sweep_dead_token_files(str(tmp_path), alive=lambda pid: False) == 1
+    assert sorted(os.listdir(tmp_path)) == sorted(keep)

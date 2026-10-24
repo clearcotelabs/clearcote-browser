@@ -1641,7 +1641,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
       p.once("spawn", () => { if (!settled) { settled = true; resolve(p); } });
     }),
     exe,
-  ));
+  ), launchToken);
 
   const deadline = Date.now() + readyTimeoutMs;
   let ready = false;

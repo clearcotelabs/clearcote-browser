@@ -123,7 +123,7 @@ vi.mock("../src/profileauto.js", async (importOriginal) => ({
 }));
 
 import { launch, launchAgent, launchPersistentContext, serve, serveNeedsNoSandbox } from "../src/index.js";
-import { resolveLicenseKey } from "../src/license.js";
+import { removeLiveTokenFiles, resolveLicenseKey } from "../src/license.js";
 import { installedPlaywrightDisabledFeatures, PAGE_VISIBLE_PLAYWRIGHT_FEATURES, PLAYWRIGHT_DISABLED_FEATURES } from "../src/launchopts.js";
 
 afterAll(() => {
@@ -372,6 +372,51 @@ describe("throwaway profiles are never left behind", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+
+  // SC 283: the release-test harness left one clearcote-rt-*.tok per run. A step timed out with its
+  // persistent context open, then the harness called process.exit(): no "close", and "beforeExit"
+  // (the only hook that removed token files) never runs on process.exit() or a signal.
+  describe("licensed: no run-token file is left behind", () => {
+    let realFetch: typeof fetch;
+    beforeEach(() => {
+      realFetch = globalThis.fetch;
+      const token = Buffer.from(JSON.stringify({ v: 1, plan: "pro", n: 1 })).toString("base64url") + ".sig";
+      globalThis.fetch = (async (url: unknown) => new Response(String(url).endsWith("/checkout") ? JSON.stringify({
+        lease_id: "L1", token, exp: Math.floor(Date.now() / 1000) + 900, lease_ttl_sec: 810,
+        heartbeat_interval_sec: 270, concurrency: { used: 1, limit: 5 },
+      }) : "{}", { status: 200 })) as typeof fetch;
+    });
+    afterEach(() => { globalThis.fetch = realFetch; });
+    const licensed = () => ({ ...base(), licenseKey: `cc_lic_pro_${Date.now()}_${Math.random().toString(36).slice(2)}`, licenseApiBase: "http://test.local" });
+    const tokens = () => leftovers().filter((n) => n.startsWith("clearcote-rt-"));
+    const envFile = () => (stub.launches.at(-1)!.opts.env as Record<string, string>).CLEARCOTE_RUN_TOKEN_FILE;
+
+    it("launchPersistentContext(): close() removes it", async () => {
+      const ctx = await launchPersistentContext(join(root, "udd"), licensed());
+      expect(tokens()).toHaveLength(1);
+      expect(envFile()).toBe(join(temp, tokens()[0])); // the engine was handed that very file
+      await ctx.close();
+      expect(tokens()).toEqual([]);
+    });
+
+    it("launch() (a persistent context behind a Browser): browser.close() removes it", async () => {
+      const browser = await launch(licensed());
+      expect(tokens()).toHaveLength(1);
+      await browser.close();
+      expect(tokens()).toEqual([]);
+    });
+
+    it("a context still open at process exit: the exit hook removes it", async () => {
+      const ctx = await launchPersistentContext(join(root, "udd"), licensed());
+      expect(tokens()).toHaveLength(1);
+      // What process.exit() runs: "exit" listeners only (no "beforeExit", no "close" from the browser).
+      const hook = process.listeners("exit").find((l) => l === removeLiveTokenFiles);
+      expect(hook).toBeDefined();
+      (hook as () => void)();
+      expect(tokens()).toEqual([]);
+      await ctx.close();
+    });
   });
 
   // Handed an executable that does not exist, Playwright fails only after creating its temp
