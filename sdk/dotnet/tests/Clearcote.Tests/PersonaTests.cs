@@ -125,6 +125,20 @@ public class PersonaTests : IDisposable
         Assert.Contains("host facts", e.Message);
     }
 
+    // 0.63.0/0.63.1 on r51: the probe got CLEARCOTE_RUN_TOKEN only, the engine refused the FREE token without its
+    // file, and every free launch failed before its persona was fetched.
+    [Fact]
+    public async Task The_host_facts_probe_gets_the_launch_run_token_file()
+    {
+        IDictionary<string, string>? seen = null;
+        string Capture(string[] cmd, IDictionary<string, string> env) { seen = new Dictionary<string, string>(env); return Runner(cmd, env); }
+        var file = Path.Combine(_dir, "run.tok");
+        await PersonaToken.PrepareAsync(_exe, new[] { "--fingerprint=77" }, Lease(), null, R51, Capture, Fetch, runTokenFile: file);
+        Assert.NotNull(seen);
+        Assert.Equal(file, seen!["CLEARCOTE_RUN_TOKEN_FILE"]);
+        Assert.Equal("hdr.sig", seen["CLEARCOTE_RUN_TOKEN"]);
+    }
+
     [Fact]
     public void Long_tokens_go_gzipped()
     {

@@ -119,7 +119,7 @@ def _facts_cache_path():
     return os.path.join(base, ".clearcote", "persona-host-facts.json") if base else None
 
 
-def host_facts(exe, args, run_token, runner=None):
+def host_facts(exe, args, run_token, runner=None, env=None):
     """The facts of this machine the generator needs, as the engine itself reports them for a launch with
     these switches: ``chrome --cc-persona-host-facts`` prints ``{"gpu_vendor": ...}`` and exits. Cached per
     (binary, the switches that influence the answer) in memory and in ``~/.clearcote``."""
@@ -147,7 +147,9 @@ def host_facts(exe, args, run_token, runner=None):
     if runner is None:
         def runner(cmd, env):
             return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30).stdout
-    env = dict(os.environ)
+    # The launch's own env, run-token FILE included: the engine refuses a FREE token without the file, so a probe
+    # given only CLEARCOTE_RUN_TOKEN died and every free launch failed before its persona was fetched (0.63.0/0.63.1).
+    env = dict(os.environ if env is None else env)
     env["CLEARCOTE_RUN_TOKEN"] = run_token  # the probe runs after the licence gate, like every launch
     env.pop(TOKEN_ENV, None)
     env.pop(TOKEN_GZ_ENV, None)
@@ -289,7 +291,7 @@ def apply(exe, args, env, lease, supports=None, runner=None, fetch=None):
     if lease is None or not engine_wants_persona_token(exe, supports):
         return args, env
     sel, profile_json, args = selector_from_args(args)
-    facts = host_facts(exe, args, lease.token, runner=runner)
+    facts = host_facts(exe, args, lease.token, runner=runner, env=env)
     token = persona_token_for(lease, sel, facts, profile_json=profile_json, fetch=fetch)
     env = dict(os.environ if env is None else env)
     return args, inject_persona_token(env, token)

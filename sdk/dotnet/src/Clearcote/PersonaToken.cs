@@ -151,7 +151,7 @@ internal static class PersonaToken
     }
 
     /// <summary>The facts of this machine the generator needs, as the engine reports them for a launch with these switches (<c>chrome --cc-persona-host-facts</c>); cached per binary + relevant switches.</summary>
-    public static Dictionary<string, string> HostFacts(string exe, IEnumerable<string> args, string runToken, FactsRunner? runner = null)
+    public static Dictionary<string, string> HostFacts(string exe, IEnumerable<string> args, string runToken, FactsRunner? runner = null, string? runTokenFile = null)
     {
         var relevant = args.Where(a => Switch(a) is { } s && HostFactSwitches.Contains(s.Name)).OrderBy(a => a, StringComparer.Ordinal).ToArray();
         string key;
@@ -179,6 +179,9 @@ internal static class PersonaToken
         var env = new Dictionary<string, string>();
         foreach (System.Collections.DictionaryEntry e in Environment.GetEnvironmentVariables()) env[(string)e.Key] = (string?)e.Value ?? "";
         env[License.RunTokenEnv] = runToken; // the probe runs after the licence gate, like every launch
+        // And with the launch's token FILE: the engine refuses a FREE token without it, so a probe given only
+        // CLEARCOTE_RUN_TOKEN died and every free launch failed before its persona was fetched (0.63.0/0.63.1).
+        if (!string.IsNullOrEmpty(runTokenFile)) env[License.RunTokenFileEnv] = runTokenFile;
         env.Remove(TokenEnv);
         env.Remove(TokenGzEnv);
         Dictionary<string, string> facts;
@@ -276,12 +279,12 @@ internal static class PersonaToken
 
     /// <summary>Prepare a launch of <paramref name="exe"/>: on an r51+ engine with a lease, fetch the persona token; otherwise the args come back unchanged and <see cref="Plan.Env"/> is the identity.</summary>
     public static async Task<Plan> PrepareAsync(string exe, IEnumerable<string> args, LeaseSession? lease, ProxySpec? proxy,
-        Func<string?, string, bool>? supports = null, FactsRunner? runner = null, Fetcher? fetch = null)
+        Func<string?, string, bool>? supports = null, FactsRunner? runner = null, Fetcher? fetch = null, string? runTokenFile = null)
     {
         var list = args.ToList();
         if (lease is null || string.IsNullOrEmpty(lease.Token) || !EngineWantsToken(exe, supports)) return new Plan(list, new Dictionary<string, string>());
         var (sel, profileJson, outArgs) = Selector(list);
-        var host = HostFacts(exe, outArgs, lease.Token, runner);
+        var host = HostFacts(exe, outArgs, lease.Token, runner, runTokenFile);
         var token = await TokenForAsync(lease, sel, host, profileJson, proxy, fetch).ConfigureAwait(false);
         return new Plan(outArgs, TokenVars(token));
     }
