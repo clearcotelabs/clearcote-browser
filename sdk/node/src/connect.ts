@@ -25,15 +25,15 @@ export interface HelperAsset {
 
 /** The helper release this SDK runs. */
 export const HELPER = {
-  version: "0.26.0",
-  baseUrl: "https://github.com/clearcotelabs/clearcote-profile-manager/releases/download/helper-v0.26.0/",
+  version: "0.27.1",
+  baseUrl: "https://github.com/clearcotelabs/clearcote-profile-manager/releases/download/helper-v0.27.1/",
   assets: {
-    "win-x64": { asset: "clearcote-helper-0.26.0-win-x64.zip", sha256: "5488f46cde48b7f451892daaf14e888186d75088c450c016ff1c1f4ed9297f78", size: 36271995 },
-    "win-arm64": { asset: "clearcote-helper-0.26.0-win-arm64.zip", sha256: "d313d14ce6b575c02bb4eab462b3524a92d0c59f51114717a726b5ebadeb8094", size: 32316609 },
-    "mac-x64": { asset: "clearcote-helper-0.26.0-mac-x64.tar.gz", sha256: "9d3c8c92182e19130f751c2356056a351c577fe8831c1fbcd1652f3d893bebac", size: 41674939 },
-    "mac-arm64": { asset: "clearcote-helper-0.26.0-mac-arm64.tar.gz", sha256: "7c83f49568e6c00af3d5cf832a342464969492c069a65b72ec5be00ad0148c60", size: 40573343 },
-    "linux-x64": { asset: "clearcote-helper-0.26.0-linux-x64.tar.gz", sha256: "770c07fb2df91da411241cc60847b824278986aabc386e5485cd67ede1ef469b", size: 45835191 },
-    "linux-arm64": { asset: "clearcote-helper-0.26.0-linux-arm64.tar.gz", sha256: "a9e8b1b34aba69ece549071d078dbc909c0de1f23eae3f928b7cf94f545be89c", size: 45779521 },
+    "win-x64": { asset: "clearcote-helper-0.27.1-win-x64.zip", sha256: "c43b9d6b345da5129f29540d7109b4573d4c591222f9b84632ff0bdc0e8da10d", size: 36274806 },
+    "win-arm64": { asset: "clearcote-helper-0.27.1-win-arm64.zip", sha256: "057179f0225c8fee91a33d00c947d5920699306f81e2d81fac4e3a5b9346ccc7", size: 32319420 },
+    "mac-x64": { asset: "clearcote-helper-0.27.1-mac-x64.tar.gz", sha256: "30929f788f3de61bc179ff409eedd28fa578608da7162a17a79e3615a79e8f37", size: 41675081 },
+    "mac-arm64": { asset: "clearcote-helper-0.27.1-mac-arm64.tar.gz", sha256: "ff3017afce6ee1b6a4493f48352d32013c7be883e4211e5c997d766ccd6fdc1c", size: 40573651 },
+    "linux-x64": { asset: "clearcote-helper-0.27.1-linux-x64.tar.gz", sha256: "18314211a318eaa822ef8b2f689f28bc101fa189d4f15eb2ba8d8152256589f7", size: 45834916 },
+    "linux-arm64": { asset: "clearcote-helper-0.27.1-linux-arm64.tar.gz", sha256: "d368b06d9e9534fc4ea99bfe223deaf6bf79f9880037223341eab738dd53ea61", size: 45779862 },
   } as Record<string, HelperAsset>,
 };
 

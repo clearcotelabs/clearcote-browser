@@ -223,3 +223,15 @@ def test_selector_list_matches_the_service_and_the_engine():
     assert cc_names == set(_persona.SELECTOR_SWITCHES)
     # the service handles the library id in code rather than in its switch map
     assert js_names | {"fingerprint-profile-id"} == set(_persona.SELECTOR_SWITCHES)
+
+
+def test_host_facts_probe_gets_the_launch_env_with_the_run_token_file(exe, service, facts_runner, tmp_path):
+    # 0.63.0/0.63.1 on r51: the probe got os.environ + CLEARCOTE_RUN_TOKEN only, the engine refused the FREE token
+    # without its file, and every free launch failed before its persona was fetched.
+    tok = str(tmp_path / "run.tok")
+    env = {"CLEARCOTE_RUN_TOKEN": "hdr.sig", "CLEARCOTE_RUN_TOKEN_FILE": tok, "HOME": str(tmp_path)}
+    apply(exe, ["--fingerprint=77"], env, FakeLease(), supports=R51, runner=facts_runner)
+    assert len(facts_runner.calls) == 1
+    probe_env = facts_runner.calls[0][1]
+    assert probe_env["CLEARCOTE_RUN_TOKEN_FILE"] == tok
+    assert probe_env["CLEARCOTE_RUN_TOKEN"] == "hdr.sig"

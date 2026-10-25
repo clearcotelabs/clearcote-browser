@@ -15,7 +15,7 @@ namespace Clearcote;
 public static partial class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.63.1";
+    public const string Version = "0.63.2";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
@@ -217,7 +217,7 @@ public static partial class Clearcote
         // engine reads them from there (see PersonaEnv). Probed once; every attempt's env gets the payload.
         // r51+: the signed persona token, fetched once; each attempt's env carries it (Persona.cs).
         var personaLaunch = await PersonaToken.PrepareAsync(exe, args.Concat(display.Args), lease,
-            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null).ConfigureAwait(false);
+            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null, runTokenFile: launchToken?.File).ConfigureAwait(false);
         var persona = PersonaEnv.Plan(exe, personaLaunch.Args, options.PersonaEnv);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
@@ -422,7 +422,7 @@ public static partial class Clearcote
         // reads them from there (see PersonaEnv). Probed once; every attempt's env gets the payload.
         // r51+: the signed persona token, fetched once; each attempt's env carries it (Persona.cs).
         var personaLaunch = await PersonaToken.PrepareAsync(exe, args.Concat(geometry.Args), lease,
-            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null).ConfigureAwait(false);
+            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null, runTokenFile: launchToken?.File).ConfigureAwait(false);
         var persona = PersonaEnv.Plan(exe, personaLaunch.Args, options.PersonaEnv);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
@@ -571,7 +571,7 @@ public static partial class Clearcote
         // engineArgs; cdpArgs never carry one and stay as they are.
         // r51+: the signed persona token (Persona.cs), fetched once before the launch.
         var personaLaunch = await PersonaToken.PrepareAsync(exe, engineArgs, lease,
-            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null).ConfigureAwait(false);
+            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null, runTokenFile: launchToken?.File).ConfigureAwait(false);
         var persona = PersonaEnv.Plan(exe, personaLaunch.Args, options.PersonaEnv);
 
         var proc = await License.ReleaseLeaseOnFailureAsync(lease, () => WinLaunch.WinAvRetryAsync(exePath =>
