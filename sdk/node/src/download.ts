@@ -25,6 +25,7 @@ import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import extract from "extract-zip";
 import { RELEASE, REPO, SIGNING_KEY_FPR, platformRelease, proPlatformKey, CATALOG_URL, CATALOG_FALLBACK, type ReleaseInfo, type Catalog, type CatalogBuild } from "./release.js";
+import { licenseUserAgent } from "./license.js";
 
 /**
  * Read every file under `dir` so on-access antivirus finishes scanning the freshly-extracted,
@@ -1514,6 +1515,9 @@ interface ProMeta {
   tag?: string; version?: string; asset?: string; archive?: string; binary?: string;
   url?: string; sha256?: string; exe_sha256?: string; chrome_dll_sha256?: string; size?: number;
   channel?: string; resolved_channel?: string;
+  // Since 156-r51: the oldest client per family that can run this build, and, when the route served an
+  // OLDER build because this SDK is below the current build's minimum, one line saying so.
+  min_sdk?: Record<string, string>; notice?: string;
 }
 
 // ── PRO metadata cache ──────────────────────────────────────────────────────
@@ -1682,9 +1686,11 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
       return cached;
     }
   }
+  // Named with the SDK version (clearcote-sdk-node/<v>): since 156-r51 a build can need a minimum
+  // client (the persona token), and the route holds back a client that names no version.
   const res = await fetch(proUrl, {
     redirect: "follow",
-    headers: { authorization: `Bearer ${licenseKey}`, "User-Agent": "clearcote-sdk" },
+    headers: { authorization: `Bearer ${licenseKey}`, "User-Agent": licenseUserAgent() },
     signal: AbortSignal.timeout(30_000),
   });
   if (!res.ok) {
@@ -1696,6 +1702,7 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
   }
   const meta = (await res.json()) as ProMeta;
   logResolvedChannel(meta, plat, channel, opts.quiet);
+  if (meta.notice) log(opts.quiet, String(meta.notice));
   const rel = proRelease(meta, plat);
   writeProMeta(licenseKey, proUrl, meta);
 

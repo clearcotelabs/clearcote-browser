@@ -56,6 +56,8 @@ class FakeBuildServer:
         self.archive_status = 200  # likewise for the archive, with a Retry-After header when retry_after is set
         self.retry_after = None
         self.user_agents = []  # the User-Agent of each archive download
+        self.meta_user_agents = []  # the User-Agent of each download-route (metadata) request
+        self.meta_extra = {}  # extra fields merged into the route's answer (e.g. a "notice")
         self.meta_seen = threading.Event()
         self._count = threading.Lock()
         self._barrier = threading.Barrier(meta_barrier) if meta_barrier > 1 else None
@@ -69,6 +71,7 @@ class FakeBuildServer:
                 if self.path.startswith("/api/v1/download/pro"):
                     with server._count:
                         server.meta_hits += 1
+                        server.meta_user_agents.append(self.headers.get("User-Agent", ""))
                     server.meta_seen.set()
                     if server._barrier is not None:
                         try:
@@ -86,7 +89,8 @@ class FakeBuildServer:
                     body = json.dumps({"tag": server.tag, "version": server.version, "url": f"{server.url}/fake.zip",
                                        "sha256": server.sha, "exe_sha256": server.exe_sha256,
                                        "chrome_dll_sha256": server.code_sha, "asset": "fake.zip",
-                                       "archive": "zip", "binary": BINARY, "size": len(server.archive)}).encode()
+                                       "archive": "zip", "binary": BINARY, "size": len(server.archive),
+                                       **server.meta_extra}).encode()
                     ctype = "application/json"
                 elif self.path == "/fake.zip":
                     with server._count:

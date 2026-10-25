@@ -39,6 +39,8 @@ from ._fingerprint import (
 from ._fontpersona import ensure_persona_fonts, font_reachability, profile_with_windows11_faces
 from ._fonts import apply_font_env, check_font_dirs
 from ._shaderdialect import apply_shader_dialect
+from . import _persona  # r51+: server-side personas (the signed persona token)
+from ._persona import PersonaServiceError
 from . import _personaenv
 from ._geometry import (apply_headless_geometry, caller_sized_the_window, engine_places_persona_window,
                         place_window)
@@ -204,11 +206,12 @@ __all__ = [
     "LicenseRevokedError",
     "OfflineKeyError",
     "LicenseServerChallengeError",
+    "PersonaServiceError",
     "OPENROUTER_BASE_URL",
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.62.1"
+__version__ = "0.63.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -1263,6 +1266,7 @@ def launch(cloud=None, **kwargs):
     # context option, so it rides on new_page/new_context.
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args, exe)
     launch_args = _with_geometry_args(args, geom)
+    launch_args = _persona.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, lease)  # r51+: the signed persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     # Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
     # instead of no proxy at all, which sent it from this machine's IP (_reqproxy.py).
@@ -1363,6 +1367,7 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     if engine_decides_color_scheme(exe):  # r32+: the persona's colour scheme, not Playwright's light
         default_color_scheme(pw_kwargs)
     launch_args = _with_geometry_args(args, geom)  # carries --widevine-cdm-path when on (see _prepare)
+    launch_args = _persona.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, lease)  # r51+: the signed persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     if crlset_plan:  # the readiness probe's port must bypass a launch proxy, so its server starts first
         launch_args = launch_args + crlset_plan.before_launch(pw_kwargs)

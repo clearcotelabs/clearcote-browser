@@ -1648,8 +1648,11 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
                 _log_resolved_channel(meta, channel, plat, quiet)
                 return cached
 
+    # Named with the SDK version (clearcote-sdk-python/<v>): since 156-r51 a build can need a minimum
+    # client (the persona token), and the route holds back a client that names no version.
+    from ._license import _user_agent
     req = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {license_key}", "User-Agent": "clearcote-sdk"})
+        url, headers={"Authorization": f"Bearer {license_key}", "User-Agent": _user_agent()})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
             meta = json.loads(resp.read().decode("utf-8"))
@@ -1660,6 +1663,9 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
             "Check your license key and that your plan is active.") from None
 
     _log_resolved_channel(meta, channel, plat, quiet)
+    if meta.get("notice"):
+        # The route served an older build than the current one because this SDK is too old for it.
+        _log(quiet, str(meta["notice"]))
     rel = _pro_release(meta, plat)
     _keep_pro_meta(meta_key, meta)
     dst = os.path.join(root, rel["tag"])
