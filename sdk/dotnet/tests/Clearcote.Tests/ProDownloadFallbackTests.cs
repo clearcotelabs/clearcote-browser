@@ -201,4 +201,18 @@ public class ProDownloadFallbackTests : IDisposable
         Assert.Matches(@"^clearcote-sdk/\d+\.\d+\.\d+ \(dotnet\)$", ua);
         Assert.Equal(Download.DownloadUserAgent, ua);
     }
+
+    [Fact]
+    public async Task The_download_route_is_asked_with_the_SDK_version()
+    {
+        // Since 156-r51 a build can carry a minimum client version; the route holds back a client that
+        // names no version (every SDK before 0.63 sent plain "clearcote-sdk" here), so the version must go.
+        if (OperatingSystem.IsMacOS()) return;
+        await using var srv = Route();
+        await Ensure(srv, Cache(), "cc_lic_fb10");
+        Assert.True(srv.MetaUserAgents.TryPeek(out var ua));
+        Assert.Matches(@"^clearcote-sdk-dotnet/\d+\.\d+\.\d+", ua);
+        Assert.Equal(Download.ProMetaUserAgent, ua);
+        Assert.Equal($"clearcote-sdk-dotnet/{Clearcote.Version}", ua);
+    }
 }

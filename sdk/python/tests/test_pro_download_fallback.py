@@ -180,3 +180,16 @@ def test_the_archive_download_says_which_sdk_fetched_it(home, tmp_path, srv):
     assert os.path.isfile(os.path.join(cache, NEW, "browser", BINARY))
     assert re.fullmatch(r"clearcote-sdk/\d+\.\d+\.\d+ \(python\)", srv.user_agents[0])
     assert srv.user_agents[0] == download._download_user_agent() == f"clearcote-sdk/{__version__} (python)"
+
+
+@pro_platform
+def test_the_download_route_is_asked_with_the_sdk_version(home, tmp_path, srv, capsys):
+    # Since 156-r51 a build can carry a minimum client version; the route holds back a client that
+    # names no version (every SDK before 0.63 sent plain "clearcote-sdk" here), so the version must go.
+    from clearcote import __version__
+
+    srv.meta_extra = {"notice": "Clearcote 156-r51 needs a newer client; you were given 155-r50 instead."}
+    download.pro_ensure_binary("cc_lic_fb10", api_base=srv.url, cache_dir=str(tmp_path / "cache"), quiet=False)
+    assert srv.meta_user_agents[0] == f"clearcote-sdk-python/{__version__}"
+    assert re.fullmatch(r"clearcote-sdk-python/\d+\.\d+\.\d+.*", srv.meta_user_agents[0])
+    assert "needs a newer client" in capsys.readouterr().err
