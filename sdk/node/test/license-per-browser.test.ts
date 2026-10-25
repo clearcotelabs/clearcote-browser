@@ -3,10 +3,11 @@
 // lease_scope "browser" and one live lease per launch_id, a paid key gets the machine-shared lease —
 // and HOME is a temp dir so the on-disk cache and instance_id are isolated.
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { basename, join } from "node:path";
 import { createHash } from "node:crypto";
-import { acquireLease, ConcurrencyLimitError, LicenseError, tokenPlan, newLaunchId } from "../src/license.js";
+import { acquireLease, ConcurrencyLimitError, LicenseError, tokenPlan, newLaunchId, removeLiveTokenFiles, sweepDeadTokenFiles, tokenHostTag } from "../src/license.js";
 import { tempDir } from "./helpers/temp.js";
 
 const realFetch = globalThis.fetch;
@@ -412,5 +413,51 @@ describe("run-token file (engine online-enforcement opt-in)", () => {
     } finally {
       await lease.stop();
     }
+  });
+
+  it("the file name carries this process's pid and host, and process exit removes a still-bound file", async () => {
+    isolate("pro");
+    backend("pro", { limit: 5 });
+    const lease = (await acquireLease({ quiet: true }))!;
+    try {
+      const lt = lease.bindLaunch();
+      expect(basename(lt.file)).toMatch(new RegExp(`^clearcote-rt-${process.pid}-${tokenHostTag()}-[0-9a-f-]{36}\\.tok$`));
+      // process.exit() and a signal skip "beforeExit": the removal has to be an "exit" listener.
+      expect(process.listeners("exit")).toContain(removeLiveTokenFiles);
+      removeLiveTokenFiles();
+      expect(existsSync(lt.file)).toBe(false);
+      lt.release(); // still safe after the exit sweep
+    } finally {
+      await lease.stop();
+    }
+  });
+
+  // A process killed outright (SIGKILL, taskkill /F, a crash) runs no hook: the next process sweeps.
+  it("sweepDeadTokenFiles removes only this host's files whose process is gone", () => {
+    const dir = tempDir("cc-toksweep-");
+    const tag = tokenHostTag();
+    const uuid = "12390cc9-7546-487c-8321-b3a52ee2ddc6";
+    const dead = spawnSync(process.execPath, ["-e", ""]).pid!; // exited by now
+    const names = {
+      dead: `clearcote-rt-${dead}-${tag}-${uuid}.tok`,
+      live: `clearcote-rt-${process.ppid}-${tag}-${uuid}.tok`,
+      own: `clearcote-rt-${process.pid}-${tag}-${uuid}.tok`,
+      otherHost: `clearcote-rt-${dead}-${tag === "00000000" ? "11111111" : "00000000"}-${uuid}.tok`,
+      legacy: `clearcote-rt-${uuid}.tok`, // pre-fix name: no owner, so never touched
+      unrelated: "clearcote-run-abc",
+    };
+    for (const n of Object.values(names)) writeFileSync(join(dir, n), "t");
+    expect(sweepDeadTokenFiles(dir)).toBe(1);
+    expect(readdirSync(dir).sort()).toEqual(Object.values(names).filter((n) => n !== names.dead).sort());
+  });
+
+  it("sweepDeadTokenFiles keeps a file whose pid is alive (or reused)", () => {
+    const dir = tempDir("cc-toksweep2-");
+    const f = join(dir, `clearcote-rt-999999-${tokenHostTag()}-12390cc9-7546-487c-8321-b3a52ee2ddc6.tok`);
+    writeFileSync(f, "t");
+    expect(sweepDeadTokenFiles(dir, () => true)).toBe(0); // a live (or reused) pid keeps its file
+    expect(existsSync(f)).toBe(true);
+    expect(sweepDeadTokenFiles(dir, () => false)).toBe(1);
+    expect(existsSync(f)).toBe(false);
   });
 });

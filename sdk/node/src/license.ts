@@ -10,8 +10,8 @@
 // backend and never gates. See clearcoat/PRIVATE-SDK-LICENSING-PLAN.md.
 
 import { offlineLease } from "./offline.js";
-import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, rmSync, chmodSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, renameSync, rmSync, chmodSync } from "node:fs";
+import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -574,19 +574,76 @@ const SKEW_SEC = 60;
 // which the backend gates). This class mirrors a lease's rotating token into one file per launch and
 // removes it on close. Older engines ignore the file (they read CLEARCOTE_RUN_TOKEN once at launch),
 // so it is purely additive — nothing breaks if the engine does not support it.
+//
+// LEFT BEHIND, ONE PER RUN (SC 283): a browser still open when the process ended kept its file. The
+// lease removed files only on close or on "beforeExit", and process.exit() (any harness, any CLI)
+// and a signal skip "beforeExit": a step that timed out with its context open left one .tok per run.
+// Every live file is now in liveTokenFiles, removed synchronously on "exit"; a process killed outright
+// runs no hook at all, so the name carries its pid and host and the first bind of a later process
+// sweeps files whose process is gone (sweepDeadTokenFiles).
+const liveTokenFiles = new Set<string>();
+let tokenExitHooked = false;
+let tokenSwept = false;
+
+/** Short tag of this machine: a temp dir shared across hosts (a mounted volume) never sweeps another's files. */
+export function tokenHostTag(): string {
+  return createHash("sha256").update(hostname()).digest("hex").slice(0, 8);
+}
+
+/** clearcote-rt-<pid>-<hosttag>-<uuid>.tok; the old clearcote-rt-<uuid>.tok has no owner and is never swept. */
+const TOKEN_FILE_RE = /^clearcote-rt-(\d+)-([0-9a-f]{8})-[0-9a-f-]{36}\.tok$/;
+
+function tokenPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM"; // exists, but not ours to signal
+  }
+}
+
+/**
+ * Remove run-token files whose process is gone (killed, crashed: it ran no exit hook). Only files this
+ * host wrote with a pid in the name; a live pid (or a reused one) keeps its file. Exported for tests.
+ */
+export function sweepDeadTokenFiles(dir: string = tmpdir(), alive: (pid: number) => boolean = tokenPidAlive): number {
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return 0; }
+  const tag = tokenHostTag();
+  let removed = 0;
+  for (const name of names) {
+    const m = TOKEN_FILE_RE.exec(name);
+    if (!m || m[2] !== tag) continue;
+    const pid = Number(m[1]);
+    if (pid === process.pid || alive(pid)) continue;
+    try { rmSync(join(dir, name), { force: true }); removed++; } catch { /* another process got it */ }
+  }
+  return removed;
+}
+
+/** Remove every live run-token file now (process exit: synchronous, so it also runs on process.exit()). */
+export function removeLiveTokenFiles(): void {
+  for (const path of liveTokenFiles) { try { rmSync(path, { force: true }); } catch { /* ignore */ } }
+  liveTokenFiles.clear();
+}
+
 class TokenFileSet {
   private readonly files = new Set<{ path: string }>();
 
   /** Create a token file seeded with `current`, kept updated until release() removes it. */
   bind(current: string): { file: string; release: () => void } {
-    const path = join(tmpdir(), `clearcote-rt-${randomUUID()}.tok`);
+    if (!tokenSwept) { tokenSwept = true; sweepDeadTokenFiles(); }
+    if (!tokenExitHooked) { tokenExitHooked = true; process.once("exit", removeLiveTokenFiles); }
+    const path = join(tmpdir(), `clearcote-rt-${process.pid}-${tokenHostTag()}-${randomUUID()}.tok`);
     this.writeOne(path, current);
     const entry = { path };
     this.files.add(entry);
+    liveTokenFiles.add(path);
     return {
       file: path,
       release: () => {
         this.files.delete(entry);
+        liveTokenFiles.delete(path);
         try { rmSync(path, { force: true }); } catch { /* already gone */ }
       },
     };
@@ -599,7 +656,7 @@ class TokenFileSet {
 
   /** Remove every file (lease shutdown). */
   closeAll(): void {
-    for (const e of this.files) { try { rmSync(e.path, { force: true }); } catch { /* ignore */ } }
+    for (const e of this.files) { liveTokenFiles.delete(e.path); try { rmSync(e.path, { force: true }); } catch { /* ignore */ } }
     this.files.clear();
   }
 

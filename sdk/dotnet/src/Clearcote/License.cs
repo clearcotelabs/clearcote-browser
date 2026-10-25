@@ -155,22 +155,73 @@ public sealed class LeaseSession
 /// token into one file per launch and removes it on close. Older engines ignore the file (they read
 /// CLEARCOTE_RUN_TOKEN once at launch), so it is purely additive — nothing breaks without support.
 /// Write failures are non-fatal: the launch still carries CLEARCOTE_RUN_TOKEN. Mirrors license.ts.
+///
+/// LEFT BEHIND, ONE PER RUN (SC 283): a browser still open when the process ended kept its file until a
+/// hook ran, and a process killed outright runs none. Every live file is in <see cref="Live"/>, removed
+/// synchronously on ProcessExit; the name carries the pid and a host tag, and the first bind of a later
+/// process sweeps files whose process is gone (<see cref="SweepDead"/>).
 internal sealed class TokenFileSet
 {
     private sealed class Entry { public required string Path; }
     private readonly HashSet<Entry> _files = new();
     private readonly object _lock = new();
 
+    private static readonly HashSet<string> Live = new();
+    private static int _hooked;
+    // clearcote-rt-<pid>-<hosttag>-<guid N>.tok; the old clearcote-rt-<guid>.tok has no owner and is never swept.
+    private static readonly System.Text.RegularExpressions.Regex FileRe =
+        new(@"^clearcote-rt-(\d+)-([0-9a-f]{8})-[0-9a-f]{32}\.tok$");
+
+    /// Short tag of this machine: a temp dir shared across hosts (a mounted volume) never sweeps another's files.
+    internal static string HostTag() =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Environment.MachineName))).ToLowerInvariant()[..8];
+
+    /// Remove every live run-token file now (process exit).
+    internal static void RemoveLive()
+    {
+        string[] snapshot;
+        lock (Live) { snapshot = Live.ToArray(); Live.Clear(); }
+        foreach (var p in snapshot) { try { System.IO.File.Delete(p); } catch { /* ignore */ } }
+    }
+
+    /// Remove run-token files whose process is gone (killed, crashed: it ran no exit hook). Only files this
+    /// host wrote with a pid in the name; a live pid (or a reused one) keeps its file.
+    internal static int SweepDead(string? dir = null, Func<int, bool>? alive = null)
+    {
+        alive ??= DockerLaunch.PidAlive;
+        dir ??= System.IO.Path.GetTempPath();
+        string[] names;
+        try { names = System.IO.Directory.GetFiles(dir, "clearcote-rt-*.tok"); } catch { return 0; }
+        var tag = HostTag();
+        var removed = 0;
+        foreach (var full in names)
+        {
+            var m = FileRe.Match(System.IO.Path.GetFileName(full));
+            if (!m.Success || m.Groups[2].Value != tag) continue;
+            if (!int.TryParse(m.Groups[1].Value, out var pid) || pid == Environment.ProcessId || alive(pid)) continue;
+            try { System.IO.File.Delete(full); removed++; } catch { /* another process got it */ }
+        }
+        return removed;
+    }
+
     /// Create a token file seeded with <paramref name="current"/>, kept updated until Release removes it.
     public LaunchToken Bind(string current)
     {
-        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"clearcote-rt-{Guid.NewGuid():N}.tok");
+        if (Interlocked.Exchange(ref _hooked, 1) == 0)
+        {
+            SweepDead();
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => RemoveLive();
+        }
+        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            $"clearcote-rt-{Environment.ProcessId}-{HostTag()}-{Guid.NewGuid():N}.tok");
         WriteOne(path, current);
         var entry = new Entry { Path = path };
         lock (_lock) _files.Add(entry);
+        lock (Live) Live.Add(path);
         return new LaunchToken(path, () =>
         {
             lock (_lock) _files.Remove(entry);
+            lock (Live) Live.Remove(path);
             try { System.IO.File.Delete(path); } catch { /* already gone */ }
         });
     }
@@ -188,6 +239,7 @@ internal sealed class TokenFileSet
     {
         Entry[] snapshot;
         lock (_lock) { snapshot = _files.ToArray(); _files.Clear(); }
+        lock (Live) foreach (var e in snapshot) Live.Remove(e.Path);
         foreach (var e in snapshot) { try { System.IO.File.Delete(e.Path); } catch { /* ignore */ } }
     }
 

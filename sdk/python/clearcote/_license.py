@@ -23,6 +23,8 @@ import base64
 import hashlib
 import json
 import os
+import re
+import socket
 import sys
 import tempfile
 import threading
@@ -516,6 +518,71 @@ def _raise_for_status(status: int, body: dict):
 # Run-token files (engine online-enforcement opt-in)
 # ---------------------------------------------------------------------------
 
+# LEFT BEHIND, ONE PER RUN (SC 283): a browser still open when the process ended kept its file
+# until a hook ran, and a process killed outright (SIGKILL, taskkill /F, os._exit) runs none. Every
+# live file is in _LIVE_TOKEN_FILES, removed at exit; the name carries the pid and a host tag, and the
+# first bind of a later process sweeps files whose process is gone (_sweep_dead_token_files).
+_LIVE_TOKEN_FILES: set[str] = set()
+_LIVE_TOKEN_LOCK = threading.Lock()
+_TOKEN_HOOKED = False
+# clearcote-rt-<pid>-<hosttag>-<uuid>.tok; the old clearcote-rt-<uuid>.tok has no owner and is never swept.
+_TOKEN_FILE_RE = re.compile(r"^clearcote-rt-(\d+)-([0-9a-f]{8})-[0-9a-f-]{36}\.tok$")
+
+
+def _token_host_tag() -> str:
+    """Short tag of this machine: a temp dir shared across hosts (a mounted volume) never sweeps another's files."""
+    return hashlib.sha256(socket.gethostname().encode("utf-8")).hexdigest()[:8]
+
+
+def _remove_live_token_files() -> None:
+    """Remove every live run-token file now (process exit)."""
+    with _LIVE_TOKEN_LOCK:
+        paths = list(_LIVE_TOKEN_FILES)
+        _LIVE_TOKEN_FILES.clear()
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def _sweep_dead_token_files(directory: str | None = None, alive=None) -> int:
+    """Remove run-token files whose process is gone (killed, crashed: it ran no exit hook). Only files this
+    host wrote with a pid in the name; a live pid (or a reused one) keeps its file."""
+    if alive is None:
+        from .download import _pid_alive as alive
+    directory = directory or tempfile.gettempdir()
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    tag = _token_host_tag()
+    removed = 0
+    for name in names:
+        m = _TOKEN_FILE_RE.match(name)
+        if not m or m.group(2) != tag:
+            continue
+        pid = int(m.group(1))
+        if pid == os.getpid() or alive(pid):
+            continue
+        try:
+            os.remove(os.path.join(directory, name))
+            removed += 1
+        except OSError:
+            pass  # another process got it
+    return removed
+
+
+def _hook_token_files() -> None:
+    global _TOKEN_HOOKED
+    with _LIVE_TOKEN_LOCK:
+        if _TOKEN_HOOKED:
+            return
+        _TOKEN_HOOKED = True
+    _sweep_dead_token_files()
+    atexit.register(_remove_live_token_files)
+
+
 class _TokenFileSet:
     """Mirror a lease's rotating run-token into one file per launch (CLEARCOTE_RUN_TOKEN_FILE).
 
@@ -534,14 +601,20 @@ class _TokenFileSet:
     def bind(self, current: str):
         """Create a token file seeded with ``current``; returns ``(path, release)``. The file is kept
         updated by :meth:`update` until ``release()`` removes it."""
-        path = os.path.join(tempfile.gettempdir(), f"clearcote-rt-{uuid.uuid4()}.tok")
+        _hook_token_files()
+        path = os.path.join(tempfile.gettempdir(),
+                            f"clearcote-rt-{os.getpid()}-{_token_host_tag()}-{uuid.uuid4()}.tok")
         self._write_one(path, current)
         with self._lock:
             self._paths.add(path)
+        with _LIVE_TOKEN_LOCK:
+            _LIVE_TOKEN_FILES.add(path)
 
         def release() -> None:
             with self._lock:
                 self._paths.discard(path)
+            with _LIVE_TOKEN_LOCK:
+                _LIVE_TOKEN_FILES.discard(path)
             try:
                 os.remove(path)
             except OSError:
@@ -561,6 +634,8 @@ class _TokenFileSet:
         with self._lock:
             paths = list(self._paths)
             self._paths.clear()
+        with _LIVE_TOKEN_LOCK:
+            _LIVE_TOKEN_FILES.difference_update(paths)
         for p in paths:
             try:
                 os.remove(p)
