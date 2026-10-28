@@ -542,7 +542,7 @@ function assembleArgs(
   // build hides it while exposing usb/serial/hid (an OS-origin tell on a Windows persona); a
   // Windows build shows it under a LINUX claim, which genuine Chrome 154 on Linux does not. The
   // host is never consulted; whichever switch agrees with this build's default is a no-op.
-  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic), ...socks5UdpArgs(socks5Udp, proxyForQuic),
+  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic, socks5Udp, extra?.exe), ...socks5UdpArgs(socks5Udp, proxyForQuic),
     ...webBluetoothArgs(
       fpArgs.find((a) => a.startsWith("--fingerprint-platform="))?.slice("--fingerprint-platform=".length),
     ),

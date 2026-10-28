@@ -221,13 +221,25 @@ def privacy_sandbox_args():
     return ["--disable-features=" + ",".join(PRIVACY_SANDBOX_FEATURES)]
 
 
-def quic_args(proxy):
+QUIC_RELAY_SWITCH = "disable-socks5-udp-quic"  # PRO r54+: the engine carries HTTP/3 through the SOCKS5 UDP relay
+
+
+def quic_args(proxy, socks5_udp=False, exe=None):
     """Behind a proxy, real Chrome cannot use QUIC/HTTP3 — a SOCKS5/HTTP proxy carries only TCP, so
     Chrome falls back to TCP for proxied requests. Disable QUIC when a proxy is configured so no
     HTTP/3 UDP is even attempted: coherent with proxied Chrome, and a belt-and-suspenders guarantee
     that no UDP egresses *around* the proxy (the #9 leak). No proxy -> leave QUIC on (real Chrome
-    uses it, so disabling it everywhere would itself be a tell)."""
-    return ["--disable-quic"] if (isinstance(proxy, dict) and proxy.get("server")) else []
+    uses it, so disabling it everywhere would itself be a tell).
+
+    Exception (PRO r54+): with ``socks5_udp=True`` and a ``socks5://`` proxy, an engine that carries
+    QUIC through the proxy's UDP relay (it implements ``--disable-socks5-udp-quic``) keeps QUIC on, so
+    HTTP/3 sites load over HTTP/3 from the proxy's exit. The proxy resolves the site's name; nothing
+    goes around it. Pass ``args=["--disable-socks5-udp-quic"]`` to keep h2 there."""
+    if not (isinstance(proxy, dict) and proxy.get("server")):
+        return []
+    if socks5_udp is True and _SOCKS5.match((proxy.get("server") or "").strip()) and exe             and engine_supports_switch(exe, QUIC_RELAY_SWITCH):
+        return []
+    return ["--disable-quic"]
 
 
 def socks5_udp_args(socks5_udp, proxy):
