@@ -77,7 +77,7 @@ body:
     attributes:
       label: Clearcote engine version
       description: The browser build that ran, from `clearcote info` or chrome://version in the Clearcote window.
-      placeholder: "e.g. 151.0.7922.108 (v0.1.0-pre.24)"
+      placeholder: "e.g. 151.0.7922.108 (v0.1.0-pre.25)"
     validations:
       required: true
 

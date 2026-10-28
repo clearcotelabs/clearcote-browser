@@ -455,7 +455,7 @@ There is one open build and one licensed build. The licensed build is offered tw
 | **154** (`154.0.8037.57`) | Available | ~Dec 2026 |
 | **153** (`153.0.8010.53`) | Available | ~Nov 2026 |
 | **152** (`152.0.7977.82`) | Available | ~Nov 2026 |
-| **151** (`151.0.7922.108`) | Available | **Available now** (`v0.1.0-pre.24`) |
+| **151** (`151.0.7922.108`) | Available | **Available now** (`v0.1.0-pre.25`) |
 | **150** (`150.0.7871.114`) | Available | Available |
 | **149** (`149.0.7827.114`) | Available | Available |
 

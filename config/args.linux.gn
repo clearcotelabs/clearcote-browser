@@ -1,7 +1,7 @@
 # Clearcote reference build configuration — Linux x64, built natively on Linux.
 #
 # This is the effective build configuration used to produce the published Linux pre-release
-# (v0.1.0-pre.24, Chromium 151). It is config/args.gn with the target flipped to Linux: target_os="linux",
+# (v0.1.0-pre.25, Chromium 151). It is config/args.gn with the target flipped to Linux: target_os="linux",
 # use_sysroot=true (build against Chromium's bundled Debian bullseye sysroot -> glibc 2.31 floor),
 # and the Windows-only cross flags (rust_sysroot_absolute, dawn_use_built_dxc) dropped. The de-Google
 # set is identical to the Windows build; the release config differs only where Linux needs it

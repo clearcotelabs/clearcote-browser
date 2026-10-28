@@ -262,7 +262,7 @@ engine keeps the password in the entrypoint's relay instead, off the command lin
 ## Notes
 
 - Each image tag is built from one SDK release: `sdk-<version>` (e.g. `sdk-0.46.0`), `<browser>` (the
-  open binary it bakes in, e.g. `0.1.0-pre.24`) and `latest`. Rebuild + verify this image yourself:
+  open binary it bakes in, e.g. `0.1.0-pre.25`) and `latest`. Rebuild + verify this image yourself:
   `docker build -t clearcote .` — every layer is auditable.
 - `--disable-dev-shm-usage` is set; the SDKs still pass `--shm-size=1g`, and the examples here do the same.
 - The image carries the label `com.clearcotelabs.serve-protocol` (2: it takes `CC_SECRETS_FILE` and
@@ -285,7 +285,7 @@ engine keeps the password in the entrypoint's relay instead, off the command lin
   scripts you `docker exec` that launch their own browsers) are reaped instead of piling up as
   `<defunct>` entries. `docker stop` still reaches the browser and releases the licence seat.
 - The image runs as a **non-root** user (`cc`). Running the browser as **root** in your own container
-  works with the open build from Chromium 151 (`0.1.0-pre.24`) on, an official build with DCHECKs
+  works with the open build from Chromium 151 (`0.1.0-pre.25`) on, an official build with DCHECKs
   compiled out. The open 150 build (`0.1.0-pre.23`) and older were compiled with DCHECKs, and
   Chromium's process-priority call aborts them when a root container refuses the call: for those, add
   `--cap-add=SYS_NICE` or run as a normal user.

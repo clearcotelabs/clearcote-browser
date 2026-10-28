@@ -1,6 +1,6 @@
 # Upgrading clearcote: Chromium 149 → 150 — Canonical Plan
 
-> **Status (151):** the open build moves to Chromium 151 (`151.0.7922.108`, `v0.1.0-pre.24`). What
+> **Status (151):** the open build moves to Chromium 151 (`151.0.7922.108`, `v0.1.0-pre.25`). What
 > changes for users: the build is now **official** (`is_official_build=true`, ThinLTO + PGO, a
 > ~30 % smaller binary) and DCHECKs are compiled out, so the DCHECK-class crashes of the 150 build
 > ("page crashed!" / `STATUS_BREAKPOINT`, issues #20 and #24) are gone, and running as root in a

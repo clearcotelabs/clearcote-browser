@@ -6,7 +6,7 @@ Site: https://clearcotelabs.com · Full docs for agents: https://clearcotelabs.c
 
 ## Status
 Pre-release, building in the open.
-- Open build: Chromium 151 (151.0.7922.108, v0.1.0-pre.24) on GitHub Releases, Windows x64 + Linux x64, an official (optimized, DCHECK-free) build. New Chromium majors reach it roughly 2 months after release.
+- Open build: Chromium 151 (151.0.7922.108, v0.1.0-pre.25) on GitHub Releases, Windows x64 + Linux x64, an official (optimized, DCHECK-free) build. New Chromium majors reach it roughly 2 months after release.
 - Licensed build (Free with GitHub and Pro): new Chromium majors the day they are built, ahead of the open build; Pro can also pin older builds. Current version: https://clearcotelabs.com/llms.txt
 - SDK: `clearcote` 0.46.0 on PyPI, npm and NuGet (Python, Node, .NET).
 - Docker: `teamflatearth/clearcote` (tags `latest`, `0.1.0-pre.23`, `sdk-0.46.0`) — a CDP endpoint on :9222. Run it with `--shm-size=1g -p 127.0.0.1:9222:9222 --security-opt seccomp=<the profile from the image>`; see /docker/README.md.

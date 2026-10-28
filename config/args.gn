@@ -1,7 +1,7 @@
 # Clearcote reference build configuration — Windows x64, cross-compiled on Linux.
 #
 # This is the effective build configuration used to produce the published pre-release
-# (v0.1.0-pre.24, Chromium 151; same flags and values as the build host's out/Default/args.gn; only ordering/comments
+# (v0.1.0-pre.25, Chromium 151; same flags and values as the build host's out/Default/args.gn; only ordering/comments
 # differ, which gn ignores; the build host also sets cc_wrapper="ccache", a compile cache that does
 # not change the output). Copy it verbatim into the build:
 #   cp config/args.gn <chromium-src>/out/Default/args.gn
@@ -39,7 +39,7 @@ rust_sysroot_absolute = ""            # build rust std from source (no prebuilt 
 
 # --- Release configuration ---
 is_debug = false
-# Official since Chromium 151 (v0.1.0-pre.24): ThinLTO + PGO, a ~30 % smaller binary, and DCHECKs
+# Official since Chromium 151 (v0.1.0-pre.25): ThinLTO + PGO, a ~30 % smaller binary, and DCHECKs
 # compiled out. Earlier open builds were non-official, which turned dcheck_always_on on and made
 # upstream DCHECKs fatal ("page crashed!" / STATUS_BREAKPOINT on edge inputs). Building this costs
 # far more than the old config: the Windows cross ThinLTO link takes ~12 h on 8 cores and needs
