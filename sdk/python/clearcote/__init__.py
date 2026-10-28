@@ -611,7 +611,8 @@ def _prepare(kwargs):
             kwargs[_REQUEST_ROUTE_KEY] = (proxy_opt, proxy_args, quiet)
     base = (fingerprint_args(fp) + agent_args(agent) + extension_args(extensions)
             + portable_args(portable_profile, encryption_key) + proxy_args)
-    base += quic_args(proxy_opt)  # behind a proxy, disable QUIC so no HTTP/3 UDP egresses around it
+    # behind a proxy, disable QUIC so no HTTP/3 UDP egresses around it (r54+: kept on through the relay)
+    base += quic_args(proxy_opt, socks5_udp, exe)
     # Opt-in: relay WebRTC UDP through the proxy rather than denying it outright.
     base += socks5_udp_args(socks5_udp, proxy_opt)
     # navigator.bluetooth must follow the CLAIM, in both directions: a Linux build hides it while

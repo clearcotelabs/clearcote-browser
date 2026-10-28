@@ -169,9 +169,20 @@ public static class LaunchOpts
         return rest;
     }
 
+    /// PRO r54+: the engine carries HTTP/3 through the SOCKS5 UDP relay; this switch turns that off.
+    public const string QuicRelaySwitch = "disable-socks5-udp-quic";
+
     /// Disable QUIC/HTTP-3 when a proxy is set (a SOCKS5/HTTP proxy carries only TCP; no UDP around it).
-    public static List<string> QuicArgs(ProxyOptions? proxy)
-        => proxy is not null && !string.IsNullOrEmpty(proxy.Server) ? new() { "--disable-quic" } : new();
+    /// PRO r54+: with socks5Udp and a socks5:// proxy, an engine that implements
+    /// --disable-socks5-udp-quic keeps HTTP/3 on through the proxy's UDP relay (the proxy resolves the site).
+    public static List<string> QuicArgs(ProxyOptions? proxy, bool socks5Udp = false, string? exe = null)
+    {
+        if (proxy is null || string.IsNullOrEmpty(proxy.Server)) return new();
+        if (socks5Udp && proxy.Server.Trim().StartsWith("socks5", StringComparison.OrdinalIgnoreCase)
+            && exe is not null && EngineSupportsSwitch(exe, QuicRelaySwitch))
+            return new();
+        return new() { "--disable-quic" };
+    }
 
     /// Carry WebRTC's UDP through the SOCKS5 proxy with UDP ASSOCIATE (RFC 1928 section 7) instead
     /// of letting it egress on the host's own path.

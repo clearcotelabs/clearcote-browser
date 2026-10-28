@@ -195,9 +195,16 @@ export function privacySandboxArgs(): string[] {
  * falls back to TCP. Disable QUIC when a proxy is configured so no HTTP/3 UDP is attempted —
  * coherent with proxied Chrome, and a guarantee no UDP egresses around the proxy. No proxy -> leave
  * QUIC on (real Chrome uses it). */
-export function quicArgs(proxy: PwProxy | undefined): string[] {
-  return proxy && proxy.server ? ["--disable-quic"] : [];
+export function quicArgs(proxy: PwProxy | undefined, socks5Udp?: boolean, exe?: string): string[] {
+  if (!proxy || !proxy.server) return [];
+  // PRO r54+: with socks5Udp and a socks5:// proxy, an engine that carries QUIC through the proxy's
+  // UDP relay (it implements --disable-socks5-udp-quic) keeps HTTP/3 on; the proxy resolves the site.
+  if (socks5Udp === true && /^socks5/i.test(proxy.server.trim()) && exe && engineSupportsSwitch(exe, QUIC_RELAY_SWITCH)) return [];
+  return ["--disable-quic"];
 }
+
+/** PRO r54+: the engine carries HTTP/3 through the SOCKS5 UDP relay; this switch turns that off. */
+export const QUIC_RELAY_SWITCH = "disable-socks5-udp-quic";
 
 /** Carry WebRTC's UDP through the SOCKS5 proxy with UDP ASSOCIATE (RFC 1928 §7) instead of letting
  * it egress on the host's own path.
