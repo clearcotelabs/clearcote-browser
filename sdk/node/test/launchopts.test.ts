@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   SCHEMA4_ENGINE_MARKER,
+  PERSONA_SERVICE_MARKER,
   extensionArgs,
   resolveProxy,
   engineSupportsSwitch,
@@ -216,6 +217,12 @@ describe("resolveProxy", () => {
     expect(warns(r37, 3)).toEqual([]);
     expect(warns(r37, 4)).toEqual([]);
     expect(warns(r35, 2)).toEqual([]);
+    const r51 = bin("r51", "fingerprint-schema", "block-third-party-cookies", SCHEMA4_ENGINE_MARKER, PERSONA_SERVICE_MARKER);
+    expect(warns(r35, 5).some((m) => m.includes("personaSchema: 5 (engine 155 r45+)"))).toBe(true);
+    expect(warns(r37, 5)).toEqual([]);
+    expect(warns(r37, 7).some((m) => m.includes("personaSchema: 7 (engine 156 r51+)"))).toBe(true);
+    expect(warns(r51, 5)).toEqual([]);
+    expect(warns(r51, 7)).toEqual([]);
     expect(SCHEMA4_ENGINE_MARKER).toContain("Arc(TM) Graphics (0x00007D55)");
     fs.rmSync(dir, { recursive: true, force: true });
   });

@@ -110,11 +110,13 @@ public class FingerprintOptions
     public bool? GpuStringSpoof { get; set; }
 
     /// <summary>
-    /// Which identity model a seed derives (<c>--fingerprint-schema</c>, licensed build 151 r19+): 4, the default
-    /// from engine 154 r37, draws the graphics card from a range of real models as common as in real browser
-    /// traffic; 3 derives exactly what 154 r36 did; 2 what 153 r29 to 154 r35 did; 1 the original model from
-    /// before r29. A seed's identity under a given schema never changes; set 3 or 2 to keep identities created on
-    /// those builds. An engine knows nothing of a schema past its own newest and derives that one instead.
+    /// Which identity model a seed derives (<c>--fingerprint-schema</c>, licensed build 151 r19+): 7, the default
+    /// since 2026-10-26 (served by the persona service to engine 156 r51+), is the machine model where the graphics
+    /// card sets device class, processor, threads, memory and screen; 5 derives exactly what r45 to r51 did; 4 what
+    /// 154 r37 to 155 r44 did; 3 what 154 r36 did; 2 what 153 r29 to 154 r35 did; 1 the original model from before
+    /// r29. There is no schema 6. A seed's identity under a given schema never changes; set an older one to keep
+    /// identities created on those builds. An engine knows nothing of a schema past its own newest and derives that
+    /// one instead.
     /// </summary>
     public int? PersonaSchema { get; set; }
 
@@ -444,8 +446,8 @@ public static class Fingerprint
         if (o.FingerprintVoices == false) args.Add("--disable-fingerprint-voices");
         // Persona schema (see PersonaSchema); the real-GPU declaration gates a schema-2 persona's discrete-GPU
         // draw and is inert on schema 1.
-        if (o.PersonaSchema is int schema && (schema < 1 || schema > 4))
-            throw new ArgumentException("PersonaSchema must be 1, 2, 3 or 4");
+        if (o.PersonaSchema is int schema && (schema < 1 || schema > 7 || schema == 6))
+            throw new ArgumentException("PersonaSchema must be 1, 2, 3, 4, 5 or 7");
         Set("fingerprint-schema", o.PersonaSchema);
         if (o.RealGpuHost == true) args.Add("--fingerprint-gpu-backend-real");
         if (o.FingerprintProfile is not null) args.Add($"--fingerprint-profile={EncodeProfile(o.FingerprintProfile)}");

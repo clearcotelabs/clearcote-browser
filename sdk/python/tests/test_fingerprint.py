@@ -228,3 +228,5 @@ def test_persona_schema_is_opt_in_and_real_gpu_host_is_a_flag():
     assert "--fingerprint-schema=2" in v2
     assert "--fingerprint-gpu-backend-real" in v2
     assert "--fingerprint-gpu-backend-real" not in fingerprint_args({"persona_schema": 2, "real_gpu_host": False})
+    assert "--fingerprint-schema=5" in fingerprint_args({"persona_schema": 5})
+    assert "--fingerprint-schema=7" in fingerprint_args({"persona_schema": 7})

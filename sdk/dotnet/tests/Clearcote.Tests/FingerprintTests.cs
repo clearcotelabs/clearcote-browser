@@ -74,7 +74,10 @@ public class FingerprintTests
         Assert.DoesNotContain(none, a => a.StartsWith("--fingerprint-schema="));
         Assert.DoesNotContain("--fingerprint-gpu-backend-real", none);
         Assert.Contains("--fingerprint-schema=4", Fingerprint.Args(new FingerprintOptions { PersonaSchema = 4 }));
-        Assert.Contains("PersonaSchema", Assert.Throws<ArgumentException>(() => Fingerprint.Args(new FingerprintOptions { PersonaSchema = 5 })).Message);
+        Assert.Contains("--fingerprint-schema=5", Fingerprint.Args(new FingerprintOptions { PersonaSchema = 5 }));
+        Assert.Contains("--fingerprint-schema=7", Fingerprint.Args(new FingerprintOptions { PersonaSchema = 7 }));
+        Assert.Contains("PersonaSchema", Assert.Throws<ArgumentException>(() => Fingerprint.Args(new FingerprintOptions { PersonaSchema = 6 })).Message);
+        Assert.Contains("PersonaSchema", Assert.Throws<ArgumentException>(() => Fingerprint.Args(new FingerprintOptions { PersonaSchema = 8 })).Message);
         Assert.Contains("PersonaSchema", Assert.Throws<ArgumentException>(() => Fingerprint.Args(new FingerprintOptions { PersonaSchema = 0 })).Message);
     }
 

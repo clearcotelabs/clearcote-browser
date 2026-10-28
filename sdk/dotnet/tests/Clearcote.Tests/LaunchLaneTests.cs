@@ -140,12 +140,14 @@ public class LaunchLaneTests : IDisposable
         Assert.Contains("PersonaSchema = 2 (engine r19+)", Assert.Single(LaunchOpts.WarnUnsupportedEngineOptions(old, new FingerprintOptions { PersonaSchema = 2 }, null, quiet: true)));
         Assert.Contains("PersonaSchema = 3 (engine 154 r36+)", Assert.Single(LaunchOpts.WarnUnsupportedEngineOptions(old, new FingerprintOptions { PersonaSchema = 3 }, null, quiet: true)));
         Assert.Contains("PersonaSchema = 4 (engine 154 r37+)", Assert.Single(LaunchOpts.WarnUnsupportedEngineOptions(old, new FingerprintOptions { PersonaSchema = 4 }, null, quiet: true)));
+        Assert.Contains("PersonaSchema = 5 (engine 155 r45+)", Assert.Single(LaunchOpts.WarnUnsupportedEngineOptions(old, new FingerprintOptions { PersonaSchema = 5 }, null, quiet: true)));
+        Assert.Contains("PersonaSchema = 7 (engine 156 r51+)", Assert.Single(LaunchOpts.WarnUnsupportedEngineOptions(old, new FingerprintOptions { PersonaSchema = 7 }, null, quiet: true)));
         Assert.Contains("RealGpuHost (engine r19+)", Assert.Single(LaunchOpts.WarnUnsupportedEngineOptions(old, new FingerprintOptions { RealGpuHost = true }, null, quiet: true)));
         Assert.Contains("cannot authenticate to a SOCKS5 proxy", Assert.Single(LaunchOpts.WarnUnsupportedEngineOptions(old, null,
             new ProxyOptions { Server = "socks5://u:p@h:1080" }, quiet: true)));
         Assert.Empty(_err.ToString());   // quiet
-        var current = FakeEngine("fingerprint-schema", "block-third-party-cookies", LaunchOpts.Schema4EngineMarker, "fingerprint-gpu-backend-real", "socks5-credentials");
-        foreach (var schema in new[] { 2, 3, 4 })
+        var current = FakeEngine("fingerprint-schema", "block-third-party-cookies", LaunchOpts.Schema4EngineMarker, LaunchOpts.PersonaServiceMarker, "fingerprint-gpu-backend-real", "socks5-credentials");
+        foreach (var schema in new[] { 2, 3, 4, 5, 7 })
             Assert.Empty(LaunchOpts.WarnUnsupportedEngineOptions(current, new FingerprintOptions { PersonaSchema = schema, RealGpuHost = true },
                 new ProxyOptions { Server = "socks5://h:1080", Username = "u" }));
         Assert.Empty(LaunchOpts.WarnUnsupportedEngineOptions(old, new FingerprintOptions { PersonaSchema = 1, RealGpuHost = false },

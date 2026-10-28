@@ -402,6 +402,8 @@ export function engineSupportsSwitch(exe: string | undefined, name: string): boo
  * frozen with their schema (3 keeps r36's rows, which name this chip "Arc(TM) Pro"), so the literal stays in every
  * later engine, and {@link engineSupportsSwitch}'s NUL-delimited search finds it like a switch name.
  */
+/** Only an engine that takes its persona from the persona service (156 r51+) answers this switch. */
+export const PERSONA_SERVICE_MARKER = "cc-persona-host-facts";
 export const SCHEMA4_ENGINE_MARKER = "ANGLE (Intel, Intel(R) Arc(TM) Graphics (0x00007D55) Direct3D11 vs_5_0 ps_5_0, D3D11)";
 
 /**
@@ -412,8 +414,9 @@ export function warnUnsupportedEngineOptions(exe: string | undefined, fingerprin
   const out: string[] = [];
   try {
     // Each schema arrived with an engine: 2 with 151 r19 (--fingerprint-schema itself), 3 with 154 r36 (which also
-    // introduced --block-third-party-cookies) and 4 with 154 r37 (SCHEMA4_ENGINE_MARKER). An engine knows nothing of
-    // a schema past its own newest and derives that one instead, silently.
+    // introduced --block-third-party-cookies), 4 with 154 r37 (SCHEMA4_ENGINE_MARKER), 5 with 155 r45 and 7 with the
+    // persona service (156 r51, PERSONA_SERVICE_MARKER). An engine knows nothing of a schema past its own newest and
+    // derives that one instead, silently. r45 left no marker, so 5 is only caught on engines before r37.
     const schema = String(fingerprint.personaSchema ?? "");
     if (schema === "2" && !engineSupportsSwitch(exe, "fingerprint-schema"))
       out.push("clearcote: personaSchema: 2 (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
@@ -421,6 +424,10 @@ export function warnUnsupportedEngineOptions(exe: string | undefined, fingerprin
       out.push("clearcote: personaSchema: 3 (engine 154 r36+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
     if (schema === "4" && !engineSupportsSwitch(exe, SCHEMA4_ENGINE_MARKER))
       out.push("clearcote: personaSchema: 4 (engine 154 r37+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
+    if (schema === "5" && !engineSupportsSwitch(exe, SCHEMA4_ENGINE_MARKER))
+      out.push("clearcote: personaSchema: 5 (engine 155 r45+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
+    if (schema === "7" && !engineSupportsSwitch(exe, PERSONA_SERVICE_MARKER))
+      out.push("clearcote: personaSchema: 7 (engine 156 r51+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
     if (fingerprint.realGpuHost && !engineSupportsSwitch(exe, "fingerprint-gpu-backend-real"))
       out.push("clearcote: realGpuHost (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
     const { server, username, password } = proxy ? proxyCredentials(proxy) : { server: "", username: "", password: "" };

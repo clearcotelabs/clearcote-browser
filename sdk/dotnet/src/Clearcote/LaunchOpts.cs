@@ -615,6 +615,8 @@ public static class LaunchOpts
     /// A string literal only engines from 154 r37 carry: the persona schema-4 GPU pool's Intel Arc row. Pool tables
     /// are frozen with their schema (3 keeps r36's rows, which name this chip "Arc(TM) Pro"), so the literal stays in
     /// every later engine, and <see cref="EngineSupportsSwitch"/>'s NUL-delimited search finds it like a switch name.
+    /// <summary>Only an engine that takes its persona from the persona service (156 r51+) answers this switch.</summary>
+    public const string PersonaServiceMarker = "cc-persona-host-facts";
     public const string Schema4EngineMarker = "ANGLE (Intel, Intel(R) Arc(TM) Graphics (0x00007D55) Direct3D11 vs_5_0 ps_5_0, D3D11)";
 
     /// Warn (never throw) for each option the resolved engine cannot honour: Chromium ignores an unknown
@@ -626,8 +628,9 @@ public static class LaunchOpts
         try
         {
             // Each schema arrived with an engine: 2 with 151 r19 (--fingerprint-schema itself), 3 with 154 r36 (which
-            // also introduced --block-third-party-cookies) and 4 with 154 r37 (Schema4EngineMarker). An engine knows
-            // nothing of a schema past its own newest and derives that one instead, silently.
+            // also introduced --block-third-party-cookies), 4 with 154 r37 (Schema4EngineMarker), 5 with 155 r45 and 7
+            // with the persona service (156 r51, PersonaServiceMarker). An engine knows nothing of a schema past its own
+            // newest and derives that one instead, silently. r45 left no marker, so 5 is only caught before r37.
             var schema = fingerprint?.PersonaSchema?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "";
             if (schema == "2" && !EngineSupportsSwitch(exe, "fingerprint-schema"))
                 outList.Add("clearcote: PersonaSchema = 2 (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
@@ -635,6 +638,10 @@ public static class LaunchOpts
                 outList.Add("clearcote: PersonaSchema = 3 (engine 154 r36+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
             if (schema == "4" && !EngineSupportsSwitch(exe, Schema4EngineMarker))
                 outList.Add("clearcote: PersonaSchema = 4 (engine 154 r37+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
+            if (schema == "5" && !EngineSupportsSwitch(exe, Schema4EngineMarker))
+                outList.Add("clearcote: PersonaSchema = 5 (engine 155 r45+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
+            if (schema == "7" && !EngineSupportsSwitch(exe, PersonaServiceMarker))
+                outList.Add("clearcote: PersonaSchema = 7 (engine 156 r51+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
             if (fingerprint?.RealGpuHost == true && !EngineSupportsSwitch(exe, "fingerprint-gpu-backend-real"))
                 outList.Add("clearcote: RealGpuHost (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
             var (server, user, pass) = proxy is null ? ("", "", "") : ProxyCredentials(proxy);

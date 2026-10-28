@@ -425,12 +425,15 @@ SCHEMA4_ENGINE_MARKER = "ANGLE (Intel, Intel(R) Arc(TM) Graphics (0x00007D55) Di
 
 # (option, the value it matters at or None for "truthy", the switch or literal the engine must carry, label).
 # Each schema arrived with an engine: 2 with 151 r19 (--fingerprint-schema itself), 3 with 154 r36 (which also
-# introduced --block-third-party-cookies) and 4 with 154 r37. An engine knows nothing of a schema past its own
-# newest and derives that one instead, silently.
+# introduced --block-third-party-cookies), 4 with 154 r37, 5 with 155 r45 and 7 with the persona service (156 r51,
+# which answers --cc-persona-host-facts). An engine knows nothing of a schema past its own newest and derives that one
+# instead, silently. r45 left no marker, so 5 is only caught on engines before r37.
 _ENGINE_OPTION_SWITCHES = (
     ("persona_schema", "2", "fingerprint-schema", "persona_schema=2 (engine r19+)"),
     ("persona_schema", "3", "block-third-party-cookies", "persona_schema=3 (engine 154 r36+)"),
     ("persona_schema", "4", SCHEMA4_ENGINE_MARKER, "persona_schema=4 (engine 154 r37+)"),
+    ("persona_schema", "5", SCHEMA4_ENGINE_MARKER, "persona_schema=5 (engine 155 r45+)"),
+    ("persona_schema", "7", "cc-persona-host-facts", "persona_schema=7 (engine 156 r51+)"),
     ("real_gpu_host", None, "fingerprint-gpu-backend-real", "real_gpu_host (engine r19+)"),
 )
 

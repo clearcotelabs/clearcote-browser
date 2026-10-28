@@ -130,15 +130,18 @@ export interface FingerprintOptions {
    */
   disableGpuFingerprint?: boolean;
   /**
-   * Persona schema version: which derivation a seed gets. Unset = the engine's current default
-   * (4 from 154 r37, 3 on r36, 2 on 153 r29 to 154 r35). Pin one to keep identities across upgrades:
+   * Persona schema version: which derivation a seed gets. Unset = the current default: 7 since
+   * 2026-10-26 (served by the persona service to r51+ engines), 5 on r45 to r50, 4 on 154 r37 to 155 r44,
+   * 3 on r36, 2 on 153 r29 to 154 r35. Pin one to keep identities across upgrades:
    * 1 = the frozen original derivation; 2 = tier-coupled screen/GPU class + RAM-sized heap limit;
    * 3 = schema 2 plus a GPU model drawn from a per-vendor pool (154 r36); 4 = schema 3 with the pool
    * re-drawn from real Windows Chrome traffic and Intel or AMD integrated graphics on a host without
-   * a GPU vendor (154 r37). A seed's identity under a given schema never changes; each higher schema
-   * is a separate identity space.
+   * a GPU vendor (154 r37); 5 = the identities of r45 to r51 (frozen); 7 = the machine model, where the
+   * graphics card sets device class, processor, threads, memory and screen (r51+ engines, via the persona
+   * service). There is no schema 6. A seed's identity under a given schema never changes; each higher
+   * schema is a separate identity space.
    */
-  personaSchema?: 1 | 2 | 3 | 4;
+  personaSchema?: 1 | 2 | 3 | 4 | 5 | 7;
   /**
    * Declare that this host renders with a real GPU (or a canvas bridge backs the pixels), so a
    * schema-2 persona may claim a discrete GPU class. Off by default: on a software rasteriser the

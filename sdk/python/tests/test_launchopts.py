@@ -353,6 +353,10 @@ def test_warn_unsupported_engine_options_knows_which_engine_each_schema_needs(tm
     assert any("persona_schema=4 (engine 154 r37+)" in m for m in msgs(r35, 4))
     assert msgs(r36, 3) == [] and any("persona_schema=4" in m for m in msgs(r36, 4))
     assert msgs(r37, 3) == [] and msgs(r37, 4) == [] and msgs(r35, 2) == []
+    r51 = tmp_path / "r51"; r51.write_bytes(lits("fingerprint-schema", "block-third-party-cookies", SCHEMA4_ENGINE_MARKER, "cc-persona-host-facts"))
+    assert any("persona_schema=5 (engine 155 r45+)" in m for m in msgs(r35, 5))
+    assert msgs(r37, 5) == [] and any("persona_schema=7 (engine 156 r51+)" in m for m in msgs(r37, 7))
+    assert msgs(r51, 5) == [] and msgs(r51, 7) == []
     assert "Arc(TM) Graphics (0x00007D55)" in SCHEMA4_ENGINE_MARKER
 
 
