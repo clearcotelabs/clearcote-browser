@@ -44,6 +44,16 @@ await browser.CloseAsync();
 proxy is set, the Privacy-Sandbox APIs are turned off, and WebRTC defaults to deny-non-proxied-UDP — all
 automatically.
 
+Playwright's own `--disable-features` list is replaced without the entries a page or server can observe
+(`ThirdPartyStoragePartitioning`, `AcceptCHFrame`, `HttpsUpgrades`, `LazyFrameLoading`,
+`AvoidCorsURLLoaderRestartOnRedirect`), so those stay on as in stock Chrome. With
+`AvoidCorsURLLoaderRestartOnRedirect` off, same-origin requests inside a cross-site iframe (a Cloudflare Turnstile
+challenge, a payment or sign-in frame) carry `sec-fetch-storage-access: active`, which stock Chrome omits there.
+**Interception caveat:** Playwright turns that feature off because Chromium 155 aborts a preflighted cross-origin
+redirect with `net::ERR_ABORTED` while `Page.RouteAsync` / `Context.RouteAsync` is active. If your routes hit that,
+opt out with `Args = new[] { "--disable-features=AvoidCorsURLLoaderRestartOnRedirect" }` (the header then returns);
+the same works for any entry above, e.g. `--disable-features=HttpsUpgrades`.
+
 ## Through a proxy (report the proxy's IP, not your host's)
 
 ```csharp

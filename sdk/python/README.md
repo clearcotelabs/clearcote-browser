@@ -453,6 +453,15 @@ Every `launch()` already does, with no extra options:
   Windows, or run Linux personas on Linux or in Docker (`docker=True`).
 - on Linux, sizes a **headless display to the persona's screen** (`--screen-info`), so full-screen, pop-ups and
   moved windows stay inside the screen the page is told about. Your own `--screen-info` wins.
+- **replaces Playwright's `--disable-features` list without the entries a page or server can observe**
+  (`ThirdPartyStoragePartitioning`, `AcceptCHFrame`, `HttpsUpgrades`, `LazyFrameLoading`,
+  `AvoidCorsURLLoaderRestartOnRedirect`), so those stay on as in stock Chrome; the rest (automation stability,
+  browser UI) stay off. With `AvoidCorsURLLoaderRestartOnRedirect` off, same-origin requests inside a cross-site
+  iframe (a Cloudflare Turnstile challenge, a payment or sign-in frame) carry `sec-fetch-storage-access: active`,
+  which stock Chrome omits there. **Interception caveat:** Playwright turns that feature off because Chromium 155
+  aborts a preflighted cross-origin redirect with `net::ERR_ABORTED` while `page.route()` / `context.route()` is
+  active. If your routes hit that, opt out with `args=["--disable-features=AvoidCorsURLLoaderRestartOnRedirect"]`
+  (the header then returns); the same works for any entry above, e.g. `--disable-features=HttpsUpgrades`.
 
 ### Your own fonts on Linux (`font_dirs`)
 

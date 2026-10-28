@@ -594,6 +594,15 @@ def test_the_users_own_disable_features_are_kept(prepared):
     assert "Foo" in feats and "ThirdPartyStoragePartitioning" in feats  # asked for explicitly
 
 
+def test_the_avoid_cors_restart_opt_out_is_kept(prepared):
+    # page.route() users hitting Chromium 155's preflighted-redirect abort turn the feature back off.
+    _exe, args, _pw, *_ = prepared(NEW, fingerprint="s1", headless=True,
+                                   args=["--disable-features=AvoidCorsURLLoaderRestartOnRedirect"])
+    feats = _only_disable_features(args)
+    assert "AvoidCorsURLLoaderRestartOnRedirect" in feats and "MediaRouter" in feats
+    assert "ThirdPartyStoragePartitioning" not in feats
+
+
 def test_no_copy_of_playwrights_list_when_the_caller_dropped_it(prepared):
     from clearcote._launchopts import PLAYWRIGHT_DISABLED_FEATURES, installed_playwright_disabled_features
     exact = "--disable-features=" + ",".join(installed_playwright_disabled_features()

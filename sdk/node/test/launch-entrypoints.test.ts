@@ -563,6 +563,15 @@ describe("Playwright's --disable-features is replaced without ThirdPartyStorageP
     });
   }
 
+  it("the caller's --disable-features=AvoidCorsURLLoaderRestartOnRedirect opt-out is kept (page.route + redirects)", async () => {
+    const browser = await launch({ ...base(), fingerprint: "s1", args: ["--disable-features=AvoidCorsURLLoaderRestartOnRedirect"] });
+    const feats = disabledFeatures(stub.launches.at(-1)!.opts.args as string[]);
+    expect(feats).toContain("AvoidCorsURLLoaderRestartOnRedirect");
+    expect(feats).toContain("MediaRouter");
+    expect(feats).not.toContain("ThirdPartyStoragePartitioning");
+    await browser.close();
+  });
+
   it("launchPersistentContext()", async () => {
     const context = await launchPersistentContext(join(root, "p"), { ...base(), fingerprint: "s1" });
     const feats = disabledFeatures(stub.launches.at(-1)!.opts.args as string[]);

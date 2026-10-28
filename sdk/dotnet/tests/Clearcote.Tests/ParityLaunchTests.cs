@@ -294,6 +294,26 @@ public class ParityLaunchTests : IDisposable
     }
 
     [Fact]
+    public void Override_re_enables_avoid_cors_restart_on_redirect_and_the_callers_opt_out_is_kept()
+    {
+        // 2026-10-28: with it off, same-origin requests inside a cross-site iframe (Turnstile's challenge
+        // POSTs) carry sec-fetch-storage-access: active; stock Chrome omits it there.
+        Assert.Contains("AvoidCorsURLLoaderRestartOnRedirect", LaunchOpts.PageVisiblePlaywrightFeatures);
+        var pw = new[] { "AvoidCorsURLLoaderRestartOnRedirect", "MediaRouter", "ThirdPartyStoragePartitioning", "Translate" };
+        Assert.Equal(new[] { "--disable-features=MediaRouter,Translate" },
+            LaunchOpts.PlaywrightFeatureOverrideArgs(null, pw, screenshotSurface: false));
+        // page.route() users hitting Chromium 155's preflighted-redirect abort turn it back off via Args.
+        var exe = FakeEngine(AllGated.Select(s => s[2..]));
+        var args = Clearcote.AssembleArgs(Fingerprint.Args(new FingerprintOptions { Fingerprint = "s1", Platform = "windows" }),
+            new(), new(), null, null, new[] { "--disable-features=AvoidCorsURLLoaderRestartOnRedirect" }, null, false,
+            new Clearcote.EngineExtras(exe, false, true, null, null, ViaPlaywright: true));
+        var feats = OnlyDisableFeatures(args);
+        Assert.Contains("AvoidCorsURLLoaderRestartOnRedirect", feats);
+        Assert.Contains("MediaRouter", feats);
+        Assert.DoesNotContain("ThirdPartyStoragePartitioning", feats);
+    }
+
+    [Fact]
     public void Dropping_the_disable_switch_keeps_the_screenshot_switch_and_parse_is_robust()
     {
         var pw = new[] { "MediaRouter", "Translate" };

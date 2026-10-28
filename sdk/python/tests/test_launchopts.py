@@ -383,6 +383,18 @@ def test_playwright_feature_override_is_skipped_only_when_playwrights_exact_swit
     assert playwright_feature_override_args(["--enable-automation"], **kw) != []
 
 
+def test_playwright_feature_override_re_enables_avoid_cors_restart_on_redirect():
+    # 2026-10-28: with it off, same-origin requests inside a cross-site iframe (Turnstile's challenge
+    # POSTs) carry sec-fetch-storage-access: active; stock Chrome omits it there.
+    from clearcote._launchopts import PAGE_VISIBLE_PLAYWRIGHT_FEATURES, playwright_feature_override_args
+    assert "AvoidCorsURLLoaderRestartOnRedirect" in PAGE_VISIBLE_PLAYWRIGHT_FEATURES
+    out = playwright_feature_override_args(
+        playwright_features=("AvoidCorsURLLoaderRestartOnRedirect", "MediaRouter",
+                             "ThirdPartyStoragePartitioning", "Translate"),
+        screenshot_surface=False)
+    assert out == ["--disable-features=MediaRouter,Translate"]
+
+
 def test_playwright_screenshot_surface_is_re_emitted():
     from clearcote._launchopts import playwright_feature_override_args
     out = playwright_feature_override_args(playwright_features=("MediaRouter",), screenshot_surface=True)

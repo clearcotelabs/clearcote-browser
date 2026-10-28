@@ -380,6 +380,15 @@ describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
     expect(playwrightFeatureOverrideArgs(["--disable-features=MediaRouter"], PW157, false)).not.toEqual([]);
   });
 
+  it("re-enables AvoidCorsURLLoaderRestartOnRedirect (sec-fetch-storage-access, 2026-10-28)", async () => {
+    // With it off, same-origin requests inside a cross-site iframe (Turnstile's challenge POSTs) carry
+    // `sec-fetch-storage-access: active`; stock Chrome omits it there.
+    const { playwrightFeatureOverrideArgs, PAGE_VISIBLE_PLAYWRIGHT_FEATURES } = await import("../src/launchopts.js");
+    expect(PAGE_VISIBLE_PLAYWRIGHT_FEATURES.has("AvoidCorsURLLoaderRestartOnRedirect")).toBe(true);
+    const pw = ["AvoidCorsURLLoaderRestartOnRedirect", "MediaRouter", "ThirdPartyStoragePartitioning", "Translate"];
+    expect(playwrightFeatureOverrideArgs(undefined, pw, false)).toEqual(["--disable-features=MediaRouter,Translate"]);
+  });
+
   it("re-emits the screenshot surface switch", async () => {
     const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
     expect(playwrightFeatureOverrideArgs(undefined, ["MediaRouter"], true))

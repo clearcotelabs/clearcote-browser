@@ -42,7 +42,7 @@ public static class LaunchOpts
     };
 
     /// Entries of Playwright's list that a web page or server can observe, kept ENABLED as in genuine
-    /// Chrome 154 (all four default on). The rest stay off: they keep Playwright's automation stable
+    /// Chrome (all default on). The rest stay off: they keep Playwright's automation stable
     /// or only touch browser UI and background services.
     /// ThirdPartyStoragePartitioning: every Chrome since 115 partitions third-party storage, whatever
     /// the user's cookie settings; with it off a cross-site iframe reads the storage its site wrote as
@@ -56,8 +56,18 @@ public static class LaunchOpts
     /// loading="lazy" iframes load lazily — it no longer exists in Chromium 154, so re-enabling it
     /// is a no-op there, as are 1.49's PlzDedicatedWorker, AutoExpandDetailsElement and
     /// ImprovedCookieControls.
+    /// AvoidCorsURLLoaderRestartOnRedirect (newer Playwright releases, microsoft/playwright#43242): with
+    /// it off, a same-origin request inside a cross-site iframe (a Cloudflare Turnstile challenge POST,
+    /// a payment or sign-in frame) goes out in credentials mode "include" and carries
+    /// <c>sec-fetch-storage-access: active</c>, which stock Chrome omits there. Measured 2026-10-28 (r52
+    /// vs Google Chrome 156.0.8078.48, SC 292): with it re-enabled the headers match stock and Turnstile
+    /// still issues tokens. Note for automation: Playwright turns it off because Chromium 155 aborts a
+    /// preflighted cross-origin redirect with net::ERR_ABORTED while request interception (Page.RouteAsync /
+    /// Context.RouteAsync) is on; if you hit that, Args "--disable-features=AvoidCorsURLLoaderRestartOnRedirect"
+    /// turns it back off (the header then returns).
     public static readonly IReadOnlySet<string> PageVisiblePlaywrightFeatures = new HashSet<string>(StringComparer.Ordinal)
-        { "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading" };
+        { "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading",
+          "AvoidCorsURLLoaderRestartOnRedirect" };
 
     private static readonly Regex PwAssign = new(@"\bdisabledFeatures\s*=", RegexOptions.Compiled);
     private static readonly Regex PwArray = new(@"^\s*(?:\([^)]*\)\s*=>\s*)?\[([\s\S]*?)\]", RegexOptions.Compiled);
