@@ -67,7 +67,7 @@ export const PLAYWRIGHT_DISABLED_FEATURES = [
 ] as const;
 
 /** Entries of Playwright's list that a web page or server can observe, kept ENABLED as in genuine
- * Chrome 154 (all four default on). The rest stay off: they keep Playwright's automation stable
+ * Chrome (all default on). The rest stay off: they keep Playwright's automation stable
  * (beforeunload, frame tracking, paint timing for screenshots) or only touch browser UI and
  * background services.
  *
@@ -86,11 +86,20 @@ export const PLAYWRIGHT_DISABLED_FEATURES = [
  *   AcceptCHFrame) turns one back off, as the merge keeps the caller's entries.
  * - LazyFrameLoading (Playwright <= 1.49): loading="lazy" iframes load lazily, as the page expects.
  *   It no longer exists in Chromium 154, so re-enabling it is a no-op there.
+ * - AvoidCorsURLLoaderRestartOnRedirect (Playwright 1.6x, microsoft/playwright#43242): with it off,
+ *   a same-origin request inside a cross-site iframe (a challenge widget's XHR POST) goes out with
+ *   credentials mode "include", so the server gets `Sec-Fetch-Storage-Access: active`, which genuine
+ *   Chrome never sends there. Measured 2026-10-28 (genuine Chrome 156.0.8078.48, Windows): plain
+ *   Chrome omits it; the same binary launched by Playwright 1.64.1, or plain with only this feature
+ *   disabled, sends it. Note for automation: Playwright disables it because Chromium 155 aborts a
+ *   preflighted cross-origin redirect with net::ERR_ABORTED while page.route() interception is on;
+ *   `args: ["--disable-features=AvoidCorsURLLoaderRestartOnRedirect"]` turns it back off.
  *
  * Deliberately left off although a page could observe it: BoundaryEventDispatchTracksNodeRemoval
  * (Playwright 1.61, microsoft/playwright#38568), which Playwright's own pointer actions rely on. */
 export const PAGE_VISIBLE_PLAYWRIGHT_FEATURES: ReadonlySet<string> = new Set([
   "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading",
+  "AvoidCorsURLLoaderRestartOnRedirect",
 ]);
 
 /** The `--disable-features` list in a Playwright chromiumSwitches source (1.5x/1.6x array form,
