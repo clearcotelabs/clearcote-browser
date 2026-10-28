@@ -123,6 +123,20 @@ def test_resolve_proxy_keys_win_over_userinfo_per_key():
     assert args == ["--proxy-server=socks5://h:1080", "--socks5-credentials=urluser:field"]
 
 
+def test_quic_args_keeps_quic_through_the_socks5_udp_relay_on_an_r54_engine(tmp_path):
+    from clearcote._launchopts import quic_args
+    r54 = tmp_path / "r54-chrome"; r54.write_bytes(b"\x00socks5-udp\x00disable-socks5-udp-quic\x00")
+    r53 = tmp_path / "r53-chrome"; r53.write_bytes(b"\x00socks5-udp\x00")
+    socks = {"server": "socks5://203.0.113.9:1080"}
+    # r54 + Relay UDP + SOCKS5: HTTP/3 goes through the relay
+    assert quic_args(socks, True, str(r54)) == []
+    # anything else keeps QUIC off behind the proxy
+    assert quic_args(socks, True, str(r53)) == ["--disable-quic"]
+    assert quic_args(socks, False, str(r54)) == ["--disable-quic"]
+    assert quic_args({"server": "http://203.0.113.9:8080"}, True, str(r54)) == ["--disable-quic"]
+    assert quic_args(socks, True, None) == ["--disable-quic"]
+
+
 def test_warn_unsupported_engine_options_sees_socks5_url_credentials(tmp_path):
     from clearcote._launchopts import warn_unsupported_engine_options
     r16 = tmp_path / "r16-chrome"; r16.write_bytes(b"\x00proxy-server\x00")  # no socks5-credentials

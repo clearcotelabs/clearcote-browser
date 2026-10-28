@@ -507,3 +507,26 @@ describe("softwareWebgpuArgs", () => {
     expect(playwrightKeepsUnsafeSwiftshader(["--enable-automation", "--enable-unsafe-swiftshader"])).toBe(false);
   });
 });
+
+describe("quicArgs through the SOCKS5 UDP relay (r54)", () => {
+  it("keeps QUIC on only for Relay UDP + socks5 + an engine with --disable-socks5-udp-quic", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cc-quic-"));
+    const r54 = path.join(dir, "r54-chrome");
+    const r53 = path.join(dir, "r53-chrome");
+    fs.writeFileSync(r54, Buffer.from(" socks5-udp disable-socks5-udp-quic ", "latin1"));
+    fs.writeFileSync(r53, Buffer.from(" socks5-udp ", "latin1"));
+    const socks = { server: "socks5://203.0.113.9:1080" };
+    try {
+      expect(quicArgs(socks, true, r54)).toEqual([]);
+      expect(quicArgs(socks, true, r53)).toEqual(["--disable-quic"]);
+      expect(quicArgs(socks, false, r54)).toEqual(["--disable-quic"]);
+      expect(quicArgs({ server: "http://203.0.113.9:8080" }, true, r54)).toEqual(["--disable-quic"]);
+      expect(quicArgs(socks, true, undefined)).toEqual(["--disable-quic"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

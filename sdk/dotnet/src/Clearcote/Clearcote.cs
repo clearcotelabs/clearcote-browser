@@ -716,7 +716,7 @@ public static partial class Clearcote
         baseList.AddRange(fpArgs);
         baseList.AddRange(extArgs);
         baseList.AddRange(proxyArgs);
-        baseList.AddRange(LaunchOpts.QuicArgs(proxyForQuic));
+        baseList.AddRange(LaunchOpts.QuicArgs(proxyForQuic, socks5Udp, extra?.Exe));
         // Opt-in: relay WebRTC UDP through the proxy rather than denying it outright.
         baseList.AddRange(LaunchOpts.Socks5UdpArgs(socks5Udp, proxyForQuic));
         // navigator.bluetooth must follow the CLAIM, in both directions: a Linux build hides it
