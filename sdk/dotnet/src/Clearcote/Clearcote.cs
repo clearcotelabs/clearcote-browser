@@ -177,7 +177,7 @@ public static partial class Clearcote
         Crlset.WarnNoProfile(options, "LaunchAsync");  // incognito: no profile to seed a CRLSet into
 
         // http(s) credentials go to the engine's --proxy-auth only when THIS engine implements it (r19+).
-        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
+        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(LaunchOpts.RelayProxyByIp(options.Proxy, options.Socks5Udp, options.Quiet), LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
         LaunchOpts.WarnUnsupportedEngineOptions(exe, options, options.Proxy, options.Quiet);
         // Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
         // instead of no proxy at all, which sent it from this machine's IP (RequestProxy). It starts just
@@ -375,7 +375,7 @@ public static partial class Clearcote
         ignoreDefaultArgs = crlsetIgnore;
 
         // http(s) credentials go to the engine's --proxy-auth only when THIS engine implements it (r19+).
-        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
+        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(LaunchOpts.RelayProxyByIp(options.Proxy, options.Socks5Udp, options.Quiet), LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
         LaunchOpts.WarnUnsupportedEngineOptions(exe, options, options.Proxy, options.Quiet);
         // As LaunchAsync: the request API reaches the proxy through a local forwarder (RequestProxy).
         var reqUpstream = proxy is null ? RequestProxy.RequestProxyUpstream(options.Proxy, proxyArgs) : null;
@@ -512,7 +512,7 @@ public static partial class Clearcote
 
         // passProxy: what is left for a plain --proxy-server once credentials went to the engine's own switches
         // (--socks5-credentials, or --proxy-auth on an engine that implements it).
-        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(options.Proxy, LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
+        var (proxyArgs, proxy) = LaunchOpts.ResolveProxy(LaunchOpts.RelayProxyByIp(options.Proxy, options.Socks5Udp, options.Quiet), LaunchOpts.EngineSupportsSwitch(exe, "proxy-auth"));
         LaunchOpts.WarnUnsupportedEngineOptions(exe, options, options.Proxy, options.Quiet);
         // A client attached over CDP runs Playwright's request API in its own process with no proxy of its
         // own (RequestProxy): nothing here can route it, so say so.

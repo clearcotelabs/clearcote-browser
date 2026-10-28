@@ -54,6 +54,7 @@ import {
   playwrightFeatureOverrideArgs,
   privacySandboxArgs,
   quicArgs,
+  relayProxyByIp,
   socks5UdpArgs,
   webBluetoothArgs,
   webrtcDefaultDenyArgs,
@@ -1116,7 +1117,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // opt-in for a free one. Bounded + fail-soft by default (see ./widevine.ts).
   const widevineCdm = await widevineLaunchArgs(exe, widevine, !!pro, args, { quiet });
   // SOCKS5-with-credentials must go through --proxy-server (Playwright rejects it); drop it from PW.
-  const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
+  const { args: proxyArgs, proxy } = resolveProxy(await relayProxyByIp((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, socks5Udp, quiet), engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
   // Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
   // instead of no proxy at all, which sent it from this machine's IP (./reqproxy.ts).
@@ -1244,7 +1245,7 @@ async function launchLocalPersistentContext(
   const exe = await executablePath(offline ? { executablePath: exeOption, quiet } : { executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro });  // capability-gated proxy route
   ensureRunnableHere(exe);
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
-  const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
+  const { args: proxyArgs, proxy } = resolveProxy(await relayProxyByIp((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, socks5Udp, quiet), engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
   // As launch(): the request API reaches the proxy through a local forwarder (./reqproxy.ts).
   const reqRoute = proxy === undefined ? await routeRequestApi(proxyOpt as PwProxy | undefined, proxyArgs, quiet) : null;
@@ -1580,7 +1581,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   const widevineCdm = await widevineLaunchArgs(exe, widevine, !!pro, userArgs, { quiet });
   // passProxy: what is left for a plain --proxy-server once credentials went to the engine's own
   // switches (undefined then — proxyArgs already carries --proxy-server).
-  const { args: proxyArgs, proxy: passProxy } = resolveProxy(proxyOpt, engineSupportsSwitch(exe, "proxy-auth"));
+  const { args: proxyArgs, proxy: passProxy } = resolveProxy(await relayProxyByIp(proxyOpt, socks5Udp, quiet), engineSupportsSwitch(exe, "proxy-auth"));
   // A client attached over CDP runs Playwright's request API in its own process with no proxy of its
   // own (./reqproxy.ts): nothing here can route it, so say so.
   if (!quiet && !process.env.CLEARCOTE_NO_WARN && requestProxyUpstream(proxyOpt, proxyArgs))

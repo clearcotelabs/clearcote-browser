@@ -10,6 +10,7 @@ import {
   webBluetoothArgs,
   privacySandboxArgs,
   quicArgs,
+  relayProxyByIp,
   socks5UdpArgs,
   webrtcDefaultDenyArgs,
 } from "../src/launchopts.js";
@@ -528,5 +529,32 @@ describe("quicArgs through the SOCKS5 UDP relay (r54)", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("relayProxyByIp", () => {
+  const lookup = vi.fn(async (host: string) => (host === "gw.example.com" ? "203.0.113.9" : Promise.reject(new Error("ENOTFOUND"))));
+  it("looks up a socks5 host name to an IP when Relay UDP is on, keeping userinfo, port and other keys", async () => {
+    expect(await relayProxyByIp({ server: "socks5://u:p@ss@gw.example.com:1080", bypass: "x" }, true, true, lookup))
+      .toEqual({ server: "socks5://u:p@ss@203.0.113.9:1080", bypass: "x" });
+    expect(await relayProxyByIp({ server: "socks5://gw.example.com", username: "u" }, true, true, lookup))
+      .toEqual({ server: "socks5://203.0.113.9", username: "u" });
+  });
+  it("leaves everything else unchanged", async () => {
+    lookup.mockClear();
+    const ip = { server: "socks5://198.51.100.4:1080" };
+    expect(await relayProxyByIp(ip, true, true, lookup)).toBe(ip);
+    const v6 = { server: "socks5://[2001:db8::1]:1080" };
+    expect(await relayProxyByIp(v6, true, true, lookup)).toBe(v6);
+    const off = { server: "socks5://gw.example.com:1080" };
+    expect(await relayProxyByIp(off, false, true, lookup)).toBe(off);
+    const http = { server: "http://gw.example.com:8080" };
+    expect(await relayProxyByIp(http, true, true, lookup)).toBe(http);
+    expect(await relayProxyByIp(undefined, true, true, lookup)).toBeUndefined();
+    expect(lookup).not.toHaveBeenCalled();
+  });
+  it("keeps the name when it does not resolve", async () => {
+    const bad = { server: "socks5://nope.invalid:1080" };
+    expect(await relayProxyByIp(bad, true, true, lookup)).toBe(bad);
   });
 });
