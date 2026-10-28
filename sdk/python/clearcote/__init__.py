@@ -72,6 +72,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     playwright_feature_override_args,
     privacy_sandbox_args,
     quic_args,
+    relay_proxy_by_ip,
     socks5_udp_args,
     resolve_proxy,
     stock_runtime_args,
@@ -652,7 +653,8 @@ def _prepare(kwargs):
     # actually implements it (r19+); an older engine keeps Playwright's credential handling, which
     # is slower and disables the cache but authenticates. Routing blindly would strip the
     # credentials from Playwright and hand them to a switch the engine ignores: every request 407s.
-    proxy_args, proxy = resolve_proxy(kwargs.get("proxy"),
+    # Relay UDP: a proxy given by host name is looked up to the IP address the engine relays through.
+    proxy_args, proxy = resolve_proxy(relay_proxy_by_ip(kwargs.get("proxy"), socks5_udp, quiet),
                                       engine_supports_proxy_auth=engine_supports_switch(exe, "proxy-auth"))
     warn_unsupported_engine_options(exe, fp, kwargs.get("proxy"), quiet=quiet)
     if proxy is None:

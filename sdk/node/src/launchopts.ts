@@ -5,7 +5,9 @@
 import { hostPersonaPlatform } from "./fingerprint.js";
 import { warnOnce } from "./warnings.js";
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { createRequire } from "node:module";
+import { isIP } from "node:net";
 import { basename, dirname, join } from "node:path";
 
 /** A Playwright proxy descriptor. */
@@ -235,6 +237,38 @@ export function socks5UdpArgs(socks5Udp: boolean | undefined, proxy: PwProxy | u
   if (socks5Udp !== true) return [];
   const server = (proxy?.server ?? "").trim();
   return /^socks5/i.test(server) ? ["--socks5-udp"] : [];
+}
+
+/** With `socks5Udp` and a `socks5://` proxy given by host name, the same proxy with that name looked
+ * up to an IPv4 address. The engine relays UDP (WebRTC, and HTTP/3 on PRO r54+) only through a proxy
+ * given as an IP address: it opens the UDP association without a host lookup of its own, so a provider
+ * gateway given by name was never relayed. Looked up once here, every connection of this browser (TCP
+ * and UDP) goes to the same address. Anything else is returned unchanged, and so is a name that does not
+ * resolve (with a warning: UDP is then not relayed, as before). */
+export async function relayProxyByIp(
+  proxy: PwProxy | undefined,
+  socks5Udp: boolean | undefined,
+  quiet?: boolean,
+  lookup: (host: string) => Promise<string> = async (host) => (await dnsLookup(host, { family: 4 })).address,
+): Promise<PwProxy | undefined> {
+  if (socks5Udp !== true || !proxy?.server) return proxy;
+  const m = /^(socks5h?:\/\/)([^/?#]*)(.*)$/is.exec(proxy.server.trim());
+  if (!m) return proxy;
+  const at = m[2].lastIndexOf("@");
+  const userinfo = m[2].slice(0, at + 1);
+  const hostport = m[2].slice(at + 1);
+  if (hostport.startsWith("[")) return proxy;  // an IPv6 literal
+  const colon = hostport.indexOf(":");
+  const host = colon < 0 ? hostport : hostport.slice(0, colon);
+  if (!host || isIP(host)) return proxy;
+  try {
+    const ip = await lookup(host);
+    return { ...proxy, server: `${m[1]}${userinfo}${ip}${hostport.slice(host.length)}${m[3]}` };
+  } catch (e) {
+    warnOnce("socks5-udp-proxy-lookup", `socks5Udp: could not look up the proxy host ${host} (${(e as Error)?.message ?? e}); ` +
+      "UDP is relayed only through a proxy given as an IP address, so it is not relayed on this launch.", quiet);
+    return proxy;
+  }
 }
 
 /** Default WebRTC to disable_non_proxied_udp, so no UDP can egress around the proxy.

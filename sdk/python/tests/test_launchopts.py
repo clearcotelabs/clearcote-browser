@@ -5,6 +5,7 @@ from clearcote._launchopts import (
     merge_feature_flags,
     privacy_sandbox_args,
     quic_args,
+    relay_proxy_by_ip,
     socks5_udp_args,
     resolve_proxy,
     webrtc_default_deny_args,
@@ -508,3 +509,26 @@ def test_software_webgpu_args_never_adds_a_switch_twice(tmp_path):
     assert playwright_keeps_unsafe_swiftshader(True) is False  # every default dropped
     assert playwright_keeps_unsafe_swiftshader(["--enable-automation"]) is True
     assert playwright_keeps_unsafe_swiftshader(["--enable-automation", "--enable-unsafe-swiftshader"]) is False
+
+
+def test_relay_proxy_by_ip_looks_up_a_socks5_name_only_with_relay_udp():
+    calls = []
+
+    def lookup(host):
+        calls.append(host)
+        if host == "gw.example.com":
+            return "203.0.113.9"
+        raise OSError("not found")
+
+    assert relay_proxy_by_ip({"server": "socks5://u:p@ss@gw.example.com:1080", "bypass": "x"}, True, True, lookup) ==         {"server": "socks5://u:p@ss@203.0.113.9:1080", "bypass": "x"}
+    assert relay_proxy_by_ip({"server": "socks5://gw.example.com", "username": "u"}, True, True, lookup) ==         {"server": "socks5://203.0.113.9", "username": "u"}
+    calls.clear()
+    for unchanged, on in (({"server": "socks5://198.51.100.4:1080"}, True),
+                          ({"server": "socks5://[2001:db8::1]:1080"}, True),
+                          ({"server": "socks5://gw.example.com:1080"}, False),
+                          ({"server": "http://gw.example.com:8080"}, True)):
+        assert relay_proxy_by_ip(unchanged, on, True, lookup) is unchanged
+    assert relay_proxy_by_ip(None, True, True, lookup) is None
+    assert calls == []
+    bad = {"server": "socks5://nope.invalid:1080"}
+    assert relay_proxy_by_ip(bad, True, True, lookup) is bad

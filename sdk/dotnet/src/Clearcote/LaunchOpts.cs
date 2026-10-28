@@ -188,6 +188,50 @@ public static class LaunchOpts
         return new() { "--disable-quic" };
     }
 
+    private static readonly Regex Socks5Url = new(@"^(socks5h?://)([^/?#]*)(.*)$", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+    /// With socks5Udp and a socks5:// proxy given by host name, the same proxy with that name looked up to an
+    /// IPv4 address. The engine relays UDP (WebRTC, and HTTP/3 on PRO r54+) only through a proxy given as an
+    /// IP address: it opens the UDP association without a host lookup of its own, so a provider gateway given
+    /// by name was never relayed. Looked up once here, every connection of this browser (TCP and UDP) goes to
+    /// the same address. Anything else is returned unchanged, and so is a name that does not resolve (with a
+    /// warning: UDP is then not relayed, as before).
+    public static ProxyOptions? RelayProxyByIp(ProxyOptions? proxy, bool socks5Udp, bool quiet = false, Func<string, string>? lookup = null)
+    {
+        if (!socks5Udp || proxy?.Server is null) return proxy;
+        var m = Socks5Url.Match(proxy.Server.Trim());
+        if (!m.Success) return proxy;
+        var authority = m.Groups[2].Value;
+        var at = authority.LastIndexOf('@');
+        var userinfo = authority.Substring(0, at + 1);
+        var hostport = authority.Substring(at + 1);
+        if (hostport.StartsWith("[", StringComparison.Ordinal)) return proxy;  // an IPv6 literal
+        var colon = hostport.IndexOf(':');
+        var host = colon < 0 ? hostport : hostport.Substring(0, colon);
+        if (host.Length == 0 || System.Net.IPAddress.TryParse(host, out _)) return proxy;
+        string ip;
+        try
+        {
+            ip = (lookup ?? LookupIpv4)(host);
+        }
+        catch (Exception e)
+        {
+            if (!quiet && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLEARCOTE_NO_WARN")))
+                Console.Error.WriteLine($"clearcote: warning: socks5Udp: could not look up the proxy host {host} ({e.Message}); " +
+                                        "UDP is relayed only through a proxy given as an IP address, so it is not relayed on this launch.");
+            return proxy;
+        }
+        return new ProxyOptions
+        {
+            Server = m.Groups[1].Value + userinfo + ip + hostport.Substring(host.Length) + m.Groups[3].Value,
+            Username = proxy.Username, Password = proxy.Password, Bypass = proxy.Bypass,
+        };
+    }
+
+    private static string LookupIpv4(string host) =>
+        System.Linq.Enumerable.First(System.Net.Dns.GetHostAddresses(host),
+            a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork).ToString();
+
     /// Carry WebRTC's UDP through the SOCKS5 proxy with UDP ASSOCIATE (RFC 1928 section 7) instead
     /// of letting it egress on the host's own path.
     ///

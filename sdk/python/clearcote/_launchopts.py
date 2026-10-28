@@ -237,9 +237,54 @@ def quic_args(proxy, socks5_udp=False, exe=None):
     goes around it. Pass ``args=["--disable-socks5-udp-quic"]`` to keep h2 there."""
     if not (isinstance(proxy, dict) and proxy.get("server")):
         return []
-    if socks5_udp is True and _SOCKS5.match((proxy.get("server") or "").strip()) and exe             and engine_supports_switch(exe, QUIC_RELAY_SWITCH):
+    if socks5_udp is True and _SOCKS5.match((proxy.get("server") or "").strip()) and exe \
+            and engine_supports_switch(exe, QUIC_RELAY_SWITCH):
         return []
     return ["--disable-quic"]
+
+
+_SOCKS5_URL = re.compile(r"^(socks5h?://)([^/?#]*)(.*)$", re.I | re.DOTALL)
+
+
+def _lookup_ipv4(host):
+    import socket
+    return socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+
+
+def relay_proxy_by_ip(proxy, socks5_udp, quiet=False, lookup=_lookup_ipv4):
+    """With ``socks5_udp=True`` and a ``socks5://`` proxy given by host name, the same proxy with that
+    name looked up to an IPv4 address. The engine relays UDP (WebRTC, and HTTP/3 on PRO r54+) only
+    through a proxy given as an IP address: it opens the UDP association without a host lookup of its
+    own, so a provider gateway given by name was never relayed. Looked up once here, every connection
+    of this browser (TCP and UDP) goes to the same address. Anything else is returned unchanged, and so
+    is a name that does not resolve (with a warning: UDP is then not relayed, as before)."""
+    if socks5_udp is not True or not isinstance(proxy, dict):
+        return proxy
+    m = _SOCKS5_URL.match((proxy.get("server") or "").strip())
+    if not m:
+        return proxy
+    userinfo, _, hostport = m.group(2).rpartition("@")
+    if hostport.startswith("["):  # an IPv6 literal
+        return proxy
+    host = hostport.split(":", 1)[0]
+    try:
+        import ipaddress
+        ipaddress.ip_address(host)
+        return proxy
+    except ValueError:
+        pass
+    if not host:
+        return proxy
+    try:
+        ip = lookup(host)
+    except Exception as e:  # noqa: BLE001 -- any failure keeps the name
+        if not quiet and not os.environ.get("CLEARCOTE_NO_WARN"):
+            warnings.warn("clearcote: socks5_udp: could not look up the proxy host %s (%s); UDP is relayed only "
+                          "through a proxy given as an IP address, so it is not relayed on this launch." % (host, e),
+                          stacklevel=3)
+        return proxy
+    at = userinfo + "@" if m.group(2).find("@") >= 0 else ""
+    return {**proxy, "server": m.group(1) + at + ip + hostport[len(host):] + m.group(3)}
 
 
 def socks5_udp_args(socks5_udp, proxy):
