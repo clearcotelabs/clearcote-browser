@@ -587,6 +587,16 @@ def test_launch_replaces_playwrights_list_without_partitioning(prepared, platfor
     assert ("WebBluetooth" in feats) == (platform == "linux")
 
 
+def test_cors_restart_feature_is_re_enabled():
+    # Off, a same-origin request in a cross-site iframe sends Sec-Fetch-Storage-Access: active, which
+    # genuine Chrome omits (measured 2026-10-28 on Chrome 156 launched plainly vs by Playwright 1.64.1).
+    from clearcote._launchopts import playwright_feature_override_args
+    args = playwright_feature_override_args(
+        playwright_features=("MediaRouter", "AvoidCorsURLLoaderRestartOnRedirect", "Translate"),
+        screenshot_surface=False)
+    assert args == ["--disable-features=MediaRouter,Translate"]
+
+
 def test_the_users_own_disable_features_are_kept(prepared):
     _exe, args, _pw, *_ = prepared(NEW, fingerprint="s1", headless=True,
                                    args=["--disable-features=Foo,ThirdPartyStoragePartitioning"])

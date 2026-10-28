@@ -371,6 +371,14 @@ describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
       .toEqual(["--disable-features=Translate"]);
   });
 
+  it("re-enables AvoidCorsURLLoaderRestartOnRedirect (2026-10-28)", async () => {
+    // Off, a same-origin request in a cross-site iframe sends Sec-Fetch-Storage-Access: active, which
+    // genuine Chrome omits (measured on Chrome 156 launched plainly vs by Playwright 1.64.1).
+    const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
+    expect(playwrightFeatureOverrideArgs(undefined, ["MediaRouter", "AvoidCorsURLLoaderRestartOnRedirect", "Translate"], false))
+      .toEqual(["--disable-features=MediaRouter,Translate"]);
+  });
+
   it("is skipped only when Playwright's exact switch is dropped", async () => {
     const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
     const exact = `--disable-features=${PW157.join(",")}`;
