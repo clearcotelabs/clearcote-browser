@@ -1,6 +1,6 @@
 --- a/chrome/app/chrome_command_ids.h
 +++ b/chrome/app/chrome_command_ids.h
-@@ -67,7 +67,7 @@
+@@ -78,7 +78,7 @@
  #define IDC_TOGGLE_MULTITASK_MENU       34050
  #endif
  

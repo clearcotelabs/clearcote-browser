@@ -1,5 +1,23 @@
 # Upgrading clearcote: Chromium 149 → 150 — Canonical Plan
 
+> **Status (151):** the open build moves to Chromium 151 (`151.0.7922.108`, `v0.1.0-pre.24`). What
+> changes for users: the build is now **official** (`is_official_build=true`, ThinLTO + PGO, a
+> ~30 % smaller binary) and DCHECKs are compiled out, so the DCHECK-class crashes of the 150 build
+> ("page crashed!" / `STATUS_BREAKPOINT`, issues #20 and #24) are gone, and running as root in a
+> container without `CAP_SYS_NICE` no longer aborts at startup. `fakeShadowRoot` is no longer exposed
+> on `Element.prototype` (`960`). New engine work since 150: authenticated SOCKS5 and SOCKS5 UDP
+> ASSOCIATE (`963`, `973`, `978`, `984`), GPU/WebGL/WebGPU persona coherence (`965`–`970`, `976`,
+> `982`, `983`, `985`), window/screen/DPR coherence (`961`, `962`, `972`, `975`), the persona
+> validator and schema v2 (`974`, `977`, `980`, `981`) and a portable profile key (`964`). `951` is
+> gone (dead code, not in the 151 tree); the macOS-only `956`–`958` stay with the 150 macOS build in
+> `patches/macos-150/`. Lessons from this bump: an official build costs far more than the old
+> config (Windows cross ThinLTO ~12 h on 8 cores, ~31 GB RAM at the link; never set
+> `concurrent_links` with ThinLTO), the Windows PGO profile must be downloaded
+> (`scripts/04-configure-build.sh`), and two official defaults have to be turned off for this build
+> (`enable_resource_allowlist_generation` on the Windows cross-build, CFI on Linux) — see
+> [BUILDING.md §5](BUILDING.md#5-configure--build). The ungoogled-chromium-windows overlay must be
+> applied before domain substitution.
+
 > **Status:** done — the open build moved to Chromium 150 (`150.0.7871.114`, `v0.1.0-pre.23`) on
 > 2026-09-28. Kept as the template for the next bump (N → N+1). Lessons from this one: build the
 > Windows and the Linux binary from ONE patched tree (overlay included, see `scripts/01-apply-patches.sh`);

@@ -1,0 +1,910 @@
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -251,6 +251,12 @@
+ // tier keeps (cores, RAM) to combinations that exist in the wild.
+ COMPONENT_EXPORT(UNGOOGLED) PersonaProfile DerivePersona(uint64_t seed);
+ 
++// clearcote: the ONE parse of a --fingerprint value into a persona seed. Numeric
++// strings are used directly; anything else is FNV-1a hashed (stable across
++// builds, unlike std::hash) so the browser process, every renderer, and the
++// persona validator sweep derive the SAME seed from the same text.
++COMPONENT_EXPORT(UNGOOGLED) uint64_t PersonaSeedFromString(const std::string& raw);
++
+ // Process-wide singleton persona for this session. The first call reads the
+ // --fingerprint switch (numeric, or FNV-1a-hashed if non-numeric -- matching
+ // the per-site seed parse so browser + renderers agree) and derives the
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -176,17 +176,7 @@
+   if (!cmd || !cmd->HasSwitch(switches::kFingerprint)) {
+     return 0;
+   }
+-  const std::string raw = cmd->GetSwitchValueASCII(switches::kFingerprint);
+-  uint64_t parsed = 0;
+-  if (base::StringToUint64(raw, &parsed)) {
+-    return parsed;
+-  }
+-  uint64_t h = 14695981039346656037ULL;  // FNV-1a offset basis
+-  for (unsigned char c : raw) {
+-    h ^= c;
+-    h *= 1099511628211ULL;  // FNV prime
+-  }
+-  return h;
++  return PersonaSeedFromString(cmd->GetSwitchValueASCII(switches::kFingerprint));
+ }
+ 
+ // clearcote: when --fingerprint-profile=<gzip+base64 JSON> is set (a captured real
+@@ -464,6 +454,19 @@
+ 
+ }  // namespace
+ 
++uint64_t PersonaSeedFromString(const std::string& raw) {
++  uint64_t parsed = 0;
++  if (base::StringToUint64(raw, &parsed)) {
++    return parsed;
++  }
++  uint64_t h = 14695981039346656037ULL;  // FNV-1a offset basis
++  for (unsigned char c : raw) {
++    h ^= c;
++    h *= 1099511628211ULL;  // FNV prime
++  }
++  return h;
++}
++
+ // clearcote: single source of truth for --fingerprint-platform (see
+ // persona_profile.h). Parsed once, lowercased once.
+ PersonaPlatform GetPersonaPlatform() {
+--- a/components/ungoogled/BUILD.gn
++++ b/components/ungoogled/BUILD.gn
+@@ -9,6 +9,8 @@
+     "fingerprint_data.h",
+     "persona_profile.cc",
+     "persona_profile.h",
++    "persona_validator.cc",
++    "persona_validator.h",
+     "portable_key_provider.cc",
+     "portable_key_provider.h",
+     "ungoogled_switches.h",
+--- /dev/null
++++ b/components/ungoogled/persona_validator.h
+@@ -0,0 +1,99 @@
++// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_UNGOOGLED_PERSONA_VALIDATOR_H_
++#define COMPONENTS_UNGOOGLED_PERSONA_VALIDATOR_H_
++
++#include <cstdint>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/component_export.h"
++#include "components/ungoogled/persona_profile.h"
++
++namespace base {
++class CommandLine;
++}
++
++namespace ungoogled {
++
++// clearcote: persona coherence validator.
++//
++// A PersonaProfile is one machine. Every browser-visible value derived from it
++// must agree with every other value derived from it, because a page can compare
++// them inside one load with no baseline and no population data. This validator
++// checks the RELATIONSHIPS between fields (screen vs work area, cores vs RAM,
++// GPU vendor vs renderer vs WebGPU adapter, platform vs backend vs voices, ...),
++// not fields in isolation. Every shipped coherence regression so far (r10
++// pointer:coarse on a desktop, r11 advertised-but-null extensions, the 151-port
++// version claim) was a relationship between two fields that were each fine on
++// their own.
++//
++// Two severities:
++//   kError   -- a contradiction real Chrome cannot produce. CI fails on these.
++//   kWarning -- suspicious, or dependent on a product decision that has not
++//               been taken (colour-depth buckets, heap-vs-RAM, WebGPU vs WebGL
++//               texture limits). Reported, never fatal.
++struct COMPONENT_EXPORT(UNGOOGLED) PersonaViolation {
++  enum class Severity { kError, kWarning };
++  Severity severity = Severity::kError;
++  // Stable identifier, "<area>.<rule>", e.g. "screen.avail_within_screen".
++  std::string invariant;
++  // The concrete values that contradicted each other.
++  std::string detail;
++};
++
++struct PersonaValidationContext {
++  // The --fingerprint-platform value the persona was derived under. kUnset
++  // means the switch was absent: DerivePersona() then leaves the Windows-shaped
++  // defaults in place regardless of host, so kUnset validates as Windows.
++  PersonaPlatform platform = PersonaPlatform::kUnset;
++  // Engine major (151 for this tree). 0 skips the engine-version check.
++  unsigned engine_major = 0;
++};
++
++// Runs every invariant and returns all violations (empty == coherent).
++COMPONENT_EXPORT(UNGOOGLED)
++std::vector<PersonaViolation> ValidatePersona(
++    const PersonaProfile& p,
++    const PersonaValidationContext& ctx);
++
++// True when |violations| contains at least one kError.
++COMPONENT_EXPORT(UNGOOGLED)
++bool HasPersonaErrors(const std::vector<PersonaViolation>& violations);
++
++// One-line, deterministic reproduction record: the seed and platform that
++// produce this persona plus the key fields, so a failure can be re-derived
++// exactly on any machine running the same binary.
++COMPONENT_EXPORT(UNGOOGLED)
++std::string DescribePersona(uint64_t seed,
++                            PersonaPlatform platform,
++                            const PersonaProfile& p);
++
++// Diagnostic entry point for CI, wired into the browser process's earliest
++// startup callback.
++//
++//   --clearcote-validate-persona=<N>          seeds 1..N
++//   --clearcote-validate-persona=<a,b,c>      explicit seeds (numeric, or any
++//                                             string hashed exactly as
++//                                             --fingerprint= would hash it)
++//   --clearcote-validate-persona=current      the seed on this command line
++//   --clearcote-validate-persona-out=<path>   write the report there instead
++//                                             of stdout (a Windows GUI process
++//                                             has no console to print to)
++//
++// The persona is derived under the SAME command line as a real launch, so
++// --fingerprint-platform, --fingerprint-profile and the GPU switches all apply:
++// the sweep validates the persona family this command line would actually
++// serve. Returns the process exit code when the switch is present (0 = no
++// errors, 3 = at least one error, 2 = bad arguments); std::nullopt when it is
++// absent or this is not the browser process.
++COMPONENT_EXPORT(UNGOOGLED)
++std::optional<int> MaybeRunPersonaValidationCli(const base::CommandLine& cmd,
++                                                const std::string& engine_version);
++
++}  // namespace ungoogled
++
++#endif  // COMPONENTS_UNGOOGLED_PERSONA_VALIDATOR_H_
+--- /dev/null
++++ b/components/ungoogled/persona_validator.cc
+@@ -0,0 +1,710 @@
++// Copyright 2026 The ungoogled-chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/ungoogled/persona_validator.h"
++
++#include <cmath>
++#include <cstdio>
++#include <string>
++#include <vector>
++
++#include "base/command_line.h"
++#include "base/files/file_path.h"
++#include "base/files/file_util.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/strings/string_util.h"
++#include "build/build_config.h"
++#include "components/ungoogled/ungoogled_switches.h"
++
++namespace ungoogled {
++namespace {
++
++using Severity = PersonaViolation::Severity;
++
++constexpr char kValidateSwitch[] = "clearcote-validate-persona";
++constexpr char kValidateOutSwitch[] = "clearcote-validate-persona-out";
++
++class Collector {
++ public:
++  void Error(const char* invariant, std::string detail) {
++    out_.push_back({Severity::kError, invariant, std::move(detail)});
++  }
++  void Warn(const char* invariant, std::string detail) {
++    out_.push_back({Severity::kWarning, invariant, std::move(detail)});
++  }
++  std::vector<PersonaViolation> Take() { return std::move(out_); }
++
++ private:
++  std::vector<PersonaViolation> out_;
++};
++
++// GPU vendor family as it appears in the WebGL UNMASKED strings and the
++// WebGPU adapter vendor. Every surface that names the GPU must land in the
++// same family or the browser names two different machines.
++enum class GpuFamily { kUnknown, kIntel, kNvidia, kAmd, kArm, kQualcomm, kApple, kSoftware };
++
++const char* FamilyName(GpuFamily f) {
++  switch (f) {
++    case GpuFamily::kIntel: return "intel";
++    case GpuFamily::kNvidia: return "nvidia";
++    case GpuFamily::kAmd: return "amd";
++    case GpuFamily::kArm: return "arm";
++    case GpuFamily::kQualcomm: return "qualcomm";
++    case GpuFamily::kApple: return "apple";
++    case GpuFamily::kSoftware: return "software";
++    case GpuFamily::kUnknown: return "unknown";
++  }
++  return "unknown";
++}
++
++bool Has(const std::string& s, const char* needle) {
++  return s.find(needle) != std::string::npos;
++}
++
++GpuFamily FamilyOfGlString(const std::string& s) {
++  if (Has(s, "SwiftShader") || Has(s, "llvmpipe") || Has(s, "Software Adapter"))
++    return GpuFamily::kSoftware;
++  if (Has(s, "NVIDIA") || Has(s, "GeForce"))
++    return GpuFamily::kNvidia;
++  if (Has(s, "AMD") || Has(s, "ATI") || Has(s, "Radeon"))
++    return GpuFamily::kAmd;
++  if (Has(s, "Intel"))
++    return GpuFamily::kIntel;
++  if (Has(s, "Mali") || Has(s, "(ARM"))
++    return GpuFamily::kArm;
++  if (Has(s, "Adreno") || Has(s, "Qualcomm"))
++    return GpuFamily::kQualcomm;
++  if (Has(s, "Apple"))
++    return GpuFamily::kApple;
++  return GpuFamily::kUnknown;
++}
++
++GpuFamily FamilyOfWebGpuVendor(const std::string& v) {
++  const std::string l = base::ToLowerASCII(v);
++  if (l == "intel") return GpuFamily::kIntel;
++  if (l == "nvidia") return GpuFamily::kNvidia;
++  if (l == "amd") return GpuFamily::kAmd;
++  if (l == "arm") return GpuFamily::kArm;
++  if (l == "qualcomm") return GpuFamily::kQualcomm;
++  if (l == "apple") return GpuFamily::kApple;
++  return GpuFamily::kUnknown;
++}
++
++// Extensions that exist only on a WebGL1 context. A WebGL2 list that names one
++// advertises something getExtension() then returns null for (the r11 defect).
++constexpr const char* kWebGL1OnlyExtensions[] = {
++    "ANGLE_instanced_arrays",  "EXT_blend_minmax",     "EXT_frag_depth",
++    "EXT_shader_texture_lod",  "EXT_sRGB",             "OES_element_index_uint",
++    "OES_fbo_render_mipmap",   "OES_standard_derivatives",
++    "OES_texture_float",       "OES_texture_half_float", "OES_vertex_array_object",
++    "WEBGL_color_buffer_float", "WEBGL_depth_texture", "WEBGL_draw_buffers",
++};
++
++// Compressed formats a Direct3D11 backend cannot expose (patch 969 subtracts
++// them; an imported profile could still carry them).
++constexpr const char* kD3DImpossibleExtensions[] = {
++    "WEBGL_compressed_texture_astc",
++    "WEBGL_compressed_texture_etc",
++    "WEBGL_compressed_texture_etc1",
++};
++
++bool IsPowerOfTwoLike(float v) {
++  // Accepts 0.25, 0.5, 1, 2, 4 ... 64.
++  if (v <= 0)
++    return false;
++  const double l = std::log2(static_cast<double>(v));
++  return std::fabs(l - std::round(l)) < 1e-6;
++}
++
++std::optional<uint64_t> Limit(const PersonaProfile& p, const char* key) {
++  const auto it = p.webgpu_limits.find(key);
++  if (it == p.webgpu_limits.end())
++    return std::nullopt;
++  return it->second;
++}
++
++std::string S(int64_t v) { return base::NumberToString(v); }
++std::string S(uint64_t v) { return base::NumberToString(v); }
++std::string S(unsigned v) { return base::NumberToString(v); }
++std::string S(int v) { return base::NumberToString(v); }
++std::string S(double v) { return base::NumberToString(v); }
++
++PersonaPlatform EffectivePlatform(PersonaPlatform p) {
++  // DerivePersona() only rewrites the Windows-shaped defaults for kLinux and
++  // kAndroid. kUnset and kMacOS keep them, so they validate as Windows-shaped.
++  if (p == PersonaPlatform::kLinux || p == PersonaPlatform::kAndroid)
++    return p;
++  return PersonaPlatform::kWindows;
++}
++
++void CheckScreen(const PersonaProfile& p, PersonaPlatform plat, Collector& c) {
++  const bool android = plat == PersonaPlatform::kAndroid;
++  if (p.screen_width <= 0 || p.screen_height <= 0 || p.avail_screen_width <= 0 ||
++      p.avail_screen_height <= 0) {
++    c.Error("screen.positive",
++            "screen " + S(p.screen_width) + "x" + S(p.screen_height) + " avail " +
++                S(p.avail_screen_width) + "x" + S(p.avail_screen_height));
++    return;
++  }
++  if (p.avail_screen_width > p.screen_width || p.avail_screen_height > p.screen_height) {
++    c.Error("screen.avail_within_screen",
++            "availWidth/Height " + S(p.avail_screen_width) + "x" + S(p.avail_screen_height) +
++                " exceeds screen " + S(p.screen_width) + "x" + S(p.screen_height));
++  }
++  if (android) {
++    if (p.avail_screen_width != p.screen_width || p.avail_screen_height != p.screen_height) {
++      c.Error("screen.android_avail_is_full_screen",
++              "Android reports avail == screen; got avail " + S(p.avail_screen_width) + "x" +
++                  S(p.avail_screen_height) + " screen " + S(p.screen_width) + "x" +
++                  S(p.screen_height));
++    }
++    if (p.screen_width > p.screen_height) {
++      c.Error("screen.android_portrait", "phone persona with landscape screen " +
++                                              S(p.screen_width) + "x" + S(p.screen_height));
++    }
++  } else {
++    if (p.avail_screen_width != p.screen_width) {
++      // A side-docked taskbar is legal but rare; the generator never produces it.
++      c.Warn("screen.desktop_avail_width_is_full",
++             "availWidth " + S(p.avail_screen_width) + " != width " + S(p.screen_width));
++    }
++    if (p.screen_width < 800 || p.screen_height < 600) {
++      c.Warn("screen.desktop_size_plausible",
++             "desktop screen " + S(p.screen_width) + "x" + S(p.screen_height));
++    }
++  }
++  if (p.device_pixel_ratio <= 0) {
++    c.Error("screen.dpr_positive", "devicePixelRatio " + S(p.device_pixel_ratio));
++  } else if (android && p.device_pixel_ratio < 1.5) {
++    c.Warn("screen.mobile_dpr", "phone persona with devicePixelRatio " + S(p.device_pixel_ratio));
++  } else if (!android && p.device_pixel_ratio < 1.0) {
++    c.Error("screen.desktop_dpr", "desktop devicePixelRatio " + S(p.device_pixel_ratio) + " < 1");
++  }
++  // 30 and 32 are real (HDR / 10-bit) but rare; whether the buckets stay is an
++  // open product decision, so only a value outside the real set is an error.
++  if (p.color_depth != 24 && p.color_depth != 30 && p.color_depth != 32) {
++    c.Error("screen.color_depth_real", "colorDepth " + S(p.color_depth) + " not in {24,30,32}");
++  }
++  if (p.css_color_gamut != "srgb" && p.css_color_gamut != "p3" && p.css_color_gamut != "rec2020") {
++    c.Error("screen.gamut_value", "color-gamut '" + p.css_color_gamut + "'");
++  }
++  if (p.dynamic_range_high && p.css_color_gamut == "srgb") {
++    c.Warn("screen.hdr_with_srgb_gamut", "dynamic-range:high with color-gamut:srgb");
++  }
++}
++
++void CheckHardware(const PersonaProfile& p, PersonaPlatform plat, Collector& c) {
++  const bool android = plat == PersonaPlatform::kAndroid;
++  if (p.hardware_concurrency < 1 || p.hardware_concurrency > 128) {
++    c.Error("hw.concurrency_range", "hardwareConcurrency " + S(p.hardware_concurrency));
++  } else if (p.hardware_concurrency > 1 && p.hardware_concurrency % 2 == 1) {
++    c.Warn("hw.odd_logical_cores", "hardwareConcurrency " + S(p.hardware_concurrency));
++  }
++  if (!android && p.hardware_concurrency < 2) {
++    c.Warn("hw.desktop_single_core", "desktop persona with hardwareConcurrency 1");
++  }
++  if (p.device_memory_gb <= 0) {
++    c.Error("hw.memory_positive", "device_memory_gb " + S(p.device_memory_gb));
++    return;
++  }
++  if (!IsPowerOfTwoLike(p.device_memory_gb)) {
++    c.Warn("hw.memory_bucket", "device_memory_gb " + S(p.device_memory_gb) +
++                                   " is not a power-of-two bucket");
++  }
++  // Two logical cores per GB is the loosest pairing a shipping machine shows
++  // (8 cores / 4 GB). Anything tighter is a CPU that no vendor pairs with that
++  // little RAM.
++  // Only for an uncapped value: an imported capture writes navigator.deviceMemory
++  // (bucketed and capped at 8 on Android / older desktop captures) into this
++  // field, where 8 is a floor on RAM rather than RAM.
++  if (p.device_memory_gb < 8.0f &&
++      static_cast<double>(p.device_memory_gb) * 2.0 < p.hardware_concurrency) {
++    c.Error("hw.cores_vs_ram", "hardwareConcurrency " + S(p.hardware_concurrency) +
++                                   " with device_memory_gb " + S(p.device_memory_gb));
++  }
++  if (p.js_heap_size_limit == 0) {
++    c.Error("heap.positive", "jsHeapSizeLimit 0");
++  } else if (static_cast<double>(p.js_heap_size_limit) >
++             static_cast<double>(p.device_memory_gb) * 1024.0 * 1024.0 * 1024.0) {
++    // Real Chrome sizes the V8 heap from physical memory. A 4.4 GB heap on a
++    // 4 GB machine is the fleet-constant question from the plan (item 7), not
++    // yet decided, so it stays a warning.
++    c.Warn("heap.exceeds_ram", "jsHeapSizeLimit " + S(p.js_heap_size_limit) +
++                                   " on device_memory_gb " + S(p.device_memory_gb));
++  }
++}
++
++void CheckTouchAndForm(const PersonaProfile& p, PersonaPlatform plat, Collector& c) {
++  const bool android = plat == PersonaPlatform::kAndroid;
++  if (p.max_touch_points < 0) {
++    c.Error("touch.points_range", "maxTouchPoints " + S(p.max_touch_points));
++  } else if (p.max_touch_points > 10) {
++    // Windows serves the digitizer's raw HID contact count (20, 40, 256 exist).
++    c.Warn("touch.points_unusual", "maxTouchPoints " + S(p.max_touch_points));
++  }
++  if (p.mobile != android) {
++    c.Error("platform.mobile_iff_android",
++            std::string("mobile=") + (p.mobile ? "true" : "false") + " platform=" +
++                PersonaPlatformName(plat));
++  }
++  if (android) {
++    if (p.max_touch_points == 0)
++      c.Error("touch.mobile_has_touch", "phone persona with maxTouchPoints 0");
++    if (!p.pointer_coarse)
++      c.Error("touch.mobile_pointer_coarse", "phone persona with pointer:fine primary");
++    if (!p.hover_none)
++      c.Error("touch.mobile_hover_none", "phone persona with hover:hover");
++    if (p.android_model.empty() || p.android_platform_version.empty()) {
++      c.Error("platform.android_identity",
++              "android persona without model/platformVersion (model='" + p.android_model +
++                  "', platformVersion='" + p.android_platform_version + "')");
++    }
++  } else {
++    // r10: a touch-capable desktop keeps a mouse as its PRIMARY pointer, so the
++    // touchscreen is visible only through any-pointer:coarse. Coarse primary or
++    // hover:none on a desktop persona is the mobile/desktop contradiction that
++    // shipped in r10.
++    if (p.pointer_coarse)
++      c.Error("touch.desktop_pointer_fine",
++              "desktop persona with pointer:coarse primary (maxTouchPoints " +
++                  S(p.max_touch_points) + ")");
++    if (p.hover_none)
++      c.Error("touch.desktop_hover", "desktop persona with hover:none");
++    if (!p.android_model.empty() || !p.android_platform_version.empty()) {
++      c.Error("platform.android_fields_on_desktop",
++              "model='" + p.android_model + "' platformVersion='" +
++                  p.android_platform_version + "' on " + PersonaPlatformName(plat));
++    }
++    if (std::string(p.orientation_type) == "portrait-primary") {
++      c.Warn("screen.desktop_portrait", "desktop persona reporting portrait-primary");
++    }
++  }
++}
++
++void CheckGpu(const PersonaProfile& p, PersonaPlatform plat, Collector& c) {
++  if (p.webgl_real_strings) {
++    // Honest strings: the host answers; nothing to cross-check here.
++    return;
++  }
++  if (p.webgl_vendor.empty() || p.webgl_renderer.empty()) {
++    c.Error("gpu.strings_present", "vendor='" + p.webgl_vendor + "' renderer='" +
++                                       p.webgl_renderer + "'");
++    return;
++  }
++  const GpuFamily vf = FamilyOfGlString(p.webgl_vendor);
++  const GpuFamily rf = FamilyOfGlString(p.webgl_renderer);
++  if (vf != GpuFamily::kUnknown && rf != GpuFamily::kUnknown && vf != rf) {
++    c.Error("gpu.vendor_renderer_family",
++            std::string("UNMASKED_VENDOR family ") + FamilyName(vf) + " vs UNMASKED_RENDERER family " +
++                FamilyName(rf) + " ('" + p.webgl_vendor + "' / '" + p.webgl_renderer + "')");
++  }
++  const bool d3d = Has(p.webgl_renderer, "Direct3D");
++  const bool gles = Has(p.webgl_renderer, "OpenGL ES");
++  switch (plat) {
++    case PersonaPlatform::kWindows:
++    case PersonaPlatform::kUnset:
++      if (!d3d) {
++        if (rf == GpuFamily::kSoftware) {
++          // A GPU-less Windows machine (RDP session, VPS) really reports SwiftShader.
++          c.Warn("gpu.windows_software_renderer",
++                 "Windows persona with software renderer '" + p.webgl_renderer + "'");
++        } else {
++          c.Error("gpu.windows_backend_is_d3d",
++                  "Windows persona with non-Direct3D renderer '" + p.webgl_renderer + "'");
++        }
++      }
++      break;
++    case PersonaPlatform::kLinux:
++      if (d3d)
++        c.Error("gpu.linux_backend_not_d3d",
++                "Linux persona with Direct3D renderer '" + p.webgl_renderer + "'");
++      break;
++    case PersonaPlatform::kAndroid:
++      if (d3d || !gles)
++        c.Error("gpu.android_backend_is_gles",
++                "Android persona with renderer '" + p.webgl_renderer + "'");
++      break;
++    case PersonaPlatform::kMacOS:
++      if (d3d)
++        c.Warn("gpu.macos_backend", "macOS persona with Direct3D renderer '" +
++                                        p.webgl_renderer + "' (macOS persona is not modelled)");
++      break;
++  }
++  // WebGPU adapter identity must name the same GPU as WebGL.
++  if (p.webgpu_vendor.empty()) {
++    c.Error("gpu.webgpu_vendor_present", "navigator.gpu vendor empty");
++  } else {
++    const GpuFamily wf = FamilyOfWebGpuVendor(p.webgpu_vendor);
++    if (vf != GpuFamily::kUnknown && wf != GpuFamily::kUnknown && vf != wf) {
++      c.Error("gpu.webgpu_vendor_matches_webgl",
++              "WebGPU vendor '" + p.webgpu_vendor + "' vs WebGL vendor '" + p.webgl_vendor + "'");
++    }
++    if (p.webgpu_architecture.empty())
++      c.Warn("gpu.webgpu_architecture_present", "navigator.gpu architecture empty");
++  }
++}
++
++void CheckWebGlLimits(const PersonaProfile& p, PersonaPlatform plat, Collector& c) {
++  if (p.webgl_real)
++    return;
++  const int lims[] = {p.webgl_max_texture_size,
++                      p.webgl_max_cube_map_texture_size,
++                      p.webgl_max_renderbuffer_size,
++                      p.webgl_max_viewport_dim,
++                      p.webgl_max_vertex_uniform_vectors,
++                      p.webgl_max_fragment_uniform_vectors,
++                      p.webgl_max_varying_vectors,
++                      p.webgl_max_combined_texture_image_units,
++                      p.webgl_max_3d_texture_size,
++                      p.webgl_max_array_texture_layers,
++                      p.webgl_max_draw_buffers,
++                      p.webgl_max_color_attachments,
++                      p.webgl_max_samples,
++                      p.webgl_max_vertex_uniform_blocks,
++                      p.webgl_max_fragment_uniform_blocks,
++                      p.webgl_max_combined_uniform_blocks,
++                      p.webgl_max_uniform_buffer_bindings,
++                      p.webgl_max_vertex_uniform_components,
++                      p.webgl_max_fragment_uniform_components};
++  for (int v : lims) {
++    if (v <= 0) {
++      c.Error("gl.limits_positive", "a WebGL limit is " + S(v));
++      return;
++    }
++  }
++  if (p.webgl_max_cube_map_texture_size > p.webgl_max_texture_size)
++    c.Error("gl.cube_map_le_texture", "MAX_CUBE_MAP_TEXTURE_SIZE " + S(p.webgl_max_cube_map_texture_size) +
++                                          " > MAX_TEXTURE_SIZE " + S(p.webgl_max_texture_size));
++  if (p.webgl_max_renderbuffer_size > p.webgl_max_texture_size)
++    c.Error("gl.renderbuffer_le_texture", "MAX_RENDERBUFFER_SIZE " + S(p.webgl_max_renderbuffer_size) +
++                                              " > MAX_TEXTURE_SIZE " + S(p.webgl_max_texture_size));
++  if (p.webgl_max_viewport_dim < p.webgl_max_texture_size)
++    c.Error("gl.viewport_ge_texture", "MAX_VIEWPORT_DIMS " + S(p.webgl_max_viewport_dim) +
++                                          " < MAX_TEXTURE_SIZE " + S(p.webgl_max_texture_size));
++  if (p.webgl_max_draw_buffers > p.webgl_max_color_attachments)
++    c.Error("gl.draw_buffers_le_attachments", "MAX_DRAW_BUFFERS " + S(p.webgl_max_draw_buffers) +
++                                                  " > MAX_COLOR_ATTACHMENTS " + S(p.webgl_max_color_attachments));
++  if (p.webgl_max_combined_uniform_blocks < p.webgl_max_vertex_uniform_blocks ||
++      p.webgl_max_combined_uniform_blocks < p.webgl_max_fragment_uniform_blocks)
++    c.Error("gl.combined_uniform_blocks", "MAX_COMBINED_UNIFORM_BLOCKS " + S(p.webgl_max_combined_uniform_blocks) +
++                                              " < a per-stage block count");
++  if (p.webgl_max_uniform_buffer_bindings < p.webgl_max_combined_uniform_blocks)
++    c.Error("gl.uniform_buffer_bindings", "MAX_UNIFORM_BUFFER_BINDINGS " + S(p.webgl_max_uniform_buffer_bindings) +
++                                              " < MAX_COMBINED_UNIFORM_BLOCKS " + S(p.webgl_max_combined_uniform_blocks));
++  // ANGLE derives MAX_*_UNIFORM_VECTORS as components / 4; the pair must agree.
++  if (p.webgl_max_vertex_uniform_components != p.webgl_max_vertex_uniform_vectors * 4)
++    c.Error("gl.vertex_uniform_vectors_vs_components",
++            "MAX_VERTEX_UNIFORM_VECTORS " + S(p.webgl_max_vertex_uniform_vectors) +
++                " vs MAX_VERTEX_UNIFORM_COMPONENTS " + S(p.webgl_max_vertex_uniform_components));
++  if (p.webgl_max_fragment_uniform_components != p.webgl_max_fragment_uniform_vectors * 4)
++    c.Error("gl.fragment_uniform_vectors_vs_components",
++            "MAX_FRAGMENT_UNIFORM_VECTORS " + S(p.webgl_max_fragment_uniform_vectors) +
++                " vs MAX_FRAGMENT_UNIFORM_COMPONENTS " + S(p.webgl_max_fragment_uniform_components));
++  if (p.webgl_samples > p.webgl_max_samples)
++    c.Error("gl.samples_le_max", "SAMPLES " + S(p.webgl_samples) + " > MAX_SAMPLES " + S(p.webgl_max_samples));
++  if (p.webgl_sample_buffers != 0 && p.webgl_sample_buffers != 1)
++    c.Error("gl.sample_buffers", "SAMPLE_BUFFERS " + S(p.webgl_sample_buffers));
++  if (p.webgl_max_texture_max_anisotropy < 1.0f)
++    c.Error("gl.anisotropy", "MAX_TEXTURE_MAX_ANISOTROPY " + S(p.webgl_max_texture_max_anisotropy));
++  if (p.webgl_max_element_index <= 0)
++    c.Error("gl.element_index", "MAX_ELEMENT_INDEX " + S(p.webgl_max_element_index));
++  if (p.webgl_aliased_point_size_range_min > p.webgl_aliased_point_size_range_max ||
++      p.webgl_aliased_line_width_range_min > p.webgl_aliased_line_width_range_max)
++    c.Error("gl.aliased_ranges", "aliased point/line range min > max");
++  for (const std::string& e : p.webgl2_extensions) {
++    for (const char* only1 : kWebGL1OnlyExtensions) {
++      if (e == only1) {
++        c.Error("gl.webgl2_advertises_webgl1_only",
++                "WebGL2 extension list contains WebGL1-only '" + e + "'");
++      }
++    }
++  }
++  // The compressed-format rule follows the BACKEND the renderer names, not the
++  // platform: a SwiftShader capture on Windows legitimately lists ETC2/ASTC.
++  if (Has(p.webgl_renderer, "Direct3D")) {
++    for (const auto* list : {&p.webgl_extensions, &p.webgl2_extensions}) {
++      for (const std::string& e : *list) {
++        for (const char* imp : kD3DImpossibleExtensions) {
++          if (e == imp)
++            c.Error("gl.d3d_impossible_extension", "Direct3D11 persona advertises '" + e + "'");
++        }
++      }
++    }
++  }
++}
++
++void CheckWebGpu(const PersonaProfile& p, PersonaPlatform plat, Collector& c) {
++  if (p.webgl_real)
++    return;
++  if (p.webgpu_limits.empty()) {
++    if (plat != PersonaPlatform::kAndroid)
++      c.Warn("webgpu.limits_present", "no WebGPU limit table on a desktop persona");
++    return;
++  }
++  auto require = [&](const char* a, const char* b, const char* rule) {
++    const auto va = Limit(p, a);
++    const auto vb = Limit(p, b);
++    if (va && vb && *va > *vb)
++      c.Error(rule, std::string(a) + " " + S(*va) + " > " + b + " " + S(*vb));
++  };
++  require("maxStorageBufferBindingSize", "maxBufferSize", "webgpu.storage_binding_le_buffer");
++  require("maxUniformBufferBindingSize", "maxBufferSize", "webgpu.uniform_binding_le_buffer");
++  require("maxBindGroups", "maxBindGroupsPlusVertexBuffers", "webgpu.bind_groups_le_plus_vertex");
++  require("maxComputeWorkgroupSizeX", "maxComputeInvocationsPerWorkgroup", "webgpu.workgroup_x_le_invocations");
++  require("maxComputeWorkgroupSizeY", "maxComputeInvocationsPerWorkgroup", "webgpu.workgroup_y_le_invocations");
++  require("maxComputeWorkgroupSizeZ", "maxComputeInvocationsPerWorkgroup", "webgpu.workgroup_z_le_invocations");
++  require("maxStorageBuffersInFragmentStage", "maxStorageBuffersPerShaderStage", "webgpu.fragment_storage_buffers");
++  require("maxStorageBuffersInVertexStage", "maxStorageBuffersPerShaderStage", "webgpu.vertex_storage_buffers");
++  require("maxStorageTexturesInFragmentStage", "maxStorageTexturesPerShaderStage", "webgpu.fragment_storage_textures");
++  require("maxStorageTexturesInVertexStage", "maxStorageTexturesPerShaderStage", "webgpu.vertex_storage_textures");
++  if (const auto t2d = Limit(p, "maxTextureDimension2D")) {
++    if (*t2d == 0) {
++      c.Error("webgpu.texture2d_positive", "maxTextureDimension2D 0");
++    } else if (*t2d < static_cast<uint64_t>(p.webgl_max_texture_size)) {
++      // The same GPU cannot address a smaller texture through WebGPU than
++      // through WebGL.
++      c.Error("webgpu.texture2d_ge_webgl", "maxTextureDimension2D " + S(*t2d) +
++                                                " < WebGL MAX_TEXTURE_SIZE " + S(p.webgl_max_texture_size));
++    } else if (*t2d != static_cast<uint64_t>(p.webgl_max_texture_size)) {
++      // Larger is possible on some stacks; whether it should match needs the
++      // per-class reference captures from the plan (item 6) before it can be
++      // enforced.
++      c.Warn("webgpu.texture2d_eq_webgl", "maxTextureDimension2D " + S(*t2d) +
++                                              " != WebGL MAX_TEXTURE_SIZE " + S(p.webgl_max_texture_size));
++    }
++  }
++}
++
++void CheckMediaAndAudio(const PersonaProfile& p, PersonaPlatform plat, Collector& c) {
++  for (const auto& [codec, s] : p.media_codecs) {
++    if (!s.supported && (s.smooth || s.power_efficient)) {
++      c.Error("media.unsupported_but_smooth",
++              "codec '" + codec + "' supported=false with smooth/powerEfficient=true");
++    }
++  }
++  if (plat != PersonaPlatform::kAndroid) {
++    for (const char* k : {"h264", "vp8", "vp9", "av1", "hevc"}) {
++      if (p.media_codecs.find(k) == p.media_codecs.end())
++        c.Warn("media.codec_table_complete", std::string("no decodingInfo entry for '") + k + "'");
++    }
++  }
++  if (p.audio_sample_rate <= 0) {
++    c.Error("audio.sample_rate_positive", "sampleRate " + S(p.audio_sample_rate));
++  } else if (p.audio_sample_rate != 44100.0f && p.audio_sample_rate != 48000.0f) {
++    c.Warn("audio.sample_rate_common", "sampleRate " + S(p.audio_sample_rate));
++  }
++  if (p.audio_base_latency <= 0 || p.audio_output_latency < 0) {
++    c.Error("audio.latency_positive", "baseLatency " + S(p.audio_base_latency) +
++                                          " outputLatency " + S(p.audio_output_latency));
++  } else if (p.audio_output_latency == 0) {
++    // Real Chrome reports 0 until the first render callback; a capture taken on
++    // an autoplay-blocked page records exactly that.
++    c.Warn("audio.output_latency_unstarted", "outputLatency 0 (context never rendered)");
++  } else if (p.audio_output_latency < p.audio_base_latency) {
++    c.Error("audio.output_ge_base", "outputLatency " + S(p.audio_output_latency) +
++                                        " < baseLatency " + S(p.audio_base_latency));
++  }
++}
++
++void CheckVoicesAndDevices(const PersonaProfile& p, PersonaPlatform plat, Collector& c) {
++  const bool windows_like = plat == PersonaPlatform::kWindows || plat == PersonaPlatform::kUnset;
++  if (windows_like && p.voices.empty()) {
++    c.Error("voices.windows_has_voices", "Windows persona with getVoices() == []");
++  }
++  if (!windows_like && !p.voices.empty() && base::StartsWith(p.voices.front().name, "Microsoft")) {
++    c.Error("voices.platform_voice_pack",
++            std::string(PersonaPlatformName(plat)) + " persona with Windows SAPI voice '" +
++                p.voices.front().name + "'");
++  }
++  if (!p.voices.empty()) {
++    int defaults = 0;
++    for (const auto& v : p.voices) {
++      if (v.is_default)
++        ++defaults;
++      if (v.name.empty() || v.lang.empty())
++        c.Error("voices.fields", "voice with empty name or lang");
++    }
++    if (defaults != 1)
++      c.Error("voices.one_default", S(defaults) + " default voices");
++  }
++  if (windows_like && p.media_devices.empty()) {
++    c.Error("devices.windows_has_devices", "Windows persona with enumerateDevices() == []");
++  }
++  for (const auto& d : p.media_devices) {
++    if (d.kind != "audioinput" && d.kind != "audiooutput" && d.kind != "videoinput")
++      c.Error("devices.kind", "device kind '" + d.kind + "'");
++    if (!windows_like &&
++        (Has(d.label, "Realtek") || base::StartsWith(d.label, "Communications -")))
++      c.Error("devices.platform_roster",
++              std::string(PersonaPlatformName(plat)) + " persona with Windows device label '" +
++                  d.label + "'");
++  }
++}
++
++void CheckIdentity(const PersonaProfile& p, const PersonaValidationContext& ctx, Collector& c) {
++  if (!p.chrome_full_version.empty()) {
++    unsigned maj = 0;
++    const std::string head = p.chrome_full_version.substr(0, p.chrome_full_version.find('.'));
++    if (!base::StringToUint(head, &maj) || maj != p.chrome_major_version) {
++      c.Error("version.full_matches_major", "chrome_full_version '" + p.chrome_full_version +
++                                                "' vs major " + S(p.chrome_major_version));
++    }
++  }
++  if (ctx.engine_major != 0 && p.chrome_major_version != ctx.engine_major) {
++    // The 151-port defect: the persona claimed 150 on a 151 engine.
++    c.Error("version.claim_matches_engine", "persona claims Chrome " + S(p.chrome_major_version) +
++                                                " on engine " + S(ctx.engine_major));
++  }
++  for (const std::string& f : p.fonts) {
++    if (f.empty()) {
++      c.Error("fonts.non_empty_names", "empty font family name in persona list");
++      break;
++    }
++  }
++}
++
++uint64_t ParseSeedToken(const std::string& tok) {
++  return PersonaSeedFromString(tok);
++}
++
++}  // namespace
++
++std::vector<PersonaViolation> ValidatePersona(const PersonaProfile& p,
++                                              const PersonaValidationContext& ctx) {
++  Collector c;
++  const PersonaPlatform plat = EffectivePlatform(ctx.platform);
++#if !BUILDFLAG(IS_WIN)
++  if (ctx.platform == PersonaPlatform::kUnset) {
++    c.Warn("platform.unset_on_non_windows_host",
++           "no --fingerprint-platform: persona keeps Windows-shaped defaults on a non-Windows build");
++  }
++#endif
++  if (ctx.platform == PersonaPlatform::kMacOS) {
++    // DerivePersona() has no macOS block: a macos launch serves the Windows-shaped
++    // defaults (Direct3D renderer, SAPI voices, Realtek roster) under a Mac UA.
++    // Validated as Windows-shaped here, and said so, until that block exists.
++    c.Warn("platform.macos_not_modelled",
++           "macOS persona is the Windows-shaped default set; its own coherence rules are not modelled");
++  }
++  CheckScreen(p, plat, c);
++  CheckHardware(p, plat, c);
++  CheckTouchAndForm(p, plat, c);
++  CheckGpu(p, plat, c);
++  CheckWebGlLimits(p, plat, c);
++  CheckWebGpu(p, plat, c);
++  CheckMediaAndAudio(p, plat, c);
++  CheckVoicesAndDevices(p, plat, c);
++  CheckIdentity(p, ctx, c);
++  return c.Take();
++}
++
++bool HasPersonaErrors(const std::vector<PersonaViolation>& violations) {
++  for (const auto& v : violations) {
++    if (v.severity == Severity::kError)
++      return true;
++  }
++  return false;
++}
++
++std::string DescribePersona(uint64_t seed, PersonaPlatform platform, const PersonaProfile& p) {
++  std::string s = "seed=" + S(seed) + " platform=" +
++                  (PersonaPlatformName(platform)[0] ? PersonaPlatformName(platform) : "unset") +
++                  " persona_seed=" + S(p.persona_seed) +
++                  " version=" + p.chrome_full_version +
++                  " screen=" + S(p.screen_width) + "x" + S(p.screen_height) +
++                  " avail=" + S(p.avail_screen_width) + "x" + S(p.avail_screen_height) +
++                  " dpr=" + S(p.device_pixel_ratio) + " depth=" + S(p.color_depth) +
++                  " gamut=" + p.css_color_gamut +
++                  " hc=" + S(p.hardware_concurrency) + " mem=" + S(p.device_memory_gb) +
++                  " touch=" + S(p.max_touch_points) + " mobile=" + (p.mobile ? "1" : "0") +
++                  " gpu='" + p.webgl_vendor + "|" + p.webgl_renderer + "'" +
++                  " webgpu=" + p.webgpu_vendor + "/" + p.webgpu_architecture +
++                  " voices=" + S(static_cast<uint64_t>(p.voices.size())) +
++                  " devices=" + S(static_cast<uint64_t>(p.media_devices.size())) +
++                  " real_gpu=" + (p.webgl_real ? "1" : "0");
++  return s;
++}
++
++std::optional<int> MaybeRunPersonaValidationCli(const base::CommandLine& cmd,
++                                                const std::string& engine_version) {
++  if (!cmd.HasSwitch(kValidateSwitch))
++    return std::nullopt;
++  if (cmd.HasSwitch("type"))  // child process: not ours to answer
++    return std::nullopt;
++
++  PersonaValidationContext ctx;
++  ctx.platform = GetPersonaPlatform();
++  {
++    unsigned maj = 0;
++    if (base::StringToUint(engine_version.substr(0, engine_version.find('.')), &maj))
++      ctx.engine_major = maj;
++  }
++
++  const std::string spec = cmd.GetSwitchValueASCII(kValidateSwitch);
++  std::vector<uint64_t> seeds;
++  uint64_t n = 0;
++  if (spec == "current") {
++    seeds.push_back(cmd.HasSwitch(switches::kFingerprint)
++                        ? PersonaSeedFromString(cmd.GetSwitchValueASCII(switches::kFingerprint))
++                        : 0);
++  } else if (spec.find(',') == std::string::npos && base::StringToUint64(spec, &n)) {
++    if (n == 0 || n > 1000000) {
++      fprintf(stderr, "clearcote-validate-persona: N must be 1..1000000\n");
++      return 2;
++    }
++    for (uint64_t i = 1; i <= n; ++i)
++      seeds.push_back(i);
++  } else {
++    for (const std::string& tok :
++         base::SplitString(spec, ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY)) {
++      seeds.push_back(ParseSeedToken(tok));
++    }
++    if (seeds.empty()) {
++      fprintf(stderr, "clearcote-validate-persona: empty seed list\n");
++      return 2;
++    }
++  }
++
++  std::string report;
++  uint64_t errors = 0, warnings = 0, failing_seeds = 0;
++  for (uint64_t seed : seeds) {
++    const PersonaProfile p = DerivePersona(seed);
++    const std::vector<PersonaViolation> v = ValidatePersona(p, ctx);
++    bool seed_failed = false;
++    for (const PersonaViolation& viol : v) {
++      const bool err = viol.severity == Severity::kError;
++      errors += err ? 1 : 0;
++      warnings += err ? 0 : 1;
++      seed_failed = seed_failed || err;
++      report += std::string(err ? "ERROR" : "WARN") + " seed=" + S(seed) + " " + viol.invariant +
++                ": " + viol.detail + "\n";
++    }
++    // Always describe the persona for a small explicit set (a single-seed
++    // "current" run must be self-describing); for a sweep only on violations.
++    if (!v.empty() || seeds.size() <= 20)
++      report += "REPRO " + DescribePersona(seed, ctx.platform, p) + "\n";
++    if (seed_failed)
++      ++failing_seeds;
++  }
++  report += "SUMMARY seeds=" + S(static_cast<uint64_t>(seeds.size())) + " failing_seeds=" +
++            S(failing_seeds) + " errors=" + S(errors) + " warnings=" + S(warnings) +
++            " engine=" + engine_version + " platform=" +
++            (PersonaPlatformName(ctx.platform)[0] ? PersonaPlatformName(ctx.platform) : "unset") +
++            "\n";
++
++  if (cmd.HasSwitch(kValidateOutSwitch)) {
++    const base::FilePath out = cmd.GetSwitchValuePath(kValidateOutSwitch);
++    if (!base::WriteFile(out, report)) {
++      fprintf(stderr, "clearcote-validate-persona: cannot write report\n");
++      return 2;
++    }
++  } else {
++    fputs(report.c_str(), stdout);
++    fflush(stdout);
++  }
++  return errors == 0 ? 0 : 3;
++}
++
++}  // namespace ungoogled
+--- a/chrome/app/chrome_main_delegate.cc
++++ b/chrome/app/chrome_main_delegate.cc
+@@ -82,6 +82,7 @@
+ #include "components/variations/service/variations_network_clock.h"
+ #include "components/variations/variations_ids_provider.h"
+ #include "components/version_info/channel.h"
++#include "components/ungoogled/persona_validator.h"  // clearcote: --clearcote-validate-persona
+ #include "components/version_info/version_info.h"
+ #include "content/public/app/initialize_mojo_core.h"
+ #include "content/public/common/content_client.h"
+@@ -1094,6 +1095,17 @@
+   // before any other files are opened, see https://crbug.com/40259890.
+   const bool is_browser = !command_line.HasSwitch(switches::kProcessType);
+ 
++  // clearcote: --clearcote-validate-persona=<N|a,b,c|current> derives the persona this command
++  // line would serve for each seed, runs the coherence invariants, prints the report (or writes
++  // it to --clearcote-validate-persona-out=<file>), and exits: 0 clean, 3 contradictions. It runs
++  // after the licence gate so validate mode is not a way around it. See persona_validator.h.
++  if (is_browser) {
++    if (const std::optional<int> validate_rc = ungoogled::MaybeRunPersonaValidationCli(
++            command_line, std::string(version_info::GetVersionNumber()))) {
++      return *validate_rc;
++    }
++  }
++
+   // clearcote: the in-browser AI agent (--agent-llm-url) drives Chrome's Actor framework, which
+   // is gated behind features::kGlicActor -- left off at runtime by this build's variations config.
+   // When the agent is configured, auto-enable the feature (merging into any existing

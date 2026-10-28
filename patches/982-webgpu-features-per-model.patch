@@ -1,0 +1,150 @@
+clearcote: WebGPU adapter.features follow the claimed GPU model.
+
+The persona spoofed the GPU identity strings while navigator.gpu still exposed the HOST
+adapter's feature set -- an NVIDIA feature list next to an Intel UHD 770 string, readable in one
+page. Real Windows captures of the two models the persona serves (audit corpus, decontaminated)
+report one modal set each: UHD 770 17 features in 19 of 21 captures (no shader-f16, no
+subgroups), RTX 3060 19 features in 5 of 7. The persona carries that list for the model its
+FINAL renderer string names; a capture's own webgpu.features list is authoritative; an unknown
+model leaves the list empty and the real adapter's set is served. gpu_adapter.cc serves the
+INTERSECTION of the list with the real adapter's features -- subtractive only, because
+requestDevice(requiredFeatures) is validated by Dawn against the real adapter and an exception
+would be a worse tell than a missing feature. The validator requires the model's list and
+rejects shader-f16/subgroups on a UHD 770 claim.
+
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -172,6 +172,26 @@
+     {8.95, 1.0}, {9.3, 1.0}, {9.5, 1.0}, {9.9, 1.0},
+ }};
+ 
++// clearcote: WebGPU adapter.features reported by real Windows captures of the persona GPU
++// models (audit corpus, decontaminated, file 72). Intel UHD 770: 19 of 21 captures report
++// exactly this 17-feature set (the other 2 add shader-f16 + subgroups). NVIDIA RTX 3060: 5 of 7
++// report this 19-feature set (the other 2 add two chromium-experimental-* features).
++constexpr const char* kWebGpuFeaturesUhd770[] = {
++    "bgra8unorm-storage", "clip-distances", "core-features-and-limits", "depth-clip-control",
++    "depth32float-stencil8", "dual-source-blending", "float32-blendable", "float32-filterable",
++    "indirect-first-instance", "primitive-index", "rg11b10ufloat-renderable",
++    "texture-component-swizzle", "texture-compression-bc", "texture-compression-bc-sliced-3d",
++    "texture-formats-tier1", "texture-formats-tier2", "timestamp-query",
++};
++constexpr const char* kWebGpuFeaturesRtx3060[] = {
++    "bgra8unorm-storage", "clip-distances", "core-features-and-limits", "depth-clip-control",
++    "depth32float-stencil8", "dual-source-blending", "float32-blendable", "float32-filterable",
++    "indirect-first-instance", "primitive-index", "rg11b10ufloat-renderable", "shader-f16",
++    "subgroups", "texture-component-swizzle", "texture-compression-bc",
++    "texture-compression-bc-sliced-3d", "texture-formats-tier1", "texture-formats-tier2",
++    "timestamp-query",
++};
++
+ constexpr std::array<WeightedEntry<WebGLGPU>, 3> kWebGLGPUs = {{
+     {{"Google Inc. (Intel)",
+       "ANGLE (Intel, Intel(R) UHD Graphics 770 (0xA780) Direct3D11 vs_5_0 "
+@@ -426,6 +446,14 @@
+     p->webgpu_vendor = *v;
+   if (const std::string* a = d.FindStringByDottedPath("webgpu.architecture"))
+     p->webgpu_architecture = *a;
++  // clearcote: a capture's webgpu.features list is the real adapter's set -- authoritative.
++  if (const base::ListValue* wf = d.FindListByDottedPath("webgpu.features")) {
++    if (!wf->empty()) {
++      p->webgpu_features.clear();
++      for (const base::Value& item : *wf)
++        if (const std::string* s = item.GetIfString()) p->webgpu_features.push_back(*s);
++    }
++  }
+   // clearcote: imported profile WebGPU limits (webgpu.limits dict) override the
+   // default desktop table key-by-key. Big values (>INT_MAX) arrive as JSON
+   // doubles, so fall back to FindDouble / numeric string.
+@@ -997,6 +1025,16 @@
+   // sentinel and is left alone.
+   if (p.persona_schema >= 2 && p.js_heap_size_limit == 0)
+     p.js_heap_size_limit = PersonaHeapLimitBytes(p);
++  // clearcote: WebGPU features for the model the FINAL renderer string names (seed, profile or
++  // switch), unless a capture already supplied its own list or the GPU is real. Unknown models
++  // leave the list empty and the real adapter's features are served.
++  if (p.webgpu_features.empty() && !p.webgl_real) {
++    if (p.webgl_renderer.find("UHD Graphics 770") != std::string::npos) {
++      p.webgpu_features.assign(std::begin(kWebGpuFeaturesUhd770), std::end(kWebGpuFeaturesUhd770));
++    } else if (p.webgl_renderer.find("RTX 3060") != std::string::npos) {
++      p.webgpu_features.assign(std::begin(kWebGpuFeaturesRtx3060), std::end(kWebGpuFeaturesRtx3060));
++    }
++  }
+   return p;
+ }
+ 
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -231,6 +231,11 @@
+   // --fingerprint-webgpu-vendor/-architecture overrides.
+   std::string webgpu_vendor;
+   std::string webgpu_architecture;
++  // clearcote: the WebGPU adapter.features the claimed GPU model exposes, as real Windows
++  // captures of that model report them (file 72). Empty = unknown model, do not filter (the
++  // real adapter's set is served). gpu_adapter.cc serves the INTERSECTION of this list with the
++  // real adapter's features -- subtractive only, never a feature the host cannot back.
++  std::vector<std::string> webgpu_features;
+ 
+   // ---- MediaCapabilities.decodingInfo() per codec family. Key is the codec
+   // family ("h264","vp8","vp9","av1","hevc"); the triple overrides the host's
+--- a/components/ungoogled/persona_validator.cc
++++ b/components/ungoogled/persona_validator.cc
+@@ -352,6 +352,21 @@
+                                         p.webgl_renderer + "' (macOS persona is not modelled)");
+       break;
+   }
++  // WebGPU features must be the claimed model's reference set (file 72) when the model is one
++  // the persona serves; a UHD 770 exposing shader-f16/subgroups is the minority 2/21 capture
++  // shape and would pair a discrete-class feature with an iGPU string.
++  if (!p.webgl_real) {
++    const bool uhd = Has(p.webgl_renderer, "UHD Graphics 770");
++    const bool rtx = Has(p.webgl_renderer, "RTX 3060");
++    if ((uhd || rtx) && p.webgpu_features.empty())
++      c.Error("gpu.webgpu_features_for_model", "no WebGPU feature list for '" + p.webgl_renderer + "'");
++    bool f16 = false, subg = false;
++    for (const std::string& f : p.webgpu_features) { f16 |= f == "shader-f16"; subg |= f == "subgroups"; }
++    if (uhd && (f16 || subg))
++      c.Error("gpu.webgpu_features_match_model", "UHD 770 persona exposing shader-f16/subgroups");
++    if (rtx && !(f16 && subg))
++      c.Error("gpu.webgpu_features_match_model", "RTX 3060 persona without shader-f16/subgroups");
++  }
+   // WebGPU adapter identity must name the same GPU as WebGL.
+   if (p.webgpu_vendor.empty()) {
+     c.Error("gpu.webgpu_vendor_present", "navigator.gpu vendor empty");
+@@ -679,6 +694,7 @@
+                   " webgpu=" + p.webgpu_vendor + "/" + p.webgpu_architecture +
+                   " rtt=" + S(p.netinfo_rtt_ms) + " dl=" + S(p.netinfo_downlink_mbps) +
+                   " sr=" + S(static_cast<double>(p.audio_sample_rate)) +
++                  " wgpufeat=" + S(static_cast<uint64_t>(p.webgpu_features.size())) +
+                   " voices=" + S(static_cast<uint64_t>(p.voices.size())) +
+                   " devices=" + S(static_cast<uint64_t>(p.media_devices.size())) +
+                   " real_gpu=" + (p.webgl_real ? "1" : "0");
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+@@ -151,6 +151,26 @@
+   power_preference_ = powerProperties.powerPreference;
+ 
+   features_ = MakeFeatureNameSet(GetHandle());
++  // clearcote: adapter.features follow the claimed GPU model. Real Windows captures of the
++  // persona's models report one modal feature set each (persona_profile.cc, file 72); the host
++  // adapter's own set under a different GPU claim was the last unaddressed cross-surface tell
++  // (an NVIDIA feature list next to an Intel UHD 770 string). Served as the INTERSECTION with
++  // the real adapter: requestDevice(requiredFeatures) is validated by Dawn against the real
++  // adapter, so claiming a feature the host lacks would turn a capability probe into an
++  // exception -- a worse tell than a missing feature. Empty list = unknown model, unfiltered.
++  {
++    const auto& cc_p = ungoogled::CurrentPersona();
++    if (!cc_p.webgl_real && !cc_p.webgpu_features.empty()) {
++      GPUSupportedFeatures* cc_filtered = MakeGarbageCollected<GPUSupportedFeatures>();
++      for (const std::string& cc_name : cc_p.webgpu_features) {
++        const std::optional<V8GPUFeatureName> cc_f =
++            V8GPUFeatureName::Create(String::FromUtf8(cc_name));
++        if (cc_f && features_->Has(cc_f->AsEnum()))
++          cc_filtered->AddFeatureName(*cc_f);
++      }
++      features_ = cc_filtered;
++    }
++  }
+ 
+   GPUSupportedLimits::ComboLimits limits;
+   GetHandle().GetLimits(limits.GetLinked());

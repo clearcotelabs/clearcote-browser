@@ -1,0 +1,198 @@
+clearcote: WebGPU adapter architecture follows the GPU model; a capture's own value is read.
+
+Two defects in one seam. The profile importer read the WebGPU identity from webgpu.vendor /
+webgpu.architecture, but captures store it under webgpu.info.*, so a donor's correct value was
+never read and the fallback always fired. The fallback pinned the architecture per vendor: every
+NVIDIA persona said "ampere" (a GTX 1060 is Pascal), every AMD one "rdna2" (a spelling real
+Chrome never emits; Dawn says "rdna-2"). Now the importer reads webgpu.info.* first, the fallback
+derives the architecture from the model the renderer string names using the modal value of real
+decontaminated Windows captures, and the validator rejects a derived architecture that disagrees
+with the model or a desktop spelling outside the vocabulary real Chrome uses (a captured identity
+only warns: dual-GPU laptops legitimately disagree). REPRO gains wgpuarch=.
+
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -9,6 +9,7 @@
+ #include <cstddef>
+ #include <mutex>
+ #include <random>
++#include <cstring>
+ #include <string>
+ 
+ #include "base/base64.h"
+@@ -440,12 +441,19 @@
+       }
+     }
+   }
+-  // clearcote: imported profile WebGPU adapter identity (webgpu.vendor /
+-  // webgpu.architecture) overrides the seed-derived values.
+-  if (const std::string* v = d.FindStringByDottedPath("webgpu.vendor"))
+-    p->webgpu_vendor = *v;
+-  if (const std::string* a = d.FindStringByDottedPath("webgpu.architecture"))
+-    p->webgpu_architecture = *a;
++  // clearcote: imported profile WebGPU adapter identity overrides the seed-derived values.
++  // Captures store it under webgpu.info.{vendor,architecture} (adapter.info as the page read
++  // it); the flat webgpu.{vendor,architecture} form is kept for hand-written profiles. Reading
++  // only the flat form left every captured value unread, so the vendor-level fallback below
++  // fired for every capture -- a GTX 1060 profile then said "ampere".
++  {
++    const std::string* v = d.FindStringByDottedPath("webgpu.info.vendor");
++    if (!v) v = d.FindStringByDottedPath("webgpu.vendor");
++    const std::string* a = d.FindStringByDottedPath("webgpu.info.architecture");
++    if (!a) a = d.FindStringByDottedPath("webgpu.architecture");
++    if (v && !v->empty()) { p->webgpu_vendor = *v; p->webgpu_identity_captured = true; }
++    if (a && !a->empty()) { p->webgpu_architecture = *a; p->webgpu_identity_captured = true; }
++  }
+   // clearcote: a capture's webgpu.features list is the real adapter's set -- authoritative.
+   if (const base::ListValue* wf = d.FindListByDottedPath("webgpu.features")) {
+     if (!wf->empty()) {
+@@ -565,6 +573,50 @@
+   return kActive;
+ }
+ 
++std::string WebGpuArchitectureForModel(const std::string& r) {
++  // Modal adapter.info.architecture per model class in real decontaminated Windows captures
++  // (file 72): GTX 750 maxwell; GTX 1070 pascal; GTX 1650/1660 + RTX 2060 turing; RTX 30xx
++  // ampere; RTX 40xx lovelace; RTX 50xx blackwell; Quadro K kepler; HD 520/530/620 + UHD 620/630
++  // gen-9; UHD 770 gen-12-lp (19/21); Iris Xe gen-12lp (6/9); Arc A gen-12hp; RX 580 gcn-4;
++  // RX 6700 rdna-2; RX 7xxx / Radeon 780 rdna-3; RX 9070 rdna-4.
++  auto has = [&r](const char* s) { return r.find(s) != std::string::npos; };
++  auto number_after = [&r](const char* prefix) -> int {
++    const size_t i = r.find(prefix);
++    if (i == std::string::npos) return -1;
++    size_t j = i + strlen(prefix);
++    int n = 0, digits = 0;
++    while (j < r.size() && r[j] >= '0' && r[j] <= '9' && digits < 4) { n = n * 10 + (r[j] - '0'); ++j; ++digits; }
++    return digits ? n : -1;
++  };
++  if (has("GeForce")) {
++    const int rtx = number_after("RTX "), gtx = number_after("GTX ");
++    if (rtx >= 5000) return "blackwell";
++    if (rtx >= 4000) return "lovelace";
++    if (rtx >= 3000) return "ampere";
++    if (rtx >= 2000) return "turing";
++    if (gtx >= 1600) return "turing";
++    if (gtx >= 1000) return "pascal";
++    if (gtx >= 700) return "maxwell";
++    return std::string();
++  }
++  if (has("Quadro K")) return "kepler";
++  if (has("UHD Graphics 7")) return "gen-12-lp";
++  if (has("UHD Graphics 6") || has("HD Graphics 5") || has("HD Graphics 6")) return "gen-9";
++  if (has("Iris(R) Xe") || has("Iris Xe")) return "gen-12lp";
++  if (has("Arc(TM) A")) return "gen-12hp";
++  if (has("Radeon RX ")) {
++    const int n = number_after("Radeon RX ");
++    if (n >= 9000) return "rdna-4";
++    if (n >= 7000) return "rdna-3";
++    if (n >= 6000) return "rdna-2";
++    if (n >= 5000) return "rdna-1";
++    if (n >= 400) return "gcn-4";
++    return std::string();
++  }
++  if (has("Radeon 780") || has("Radeon 760")) return "rdna-3";
++  return std::string();
++}
++
+ unsigned PersonaSchema() {
+   static const unsigned kSchema = [] {
+     const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+@@ -998,13 +1050,17 @@
+   // FINAL WebGL GPU (after the gpu-vendor switch/profile) so navigator.gpu always
+   // matches the WebGL UNMASKED vendor: lowercase WebGPU vendor + canonical arch.
+   if (p.webgpu_vendor.empty() || p.webgpu_architecture.empty()) {
++    // The architecture follows the MODEL the renderer string names (real captures: a GTX 1060
++    // is pascal, an RTX 3060 ampere); the per-vendor value is only the default for a model the
++    // table does not know. "rdna2" was a spelling no real Chrome emits -- Dawn says "rdna-2".
++    const std::string model_arch = WebGpuArchitectureForModel(p.webgl_renderer);
+     std::string cc_v, cc_a;
+     if (p.webgl_vendor.find("NVIDIA") != std::string::npos) {
+-      cc_v = "nvidia"; cc_a = "ampere";
++      cc_v = "nvidia"; cc_a = model_arch.empty() ? "ampere" : model_arch;
+     } else if (p.webgl_vendor.find("AMD") != std::string::npos ||
+                p.webgl_vendor.find("ATI") != std::string::npos ||
+                p.webgl_vendor.find("Radeon") != std::string::npos) {
+-      cc_v = "amd"; cc_a = "rdna2";
++      cc_v = "amd"; cc_a = model_arch.empty() ? "rdna-2" : model_arch;
+     } else if (p.webgl_vendor.find("ARM") != std::string::npos ||
+                p.webgl_vendor.find("Mali") != std::string::npos) {
+       // clearcote: Android Mali persona -> ARM Valhall (Mali-G710/G68), so
+@@ -1015,7 +1071,7 @@
+                p.webgl_vendor.find("Adreno") != std::string::npos) {
+       cc_v = "qualcomm"; cc_a = "adreno";
+     } else {
+-      cc_v = "intel"; cc_a = "gen-12-lp";
++      cc_v = "intel"; cc_a = model_arch.empty() ? "gen-12-lp" : model_arch;
+     }
+     if (p.webgpu_vendor.empty()) p.webgpu_vendor = cc_v;
+     if (p.webgpu_architecture.empty()) p.webgpu_architecture = cc_a;
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -236,6 +236,9 @@
+   // real adapter's set is served). gpu_adapter.cc serves the INTERSECTION of this list with the
+   // real adapter's features -- subtractive only, never a feature the host cannot back.
+   std::vector<std::string> webgpu_features;
++  // clearcote: true when webgpu_vendor/webgpu_architecture came from an imported capture
++  // (authoritative: a real machine, possibly dual-GPU) rather than from the model table.
++  bool webgpu_identity_captured = false;
+ 
+   // ---- MediaCapabilities.decodingInfo() per codec family. Key is the codec
+   // family ("h264","vp8","vp9","av1","hevc"); the triple overrides the host's
+@@ -320,6 +323,11 @@
+ // little under the nominal size. Computed from the FINAL device_memory_gb (after the platform
+ // fix-ups); a capture's own jsHeapSizeLimit wins over it.
+ COMPONENT_EXPORT(UNGOOGLED) uint64_t PersonaHeapLimitBytes(const PersonaProfile& p);
++
++// clearcote: the WebGPU adapter architecture real Chrome reports for the GPU model named by a
++// WebGL renderer string -- the modal value across real decontaminated Windows captures
++// (SESSION-CONTEXT/72). Empty when the model is not in the table.
++COMPONENT_EXPORT(UNGOOGLED) std::string WebGpuArchitectureForModel(const std::string& renderer);
+ // clearcote: the plausible range for this persona's RAM and form factor: the same formula with a
+ // reserved slice of 0 (upper) and 1 GiB (lower). The validator errors outside the band and only
+ // warns when a value inside it is not the seed-derived one (an imported capture).
+--- a/components/ungoogled/persona_validator.cc
++++ b/components/ungoogled/persona_validator.cc
+@@ -376,8 +376,34 @@
+       c.Error("gpu.webgpu_vendor_matches_webgl",
+               "WebGPU vendor '" + p.webgpu_vendor + "' vs WebGL vendor '" + p.webgl_vendor + "'");
+     }
+-    if (p.webgpu_architecture.empty())
++    if (p.webgpu_architecture.empty()) {
+       c.Warn("gpu.webgpu_architecture_present", "navigator.gpu architecture empty");
++    } else {
++      // The architecture must be the one real Chrome reports for the model the renderer names.
++      // A captured identity may legitimately disagree (dual-GPU laptop: WebGL on one adapter,
++      // WebGPU on the other), so that case warns; a derived one that disagrees is a defect.
++      const std::string want = WebGpuArchitectureForModel(p.webgl_renderer);
++      if (!want.empty() && p.webgpu_architecture != want) {
++        const std::string msg = "'" + p.webgl_renderer + "' is " + want +
++                                " but navigator.gpu says '" + p.webgpu_architecture + "'";
++        if (p.webgpu_identity_captured)
++          c.Warn("gpu.webgpu_architecture_matches_model", msg);
++        else
++          c.Error("gpu.webgpu_architecture_matches_model", msg);
++      }
++      // Desktop spellings real Chrome/Dawn emits (real Windows captures, file 72).
++      if (!p.mobile) {
++        static constexpr const char* kArchVocab[] = {
++            "gen-8", "gen-9", "gen-11", "gen-12lp", "gen-12-lp", "gen-12hp", "xe-lpg", "xe-2lpg",
++            "xe-3lpg", "kepler", "maxwell", "pascal", "turing", "ampere", "lovelace", "blackwell",
++            "gcn-4", "gcn-5", "rdna-1", "rdna-2", "rdna-3", "rdna-4", "warp"};
++        bool known = false;
++        for (const char* a : kArchVocab) known |= (p.webgpu_architecture == a);
++        if (!known)
++          c.Error("gpu.webgpu_architecture_vocabulary",
++                  "navigator.gpu architecture '" + p.webgpu_architecture + "' is not a spelling real Chrome emits");
++      }
++    }
+   }
+ }
+ 
+@@ -694,6 +720,7 @@
+                   " webgpu=" + p.webgpu_vendor + "/" + p.webgpu_architecture +
+                   " rtt=" + S(p.netinfo_rtt_ms) + " dl=" + S(p.netinfo_downlink_mbps) +
+                   " sr=" + S(static_cast<double>(p.audio_sample_rate)) +
++                  " wgpuarch=" + p.webgpu_architecture +
+                   " wgpufeat=" + S(static_cast<uint64_t>(p.webgpu_features.size())) +
+                   " voices=" + S(static_cast<uint64_t>(p.voices.size())) +
+                   " devices=" + S(static_cast<uint64_t>(p.media_devices.size())) +

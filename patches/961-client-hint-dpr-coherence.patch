@@ -1,0 +1,178 @@
+clearcote(#11): Sec-CH-DPR must follow the persona.
+
+window.devicePixelRatio was overridden in the renderer while the Sec-CH-DPR client hint kept
+reporting the host's real display, so any site that opted into client hints received both values in
+a single page load and could see them disagree -- with no fingerprinting work of its own, and no
+population baseline needed. Reported against 149; the sibling Sec-CH-Device-Memory defect was
+already fixed by 030, which works precisely because both channels read one blink/common function.
+
+Two producers had to change, which is why the first attempt at this fix failed verification:
+
+  * content/browser/client_hints/client_hints.cc  -- the browser adds the hint on navigation
+  * third_party/blink/.../loader/frame_fetch_context.cc -- the renderer adds it for fetches, and
+    read Document::DevicePixelRatio(), a DIFFERENT accessor from the LocalDOMWindow getter the
+    persona overrides
+
+Both now resolve through ungoogled::PersonaDevicePixelRatio() (flag > persona > none), so the rule
+lives in one place and the two channels cannot disagree. The overridden header is deliberately not
+zoom-scaled, because the JS value the persona returns does not track zoom either.
+
+Verified on both platforms, host DPR 1, persona DPR forced to 2 and 3: header and JS agree in every
+configuration tested.
+
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -249,6 +249,18 @@
+ // persona; later calls return the same one. Thread-safe (std::call_once).
+ COMPONENT_EXPORT(UNGOOGLED) const PersonaProfile& CurrentPersona();
+ 
++// clearcote: the device pixel ratio this persona presents, or 0 when there is no
++// override and the caller should fall back to the real display value. Resolution
++// order is flag > persona > none, which is what window.devicePixelRatio returns.
++//
++// SINGLE SOURCE OF TRUTH -- both window.devicePixelRatio (renderer) and the
++// Sec-CH-DPR client hint (browser process) must resolve through this. When only
++// the renderer applied the override, a site that opted into client hints got the
++// real display DPR on the wire and the persona value in JS, so the browser
++// contradicted itself inside one page load with no fingerprinting work required
++// of the site. Two code paths must never own the same rule.
++COMPONENT_EXPORT(UNGOOGLED) double PersonaDevicePixelRatio();
++
+ // clearcote: the persona's speechSynthesis voice list, retargeted to the
+ // persona's locale. |accept_languages| is the RendererPreferences
+ // Accept-Language string -- the SAME field blink::Settings::GetAcceptLanguages()
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -797,6 +797,34 @@
+   return p;
+ }
+ 
++double PersonaDevicePixelRatio() {
++  // Resolved once per process: this is read on every devicePixelRatio access and
++  // HasSwitch() is a map lookup plus (on Windows) a lowercasing allocation.
++  static const double kDpr = [] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd) {
++      return 0.0;
++    }
++    double flag_dpr = 0;
++    if (cmd->HasSwitch(switches::kFingerprintDevicePixelRatio) &&
++        base::StringToDouble(
++            cmd->GetSwitchValueASCII(switches::kFingerprintDevicePixelRatio),
++            &flag_dpr) &&
++        flag_dpr > 0) {
++      return flag_dpr;
++    }
++    // A seeded persona carries its own DPR; without --fingerprint there is none.
++    if (cmd->HasSwitch(switches::kFingerprint)) {
++      const double persona_dpr = CurrentPersona().device_pixel_ratio;
++      if (persona_dpr > 0) {
++        return persona_dpr;
++      }
++    }
++    return 0.0;
++  }();
++  return kDpr;
++}
++
+ const PersonaProfile& CurrentPersona() {
+   // Intentionally leaked process-lifetime singleton (no exit-time destructor),
+   // lazily initialized once per process.
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -2037,24 +2037,15 @@
+     // override is always > 0, so 0 is an unambiguous "no override" sentinel
+     // and the absent / empty / unparseable / <= 0 cases fall through exactly
+     // as they did before.
+-    static const double kLsDpr = [] {
+-      const base::CommandLine* ls_cmd = base::CommandLine::ForCurrentProcess();
+-      double ls_dpr = 0;
+-      if (ls_cmd->HasSwitch(::switches::kFingerprintDevicePixelRatio) &&
+-          base::StringToDouble(
+-              ls_cmd->GetSwitchValueASCII(::switches::kFingerprintDevicePixelRatio),
+-              &ls_dpr) &&
+-          ls_dpr > 0) {
+-        return ls_dpr;
+-      }
+-      return 0.0;
+-    }();
++    // clearcote(#11): both the flag and the persona case now resolve through
++    // ungoogled::PersonaDevicePixelRatio(), which the browser-side Sec-CH-DPR
++    // hint also calls, so the two channels cannot disagree. Still cached, and
++    // the order (flag > persona > real) is unchanged.
++    const double kLsDpr = ungoogled::PersonaDevicePixelRatio();
+     if (kLsDpr > 0) {
+       return kLsDpr;
+     }
+   }
+-  if (PersonaWindowActive())
+-    return ungoogled::CurrentPersona().device_pixel_ratio;
+ 
+   return GetFrame()->DevicePixelRatio();
+ }
+--- a/third_party/blink/renderer/core/loader/frame_fetch_context.cc
++++ b/third_party/blink/renderer/core/loader/frame_fetch_context.cc
+@@ -30,6 +30,8 @@
+ 
+ #include "third_party/blink/renderer/core/loader/frame_fetch_context.h"
+ 
++#include "components/ungoogled/persona_profile.h"
++
+ namespace {
+ BASE_FEATURE(kFastMemoryCacheWithDevTools, base::FEATURE_ENABLED_BY_DEFAULT);
+ }
+@@ -1388,6 +1390,15 @@
+ }
+ 
+ float FrameFetchContext::GetDevicePixelRatio() const {
++  // clearcote(#11): this feeds the Sec-CH-DPR client hint. It read
++  // Document::DevicePixelRatio(), the frame's REAL ratio -- a different accessor
++  // from the LocalDOMWindow::devicePixelRatio getter the persona overrides. A
++  // page therefore saw the persona ratio in JS and the host's true ratio on the
++  // wire, contradicting itself in one load. Same resolver both channels use.
++  const double persona_dpr = ungoogled::PersonaDevicePixelRatio();
++  if (persona_dpr > 0) {
++    return static_cast<float>(persona_dpr);
++  }
+   if (GetResourceFetcherProperties().IsDetached()) {
+     return frozen_state_->device_pixel_ratio;
+   }
+--- a/content/browser/client_hints/client_hints.cc
++++ b/content/browser/client_hints/client_hints.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "content/browser/client_hints/client_hints.h"
+ 
++#include "components/ungoogled/persona_profile.h"
++
+ #include <algorithm>
+ #include <optional>
+ #include <string>
+@@ -140,6 +142,13 @@
+ }
+ 
+ double GetDeviceScaleFactor() {
++  // clearcote(#11): the persona wins over the real display, so Sec-CH-DPR
++  // reports what window.devicePixelRatio reports. Same resolver as the
++  // renderer -- see ungoogled::PersonaDevicePixelRatio().
++  const double persona_dpr = ungoogled::PersonaDevicePixelRatio();
++  if (persona_dpr > 0) {
++    return persona_dpr;
++  }
+   double device_scale_factor = 1.0;
+   if (display::Screen::Get()) {
+     device_scale_factor =
+@@ -256,7 +265,12 @@
+   DCHECK(headers);
+   DCHECK(context);
+   double device_scale_factor = GetDeviceScaleFactor();
+-  double zoom_factor = GetZoomFactor(context, url);
++  // clearcote(#11): when a persona DPR is in force, window.devicePixelRatio
++  // returns it verbatim and does not track zoom, so the header must not be
++  // zoom-scaled either or the two channels diverge again at non-default zoom.
++  double zoom_factor = ungoogled::PersonaDevicePixelRatio() > 0
++                           ? 1.0
++                           : GetZoomFactor(context, url);
+   SetHeaderToDouble(headers,
+                     use_deprecated_version ? WebClientHintsType::kDpr_DEPRECATED
+                                            : WebClientHintsType::kDpr,

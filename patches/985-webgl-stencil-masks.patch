@@ -1,0 +1,173 @@
+clearcote(#15): serve the capture stencil masks until the context writes stencil state
+
+The four GL stencil masks are MUTABLE state, not capability limits, so they are served
+from the persona only while the page has not written stencil state -- after that
+getParameter reports the real values and set-then-read cannot disagree. Present in the
+shipped r19 binary but carried by no patch.
+
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -191,6 +191,14 @@
+   int webgl_alpha_bits = 8;
+   int webgl_depth_bits = 24;
+   int webgl_stencil_bits = 8;
++
++  // clearcote(#15): the four stencil masks as the capture recorded them. 0 means "no captured
++  // value" and the real one is used. These are MUTABLE GL state, not capability limits -- they are
++  // served only until the context writes stencil state, so set-then-read still agrees.
++  int64_t webgl_stencil_value_mask = 0;
++  int64_t webgl_stencil_writemask = 0;
++  int64_t webgl_stencil_back_value_mask = 0;
++  int64_t webgl_stencil_back_writemask = 0;
+   int webgl_subpixel_bits = 4;
+   int webgl_sample_buffers = 1;
+   int webgl_samples = 4;
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -405,6 +405,16 @@
+       gi("ALPHA_BITS", &p->webgl_alpha_bits);
+       gi("DEPTH_BITS", &p->webgl_depth_bits);
+       gi("STENCIL_BITS", &p->webgl_stencil_bits);
++      // clearcote(#15): read as double -- these are GLuint bitmasks (0xFFFFFFFF) that exceed
++      // int32, and doubles hold integers exactly to 2^53.
++      if (auto v = num(*pr, "STENCIL_VALUE_MASK"))
++        p->webgl_stencil_value_mask = static_cast<int64_t>(*v);
++      if (auto v = num(*pr, "STENCIL_WRITEMASK"))
++        p->webgl_stencil_writemask = static_cast<int64_t>(*v);
++      if (auto v = num(*pr, "STENCIL_BACK_VALUE_MASK"))
++        p->webgl_stencil_back_value_mask = static_cast<int64_t>(*v);
++      if (auto v = num(*pr, "STENCIL_BACK_WRITEMASK"))
++        p->webgl_stencil_back_writemask = static_cast<int64_t>(*v);
+       gi("SUBPIXEL_BITS", &p->webgl_subpixel_bits);
+       gi("SAMPLE_BUFFERS", &p->webgl_sample_buffers);
+       gi("SAMPLES", &p->webgl_samples);
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+@@ -338,6 +338,11 @@
+   void hint(GLenum target, GLenum mode);
+   bool isBuffer(WebGLBuffer*);
+   bool isContextLost() const override;
++
++  // clearcote(#15): set once the page writes stencil state, after which the captured masks stop
++  // being served and getParameter reports the real values, so set-then-read cannot disagree.
++  void ClearcoteMarkStencilStateTouched() { clearcote_stencil_touched_ = true; }
++  bool ClearcoteStencilStateTouched() const { return clearcote_stencil_touched_; }
+   bool isEnabled(GLenum cap);
+   bool isFramebuffer(WebGLFramebuffer*);
+   bool isProgram(WebGLProgram*);
+@@ -930,6 +935,7 @@
+   GLint pack_alignment_ = 4;
+   GLint unpack_alignment_ = 4;
+   bool unpack_flip_y_ = false;
++  bool clearcote_stencil_touched_ = false;  // clearcote(#15)
+   bool unpack_premultiply_alpha_ = false;
+   GLenum unpack_colorspace_conversion_ = GC3D_BROWSER_DEFAULT_WEBGL;
+   // The following three unpack params belong to WebGL2 only.
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -283,6 +283,27 @@
+ // clamping the persona at init, but robust across multiple contexts and
+ // GPU-process restarts, and it costs exactly the one GetIntegerv that stock
+ // Chrome already performs for this pname.
++// clearcote(#15): the capture's stencil masks, served ONLY while the context has not written
++// stencil state. These are mutable GL state (stencilFunc / stencilMask and the *Separate
++// variants write them), not capability limits -- so overriding them unconditionally would make
++// gl.stencilMask(x) followed by getParameter(STENCIL_WRITEMASK) disagree, a contradiction any
++// page can check with no reference data. 0 means the capture carried no value.
++int64_t ClearcoteStencilMask(GLenum pname) {
++  const ungoogled::PersonaProfile& p = ungoogled::CurrentPersona();
++  switch (pname) {
++    case GL_STENCIL_VALUE_MASK:
++      return p.webgl_stencil_value_mask;
++    case GL_STENCIL_WRITEMASK:
++      return p.webgl_stencil_writemask;
++    case GL_STENCIL_BACK_VALUE_MASK:
++      return p.webgl_stencil_back_value_mask;
++    case GL_STENCIL_BACK_WRITEMASK:
++      return p.webgl_stencil_back_writemask;
++    default:
++      return 0;
++  }
++}
++
+ GLint ClampPersonaLimit(gpu::gles2::GLES2Interface* gl,
+                         GLenum pname,
+                         int persona_value) {
+@@ -4565,10 +4586,20 @@
+       return GetUnsignedIntParameter(script_state, pname);
+     case GL_STENCIL_BACK_REF:
+       return GetIntParameter(script_state, pname);
+-    case GL_STENCIL_BACK_VALUE_MASK:
++    case GL_STENCIL_BACK_VALUE_MASK: {
++      const int64_t cc_mask = ClearcoteStencilMask(pname);  // clearcote(#15)
++      if (cc_mask > 0 && !ClearcoteStencilStateTouched()) {
++        return WebGLAny(script_state, static_cast<GLuint>(cc_mask));
++      }
+       return GetUnsignedIntParameter(script_state, pname);
+-    case GL_STENCIL_BACK_WRITEMASK:
++    }
++    case GL_STENCIL_BACK_WRITEMASK: {
++      const int64_t cc_mask = ClearcoteStencilMask(pname);  // clearcote(#15)
++      if (cc_mask > 0 && !ClearcoteStencilStateTouched()) {
++        return WebGLAny(script_state, static_cast<GLuint>(cc_mask));
++      }
+       return GetUnsignedIntParameter(script_state, pname);
++    }
+     case GL_STENCIL_BITS:
+       if (!framebuffer_binding_ && !CreationAttributes().stencil)
+         return WebGLAny(script_state, kIntZero);
+@@ -4588,10 +4619,20 @@
+       return GetIntParameter(script_state, pname);
+     case GL_STENCIL_TEST:
+       return WebGLAny(script_state, stencil_enabled_);
+-    case GL_STENCIL_VALUE_MASK:
++    case GL_STENCIL_VALUE_MASK: {
++      const int64_t cc_mask = ClearcoteStencilMask(pname);  // clearcote(#15)
++      if (cc_mask > 0 && !ClearcoteStencilStateTouched()) {
++        return WebGLAny(script_state, static_cast<GLuint>(cc_mask));
++      }
+       return GetUnsignedIntParameter(script_state, pname);
+-    case GL_STENCIL_WRITEMASK:
++    }
++    case GL_STENCIL_WRITEMASK: {
++      const int64_t cc_mask = ClearcoteStencilMask(pname);  // clearcote(#15)
++      if (cc_mask > 0 && !ClearcoteStencilStateTouched()) {
++        return WebGLAny(script_state, static_cast<GLuint>(cc_mask));
++      }
+       return GetUnsignedIntParameter(script_state, pname);
++    }
+     case GL_SUBPIXEL_BITS:
+       return WebGLAny(script_state,
+                       static_cast<GLint>(ungoogled::CurrentPersona().webgl_subpixel_bits));
+@@ -6115,6 +6156,7 @@
+ void WebGLRenderingContextBase::stencilFunc(GLenum func,
+                                             GLint ref,
+                                             GLuint mask) {
++  ClearcoteMarkStencilStateTouched();  // clearcote(#15)
+   if (isContextLost())
+     return;
+   if (!ValidateStencilOrDepthFunc("stencilFunc", func))
+@@ -6130,6 +6172,7 @@
+                                                     GLenum func,
+                                                     GLint ref,
+                                                     GLuint mask) {
++  ClearcoteMarkStencilStateTouched();  // clearcote(#15)
+   if (isContextLost())
+     return;
+   if (!ValidateStencilOrDepthFunc("stencilFuncSeparate", func))
+@@ -6157,6 +6200,7 @@
+ }
+ 
+ void WebGLRenderingContextBase::stencilMask(GLuint mask) {
++  ClearcoteMarkStencilStateTouched();  // clearcote(#15)
+   if (isContextLost())
+     return;
+   stencil_mask_ = mask;
+@@ -6165,6 +6209,7 @@
+ }
+ 
+ void WebGLRenderingContextBase::stencilMaskSeparate(GLenum face, GLuint mask) {
++  ClearcoteMarkStencilStateTouched();  // clearcote(#15)
+   if (isContextLost())
+     return;
+   switch (face) {

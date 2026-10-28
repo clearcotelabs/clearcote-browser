@@ -1,0 +1,403 @@
+clearcote: versioned persona schema. Schema 1 = the original derivation, frozen and default;
+schema 2 (--fingerprint-schema=2) couples screen class and GPU class to the hardware tier and
+sizes performance.memory.jsHeapSizeLimit from the persona's RAM the way V8 does.
+
+Why versioned: coupling changes what a seed derives, and a seed's identity is a customer's
+stored session. Schema 1 is byte-for-byte unchanged for every seed (proven: 6000 personas, 3
+platforms, identical before/after); schema 2 is a separate identity space a launch opts into.
+
+Schema 2: per-tier screen pools (the kScreens marginals restricted to what a tier ships with,
+renormalised -- no new marginal); per-tier GPU class (Intel iGPU / NVIDIA; AMD deliberately
+absent until its class is decided), drawn always but honoured only when the launcher declared a
+real GPU backend (--fingerprint-gpu-backend-real) or a canvas bridge -- a discrete claim the
+host's pixels cannot back is worse than a plain one; heap limit = V8's sizing from physical
+memory (old generation physical/2 desktop or /4 Android, clamped [256 MiB, 4 GiB], 256 KiB
+pages; young generation from the semispace cap: 96 MiB desktop, 24 MiB non-high-end Android),
+with physical = nominal RAM minus a seed-derived reserved slice (64..320 MiB), sized last from
+the final RAM so the Android device table and an imported capture are respected. 16 GB and
+above reproduce the 4,395,630,592 real Chrome reports; 8 GB and 4 GB personas no longer claim a
+heap larger than their RAM. Validator: tier/screen/GPU coupling invariants and a V8 plausibility
+band for the heap. Both switches are forwarded to renderers.
+
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "components/ungoogled/persona_profile.h"
+ 
++#include <algorithm>
+ #include <array>
+ #include <cstddef>
+ #include <mutex>
+@@ -121,6 +122,34 @@
+ // claim scores far lower on VM/anti-detect classifiers than claiming a discrete
+ // GPU whose pixel output software rendering cannot match. NVIDIA/AMD are kept
+ // for future per-seed GPU selection; every persona currently uses index 0.
++// clearcote schema 2: the screen classes a machine of each hardware tier ships with. Weights are
++// the kScreens marginals restricted to that tier's entries (WeightedPick renormalises), so no new
++// marginal is invented -- a tier just cannot draw a display it does not pair with (a 4-core / 4 GB
++// laptop with a 4K panel, a workstation on 1366x768).
++constexpr std::array<WeightedEntry<ScreenSize>, 5> kScreensTier1 = {{
++    {{1366, 768, 728}, 0.15}, {{1536, 864, 824}, 0.12}, {{1920, 1080, 1040}, 0.34},
++    {{1600, 900, 860}, 0.04}, {{1440, 900, 860}, 0.05},
++}};
++constexpr std::array<WeightedEntry<ScreenSize>, 5> kScreensTier2 = {{
++    {{1920, 1080, 1040}, 0.34}, {{1920, 1080, 1080}, 0.06}, {{2560, 1440, 1400}, 0.10},
++    {{1680, 1050, 1010}, 0.04}, {{1536, 864, 824}, 0.12},
++}};
++constexpr std::array<WeightedEntry<ScreenSize>, 4> kScreensTier3 = {{
++    {{2560, 1440, 1400}, 0.10}, {{3840, 2160, 2120}, 0.10}, {{1920, 1080, 1040}, 0.34},
++    {{1920, 1080, 1080}, 0.06},
++}};
++constexpr std::array<WeightedEntry<ScreenSize>, 3> kScreensTier4 = {{
++    {{3840, 2160, 2120}, 0.10}, {{2560, 1440, 1400}, 0.10}, {{1920, 1080, 1040}, 0.34},
++}};
++// clearcote schema 2: GPU class per tier, as indices into kWebGLGPUs (0 Intel iGPU, 1 NVIDIA
++// discrete). AMD (index 2) is deliberately absent until its string/architecture class is decided.
++// The draw is always consumed so later seed-derived fields do not depend on the host; the result
++// is only honoured when the launcher declared a real GPU backend or configured a canvas bridge.
++constexpr std::array<WeightedEntry<size_t>, 2> kGpuTier1 = {{{0u, 1.00}, {1u, 0.00}}};
++constexpr std::array<WeightedEntry<size_t>, 2> kGpuTier2 = {{{0u, 0.55}, {1u, 0.45}}};
++constexpr std::array<WeightedEntry<size_t>, 2> kGpuTier3 = {{{0u, 0.15}, {1u, 0.85}}};
++constexpr std::array<WeightedEntry<size_t>, 2> kGpuTier4 = {{{0u, 0.10}, {1u, 0.90}}};
++
+ constexpr std::array<WeightedEntry<WebGLGPU>, 3> kWebGLGPUs = {{
+     {{"Google Inc. (Intel)",
+       "ANGLE (Intel, Intel(R) UHD Graphics 770 (0xA780) Direct3D11 vs_5_0 "
+@@ -486,6 +515,62 @@
+   return kActive;
+ }
+ 
++unsigned PersonaSchema() {
++  static const unsigned kSchema = [] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    return (cmd && cmd->GetSwitchValueASCII(switches::kFingerprintSchema) == "2") ? 2u : 1u;
++  }();
++  return kSchema;
++}
++
++namespace {
++
++// V8's heap sizing from physical memory (v8/src/heap/heap.cc), for the persona's form factor.
++uint64_t HeapLimitForPhysical(uint64_t physical, bool mobile) {
++  constexpr uint64_t kMiB = 1024ull * 1024ull;
++  constexpr uint64_t kGiB = 1024ull * kMiB;
++  constexpr uint64_t kPage = 256ull * 1024ull;  // v8 NormalPage::kPageSize
++  // Heap::OldGenerationSizeFromPhysicalMemory: kRatio 2 on 64-bit desktop, 4 on Android;
++  // clamped to [kDefaultMinHeapSize 256 MiB, kDefaultMaxHeapSize 4 GiB], page-rounded.
++  uint64_t old_gen = physical / (mobile ? 4ull : 2ull);
++  old_gen = std::min<uint64_t>(std::max<uint64_t>(old_gen, 256ull * kMiB), 4ull * kGiB);
++  old_gen = (old_gen + kPage - 1) / kPage * kPage;
++  // Heap::YoungGenerationSizeFromPhysicalMemory: semispace = (physical/4) / HeapSizeToSemiSpaceRatio,
++  // clamped to [2 MiB, DefaultMaxSemiSpaceSize]; Android below the 8 GB high-end threshold
++  // (physical / GB >= 8, integer division) uses ratio 128 and an 8 MiB cap, everything else
++  // ratio 32 and 32 MiB. Young = 2 semispaces + new large-object space (ratio 1).
++  const bool high_end = !mobile || (physical / kGiB) >= 8ull;
++  const uint64_t ratio = high_end ? 32ull : 128ull;
++  const uint64_t cap = high_end ? 32ull * kMiB : 8ull * kMiB;
++  uint64_t semi = (physical / 4) / ratio;
++  semi = std::min<uint64_t>(std::max<uint64_t>(semi, 2ull * kMiB), cap);
++  semi = (semi + kPage - 1) / kPage * kPage;
++  // HeapStatistics::heap_size_limit == Heap::MaxReserved().
++  return old_gen + 3ull * semi;
++}
++
++uint64_t NominalRamBytes(const PersonaProfile& p) {
++  constexpr uint64_t kGiB = 1024ull * 1024ull * 1024ull;
++  return static_cast<uint64_t>(p.device_memory_gb * static_cast<float>(kGiB));
++}
++
++}  // namespace
++
++uint64_t PersonaHeapLimitBytes(const PersonaProfile& p) {
++  constexpr uint64_t kMiB = 1024ull * 1024ull;
++  // Nominal RAM minus a hardware-reserved slice: 64 MiB + (seed-derived, < 256 MiB), 4 KiB grain.
++  const uint64_t nominal = NominalRamBytes(p);
++  const uint64_t reserved = (64ull * kMiB + ((p.persona_seed >> 20) % (256ull * kMiB))) & ~4095ull;
++  return HeapLimitForPhysical(nominal > reserved ? nominal - reserved : nominal, p.mobile);
++}
++
++void PersonaHeapLimitBounds(const PersonaProfile& p, uint64_t* lo, uint64_t* hi) {
++  constexpr uint64_t kGiB = 1024ull * 1024ull * 1024ull;
++  const uint64_t nominal = NominalRamBytes(p);
++  *hi = HeapLimitForPhysical(nominal, p.mobile);
++  *lo = HeapLimitForPhysical(nominal > kGiB ? nominal - kGiB : nominal / 2, p.mobile);
++}
++
+ uint64_t PersonaSeedFromString(const std::string& raw) {
+   uint64_t parsed = 0;
+   if (base::StringToUint64(raw, &parsed)) {
+@@ -611,23 +696,56 @@
+   }
+   std::discrete_distribution<size_t> tier_dist(tier_weights.begin(),
+                                                tier_weights.end());
+-  const HwTier& tier = kHwTiers[tier_dist(rng)].value;
++  const size_t tier_index = tier_dist(rng);
++  const HwTier& tier = kHwTiers[tier_index].value;
+   p.hardware_concurrency = WeightedPick(rng, tier.hc);
+   p.device_memory_gb = WeightedPick(rng, tier.mem);
+ 
+-  // Screen.
+-  const ScreenSize& sc = WeightedPick(rng, kScreens);
+-  p.screen_width = sc.w;
+-  p.screen_height = sc.h;
+-  p.avail_screen_width = sc.w;
+-  p.avail_screen_height = sc.avail_h;
+-  p.color_depth = WeightedPick(rng, kColorDepths);
+-  p.device_pixel_ratio = 1.0;
+-
+-  // WebGL identity (coherent Intel UHD 770 default; see kWebGLGPUs).
+-  const WebGLGPU& gpu = kWebGLGPUs[0].value;
+-  p.webgl_vendor = gpu.vendor;
+-  p.webgl_renderer = gpu.renderer;
++  if (PersonaSchema() == 1) {
++    // Schema 1: the original derivation, frozen. Same draws in the same order.
++    const ScreenSize& sc = WeightedPick(rng, kScreens);
++    p.screen_width = sc.w;
++    p.screen_height = sc.h;
++    p.avail_screen_width = sc.w;
++    p.avail_screen_height = sc.avail_h;
++    p.color_depth = WeightedPick(rng, kColorDepths);
++    p.device_pixel_ratio = 1.0;
++
++    // WebGL identity (coherent Intel UHD 770 default; see kWebGLGPUs).
++    const WebGLGPU& gpu = kWebGLGPUs[0].value;
++    p.webgl_vendor = gpu.vendor;
++    p.webgl_renderer = gpu.renderer;
++  } else {
++    // Schema 2: screen and GPU class follow the tier; the heap limit follows the RAM.
++    p.persona_schema = 2;
++    p.hw_tier = static_cast<unsigned>(tier_index + 1);
++    const ScreenSize& sc = tier_index == 0   ? WeightedPick(rng, kScreensTier1)
++                           : tier_index == 1 ? WeightedPick(rng, kScreensTier2)
++                           : tier_index == 2 ? WeightedPick(rng, kScreensTier3)
++                                             : WeightedPick(rng, kScreensTier4);
++    p.screen_width = sc.w;
++    p.screen_height = sc.h;
++    p.avail_screen_width = sc.w;
++    p.avail_screen_height = sc.avail_h;
++    p.color_depth = WeightedPick(rng, kColorDepths);
++    p.device_pixel_ratio = 1.0;
++
++    const size_t gpu_index = tier_index == 0   ? WeightedPick(rng, kGpuTier1)
++                             : tier_index == 1 ? WeightedPick(rng, kGpuTier2)
++                             : tier_index == 2 ? WeightedPick(rng, kGpuTier3)
++                                               : WeightedPick(rng, kGpuTier4);
++    const base::CommandLine* sc_cmd = base::CommandLine::ForCurrentProcess();
++    const bool discrete_ok =
++        sc_cmd && (sc_cmd->HasSwitch(switches::kFingerprintGpuBackendReal) ||
++                   sc_cmd->HasSwitch(switches::kCanvasBridgeUrl));
++    const WebGLGPU& gpu = kWebGLGPUs[discrete_ok ? gpu_index : 0].value;
++    p.webgl_vendor = gpu.vendor;
++    p.webgl_renderer = gpu.renderer;
++    // The heap is sized at the very end of DerivePersona(), from the final RAM: the android
++    // fix-up below replaces device_memory_gb from its device table, and a capture may supply
++    // its own limit. 0 marks "not yet sized".
++    p.js_heap_size_limit = 0;
++  }
+ 
+   // Default Windows voice set (closes the getVoices()=0 tell); a profile overrides.
+   p.voices = {
+@@ -845,6 +963,11 @@
+     if (p.webgpu_vendor.empty()) p.webgpu_vendor = cc_v;
+     if (p.webgpu_architecture.empty()) p.webgpu_architecture = cc_a;
+   }
++  // clearcote schema 2: size the heap from the FINAL RAM and form factor (see the 0 sentinel in
++  // the schema-2 block). A capture that carried perf_memory.jsHeapSizeLimit already replaced the
++  // sentinel and is left alone.
++  if (p.persona_schema >= 2 && p.js_heap_size_limit == 0)
++    p.js_heap_size_limit = PersonaHeapLimitBytes(p);
+   return p;
+ }
+ 
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -61,6 +61,13 @@
+ struct COMPONENT_EXPORT(UNGOOGLED) PersonaProfile {
+   // SplitMix64-mixed seed, kept so downstream per-seed routines can mix it in.
+   uint64_t persona_seed = 0;
++  // clearcote: which derivation produced this persona (see kFingerprintSchema). 1 is the
++  // original derivation and stays byte-identical for every seed; 2 couples screen and GPU class
++  // to the hardware tier and sizes the heap from RAM.
++  unsigned persona_schema = 1;
++  // clearcote: 1-based hardware tier the persona was drawn from (schema 2 only; 0 = not
++  // recorded). The validator checks screen and GPU class against it.
++  unsigned hw_tier = 0;
+ 
+   // ---- Identity ----
+   unsigned chrome_major_version = 151;
+@@ -286,6 +293,26 @@
+ // --fingerprint: they need a seed, not a persona.
+ COMPONENT_EXPORT(UNGOOGLED) bool PersonaActive();
+ 
++// clearcote: the persona schema this process derives under: 2 when --fingerprint-schema=2, else
++// 1. Resolved once per process.
++COMPONENT_EXPORT(UNGOOGLED) unsigned PersonaSchema();
++
++// clearcote: performance.memory.jsHeapSizeLimit for a schema-2 persona, computed the way V8
++// sizes its heap from physical memory (v8/src/heap/heap.cc). Desktop 64-bit: old generation =
++// physical/2 clamped to [256 MiB, 4 GiB] on 256 KiB pages; young = 2 semispaces + new-LO space
++// of a semispace = (physical/4)/32 clamped to [2 MiB, 32 MiB] => 96 MiB. A phone persona
++// (mobile): old = physical/4 with the same clamp; below the 8 GB high-end threshold the
++// semispace cap is 8 MiB with ratio 128 => 24 MiB young. Physical bytes = nominal RAM minus a
++// seed-derived hardware-reserved slice (64..320 MiB): a real AmountOfPhysicalMemory is always a
++// little under the nominal size. Computed from the FINAL device_memory_gb (after the platform
++// fix-ups); a capture's own jsHeapSizeLimit wins over it.
++COMPONENT_EXPORT(UNGOOGLED) uint64_t PersonaHeapLimitBytes(const PersonaProfile& p);
++// clearcote: the plausible range for this persona's RAM and form factor: the same formula with a
++// reserved slice of 0 (upper) and 1 GiB (lower). The validator errors outside the band and only
++// warns when a value inside it is not the seed-derived one (an imported capture).
++COMPONENT_EXPORT(UNGOOGLED) void PersonaHeapLimitBounds(const PersonaProfile& p,
++                                                        uint64_t* lo, uint64_t* hi);
++
+ // Process-wide singleton persona for this session. The first call reads the
+ // --fingerprint switch (numeric, or FNV-1a-hashed if non-numeric -- matching
+ // the per-site seed parse so browser + renderers agree) and derives the
+--- a/components/ungoogled/persona_validator.cc
++++ b/components/ungoogled/persona_validator.cc
+@@ -226,6 +226,26 @@
+   }
+   if (p.js_heap_size_limit == 0) {
+     c.Error("heap.positive", "jsHeapSizeLimit 0");
++  } else if (p.persona_schema >= 2) {
++    // Schema 2 sizes the heap from the persona's RAM with V8's own formula. Outside the band a
++    // real machine of that RAM could produce (reserved slice 0..1 GiB) is a contradiction between
++    // deviceMemory and performance.memory; inside it but not the seed's own value is an imported
++    // capture, reported for the record.
++    uint64_t lo = 0, hi = 0;
++    PersonaHeapLimitBounds(p, &lo, &hi);
++    if (p.js_heap_size_limit > hi || p.js_heap_size_limit < lo)
++      c.Error("heap.matches_v8_formula", "jsHeapSizeLimit " + S(p.js_heap_size_limit) +
++                                             " outside V8's [" + S(lo) + ", " + S(hi) + "] for " +
++                                             S(p.device_memory_gb) + " GB" +
++                                             (p.mobile ? " (mobile)" : ""));
++    else if (p.js_heap_size_limit != PersonaHeapLimitBytes(p))
++      c.Warn("heap.not_seed_formula", "jsHeapSizeLimit " + S(p.js_heap_size_limit) +
++                                          " is plausible but not the seed-derived " +
++                                          S(PersonaHeapLimitBytes(p)));
++    if (static_cast<double>(p.js_heap_size_limit) >
++        static_cast<double>(p.device_memory_gb) * 1024.0 * 1024.0 * 1024.0)
++      c.Error("heap.exceeds_ram", "jsHeapSizeLimit " + S(p.js_heap_size_limit) +
++                                      " on device_memory_gb " + S(p.device_memory_gb));
+   } else if (static_cast<double>(p.js_heap_size_limit) >
+              static_cast<double>(p.device_memory_gb) * 1024.0 * 1024.0 * 1024.0) {
+     // Real Chrome sizes the V8 heap from physical memory. A 4.4 GB heap on a
+@@ -543,6 +563,31 @@
+   }
+ }
+ 
++// Schema 2 only: the screen class and the GPU class must be ones the hardware tier ships with,
++// and a discrete GPU may only be claimed when the launcher said the host can back it.
++void CheckTierCoupling(const PersonaProfile& p, PersonaPlatform plat,
++                       const PersonaValidationContext& ctx, Collector& c) {
++  if (p.persona_schema < 2 || plat == PersonaPlatform::kAndroid)
++    return;
++  if (p.hw_tier < 1 || p.hw_tier > 4) {
++    c.Error("tier.recorded", "schema-2 persona with hw_tier " + S(p.hw_tier));
++    return;
++  }
++  if (p.hw_tier == 1 && p.screen_width >= 2560)
++    c.Error("tier.screen_class", "entry tier with " + S(p.screen_width) + "x" + S(p.screen_height));
++  if (p.hw_tier >= 3 && p.screen_width < 1920)
++    c.Error("tier.screen_class", "tier " + S(p.hw_tier) + " with " + S(p.screen_width) + "x" +
++                                     S(p.screen_height));
++  const GpuFamily gf = FamilyOfGlString(p.webgl_vendor);
++  if (gf == GpuFamily::kNvidia || gf == GpuFamily::kAmd) {
++    if (p.hw_tier == 1)
++      c.Error("tier.gpu_class", "entry tier with discrete GPU '" + p.webgl_vendor + "'");
++    if (!ctx.discrete_gpu_allowed && !p.webgl_real_strings)
++      c.Error("tier.gpu_requires_real_backend",
++              "discrete GPU '" + p.webgl_vendor + "' claimed without a real GPU backend or canvas bridge");
++  }
++}
++
+ void CheckIdentity(const PersonaProfile& p, const PersonaValidationContext& ctx, Collector& c) {
+   if (!p.chrome_full_version.empty()) {
+     unsigned maj = 0;
+@@ -596,6 +641,7 @@
+   CheckWebGpu(p, plat, c);
+   CheckMediaAndAudio(p, plat, c);
+   CheckVoicesAndDevices(p, plat, c);
++  CheckTierCoupling(p, plat, ctx, c);
+   CheckIdentity(p, ctx, c);
+   return c.Take();
+ }
+@@ -609,7 +655,8 @@
+ }
+ 
+ std::string DescribePersona(uint64_t seed, PersonaPlatform platform, const PersonaProfile& p) {
+-  std::string s = "seed=" + S(seed) + " platform=" +
++  std::string s = "seed=" + S(seed) + " schema=" + S(p.persona_schema) + " tier=" + S(p.hw_tier) +
++                  " heap=" + S(p.js_heap_size_limit) + " platform=" +
+                   (PersonaPlatformName(platform)[0] ? PersonaPlatformName(platform) : "unset") +
+                   " persona_seed=" + S(p.persona_seed) +
+                   " version=" + p.chrome_full_version +
+@@ -636,6 +683,8 @@
+ 
+   PersonaValidationContext ctx;
+   ctx.platform = GetPersonaPlatform();
++  ctx.discrete_gpu_allowed = cmd.HasSwitch(switches::kFingerprintGpuBackendReal) ||
++                             cmd.HasSwitch(switches::kCanvasBridgeUrl);
+   {
+     unsigned maj = 0;
+     if (base::StringToUint(engine_version.substr(0, engine_version.find('.')), &maj))
+@@ -690,7 +739,7 @@
+   }
+   report += "SUMMARY seeds=" + S(static_cast<uint64_t>(seeds.size())) + " failing_seeds=" +
+             S(failing_seeds) + " errors=" + S(errors) + " warnings=" + S(warnings) +
+-            " engine=" + engine_version + " platform=" +
++            " engine=" + engine_version + " schema=" + S(PersonaSchema()) + " platform=" +
+             (PersonaPlatformName(ctx.platform)[0] ? PersonaPlatformName(ctx.platform) : "unset") +
+             "\n";
+ 
+--- a/components/ungoogled/persona_validator.h
++++ b/components/ungoogled/persona_validator.h
+@@ -52,6 +52,9 @@
+   PersonaPlatform platform = PersonaPlatform::kUnset;
+   // Engine major (151 for this tree). 0 skips the engine-version check.
+   unsigned engine_major = 0;
++  // Whether this launch declared a real GPU backend or a canvas bridge (schema-2 personas may
++  // only claim a discrete GPU when it did).
++  bool discrete_gpu_allowed = false;
+ };
+ 
+ // Runs every invariant and returns all violations (empty == coherent).
+--- a/components/ungoogled/ungoogled_switches.cc
++++ b/components/ungoogled/ungoogled_switches.cc
+@@ -92,6 +92,8 @@
+ 
+ // Canvas bridge: forward canvas/WebGL ops to a remote real-GPU render host
+ // ("ws://host:port/path"). When unset, rendering stays fully local.
++const char kFingerprintSchema[] = "fingerprint-schema";
++const char kFingerprintGpuBackendReal[] = "fingerprint-gpu-backend-real";
+ const char kCanvasBridgeUrl[] = "canvas-bridge-url";
+ // Canvas bridge HTTP Basic credentials, "user:secret".
+ const char kCanvasBridgeAuth[] = "canvas-bridge-auth";
+--- a/components/ungoogled/ungoogled_switches.h
++++ b/components/ungoogled/ungoogled_switches.h
+@@ -52,6 +52,14 @@
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeAllow[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeDeny[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kCanvasBridgeFallback[];
++// clearcote: persona schema version (1 = frozen original derivation, default; 2 = tier-coupled
++// screen/GPU + RAM-sized heap). A seed keeps its schema-1 identity forever; schema 2 is a new
++// identity space a caller opts into.
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintSchema[];
++// clearcote: the launcher declares that the host renders with a real GPU backend, so a schema-2
++// persona may claim a discrete GPU class. Absent (or no canvas bridge), the persona stays on the
++// index-0 iGPU whatever its tier: a claim the host's pixels cannot back is worse than a plain one.
++COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintGpuBackendReal[];
+ }
+ 
+ #endif  // THIRD_PARTY_UNGOOGLED_FINGERPRINTING_SWITCHES_H_
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -3936,6 +3936,8 @@
+       switches::kCanvasBridgeAllow,
+       switches::kCanvasBridgeDeny,
+       switches::kCanvasBridgeFallback,
++      switches::kFingerprintSchema,          // clearcote: persona schema version
++      switches::kFingerprintGpuBackendReal,  // clearcote: schema-2 discrete-GPU gate
+       switches::kForceDeviceScaleFactor,
+       switches::kForceDisplayColorProfile,
+       switches::kForceHighContrast,

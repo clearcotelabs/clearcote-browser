@@ -2724,9 +2724,9 @@
      "histogram_fetcher.h",
      "host_zoom_map.h",
 +    "humanized_click.h",
-     "installability_error.cc",
-     "installability_error.h",
-     "installed_payment_apps_finder.h",
+     "immersive_playback_options.h",
+     "initiator_navigation_state.cc",
+     "initiator_navigation_state.h",
 --- /dev/null
 +++ b/content/public/browser/humanized_click.h
 @@ -0,0 +1,48 @@

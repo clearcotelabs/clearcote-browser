@@ -1,0 +1,55 @@
+clearcote: clamp the WebGPU persona limits downward.
+
+075-webgpu-coherence fetches the real Dawn limits and then overwrote 36 of them with the persona
+table, with NO clamp. Dawn validates allocations against the REAL limits, so any persona entry above
+the host's capability was an unbacked claim: a page allocating at the advertised limit gets an error
+a real device of that class would not produce -- a cleaner signal than the wrong constant it
+replaced, and a broken page for anything that sizes buffers off the reported limit.
+
+This is the same defect that made an upward MAX_TEXTURE_SIZE spoof a functional hazard. Measured
+there: the container reports 8192 and cannot allocate 16384 (GL_INVALID_VALUE), while genuine Chrome
+on real D3D11 allocates it fine. Advertising capability the backend cannot honour is never a win.
+
+min(persona, real) keeps every persona value that is LOWER than the host's (those stay backed) and
+never raises one. Absent keys still keep the real value, unchanged.
+
+UNGATED, unlike the rest of r16: removing an overclaim cannot create an incoherence on any host or
+persona, and the bug is present regardless of what the persona claims.
+
+Not observable from JS while requestAdapter() returns null -- there is no adapter to read limits
+from -- so this rests on source review. It is a hard prerequisite for ever returning an adapter:
+doing that first would expose all 36 unbacked claims to the web at once.
+
+--- a/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_adapter.cc
+@@ -163,11 +163,25 @@
+   // always-on WebGL getParameter spoof (an imported profile can override).
+   {
+     const auto& cc_pl = ungoogled::CurrentPersona().webgpu_limits;
+-#define CC_WGPU_SET(field)                                               \
+-  do {                                                                   \
+-    auto cc_it = cc_pl.find(#field);                                     \
+-    if (cc_it != cc_pl.end())                                            \
+-      limits.field = static_cast<decltype(limits.field)>(cc_it->second); \
++// clearcote(r16): CLAMP DOWNWARD. This block used to assign the persona value directly
++// over the real one fetched above, for 36 limits. Dawn validates allocations against the
++// REAL limits, so any persona entry above the host's capability was an unbacked claim: a
++// page allocating at the advertised limit gets an error a real device of that class would
++// not produce. That is a cleaner detector signal than the wrong constant it replaced, and
++// it breaks pages that size buffers off the reported limit -- the same reason the WebGL
++// MAX_TEXTURE_SIZE upward spoof was rejected. min() keeps the persona's LOWER values
++// (which stay backed) and never advertises capability the host cannot honour.
++//
++// Absent keys still keep the real value, unchanged.
++#define CC_WGPU_SET(field)                                                   \
++  do {                                                                       \
++    auto cc_it = cc_pl.find(#field);                                          \
++    if (cc_it != cc_pl.end()) {                                               \
++      const auto cc_real = limits.field;                                      \
++      const auto cc_want =                                                    \
++          static_cast<decltype(limits.field)>(cc_it->second);                  \
++      limits.field = cc_want < cc_real ? cc_want : cc_real;                    \
++    }                                                                          \
+   } while (0)
+     CC_WGPU_SET(maxTextureDimension1D);
+     CC_WGPU_SET(maxTextureDimension2D);

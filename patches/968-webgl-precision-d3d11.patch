@@ -1,0 +1,65 @@
+clearcote: report the D3D11 shader-precision profile for a Windows persona on a non-D3D host.
+
+D3D11 has no reduced float precision -- HLSL SM4+ promotes every tier to highp -- so a real
+Direct3D11 renderer answers [127,127,23] for float and [31,30,0] for int at EVERY tier and BOTH
+stages. Measured on genuine Chrome 151, real Windows, RTX 3070: all twelve queries return exactly
+those two values, with no per-tier variation at all.
+
+ANGLE's Vulkan/SwiftShader backend instead reports true fp16 for mediump/lowp ([15,15],10), which
+sits directly beside a renderer string naming Direct3D11. Reading it needs no reference data and no
+population baseline: the renderer names the API, and the precision profile contradicts it.
+
+Sits in the same switch as the existing mobile branch, which spoofs the opposite direction, and
+returns before the real GetShaderPrecisionFormat() call -- ClampPersonaLimit is not on this path, so
+no clamp exception is involved.
+
+SAFE because precision formats are ADVISORY. SwiftShader computes at 32-bit float regardless, so no
+shader that compiled before stops compiling and no allocation is backed by these numbers. That is
+exactly what distinguishes this from an upward limit spoof, which the backend would have to honour.
+
+Gated on IS_LINUX plus an explicit Windows persona: a real-GPU Vulkan Linux host honours
+RelaxedPrecision and keeps its honest answer, a Windows host is already correct, and an absent
+--fingerprint-platform falls back to the host build (the IsWindowsPersona convention).
+
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -5023,6 +5023,39 @@
+     return MakeGarbageCollected<WebGLShaderPrecisionFormat>(r0, r1, p);
+   }
+ 
++  // clearcote(r16): a Windows persona on a non-D3D host reports the D3D11 precision
++  // profile. D3D11 has no reduced float precision -- HLSL SM4+ promotes every tier to
++  // highp -- so a real Direct3D11 renderer answers [127,127,23] for float and [31,30,0]
++  // for int at EVERY tier and BOTH stages. Measured on genuine Chrome 151, real Windows,
++  // RTX 3070: all twelve queries return exactly those two values. ANGLE's Vulkan backend
++  // instead reports true fp16 mediump/lowp ([15,15],10), which sits directly beside a
++  // renderer string naming Direct3D11 and needs no reference data to read.
++  //
++  // Gated on IS_LINUX (compile time) plus a Windows persona: a real-GPU Vulkan Linux host
++  // honours RelaxedPrecision and must keep its honest answer, and a Windows host is
++  // already correct. Advisory metadata only -- SwiftShader computes at 32-bit float
++  // regardless, so no shader that compiled before stops compiling. This is what
++  // distinguishes it from an upward limit spoof, which Dawn/Blink would have to back.
++#if BUILDFLAG(IS_LINUX)
++  if (!ungoogled::CurrentPersona().webgl_real &&
++      ungoogled::GetPersonaPlatform() == ungoogled::PersonaPlatform::kWindows) {
++    GLint r0 = 127, r1 = 127, p = 23;
++    switch (precision_type) {
++      case GL_HIGH_FLOAT:
++      case GL_MEDIUM_FLOAT:
++      case GL_LOW_FLOAT:
++        r0 = 127; r1 = 127; p = 23; break;
++      case GL_HIGH_INT:
++      case GL_MEDIUM_INT:
++      case GL_LOW_INT:
++        r0 = 31; r1 = 30; p = 0; break;
++      default:
++        break;
++    }
++    return MakeGarbageCollected<WebGLShaderPrecisionFormat>(r0, r1, p);
++  }
++#endif
++
+   GLint range[2] = {0, 0};
+   GLint precision = 0;
+   ContextGL()->GetShaderPrecisionFormat(shader_type, precision_type, range,

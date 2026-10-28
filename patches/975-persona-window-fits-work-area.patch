@@ -1,0 +1,207 @@
+--- a/chrome/browser/ui/window_sizer/window_sizer.cc
++++ b/chrome/browser/ui/window_sizer/window_sizer.cc
+@@ -8,6 +8,7 @@
+ #include <utility>
+ 
+ #include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
+ #include "base/functional/function_ref.h"
+ #include "base/memory/raw_ptr.h"
+ #include "build/build_config.h"
+@@ -21,6 +22,8 @@
+ #include "chrome/browser/ui/web_applications/app_browser_controller.h"
+ #include "chrome/common/chrome_switches.h"
+ #include "components/prefs/pref_service.h"
++#include "components/ungoogled/persona_profile.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "ui/base/mojom/window_show_state.mojom.h"
+ #include "ui/base/ui_base_switches.h"
+ #include "ui/display/display.h"
+@@ -32,6 +35,63 @@
+ 
+ namespace {
+ 
++// clearcote: when a seeded persona is active, screen.width/height and
++// screen.availWidth/availHeight are the persona's (frame/screen.cc, gated on
++// --fingerprint exactly as here), but the OS window was still sized from the
++// REAL display's work area. A persona whose work area is smaller than the
++// display then reported a viewport larger than its own screen -- r17/r18, seed
++// verify-2026-09-02-A: avail 1536x824, inner 1689x1187 on both platforms. A
++// window cannot be larger than the screen it says it is on; that is one
++// comparison for a page, no baseline needed.
++//
++// This is the only place default bounds and bounds clamping read the work
++// area, so sizing against the persona work area here makes every window the
++// sizer produces satisfy inner <= outer <= avail <= screen. The persona rect is
++// intersected with the real display so the window is never larger than what
++// the host can actually show (a 3840x2160 persona on a 1920x1080 display).
++bool PersonaScreenActive() {
++  static const bool kActive = [] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    return cmd && cmd->HasSwitch(switches::kFingerprint);
++  }();
++  return kActive;
++}
++
++// The work area screen.availWidth/availHeight report: an explicit
++// --fingerprint-avail-* switch first, then the persona -- the same resolution
++// order frame/screen.cc uses, so the window and the page's screen object are
++// sized from one value. 0x0 when neither applies.
++gfx::Size PersonaAvailSize() {
++  static const gfx::Size kSize = [] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    int w = 0, h = 0;
++    if (cmd) {
++      if (cmd->HasSwitch(switches::kFingerprintAvailWidth))
++        base::StringToInt(cmd->GetSwitchValueASCII(switches::kFingerprintAvailWidth), &w);
++      if (cmd->HasSwitch(switches::kFingerprintAvailHeight))
++        base::StringToInt(cmd->GetSwitchValueASCII(switches::kFingerprintAvailHeight), &h);
++    }
++    const ungoogled::PersonaProfile& persona = ungoogled::CurrentPersona();
++    if (w <= 0)
++      w = persona.avail_screen_width;
++    if (h <= 0)
++      h = persona.avail_screen_height;
++    return gfx::Size(std::max(w, 0), std::max(h, 0));
++  }();
++  return kSize;
++}
++
++gfx::Rect EffectiveWorkArea(const gfx::Rect& display_work_area) {
++  if (!PersonaScreenActive())
++    return display_work_area;
++  const gfx::Size avail = PersonaAvailSize();
++  if (avail.IsEmpty())
++    return display_work_area;
++  gfx::Rect persona_area(display_work_area.origin(), avail);
++  persona_area.Intersect(display_work_area);
++  return persona_area.IsEmpty() ? display_work_area : persona_area;
++}
++
+ // Minimum height of the visible part of a window.
+ const int kMinVisibleHeight = 30;
+ // Minimum width of the visible part of a window.
+@@ -276,6 +336,9 @@
+       display::Screen::Get()->GetDisplayMatching(*bounds).work_area();
+ 
+   AdjustWorkAreaForPlatform(work_area);
++  // clearcote: the platform outset (Linux CSD shadow) enlarges the REAL work
++  // area; the persona work area is the hard cap and is applied afterwards.
++  work_area = EffectiveWorkArea(work_area);
+ 
+   // Resize so that it fits.
+   bounds->AdjustToFit(work_area);
+@@ -283,6 +346,29 @@
+ 
+ void WindowSizer::AdjustWorkAreaForPlatform(gfx::Rect& work_area) {}
+ 
++// static
++void WindowSizer::ClampToPersonaWorkArea(gfx::Rect* bounds,
++                                         ui::mojom::WindowShowState* show_state) {
++  if (!bounds || !show_state || !PersonaScreenActive())
++    return;
++  display::Screen* screen = display::Screen::Get();
++  if (!screen)
++    return;
++  const display::Display display = bounds->IsEmpty()
++                                       ? screen->GetPrimaryDisplay()
++                                       : screen->GetDisplayMatching(*bounds);
++  const gfx::Rect work_area = display.work_area();
++  const gfx::Rect persona_area = EffectiveWorkArea(work_area);
++  if (*show_state == ui::mojom::WindowShowState::kMaximized &&
++      persona_area != work_area) {
++    *show_state = ui::mojom::WindowShowState::kNormal;
++    *bounds = persona_area;
++    return;
++  }
++  if (!bounds->IsEmpty() && !persona_area.Contains(*bounds))
++    bounds->AdjustToFit(persona_area);
++}
++
+ bool WindowSizer::GetLastActiveWindowBounds(
+     gfx::Rect* bounds,
+     ui::mojom::WindowShowState* show_state) const {
+@@ -315,7 +401,7 @@
+ 
+ gfx::Rect WindowSizer::GetDefaultWindowBounds(
+     const display::Display& display) const {
+-  gfx::Rect work_area = display.work_area();
++  gfx::Rect work_area = EffectiveWorkArea(display.work_area());
+ 
+   // The default size is either some reasonably wide width, or if the work
+   // area is narrower, then the work area width less some aesthetic padding.
+@@ -327,6 +413,13 @@
+   // For wider aspect ratio displays at higher resolutions, we might size the
+   // window narrower to allow two windows to easily be placed side-by-side.
+   gfx::Rect screen_size = display::Screen::Get()->GetPrimaryDisplay().bounds();
++  if (PersonaScreenActive()) {
++    // clearcote: the default box is what Chrome computes on the persona's
++    // display, so its aspect ratio decides the halving, not the host's.
++    const ungoogled::PersonaProfile& persona = ungoogled::CurrentPersona();
++    if (persona.screen_width > 0 && persona.screen_height > 0)
++      screen_size.set_size(gfx::Size(persona.screen_width, persona.screen_height));
++  }
+   double width_to_height =
+       static_cast<double>(screen_size.width()) / screen_size.height();
+ 
+@@ -378,12 +471,18 @@
+   bounds->set_height(std::max(kMinVisibleHeight, bounds->height()));
+   bounds->set_width(std::max(kMinVisibleWidth, bounds->width()));
+ 
+-  const gfx::Rect work_area = display.work_area();
++  const gfx::Rect work_area = EffectiveWorkArea(display.work_area());
+   CHECK(!work_area.IsEmpty());
+   // Ensure that the title bar is not above the work area.
+   if (bounds->y() < work_area.y()) {
+     bounds->set_y(work_area.y());
+   }
++  // clearcote: saved or last-active bounds from a launch on a different
++  // persona (or none) can exceed this persona's work area; the persona window
++  // must fit its own screen regardless of what the profile remembered.
++  if (PersonaScreenActive() && !work_area.Contains(*bounds)) {
++    bounds->AdjustToFit(work_area);
++  }
+ 
+   // Reposition and resize the bounds if the saved_work_area is different from
+   // the current work area and the current work area doesn't completely contain
+--- a/chrome/browser/ui/window_sizer/window_sizer.h
++++ b/chrome/browser/ui/window_sizer/window_sizer.h
+@@ -33,6 +33,15 @@
+ // TODO(crbug.com/846736): Extract the platform-specific code out of this class.
+ class WindowSizer {
+  public:
++  // clearcote: final persona clamp, run AFTER --window-size/--window-position
++  // have been applied in chrome::GetSavedWindowBoundsAndShowState(). A seeded
++  // persona's window must fit the persona work area regardless of how its
++  // bounds were chosen; a maximized show state would let the OS size the window
++  // to the REAL work area, so it is demoted to kNormal with the persona work
++  // area as bounds when the two differ. No-op without a persona.
++  static void ClampToPersonaWorkArea(gfx::Rect* bounds,
++                                     ui::mojom::WindowShowState* show_state);
++
+   // An interface implemented by an object that can retrieve state from either a
+   // persistent store or an existing window.
+   class StateProvider {
+--- a/chrome/browser/ui/window_sizer/BUILD.gn
++++ b/chrome/browser/ui/window_sizer/BUILD.gn
+@@ -36,6 +36,7 @@
+     "//chrome/browser/ui/web_applications",
+     "//chrome/common:non_code_constants",
+     "//components/prefs",
++    "//components/ungoogled:ungoogled_switches",
+     "//ui/base",
+     "//ui/display",
+   ]
+--- a/chrome/browser/ui/browser_window_state.cc
++++ b/chrome/browser/ui/browser_window_state.cc
+@@ -160,6 +160,10 @@
+ 
+   internal::UpdateWindowBoundsAndShowStateFromCommandLine(parsed_command_line,
+                                                           bounds, show_state);
++  // clearcote: the command-line override above bypassed the sizer's persona
++  // work-area clamp; re-apply it last so every browser window on a seeded
++  // persona satisfies inner <= outer <= avail <= screen.
++  WindowSizer::ClampToPersonaWorkArea(bounds, show_state);
+ }
+ 
+ namespace internal {

@@ -46,7 +46,7 @@ CCKEY=cc_lic_...  sdk/scripts/smoke-release.sh 0.32.0 --docker
 - **Requirements:** host mode needs `python3` + `node`/`npm` on PATH; `--docker` needs Docker.
 - **Pass criterion:** every run prints `LAUNCH_OK` and the script exits `0` with
   `### SMOKE PASS ###`. Any `LAUNCH_FAIL` → non-zero + `### SMOKE FAIL … DO NOT SHIP ###`.
-  Each line shows the Chrome major that ran, e.g. `FREE: LAUNCH_OK | Chrome/150` and
+  Each line shows the Chrome major that ran, e.g. `FREE: LAUNCH_OK | Chrome/151` and
   `PRO : LAUNCH_OK | Chrome/153` — FREE is the open build the SDK pins, PRO the current licensed build.
 
 The license key is a secret: pass it via the environment, never hard-code it into the script or a
@@ -74,13 +74,14 @@ your proof that these are the libs to document for users.
 The `--docker` mode runs every SDK leg as the image's unprivileged `node` user — the way the
 published `teamflatearth/clearcote` image runs the browser (as its own `cc` user).
 
-As **root** in a container, the open build stops at start: it is compiled with debug assertions
-(DCHECKs), and Chromium's `setpriority()` call is refused when the container lacks `CAP_SYS_NICE` —
+Up to the Chromium 150 open build (`v0.1.0-pre.23`), running as **root** in a container stopped the
+open build at start: it was compiled with debug assertions (DCHECKs), and Chromium's `setpriority()`
+call is refused when the container lacks `CAP_SYS_NICE` —
 `FATAL:base/process/process_linux.cc … DCHECK failed: result == 0. : Permission denied`, surfaced by
-Playwright as `Target page, context or browser has been closed`. The licensed build is an optimized
-release build and is not affected. The documented workaround is to run as a normal user or to add
-`--cap-add=SYS_NICE`; the `--docker` mode runs one extra FREE leg as root with that capability, so the
-workaround is checked on every release. (Until this harness ran its legs unprivileged, its own `--docker`
+Playwright as `Target page, context or browser has been closed`. Since Chromium 151 the open build is
+an official build with DCHECKs compiled out, like the licensed build, and is not affected either. The
+`--docker` mode still runs one extra FREE leg as root with `--cap-add=SYS_NICE`, which covers users
+still pinned to 150. (Until this harness ran its legs unprivileged, its own `--docker`
 mode ran as root and failed the FREE tier for exactly this reason — for 0.31.1 as much as for 0.32.0.)
 
 ## When it catches things

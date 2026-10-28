@@ -1,0 +1,132 @@
+clearcote: --proxy-auth=user:pass -- the engine answers HTTP/HTTPS proxy 407 challenges itself.
+
+The SDK used to hand HTTP-proxy credentials to Playwright, whose driver then enables Fetch
+interception and Network.setCacheDisabled(true) for the whole context: every request bypassed the
+cache and carried the interception's side effects, a transport tell unrelated to the persona.
+
+HttpAuthController::SelectNextAuthIdentityToTry() is the single funnel for the plain-HTTP and the
+CONNECT path; the handler is already built from the real Proxy-Authenticate challenge, so Basic and
+Digest both work. The identity is offered once per controller (like the URL-embedded identity);
+after a success ResetAuth() seeds the HttpAuthCache and later requests are pre-emptive, as stock
+Chrome behaves after the user answered the prompt once. Wrong credentials fail closed: no DIRECT
+fallback exists for a one-entry --proxy-server. The switch is forwarded to the network service via
+the utility-process allowlist, next to socks5-credentials.
+
+--- a/content/browser/service_host/utility_process_host.cc
++++ b/content/browser/service_host/utility_process_host.cc
+@@ -406,6 +406,11 @@
+       // (net/socket/socks5_client_socket.cc) and every authenticated proxy fails
+       // with ERR_SOCKS_CONNECTION_FAILED.
+       "socks5-credentials",
++      // clearcote: HTTP/HTTPS proxy credentials, consumed by
++      // net/http/http_auth_controller.cc inside the network service. Without
++      // this line the switch is silently invisible there and every 407 still
++      // surfaces to the browser's login prompt.
++      "proxy-auth",
+       // clearcote: UDP relaying reads BOTH of these in the network service (the P2P
+       // socket factory lives there), so without forwarding them the feature silently
+       // does nothing and looks like a proxy that refuses UDP.
+--- a/net/http/http_auth_controller.cc
++++ b/net/http/http_auth_controller.cc
+@@ -6,7 +6,9 @@
+ 
+ #include <utility>
+ 
++#include "base/command_line.h"
+ #include "base/functional/bind.h"
++#include "base/no_destructor.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/metrics/histogram_macros.h"
+ #include "base/strings/string_util.h"
+@@ -33,6 +35,48 @@
+ 
+ namespace {
+ 
++// clearcote: --proxy-auth=user:pass, resolved once per process. Read HERE, in
++// net, because this file runs inside the network service; the switch reaches
++// that process only through the kSwitchNames allowlist in
++// content/browser/service_host/utility_process_host.cc (see the
++// "socks5-credentials" entry there for the precedent). When the switch is
++// absent |valid| is false and every code path below is stock Chromium.
++//
++// Split at the FIRST ':' -- RFC 7617 forbids ':' in the user-id but allows it
++// in the password. The value is taken as a native string so a non-ASCII
++// password survives on Windows (AuthCredentials wants UTF-16).
++constexpr char kProxyAuthSwitch[] = "proxy-auth";
++
++struct ProxySwitchCredentials {
++  AuthCredentials credentials;
++  bool valid = false;
++};
++
++const ProxySwitchCredentials& GetProxySwitchCredentials() {
++  static const base::NoDestructor<ProxySwitchCredentials> creds([] {
++    ProxySwitchCredentials c;
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd || !cmd->HasSwitch(kProxyAuthSwitch)) {
++      return c;
++    }
++#if BUILDFLAG(IS_WIN)
++    const std::u16string raw =
++        base::WideToUTF16(cmd->GetSwitchValueNative(kProxyAuthSwitch));
++#else
++    const std::u16string raw =
++        base::UTF8ToUTF16(cmd->GetSwitchValueNative(kProxyAuthSwitch));
++#endif
++    const size_t colon = raw.find(u':');
++    if (colon == std::u16string::npos || colon == 0) {
++      return c;  // malformed: behave as if the switch were absent
++    }
++    c.credentials.Set(raw.substr(0, colon), raw.substr(colon + 1));
++    c.valid = true;
++    return c;
++  }());
++  return *creds;
++}
++
+ enum AuthTarget {
+   AUTH_TARGET_PROXY = 0,
+   AUTH_TARGET_SECURE_PROXY,
+@@ -467,6 +511,27 @@
+     return true;
+   }
+ 
++  // clearcote: answer a PROXY challenge with the --proxy-auth identity, once.
++  //
++  // WHY HERE: at this point handler_ was built from the proxy's real
++  // Proxy-Authenticate header, so realm (Basic) and nonce/qop (Digest) are
++  // correct and GenerateAuthToken just works; the cache lookup above already
++  // missed, so nothing better is known for this realm. Returning true makes
++  // HaveAuth() true, so HttpNetworkTransaction::IsReadyToRestartForAuth()
++  // triggers the same silent restart the URL-embedded identity uses, and
++  // ResetAuth() then seeds the HttpAuthCache -- from the second request on
++  // SelectPreemptiveAuth() sends Proxy-Authorization up front, exactly as
++  // stock Chrome does after the user has answered the prompt once.
++  // Never for AUTH_SERVER: these are the proxy's credentials only.
++  if (target_ == HttpAuth::AUTH_PROXY && !proxy_switch_identity_used_ &&
++      GetProxySwitchCredentials().valid) {
++    identity_.source = HttpAuth::IDENT_SRC_EXTERNAL;
++    identity_.invalid = false;
++    identity_.credentials = GetProxySwitchCredentials().credentials;
++    proxy_switch_identity_used_ = true;
++    return true;
++  }
++
+   // Use default credentials (single sign-on) if they're allowed and this is the
+   // first attempt at using an identity. Do not allow multiple times as it will
+   // infinite loop. We use default credentials after checking the auth cache so
+--- a/net/http/http_auth_controller.h
++++ b/net/http/http_auth_controller.h
+@@ -237,6 +237,12 @@
+   // preventing an infinite auth restart loop.
+   bool embedded_identity_used_ = false;
+ 
++  // clearcote: true once the --proxy-auth identity has been offered for this
++  // controller. Same role as embedded_identity_used_: the switch identity is
++  // tried at most once per transaction so a proxy that keeps answering 407
++  // cannot loop us. Only ever set when target_ == HttpAuth::AUTH_PROXY.
++  bool proxy_switch_identity_used_ = false;
++
+   // True if default credentials have already been tried for this transaction
+   // in response to an HTTP authentication challenge.
+   bool default_credentials_used_ = false;

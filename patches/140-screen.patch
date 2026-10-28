@@ -10,7 +10,7 @@
  #include "base/metrics/histogram_macros.h"
  #include "base/task/single_thread_task_runner.h"
  #include "base/trace_event/trace_id_helper.h"
-@@ -1591,10 +1594,73 @@
+@@ -1659,11 +1662,91 @@
    return true;
  }
  
@@ -63,8 +63,9 @@
 +}  // namespace
 +
  int LocalDOMWindow::outerHeight() const {
-   if (!GetFrame())
+   if (!GetFrame()) {
      return 0;
+   }
  
 +  const int ls_ah = AvailOverrides().avail_height;  // clearcote-ls-refine
 +  if (ls_ah > 0) {
@@ -81,13 +82,6 @@
 +    return oh < ah ? oh : ah;
 +  }
 +
-   LocalFrame* frame = GetFrame();
- 
-   // FencedFrames should return innerHeight to prevent passing
-@@ -1620,6 +1686,23 @@
-   if (!GetFrame())
-     return 0;
- 
 +  const int ls_aw = AvailOverrides().avail_width;  // clearcote-ls-refine
 +  if (ls_aw > 0) {
 +    int ow = innerWidth() + 16;
@@ -107,10 +101,10 @@
 +
    LocalFrame* frame = GetFrame();
  
-   // FencedFrames should return innerWidth to prevent passing
-@@ -1693,6 +1776,24 @@
-   if (!frame)
+   // FencedFrames should return innerHeight to prevent passing
+@@ -1770,6 +1853,24 @@
      return 0;
+   }
  
 +  const int ls_aw = AvailOverrides().avail_width;  // clearcote-ls-refine
 +  if (ls_aw > 0) {
@@ -131,11 +125,11 @@
 +  }
 +
    Page* page = frame->GetPage();
-   if (!page)
+   if (!page) {
      return 0;
-@@ -1711,6 +1812,23 @@
-   if (!frame)
+@@ -1790,6 +1891,23 @@
      return 0;
+   }
  
 +  const int ls_ah = AvailOverrides().avail_height;  // clearcote-ls-refine
 +  if (ls_ah > 0) {
@@ -155,11 +149,11 @@
 +  }
 +
    Page* page = frame->GetPage();
-   if (!page)
+   if (!page) {
      return 0;
-@@ -1823,6 +1941,33 @@
-   if (!GetFrame())
+@@ -1911,6 +2029,33 @@
      return 0.0;
+   }
  
 +  {  // clearcote-light-stealth: direct DPR override (flag > persona > real).
 +    // clearcote-timing-fix: resolve ONCE into a function-local static -- this

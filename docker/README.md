@@ -262,7 +262,7 @@ engine keeps the password in the entrypoint's relay instead, off the command lin
 ## Notes
 
 - Each image tag is built from one SDK release: `sdk-<version>` (e.g. `sdk-0.46.0`), `<browser>` (the
-  open binary it bakes in, e.g. `0.1.0-pre.23`) and `latest`. Rebuild + verify this image yourself:
+  open binary it bakes in, e.g. `0.1.0-pre.24`) and `latest`. Rebuild + verify this image yourself:
   `docker build -t clearcote .` — every layer is auditable.
 - `--disable-dev-shm-usage` is set; the SDKs still pass `--shm-size=1g`, and the examples here do the same.
 - The image carries the label `com.clearcotelabs.serve-protocol` (2: it takes `CC_SECRETS_FILE` and
@@ -284,9 +284,11 @@ engine keeps the password in the entrypoint's relay instead, off the command lin
 - `tini` is PID 1, so browser helper processes that exit inside the container (for example from
   scripts you `docker exec` that launch their own browsers) are reaped instead of piling up as
   `<defunct>` entries. `docker stop` still reaches the browser and releases the licence seat.
-- The image runs as a **non-root** user (`cc`). If you run the browser in your own container as
-  **root**, add `--cap-add=SYS_NICE` (or run as a normal user): the open build is compiled with
-  DCHECKs, and Chromium's process-priority call aborts it when a root container refuses the call.
+- The image runs as a **non-root** user (`cc`). Running the browser as **root** in your own container
+  works with the open build from Chromium 151 (`0.1.0-pre.24`) on, an official build with DCHECKs
+  compiled out. The open 150 build (`0.1.0-pre.23`) and older were compiled with DCHECKs, and
+  Chromium's process-priority call aborts them when a root container refuses the call: for those, add
+  `--cap-add=SYS_NICE` or run as a normal user.
 - There is no GPU in the container, so WebGL renders in software through the backend that matches
   the GPU the persona names: a Linux persona (Mesa/OpenGL) through Mesa's own GL on the Xvfb display
   (headful, the default), a Windows persona (Direct3D11) through SwiftShader. Under `CC_HEADLESS=1`

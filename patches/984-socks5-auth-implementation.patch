@@ -1,0 +1,186 @@
+clearcote: complete the RFC 1929 SOCKS5 auth (963 shipped only the declarations)
+
+963-socks5-auth added the four DoAuth* declarations to socks5_client_socket.h and the
+state-machine cases that dispatch to them, but not the definitions, nor the credential
+parser and the two-method greeting. The shipped r19 binary has all of it; the stack did
+not, so a rebuild from patches-151 alone fails to link SOCKS5ClientSocket::DoAuthWrite.
+This patch carries the missing implementation exactly as it stands in the build tree.
+
+--- a/net/socket/socks5_client_socket.h
++++ b/net/socket/socks5_client_socket.h
+@@ -100,6 +100,12 @@
+     STATE_GREET_WRITE_COMPLETE,
+     STATE_GREET_READ,
+     STATE_GREET_READ_COMPLETE,
++    // clearcote: RFC 1929 username/password sub-negotiation, entered only when
++    // the server selects method 0x02.
++    STATE_AUTH_WRITE,
++    STATE_AUTH_WRITE_COMPLETE,
++    STATE_AUTH_READ,
++    STATE_AUTH_READ_COMPLETE,
+     STATE_HANDSHAKE_WRITE,
+     STATE_HANDSHAKE_WRITE_COMPLETE,
+     STATE_HANDSHAKE_READ,
+--- a/net/socket/socks5_client_socket.cc
++++ b/net/socket/socks5_client_socket.cc
+@@ -11,6 +11,7 @@
+ #include <array>
+ #include <utility>
+ 
++#include "base/command_line.h"
+ #include "base/compiler_specific.h"
+ #include "base/format_macros.h"
+ #include "base/functional/bind.h"
+@@ -290,6 +291,45 @@
+ static constexpr std::array<uint8_t, 3> kSOCKS5GreetWriteData{
+     0x05, 0x01, 0x00};  // no authentication
+ 
++// clearcote: offer BOTH no-auth and username/password, so a server that wants
++// neither still completes exactly as before.
++static constexpr std::array<uint8_t, 4> kSOCKS5GreetWriteDataAuth{
++    0x05, 0x02, 0x00, 0x02};
++
++namespace {
++
++// clearcote: --socks5-credentials=user:pass, resolved once per process. Empty
++// when the switch is absent, which is the "stock Chromium" path everywhere below.
++struct Socks5Credentials {
++  std::string username;
++  std::string password;
++  bool valid = false;
++};
++
++const Socks5Credentials& GetSocks5Credentials() {
++  static const Socks5Credentials creds = [] {
++    Socks5Credentials c;
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd || !cmd->HasSwitch("socks5-credentials")) {
++      return c;
++    }
++    const std::string raw = cmd->GetSwitchValueASCII("socks5-credentials");
++    const size_t colon = raw.find(':');
++    if (colon == std::string::npos) {
++      return c;
++    }
++    c.username = raw.substr(0, colon);
++    c.password = raw.substr(colon + 1);
++    // RFC 1929 length fields are one byte each.
++    c.valid = !c.username.empty() && c.username.size() <= 255 &&
++              c.password.size() <= 255;
++    return c;
++  }();
++  return creds;
++}
++
++}  // namespace
++
+ int SOCKS5ClientSocket::DoGreetWrite() {
+   // Since we only have 1 byte to send the hostname length in, if the
+   // URL has a hostname longer than 255 characters we can't send it.
+@@ -299,8 +339,11 @@
+   }
+ 
+   if (!write_buf_) {
++    // clearcote: advertise username/password as well when credentials exist.
+     auto greet_buffer =
+-        base::MakeRefCounted<WrappedIOBuffer>(kSOCKS5GreetWriteData);
++        GetSocks5Credentials().valid
++            ? base::MakeRefCounted<WrappedIOBuffer>(kSOCKS5GreetWriteDataAuth)
++            : base::MakeRefCounted<WrappedIOBuffer>(kSOCKS5GreetWriteData);
+     write_buf_ = base::MakeRefCounted<DrainableIOBuffer>(
+         std::move(greet_buffer), greet_buffer->size());
+   }
+@@ -359,12 +402,92 @@
+                                    "version", read_data[0]);
+     return ERR_SOCKS_CONNECTION_FAILED;
+   }
+-  if (read_data[1] != 0x00) {
++  // clearcote: 0x02 is username/password (RFC 1929). Only acceptable if we
++  // actually offered it, i.e. credentials are configured.
++  const bool wants_userpass =
++      read_data[1] == 0x02 && GetSocks5Credentials().valid;
++  if (read_data[1] != 0x00 && !wants_userpass) {
+     net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
+                                    "method", read_data[1]);
+     return ERR_SOCKS_CONNECTION_FAILED;
+   }
+ 
++  read_buf_.reset();
++  next_state_ = wants_userpass ? STATE_AUTH_WRITE : STATE_HANDSHAKE_WRITE;
++  return OK;
++}
++
++// clearcote: RFC 1929 sub-negotiation -- VER(1) ULEN(1) UNAME PLEN(1) PASSWD,
++// answered with VER(1) STATUS(1), status 0 meaning success.
++int SOCKS5ClientSocket::DoAuthWrite() {
++  if (!write_buf_) {
++    const Socks5Credentials& creds = GetSocks5Credentials();
++    std::vector<uint8_t> auth;
++    auth.reserve(3 + creds.username.size() + creds.password.size());
++    auth.push_back(0x01);
++    auth.push_back(base::checked_cast<uint8_t>(creds.username.size()));
++    auth.insert(auth.end(), creds.username.begin(), creds.username.end());
++    auth.push_back(base::checked_cast<uint8_t>(creds.password.size()));
++    auth.insert(auth.end(), creds.password.begin(), creds.password.end());
++    auto base_buffer = base::MakeRefCounted<VectorIOBuffer>(std::move(auth));
++    write_buf_ = base::MakeRefCounted<DrainableIOBuffer>(
++        std::move(base_buffer), base_buffer->size());
++  }
++
++  next_state_ = STATE_AUTH_WRITE_COMPLETE;
++  return transport_socket_->Write(write_buf_.get(),
++                                  write_buf_->BytesRemaining(), io_callback_,
++                                  traffic_annotation_);
++}
++
++int SOCKS5ClientSocket::DoAuthWriteComplete(int result) {
++  if (result < 0)
++    return result;
++
++  write_buf_->DidConsume(result);
++  if (write_buf_->BytesRemaining() == 0) {
++    write_buf_.reset();
++    next_state_ = STATE_AUTH_READ;
++  } else {
++    next_state_ = STATE_AUTH_WRITE;
++  }
++  return OK;
++}
++
++int SOCKS5ClientSocket::DoAuthRead() {
++  next_state_ = STATE_AUTH_READ_COMPLETE;
++  if (!read_buf_) {
++    read_buf_ = base::MakeRefCounted<GrowableIOBuffer>();
++    read_buf_->SetCapacity(kGreetReadHeaderSize);  // VER + STATUS
++  }
++  return transport_socket_->Read(read_buf_.get(),
++                                 read_buf_->RemainingCapacity(), io_callback_);
++}
++
++int SOCKS5ClientSocket::DoAuthReadComplete(int result) {
++  if (result < 0)
++    return result;
++
++  if (result == 0) {
++    net_log_.AddEvent(
++        NetLogEventType::SOCKS_UNEXPECTEDLY_CLOSED_DURING_GREETING);
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++
++  read_buf_->set_offset(read_buf_->offset() + result);
++  if (read_buf_->RemainingCapacity() > 0) {
++    next_state_ = STATE_AUTH_READ;
++    return OK;
++  }
++
++  base::span<uint8_t> read_data = read_buf_->span_before_offset();
++  // The sub-negotiation carries its own version (0x01), not the SOCKS version.
++  if (read_data[0] != 0x01 || read_data[1] != 0x00) {
++    net_log_.AddEventWithIntParams(NetLogEventType::SOCKS_UNEXPECTED_AUTH,
++                                   "auth_status", read_data[1]);
++    return ERR_SOCKS_CONNECTION_FAILED;
++  }
++
+   read_buf_.reset();
+   next_state_ = STATE_HANDSHAKE_WRITE;
+   return OK;

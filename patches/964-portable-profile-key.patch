@@ -1,0 +1,281 @@
+clearcote(#12): portable profile encryption key.
+
+Cookie values are encrypted with a key the OS holds -- DPAPI on Windows, Keychain on macOS -- so a
+copied profile arrives signed out. Everything else in a user data directory already moves by copying
+the folder; cookies did not.
+
+Chromium 151 resolves the key through pluggable KeyProviders registered with a precedence. Only the
+highest-precedence provider performs encryption, but EVERY registered provider can still decrypt, so
+adding a portable provider above the platform ones gives portability AND free migration: an existing
+profile keeps opening, and moves to the portable key as it is written. No export step, no import
+step, no new file format.
+
+Two modes, both opt-in; with neither switch the provider is not registered at all and behaviour is
+exactly stock:
+
+  --portable-profile              generate a key and store it in the profile
+  --profile-encryption-key=<s>    derive the key from a caller secret; nothing is written to disk
+
+A key stored beside the data it protects means the cookie database is effectively unencrypted at
+rest. That is inherent to portability rather than a flaw in it, which is why it is opt-in and why
+the derived mode is the better default for a profile synced to shared storage.
+
+Notes on the implementation: the provider lives in components/ungoogled rather than in
+components/os_crypt so the fork does not edit upstream's BUILD.gn; a corrupt key file is never
+overwritten, because silently regenerating one would discard every cookie it protects; and failures
+return kTemporarilyUnavailable rather than kPermanentlyUnavailable, since the interface documents
+that "permanent" invites callers to drop the data. File IO runs on the thread pool -- GetKey is
+callback-shaped for exactly that, and base::ScopedAllowBlocking is friend-gated besides.
+
+Verified on both platforms: a profile copied with its platform-wrapped key removed (simulating a
+different machine) loses its cookies without the switch and keeps them with either switch. On Linux
+the control keeps them too, because the POSIX provider derives from a hardcoded constant and Linux
+profiles were already portable.
+
+--- a/components/ungoogled/portable_key_provider.h
++++ b/components/ungoogled/portable_key_provider.h
+@@ -0,0 +1,46 @@
++// clearcote: portable profile encryption key (clearcote-browser#12).
++
++#ifndef COMPONENTS_UNGOOGLED_PORTABLE_KEY_PROVIDER_H_
++#define COMPONENTS_UNGOOGLED_PORTABLE_KEY_PROVIDER_H_
++
++#include <string>
++
++#include "base/component_export.h"
++#include "base/files/file_path.h"
++#include "components/os_crypt/async/browser/key_provider.h"
++
++namespace ungoogled {
++
++// Supplies the cookie/password encryption key from the PROFILE rather than from
++// the OS keystore, so the whole user data directory can be copied to another
++// machine and still decrypt.
++//
++// Two modes:
++//   * caller secret  -- the key is derived from a caller-supplied string and
++//                       NOTHING is written to disk. Preferred when the profile
++//                       is synced to shared storage.
++//   * key file       -- a random key is generated once and stored in the
++//                       profile directory. Convenient, but it means the cookie
++//                       database is effectively unencrypted at rest, which is
++//                       inherent to portability rather than a flaw in it.
++class COMPONENT_EXPORT(UNGOOGLED) PortableKeyProvider
++    : public os_crypt_async::KeyProvider {
++ public:
++  // Exactly one of `key_file` / `caller_secret` is used; `caller_secret` wins.
++  PortableKeyProvider(base::FilePath key_file, std::string caller_secret);
++  ~PortableKeyProvider() override;
++
++  PortableKeyProvider(const PortableKeyProvider&) = delete;
++  PortableKeyProvider& operator=(const PortableKeyProvider&) = delete;
++
++  void GetKey(KeyCallback callback) override;
++  bool UseForEncryption() override;
++
++ private:
++  const base::FilePath key_file_;
++  const std::string caller_secret_;
++};
++
++}  // namespace ungoogled
++
++#endif  // COMPONENTS_UNGOOGLED_PORTABLE_KEY_PROVIDER_H_
+--- a/components/ungoogled/portable_key_provider.cc
++++ b/components/ungoogled/portable_key_provider.cc
+@@ -0,0 +1,109 @@
++// clearcote: portable profile encryption key (clearcote-browser#12).
++
++#include "components/ungoogled/portable_key_provider.h"
++
++#include <utility>
++#include <vector>
++
++#include "base/base64.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/task/thread_pool.h"
++#include "components/os_crypt/async/common/algorithm.mojom.h"
++#include "components/os_crypt/async/common/encryptor.h"
++#include "crypto/hkdf.h"
++#include "crypto/random.h"
++
++namespace ungoogled {
++
++namespace {
++
++using os_crypt_async::Encryptor;
++
++// Distinct from the platform providers' "v10" so portable data is never
++// mistaken for DPAPI/Keychain data, and vice versa.
++constexpr char kPortableKeyTag[] = "ccp";
++
++constexpr size_t kKeySize = 32;  // Encryptor::Key::kAES256GCMKeySize
++
++// Domain separation for the derived-key mode.
++constexpr char kHkdfSalt[] = "clearcote-portable-profile";
++constexpr char kHkdfInfo[] = "os_crypt key v1";
++
++std::vector<uint8_t> DeriveFromSecret(const std::string& secret) {
++  const std::string derived =
++      crypto::HkdfSha256(secret, kHkdfSalt, kHkdfInfo, kKeySize);
++  return std::vector<uint8_t>(derived.begin(), derived.end());
++}
++
++// Reads the key from `path`, generating and storing one on first use.
++// Runs on the thread pool: this touches the disk.
++std::vector<uint8_t> LoadOrCreateKeyFile(const base::FilePath& path) {
++  std::string encoded;
++  if (base::ReadFileToString(path, &encoded)) {
++    std::string decoded;
++    if (base::Base64Decode(encoded, &decoded) && decoded.size() == kKeySize) {
++      return std::vector<uint8_t>(decoded.begin(), decoded.end());
++    }
++    LOG(ERROR) << "clearcote: portable key at " << path
++               << " is unreadable; refusing to overwrite it, because doing so "
++                  "would silently discard every cookie it protects.";
++    return std::vector<uint8_t>();
++  }
++
++  std::vector<uint8_t> key(kKeySize);
++  crypto::RandBytes(key);
++  const std::string encoded_new = base::Base64Encode(key);
++  if (!base::WriteFile(path, encoded_new)) {
++    LOG(ERROR) << "clearcote: could not write portable key to " << path
++               << "; this profile will not be portable.";
++    return std::vector<uint8_t>();
++  }
++  return key;
++}
++
++void ReplyWithKey(os_crypt_async::KeyProvider::KeyCallback callback,
++                  std::vector<uint8_t> key_bytes) {
++  if (key_bytes.size() != kKeySize) {
++    // Temporary, not permanent: a permanent error invites callers to conclude
++    // the data is unrecoverable and drop it.
++    std::move(callback).Run(
++        kPortableKeyTag,
++        base::unexpected(
++            os_crypt_async::KeyProvider::KeyError::kTemporarilyUnavailable));
++    return;
++  }
++  Encryptor::Key key(key_bytes, os_crypt_async::mojom::Algorithm::kAES256GCM);
++  std::move(callback).Run(kPortableKeyTag, std::move(key));
++}
++
++}  // namespace
++
++PortableKeyProvider::PortableKeyProvider(base::FilePath key_file,
++                                         std::string caller_secret)
++    : key_file_(std::move(key_file)),
++      caller_secret_(std::move(caller_secret)) {}
++
++PortableKeyProvider::~PortableKeyProvider() = default;
++
++void PortableKeyProvider::GetKey(KeyCallback callback) {
++  // Derived mode touches no disk, so it can answer inline.
++  if (!caller_secret_.empty()) {
++    ReplyWithKey(std::move(callback), DeriveFromSecret(caller_secret_));
++    return;
++  }
++  // File mode reads (and possibly writes) the profile directory, which must not
++  // happen on the calling sequence.
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE,
++      {base::MayBlock(), base::TaskPriority::USER_BLOCKING},
++      base::BindOnce(&LoadOrCreateKeyFile, key_file_),
++      base::BindOnce(&ReplyWithKey, std::move(callback)));
++}
++
++bool PortableKeyProvider::UseForEncryption() {
++  return true;
++}
++
++}  // namespace ungoogled
+--- a/components/ungoogled/ungoogled_switches.h
++++ b/components/ungoogled/ungoogled_switches.h
+@@ -29,6 +29,12 @@
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintAvailHeight[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintColorDepth[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintDevicePixelRatio[];
++
++// clearcote(#12): keep the profile's encryption key in the profile directory so
++// the whole user data dir is portable between machines.
++COMPONENT_EXPORT(UNGOOGLED) extern const char kPortableProfile[];
++// Derive that key from a caller-supplied secret instead, so nothing lands on disk.
++COMPONENT_EXPORT(UNGOOGLED) extern const char kProfileEncryptionKey[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintMaxTouchPoints[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintPlatform[];
+ COMPONENT_EXPORT(UNGOOGLED) extern const char kFingerprintPlatformVersion[];
+--- a/components/ungoogled/ungoogled_switches.cc
++++ b/components/ungoogled/ungoogled_switches.cc
+@@ -49,6 +49,8 @@
+ const char kFingerprintAvailHeight[] = "fingerprint-avail-height";
+ const char kFingerprintColorDepth[] = "fingerprint-color-depth";
+ const char kFingerprintDevicePixelRatio[] = "fingerprint-device-pixel-ratio";
++const char kPortableProfile[] = "portable-profile";
++const char kProfileEncryptionKey[] = "profile-encryption-key";
+ const char kFingerprintMaxTouchPoints[] = "fingerprint-max-touch-points";
+ 
+ // Specify the operating system type
+--- a/components/ungoogled/BUILD.gn
++++ b/components/ungoogled/BUILD.gn
+@@ -9,6 +9,8 @@
+     "fingerprint_data.h",
+     "persona_profile.cc",
+     "persona_profile.h",
++    "portable_key_provider.cc",
++    "portable_key_provider.h",
+     "ungoogled_switches.h",
+     "ungoogled_switches.cc",
+   ]
+@@ -17,6 +19,12 @@
+ 
+   deps = [
+     "//base",
++    "//crypto",
+     "//third_party/zlib/google:compression_utils",
+   ]
++
++  public_deps = [
++    # clearcote(#12): PortableKeyProvider implements os_crypt_async::KeyProvider.
++    "//components/os_crypt/async/browser:key_provider_interface",
++  ]
+ }
+--- a/chrome/browser/browser_process_impl.cc
++++ b/chrome/browser/browser_process_impl.cc
+@@ -124,6 +124,8 @@
+ #include "components/network_session_configurator/common/network_switches.h"
+ #include "components/network_time/network_time_tracker.h"
+ #include "components/os_crypt/async/browser/os_crypt_async.h"
++#include "components/ungoogled/portable_key_provider.h"
++#include "components/ungoogled/ungoogled_switches.h"
+ #include "components/permissions/permissions_client.h"
+ #include "components/policy/core/common/policy_service.h"
+ #include "components/prefs/json_pref_store.h"
+@@ -1557,6 +1559,24 @@
+   std::vector<std::pair<size_t, std::unique_ptr<os_crypt_async::KeyProvider>>>
+       providers;
+ 
++  // clearcote(#12): portable profiles. Registered ABOVE the platform providers
++  // so it performs encryption, while DPAPI / App-Bound / Keychain stay
++  // registered and can still DECRYPT anything written before the switch was
++  // used -- an existing profile keeps opening and migrates as it is written.
++  {
++    const base::CommandLine* cc_cmd = base::CommandLine::ForCurrentProcess();
++    const std::string cc_secret =
++        cc_cmd->GetSwitchValueASCII(switches::kProfileEncryptionKey);
++    if (!cc_secret.empty() || cc_cmd->HasSwitch(switches::kPortableProfile)) {
++      base::FilePath cc_user_data;
++      base::PathService::Get(chrome::DIR_USER_DATA, &cc_user_data);
++      providers.emplace_back(
++          /*precedence=*/20u,
++          std::make_unique<ungoogled::PortableKeyProvider>(
++              cc_user_data.AppendASCII("Portable Key"), cc_secret));
++    }
++  }
++
+   if (additional_provider_for_test_) {
+     // Explicitly move the KeyProvider but leave the std::optional holding the
+     // pair, this ensures it can only be set once in testing.

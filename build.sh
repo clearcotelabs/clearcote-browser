@@ -4,7 +4,7 @@
 #   - Linux x64    (native)
 #
 # Prerequisites (a capable Linux host):
-#   - 64-bit Linux, ~16 GB+ RAM (32 GB recommended; the link step is RAM-hungry), a big swap helps
+#   - 64-bit Linux, ~32 GB RAM (the official ThinLTO link peaks at ~31 GB on Windows), a big swap helps
 #   - ~120 GB free disk, a many-core CPU, and several hours
 #   - git, python3, curl, ninja, zip, xz; and for the Windows target, ciopfs (case-folded SDK headers)
 #
@@ -25,7 +25,7 @@ export REPO="$HERE"
 run() { echo; echo "==== $1 ===="; bash "$HERE/scripts/$2"; }
 
 echo "### Clearcote build — TARGET=$TARGET  WORK=$WORK  (Chromium $(cat "$HERE/UPSTREAM_REVISION"))"
-run "00  fetch + prune Chromium 150 source"        00-fetch-source.sh
+run "00  fetch + prune Chromium 151 source"        00-fetch-source.sh
 run "01  apply patch series ($TARGET)"             01-apply-patches.sh
 run "02  host toolchain (clang/rust/gn/sysroot)"   02-host-toolchain.sh
 if [ "$TARGET" = "windows" ]; then

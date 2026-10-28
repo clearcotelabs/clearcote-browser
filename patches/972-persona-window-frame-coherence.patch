@@ -1,0 +1,102 @@
+clearcote(#12): a persona window reports its REAL frame delta.
+
+outerHeight() synthesised the browser chrome as a hard-coded innerHeight + 88
+whenever a persona was active, clamped to the persona work area. Pointer events,
+meanwhile, carry the true viewport origin, shifted together with window.screenY
+by PersonaScreenOriginDelta so those two remain consistent with each other.
+
+That left a page two ways to recover the chrome height -- from an event, as
+screenY - clientY - window.screenY, and from the window, as outerHeight -
+innerHeight -- which disagreed by however far the real chrome was from 88.
+Measured on a headed Windows desktop with a real frame delta of 129: the two
+readings differed by 41px, a contradiction no window can produce, and one the
+public audit reconciles directly (event-coords-vs-window-geometry).
+
+Use the real delta instead. This leaks nothing further: innerHeight is already
+the true viewport, and the chrome height is a constant of the OS and its display
+scaling rather than a property of the display size or the window position. The
+clamp to the persona work area is kept, so a window still never claims to be
+taller than the screen it says it is on.
+
+Also removes a misplaced block: the avail_width / persona WIDTH branches sat
+inside outerHeight(), so with --fingerprint-avail-width set and no
+--fingerprint-avail-height, outerHeight() returned a value derived from
+innerWidth. The second of the two was unreachable in any case, since the persona
+branch above it always returned first. outerWidth() is unaffected and continues
+to report the real frame width.
+
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -203,6 +203,22 @@
+   return document->RequestAnimationFrame(frame_callback);
+ }
+ 
++
++// clearcote(#12): the REAL outer-minus-inner vertical delta for this window --
++// the height of the browser chrome plus the bottom border. Used so a persona
++// reports a frame the pointer-event coordinates can be reconciled with. Returns
++// 0 rather than a negative when the frame cannot be measured, which keeps
++// outerHeight >= innerHeight in every degenerate case.
++int RealFrameDeltaHeightFor(LocalFrame* frame, int inner_height) {
++  if (!frame)
++    return 0;
++  Page* page = frame->GetPage();
++  if (!page)
++    return 0;
++  const int real = page->GetChromeClient().RootWindowRect(*frame).height();
++  const int delta = real - inner_height;
++  return delta > 0 ? delta : 0;
++}
+ }  // namespace
+ 
+ class LocalDOMWindow::NetworkStateObserver final
+@@ -1722,31 +1738,30 @@
+   }
+   if (PersonaWindowActive()) {
+     // clearcote: a phone browser has no desktop window chrome, so outerHeight
+-    // equals innerHeight (no +88 tab/url delta).
++    // equals innerHeight (no tab/url delta).
+     if (ungoogled::CurrentPersona().mobile)
+       return innerHeight();
++    // clearcote(#12): the frame delta must be the REAL one, not a constant.
++    //
++    // A pointer event's screenY is derived from the true viewport origin, and is
++    // then shifted together with window.screenY by PersonaScreenOriginDelta, so
++    // those two stay consistent with each other. That leaves a page two ways to
++    // recover the chrome height: from an event, as screenY - clientY -
++    // window.screenY, and from here, as outerHeight - innerHeight. A hard-coded
++    // 88 makes them disagree by however much the real chrome differs from 88 --
++    // measured at 41px on a headed Windows desktop whose real delta is 129,
++    // which is a contradiction no window can produce.
++    //
++    // Reporting the real delta leaks nothing further: innerHeight is already the
++    // true viewport, and the chrome height is a constant of the OS and its
++    // display scaling rather than a property of the display size or the window
++    // position. The clamp to the persona work area is kept, so the window still
++    // never claims to be taller than the screen it says it is on.
+     int ah = ungoogled::CurrentPersona().avail_screen_height;
+-    int oh = innerHeight() + 88;  // realistic Chrome tab+url chrome height
++    int oh = innerHeight() + RealFrameDeltaHeightFor(GetFrame(), innerHeight());
+     return oh < ah ? oh : ah;
+   }
+ 
+-  const int ls_aw = AvailOverrides().avail_width;  // clearcote-ls-refine
+-  if (ls_aw > 0) {
+-    int ow = innerWidth() + 16;
+-    return ow < ls_aw ? ow : ls_aw;
+-  }
+-  if (PersonaWindowActive()) {
+-    // clearcote: a phone browser has no desktop window frame, so outerWidth
+-    // equals innerWidth (no +16 delta).
+-    if (ungoogled::CurrentPersona().mobile)
+-      return innerWidth();
+-    // clearcote: horizontal window-frame delta (like outerHeight's +88) so outerWidth
+-    // != innerWidth -- a real Chrome window is wider than its viewport.
+-    int aw = ungoogled::CurrentPersona().avail_screen_width;
+-    int ow = innerWidth() + 16;
+-    return ow < aw ? ow : aw;
+-  }
+-
+   LocalFrame* frame = GetFrame();
+ 
+   // FencedFrames should return innerHeight to prevent passing

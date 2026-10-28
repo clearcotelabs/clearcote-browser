@@ -8,15 +8,17 @@ Clearcote is meant to be rebuilt by anyone with a capable Linux box. This guide 
 
 | Component | Pin |
 |---|---|
-| Chromium | `150.0.7871.114` (see [`UPSTREAM_REVISION`](../UPSTREAM_REVISION)) |
-| ungoogled-chromium | tag `150.0.7871.114-1` (commit `2d89b04e1b68385c9086efab0df1e3679b35246e`) |
-| ungoogled-chromium-windows | tag `150.0.7871.114-1.1` (commit `42f46dba031f8f9e39277465fa28fec837f2f5bd`) |
+| Chromium | `151.0.7922.108` (see [`UPSTREAM_REVISION`](../UPSTREAM_REVISION)) |
+| ungoogled-chromium | tag `151.0.7922.108-1` (commit `ecbcc4c1413c961e37d4224f787fecb8534b1505`) |
+| ungoogled-chromium-windows | tag `151.0.7922.108-1.1` (commit `0314145a88835602a48d656fd9836e5f5644721c`) |
 | Toolchain | Chromium in-tree clang/lld (clang-cl + lld-link for the Windows target) |
+| Build type | **official** (`is_official_build=true`: ThinLTO + PGO, DCHECKs compiled out) since Chromium 151 |
+| PGO profiles | Chromium's own for this revision: `chrome/build/win64.pgo.txt` / `linux.pgo.txt` name the file (the Linux one ships in the tarball; the Windows one is downloaded by stage 04) |
 | Windows SDK / CRT | Microsoft SDK `10.0.26100` + CRT, fetched on Linux via [xwin](https://github.com/Jake-Shadle/xwin) `0.9.0` |
 
 ## Prerequisites
 
-- 64-bit Linux host. **~16 GB+ RAM** (32 GB recommended — the link step is RAM-hungry; a large swap file helps), **~120 GB free disk**, a many-core CPU, and **several hours**.
+- 64-bit Linux host. **~32 GB RAM** (the official ThinLTO link of the Windows target peaks at ~31 GB; a large swap file helps), **~120 GB free disk**, a many-core CPU, and **a long time**: since 151 the build is official, and the Windows cross ThinLTO build takes ~12 h on 8 cores.
 - `git`, `python3`, `curl`, `ninja`, `zip`, and **`ciopfs`** (case-insensitive FUSE, for the MSVC headers). The rest of Chromium's system build packages are installed by `scripts/02` via `build/install-build-deps.py` (Debian/Ubuntu; run as root or with sudo — other distros: install the equivalents).
 - No system MSVC and no Windows machine — the toolchain is assembled from Microsoft's redistributable SDK packages via `xwin` (you accept Microsoft's license when xwin downloads them; Clearcote ships none of them).
 
@@ -28,12 +30,12 @@ The most reproducible way is to build inside the pinned [`Dockerfile`](../Docker
 git clone https://github.com/clearcotelabs/clearcote-browser.git && cd clearcote-browser
 docker build -t clearcote-build .                                    # the build environment (fast)
 
-# then build a target — multi-hour; ~16 GB+ RAM, ~120 GB disk. Artifacts land in ./out:
+# then build a target — many hours (official ThinLTO); ~32 GB RAM, ~120 GB disk. Artifacts land in ./out:
 docker run --rm -v "$PWD/out:/clearcote-build/dist" clearcote-build linux     # -> chrome tar.xz
 docker run --rm -v "$PWD/out:/clearcote-build/dist" clearcote-build windows   # -> chrome.exe zip
 
 # verify against the release (see docs/VERIFY.md):
-sha256sum -c out/clearcote-150.0.7871.114-linux-x64.tar.xz.sha256
+sha256sum -c out/clearcote-151.0.7922.108-linux-x64.tar.xz.sha256
 gpg --verify out/SHA256SUMS.txt.asc out/SHA256SUMS.txt   # against the release's SHA256SUMS.txt.asc
 ```
 
@@ -49,16 +51,16 @@ WORK=~/clearcote-build ./build.sh linux       # or: ./build.sh windows   (defaul
 
 | Stage | Script | What it does |
 |---|---|---|
-| 00 | `scripts/00-fetch-source.sh` | clone the pinned ungoogled tooling, retrieve + unpack Chromium 150, prune binaries |
+| 00 | `scripts/00-fetch-source.sh` | clone the pinned ungoogled tooling, retrieve + unpack Chromium 151, prune binaries |
 | 01 | `scripts/01-apply-patches.sh` | apply the patch series (ungoogled base + windows overlay + Clearcote set) — the **same tree for both targets**: since 150 one patched tree builds the Windows and the Linux binary |
 | 02 | `scripts/02-host-toolchain.sh` | fetch clang/rust/sysroot/node; build `gn` from in-tree source (both targets) |
 | 03 | `scripts/03-windows-sdk.sh` | **Windows only** — xwin → assemble the `package_from_installed`-style Windows SDK/CRT sysroot |
-| 04 | `scripts/04-configure-build.sh` | copy `config/args.gn` (Win) or `config/args.linux.gn` (Linux), `gn gen`, `ninja` (Linux also builds `chrome_sandbox` + `chrome_crashpad_handler`) |
+| 04 | `scripts/04-configure-build.sh` | fetch the Windows PGO profile (Windows only), copy `config/args.gn` (Win) or `config/args.linux.gn` (Linux), `gn gen`, `ninja` (Linux also builds `chrome_sandbox` + `chrome_crashpad_handler`) |
 | 05 | `scripts/05-package.sh` | Windows → zip + VC++ DLLs; Linux → deterministic `tar.xz` (+ `chrome-sandbox`). Emits `.sha256` + `SHA256SUMS.txt` → `$WORK/dist` |
 
 ## 1. Source
 
-`scripts/00-fetch-source.sh` checks out the pinned `ungoogled-chromium` and `ungoogled-chromium-windows` tags, then uses ungoogled's `downloads.py` to retrieve and unpack the exact Chromium 150 tarball (~1.5 GB download → ~10 GB unpacked) and prunes non-source binaries.
+`scripts/00-fetch-source.sh` checks out the pinned `ungoogled-chromium` and `ungoogled-chromium-windows` tags, then uses ungoogled's `downloads.py` to retrieve and unpack the exact Chromium 151 tarball (~1.5 GB download → ~10 GB unpacked) and prunes non-source binaries.
 
 ## 2. Patches
 
@@ -70,7 +72,7 @@ The identity/privacy behavior is defined **entirely by the patch set** — read 
 
 `scripts/01-apply-patches.sh` applies them with the ungoogled patch tooling. Every patch is a plain unified diff against the pinned revision.
 
-> **Domain substitution** (ungoogled's URL-rewriting hardening) is intentionally **not** applied in the default flow: it rewrites Google download URLs and breaks the toolchain fetch in stage 02. Apply it (optional) *after* stage 02 if you want it, and re-run `gn gen`.
+> **Domain substitution** (ungoogled's URL-rewriting hardening) is **not** applied at this stage: it rewrites Google download URLs and would break the toolchain fetch in stage 02. Since Chromium 151 the released binaries are built from a tree *with* it, so `scripts/04-configure-build.sh` applies it after stage 02, just before `gn gen` (applying it after the Clearcote series gives the same tree as applying it before). Re-running stage 02 reverts it; stage 04 applies it again.
 
 ## 3. Host toolchain
 
@@ -89,7 +91,18 @@ The build then runs with **`DEPOT_TOOLS_WIN_TOOLCHAIN=1`** (not 0) pointing `GYP
 
 ## 5. Configure + build
 
-`scripts/04-configure-build.sh` copies [`config/args.gn`](../config/args.gn) into `out/Default`, runs `gn gen`, and `ninja -C out/Default chrome`. The config is the exact `args.gn` the release used (Windows x64, de-Googled, `proprietary_codecs=true`, `is_official_build=false`).
+`scripts/04-configure-build.sh` copies [`config/args.gn`](../config/args.gn) (or [`config/args.linux.gn`](../config/args.linux.gn)) into `out/Default`, runs `gn gen`, and `ninja -C out/Default chrome`. The config is the exact `args.gn` the release used (de-Googled, `proprietary_codecs=true`, and since Chromium 151 an **official** build: `is_official_build=true`, `dcheck_always_on=false`, ThinLTO + PGO).
+
+**PGO profile.** `chrome_pgo_phase=2` needs the profile that `pgo_data_path` names. The Linux profile is in the source tarball. The Windows one is not; stage 04 downloads it before `gn gen` (and checks that `pgo_data_path` matches the name the tree expects). By hand, from `build/src`:
+
+```bash
+curl -fL -o chrome/build/pgo_profiles/$(cat chrome/build/win64.pgo.txt) \
+  https://storage.googleapis.com/chromium-optimization-profiles/pgo_profiles/$(cat chrome/build/win64.pgo.txt)
+```
+
+(`tools/update_pgo_profiles.py` does the same but needs `vpython3`.)
+
+**Cost and limits.** The Windows cross ThinLTO build takes ~12 h on 8 cores and needs ~31 GB RAM at the link. Do **not** set `concurrent_links` in `args.gn` — gn asserts on it when ThinLTO is on. Two non-default flags keep an official build working here: `enable_resource_allowlist_generation=false` on Windows (the default needs MSVC's `undname`, which a Linux cross-build does not have, and the build fails at ~99 % on `//chrome:resource_allowlist`; `llvm-undname` is not a substitute, its output differs), and `is_cfi=false` / `use_cfi_icall=false` on Linux (CFI defaults on for official Linux x64 and aborts on indirect-call type mismatches). `angle_enable_hlsl=true` on Linux is needed by `966-angle-hlsl-dialect-optin`.
 
 ## 6. Package + verify
 

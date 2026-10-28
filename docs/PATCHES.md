@@ -1,6 +1,6 @@
 # clearcote Stealth-Patch Manifest
 
-**Target:** Chromium 150.0.7871.114 (ungoogled base) · Windows x64 + Linux x64 · cross-compiled on Linux (this design manifest was drafted and grounded against 149; the committed patch set in `patches/` is the source of truth)
+**Target:** Chromium 151.0.7922.108 (ungoogled base) · Windows x64 + Linux x64 · cross-compiled on Linux (this design manifest was drafted and grounded against 149; the committed patch set in `patches/` is the source of truth)
 **Base spoofing layer:** adryfish/fingerprint-chromium 142→149 port
 **Coherence model:** Brave per-eTLD+1 farbling, ported onto clearcote's session-seed root
 **Status:** design plan, written before the patches were built · file paths are real Chromium 149 targets

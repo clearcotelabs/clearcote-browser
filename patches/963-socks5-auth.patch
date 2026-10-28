@@ -1,0 +1,78 @@
+clearcote: authenticated SOCKS5 (RFC 1929)
+
+Chromium offers exactly one SOCKS5 auth method -- 0x00, "no authentication" -- so an authenticated
+SOCKS5 proxy, which is what most residential vendors sell, fails with ERR_SOCKS_CONNECTION_FAILED.
+curl succeeds against the same endpoint because curl implements RFC 1929.
+
+socks5_client_socket now offers [0x00, 0x02] when credentials are present and implements the
+username/password sub-negotiation in four new states between the greeting and the handshake. With
+no credentials the greeting and state machine are byte-for-byte what they were.
+
+Credentials arrive on --socks5-credentials=user:pass. utility_process_host.cc must forward it:
+the SOCKS5 handshake runs in the NETWORK SERVICE, so without that the switch is invisible where it
+is read and every authenticated proxy still fails -- the first build of this change did exactly
+that. Patch 210 added the fingerprint switches to the same allowlist for the same reason.
+
+Verified on Windows and Linux against a real authenticated endpoint: 3/3 runs each exit via the
+proxy, and the negative control without credentials is still refused, which is what proves the
+credentials did the work. WebRTC re-checked with the proxy live: no UDP escapes, no real address in
+any candidate, ICE shape unchanged.
+
+--- a/net/socket/socks5_client_socket.h
++++ b/net/socket/socks5_client_socket.h
+@@ -122,6 +122,11 @@
+   int DoGreetReadComplete(int result);
+   int DoGreetWrite();
+   int DoGreetWriteComplete(int result);
++  // clearcote: RFC 1929.
++  int DoAuthWrite();
++  int DoAuthWriteComplete(int result);
++  int DoAuthRead();
++  int DoAuthReadComplete(int result);
+ 
+   // Creates a DrainableIOBuffer containing the SOCKS handshake.
+   scoped_refptr<DrainableIOBuffer> BuildHandshakeWriteBuffer() const;
+--- a/net/socket/socks5_client_socket.cc
++++ b/net/socket/socks5_client_socket.cc
+@@ -225,6 +225,27 @@
+         net_log_.EndEventWithNetErrorCode(NetLogEventType::SOCKS5_GREET_READ,
+                                           rv);
+         break;
++      // clearcote: RFC 1929 states, reusing the greet net-log events.
++      case STATE_AUTH_WRITE:
++        DCHECK_EQ(OK, rv);
++        net_log_.BeginEvent(NetLogEventType::SOCKS5_GREET_WRITE);
++        rv = DoAuthWrite();
++        break;
++      case STATE_AUTH_WRITE_COMPLETE:
++        rv = DoAuthWriteComplete(rv);
++        net_log_.EndEventWithNetErrorCode(NetLogEventType::SOCKS5_GREET_WRITE,
++                                          rv);
++        break;
++      case STATE_AUTH_READ:
++        DCHECK_EQ(OK, rv);
++        net_log_.BeginEvent(NetLogEventType::SOCKS5_GREET_READ);
++        rv = DoAuthRead();
++        break;
++      case STATE_AUTH_READ_COMPLETE:
++        rv = DoAuthReadComplete(rv);
++        net_log_.EndEventWithNetErrorCode(NetLogEventType::SOCKS5_GREET_READ,
++                                          rv);
++        break;
+       case STATE_HANDSHAKE_WRITE:
+         DCHECK_EQ(OK, rv);
+         net_log_.BeginEvent(NetLogEventType::SOCKS5_HANDSHAKE_WRITE);
+--- a/content/browser/service_host/utility_process_host.cc
++++ b/content/browser/service_host/utility_process_host.cc
+@@ -401,6 +401,11 @@
+       // the network fingerprint silently stays stock.
+       switches::kFingerprint,
+       switches::kFingerprintTlsProfile,
++      // clearcote: RFC 1929 SOCKS5 credentials. The SOCKS5 handshake runs in the
++      // network service, so without this the switch is invisible where it is read
++      // (net/socket/socks5_client_socket.cc) and every authenticated proxy fails
++      // with ERR_SOCKS_CONNECTION_FAILED.
++      "socks5-credentials",
+       network::switches::kAdditionalTrustTokenKeyCommitments,
+       network::switches::kForceEffectiveConnectionType,
+       network::switches::kHostResolverRules,

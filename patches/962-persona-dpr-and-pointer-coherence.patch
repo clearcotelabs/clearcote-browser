@@ -1,0 +1,156 @@
+clearcote: persona DPR and pointer-origin coherence (clearcote-browser#11 follow-up)
+
+Found by probing the secondary observation in #11 -- persona screen dimensions alongside real
+pointer coordinates. All four defects are one shape: a value overridden in ONE accessor while a
+second accessor kept reading the real host, so the two disagreed inside a single page load with
+nothing for the site to compare against.
+
+1. media_values.cc -- CalculateDevicePixelRatio() honoured only the seeded-persona case and
+   ignored --fingerprint-device-pixel-ratio. A persona claiming 2x matched (resolution: 1dppx)
+   and fetched the 1x srcset candidate while window.devicePixelRatio said 2.
+
+2. style_resolver_state.cc -- style resolution received document.DevicePixelRatio(), the frame's
+   REAL ratio, so CSS image-set() still picked its 1x candidate after srcset and the resolution
+   media query were corrected. Patched at the style-resolution call site rather than in
+   Document::DevicePixelRatio(), which also feeds layout paths (text_fit_utils, inline_node,
+   layout_image_resource) where an override would change rendering, not resource selection.
+
+3./4. local_dom_window.{h,cc} + mouse_event.cc -- window.screenX/screenY were synthesised to fit
+   the persona screen while MouseEvent.screenX/screenY carried true desktop coordinates. Since
+   screenX - clientX is constant per window position, a page could subtract the two and recover
+   the real desktop origin, then compare it against the claimed screen. Measured before the fix:
+   the delta moved 88 -> 76 -> 98 as the persona screen changed, while a real machine holds it
+   constant. Both now share one origin delta, exposed as
+   LocalDOMWindow::PersonaScreenOriginDelta().
+
+Everything is guarded so behaviour is unchanged when no override is active: the control runs still
+report 1dppx and fetch the 1x candidates.
+
+Verified on Windows and Linux, persona DPR 2 with and without a persona screen:
+  (resolution: 2dppx) matches, srcset takes img2x.png, image-set() takes css2x.png,
+  pointer delta constant at 88 across personas.
+Audit after the change: 100/100, 179/179 scored checks agree, automation surface 58/58 -- the
+MouseEvent change costs nothing on the input path.
+
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -201,8 +201,16 @@
+ }
+ 
+ float MediaValues::CalculateDevicePixelRatio(LocalFrame* frame) {
+-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
+-    return static_cast<float>(ungoogled::CurrentPersona().device_pixel_ratio);
++  // clearcote(#11-follow-up): this drives (resolution: Ndppx), srcset selection
++  // and image-set(). It used to honour ONLY the seeded persona, so the direct
++  // --fingerprint-device-pixel-ratio flag moved window.devicePixelRatio while
++  // every media-query-driven channel stayed on the host ratio -- a persona
++  // claiming 2x fetched the 1x images and matched (resolution: 1dppx).
++  // Same resolver as window.devicePixelRatio and Sec-CH-DPR: flag > persona.
++  const double persona_dpr = ungoogled::PersonaDevicePixelRatio();
++  if (persona_dpr > 0) {
++    return static_cast<float>(persona_dpr);
++  }
+   return frame->DevicePixelRatio();
+ }
+ 
+--- a/third_party/blink/renderer/core/css/resolver/style_resolver_state.cc
++++ b/third_party/blink/renderer/core/css/resolver/style_resolver_state.cc
+@@ -37,11 +37,26 @@
+ #include "third_party/blink/renderer/core/dom/node.h"
+ #include "third_party/blink/renderer/core/dom/pseudo_element.h"
+ #include "third_party/blink/renderer/core/style/computed_style.h"
++#include "components/ungoogled/persona_profile.h"
+ 
+ namespace blink {
+ 
+ namespace {
+ 
++// clearcote(#11-follow-up): CSS image-set() picks its candidate from the ratio
++// handed to style resolution. That was document.DevicePixelRatio(), the frame's
++// REAL ratio, so a persona claiming 2x still resolved image-set() at 1x even
++// after srcset and (resolution: Ndppx) were corrected -- the same contradiction
++// in a third channel. Same resolver as window.devicePixelRatio and Sec-CH-DPR.
++float ClearcoteStyleDevicePixelRatio(const Document& document) {
++  const double persona_dpr = ungoogled::PersonaDevicePixelRatio();
++  if (persona_dpr > 0) {
++    return static_cast<float>(persona_dpr);
++  }
++  return document.DevicePixelRatio();
++}
++
++
+ bool MayReturnNullRenderingStyleForPseudoElement(
+     PseudoId pseudo_id,
+     const ComputedStyle* parent_style) {
+@@ -113,7 +128,7 @@
+       styled_element_(ComputeStyledElement(style_request, element)),
+       element_style_resources_(
+           GetStyledElement() ? *GetStyledElement() : GetElement(),
+-          document.DevicePixelRatio()),
++          ClearcoteStyleDevicePixelRatio(document)),
+       pseudo_id_(style_request.pseudo_id),
+       originating_element_style_(style_request.originating_element_style),
+       is_for_highlight_(IsHighlightPseudoElement(style_request.pseudo_id)),
+--- a/third_party/blink/renderer/core/frame/local_dom_window.h
++++ b/third_party/blink/renderer/core/frame/local_dom_window.h
+@@ -295,6 +295,13 @@
+   int innerHeight() const;
+   int innerWidth() const;
+   int screenX() const;
++
++  // clearcote(#11-follow-up): (screenX,screenY) minus the REAL window origin,
++  // or (0,0) when no override is in force. Pointer events carry real desktop
++  // coordinates; window.screenX/Y is synthesised for the persona, so without
++  // this shift a page can recover the true window origin from any mouse event
++  // and see it disagree with window.screenX.
++  gfx::Vector2d PersonaScreenOriginDelta() const;
+   int screenY() const;
+   int screenLeft() const { return screenX(); }
+   int screenTop() const { return screenY(); }
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -1847,6 +1847,25 @@
+                                           GetFrame()->LayoutZoomFactor());
+ }
+ 
++gfx::Vector2d LocalDOMWindow::PersonaScreenOriginDelta() const {
++  // clearcote(#11-follow-up): only when the window origin is actually
++  // synthesised. With no override this returns (0,0) and every coordinate path
++  // behaves exactly as stock.
++  if (AvailOverrides().avail_width <= 0 && !PersonaWindowActive()) {
++    return gfx::Vector2d();
++  }
++  LocalFrame* frame = GetFrame();
++  if (!frame) {
++    return gfx::Vector2d();
++  }
++  Page* page = frame->GetPage();
++  if (!page) {
++    return gfx::Vector2d();
++  }
++  const gfx::Rect real = page->GetChromeClient().RootWindowRect(*frame);
++  return gfx::Vector2d(screenX() - real.x(), screenY() - real.y());
++}
++
+ int LocalDOMWindow::screenX() const {
+   LocalFrame* frame = GetFrame();
+   if (!frame) {
+--- a/third_party/blink/renderer/core/events/mouse_event.cc
++++ b/third_party/blink/renderer/core/events/mouse_event.cc
+@@ -158,6 +158,16 @@
+       menu_source_type_(menu_source_type) {
+   InitCoordinates(initializer->clientX(), initializer->clientY(),
+                   fallback_dom_window);
++  // clearcote(#11-follow-up): shift the screen coordinates by the same amount
++  // window.screenX/Y was shifted, so the two cannot be differenced to recover
++  // the real window origin. No-op unless an override is active.
++  if (LocalDOMWindow* w = DynamicTo<LocalDOMWindow>(view())) {
++    const gfx::Vector2d d = w->PersonaScreenOriginDelta();
++    if (!d.IsZero()) {
++      screen_x_ += d.x();
++      screen_y_ += d.y();
++    }
++  }
+   modifiers_ |= ButtonsToWebInputEventModifiers(buttons_);
+ }
+ 

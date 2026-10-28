@@ -1,0 +1,210 @@
+clearcote: opt-in HLSL shader dialect for a Windows persona on a non-D3D host.
+
+WEBGL_debug_shaders.getTranslatedShaderSource() returns whatever the ACTIVE backend produced. A
+Windows persona advertises a Direct3D11 renderer, but on a Linux host the Vulkan backend answers
+with a SPIR-V dump, so two adjacent values contradict each other. Measured on our own builds, same
+persona and UA:
+
+    renderer  ANGLE (Intel, Intel(R) UHD Graphics 770 (0xA780) Direct3D11 vs_5_0 ps_5_0, D3D11)
+    windows   "// INITIAL HLSL BEGIN ... #pragma warning( disable: 3081 ..."    806 bytes
+    linux     "Outputs: gl_Position ... Paste the following SPIR-V binary ..."  7969 bytes
+
+No reference data and no population baseline is needed to read this: the renderer string names the
+API and the dialect sits right next to it.
+
+ANGLE's HLSL backend is a source-to-source translator -- it needs no D3D device, only
+angle_enable_hlsl at build time (added to the Linux args.gn; it is already on for Windows). So the
+shader is re-translated with SH_HLSL_4_1_OUTPUT for THIS QUERY ONLY, using the context's real
+ShBuiltInResources and the same ShCompileOptions Shader::compile builds, then wrapped in the
+envelope ShaderD3D reports ("// INITIAL HLSL BEGIN" ... "<TYPE> SHADER END"). Verified: the result
+is BYTE-IDENTICAL to the genuine capture from our own Windows build, sha256 50ce5778f1c1abab, 806
+bytes both.
+
+Rendering is untouched -- the Vulkan backend still compiles and draws the real shader. A WebGL
+gradient draw with a 64x64 readback hashes 730b0805 with the option off, set to a junk value, and
+on.
+
+The hook is getTranslatedSourceWithDebugInfo() and its length query, which is what
+glGetTranslatedShaderSourceANGLE actually calls (Context.cpp -> mImplementation->getDebugInfo()).
+The translatedSource getters are deliberately left stock: they are unreachable from JS and are used
+for real work. Both the length query and the buffer read go through one helper, because if they
+disagreed the caller's read would truncate. That helper returns BY VALUE -- ShaderImpl::getDebugInfo
+returns by value, so returning a reference to it dangles; the first cut did exactly that and hung
+the query even on the honest path.
+
+OFF BY DEFAULT, enabled per launch with CLEARCOTE_SHADER_DIALECT=hlsl. An environment variable
+rather than a command-line switch because this code runs in the GPU process, which does not receive
+the fingerprint switches, and ANGLE builds standalone so it cannot use base::CommandLine. Any other
+value leaves every path stock.
+
+Two guards, both failing toward the honest value:
+  * if the active backend ALREADY emits HLSL (a real D3D host) the re-translation is skipped, so the
+    same source is a strict no-op in the Windows build even with the variable set;
+  * any translation failure returns empty and the caller falls back to the backend's real debug
+    info -- a failed spoof must never destroy the truthful answer.
+
+Cached per shader; the translation is deterministic and the getter can be called repeatedly.
+
+Off by default because it is not free: the second translation is a different code path from the one
+that rendered, so a shader the Vulkan backend accepts but the HLSL translator rejects falls back to
+SPIR-V and reintroduces the tell for that shader alone. This is for users who hit this specific
+check, not a default.
+
+--- a/third_party/angle/src/libANGLE/Shader.cpp
++++ b/third_party/angle/src/libANGLE/Shader.cpp
+@@ -14,6 +14,7 @@
+ 
+ #include "libANGLE/Shader.h"
+ 
++#include <cstdlib>
+ #include <functional>
+ #include <sstream>
+ 
+@@ -570,11 +571,122 @@
+     return static_cast<int>(mState.mCompiledState->translatedSource->length()) + 1;
+ }
+ 
++namespace
++{
++// clearcote: opt-in HLSL shader dialect for a Windows persona on a non-D3D host.
++//
++// WEBGL_debug_shaders.getTranslatedShaderSource() returns the ACTIVE backend's dump. A Windows
++// persona names a Direct3D11 renderer, but on Linux the Vulkan backend answers with SPIR-V
++// disassembly, so a page can read the renderer string and the dialect beside it and see they
++// disagree. ANGLE's HLSL backend is a source-to-source translator needing no D3D device, so the
++// shader is re-translated for THIS QUERY ONLY. Rendering is untouched -- the Vulkan backend still
++// compiles and draws, and a WebGL pixel readback is identical with this on and off.
++//
++// Off unless CLEARCOTE_SHADER_DIALECT=hlsl. An environment variable rather than a switch because
++// this is the GPU process, which does not receive the fingerprint switches, and ANGLE builds
++// standalone so it cannot use base::CommandLine.
++bool ClearcoteWantsHlsl()
++{
++    static const bool kWant = [] {
++        const char *v = std::getenv("CLEARCOTE_SHADER_DIALECT");
++        return v != nullptr && std::string(v) == "hlsl";
++    }();
++    return kWant;
++}
++
++// Returns empty on any failure; every caller then falls back to the backend's real debug info. A
++// failed spoof must never destroy the honest answer.
++std::string ClearcoteTranslateToHlsl(sh::GLenum type,
++                                     ShShaderSpec spec,
++                                     const ShBuiltInResources &resources,
++                                     const ShCompileOptions &options,
++                                     const std::string &source)
++{
++    if (source.empty() || !sh::Initialize())
++    {
++        return std::string();
++    }
++    ShHandle handle = sh::ConstructCompiler(type, spec, SH_HLSL_4_1_OUTPUT, &resources);
++    if (handle == nullptr)
++    {
++        return std::string();
++    }
++    const char *strings[1] = {source.c_str()};
++    std::string out;
++    if (sh::Compile(handle, strings, 1, options))
++    {
++        out = sh::GetObjectCode(handle);
++    }
++    sh::Destruct(handle);
++    return out;
++}
++}  // namespace
++
++// clearcote: the debug info to report, HLSL when opted in and the translation succeeded, otherwise
++// the backend's own. Both the length query and the buffer read go through here so they agree --
++// disagreeing would truncate the caller's read.
++// Returns BY VALUE: ShaderImpl::getDebugInfo() itself returns by value, so handing back a
++// reference to it would dangle. Callers bind the result to a const& and lifetime extension applies.
++std::string Shader::clearcoteDebugInfo(const Context *context)
++{
++    std::string real = mImplementation->getDebugInfo();
++    if (!ClearcoteWantsHlsl())
++    {
++        return real;
++    }
++    // Already HLSL means a real D3D backend; keep the honest translation. Makes this a strict
++    // no-op in the Windows build even with the variable set.
++    const ShShaderOutput output = context->getCompiler()->getShaderOutputType();
++    if (output == SH_HLSL_4_1_OUTPUT || output == SH_HLSL_3_0_OUTPUT)
++    {
++        return real;
++    }
++    if (!mClearcoteHlslDone)
++    {
++        mClearcoteHlslDone = true;
++
++        // Mirror the options Shader::compile builds, so the HLSL matches what a D3D backend would
++        // have produced for this same context rather than a bare translator default.
++        ShCompileOptions options = {};
++        options.objectCode       = true;
++        options.emulateGLDrawID  = true;
++        if (context->isWebGL() || context->isHardenedContext())
++        {
++            options.initGLPosition                          = true;
++            options.limitCallStackDepth                     = true;
++            options.limitExpressionComplexity               = true;
++            options.initSharedVariables                     = true;
++            options.rejectWebglShadersWithLargeVariables    = true;
++            options.rejectWebglShadersWithUndefinedBehavior = true;
++            // ShaderD3D adds this one for hardened contexts (ShaderD3D.cpp).
++            options.clampIndirectArrayBounds = true;
++        }
++        else
++        {
++            options.emulateGLBaseVertexBaseInstance = true;
++        }
++
++        const std::string hlsl = ClearcoteTranslateToHlsl(
++            ToGLenum(mState.getShaderType()), Compiler::SelectShaderSpec(context->getState()),
++            context->getCompiler()->getBuiltInResources(), options, mState.getSource());
++
++        // The envelope ShaderD3D puts around it, so the shape matches a real D3D report and not
++        // just the dialect (ShaderD3D.cpp: debugInfo accumulation, then getDebugInfo()).
++        if (!hlsl.empty())
++        {
++            mClearcoteHlsl = "// INITIAL HLSL BEGIN\n\n" + hlsl + "\n// INITIAL HLSL END\n\n\n" +
++                             std::string("\n// ") + GetShaderTypeString(mState.getShaderType()) +
++                             " SHADER END\n";
++        }
++    }
++    return mClearcoteHlsl.empty() ? real : mClearcoteHlsl;
++}
++
+ int Shader::getTranslatedSourceWithDebugInfoLength(const Context *context)
+ {
+     resolveCompile(context);
+ 
+-    const std::string &debugInfo = mImplementation->getDebugInfo();
++    const std::string &debugInfo = clearcoteDebugInfo(context);
+     if (debugInfo.empty())
+     {
+         return 0;
+@@ -614,7 +726,7 @@
+                                               char *buffer)
+ {
+     resolveCompile(context);
+-    const std::string &debugInfo = mImplementation->getDebugInfo();
++    const std::string &debugInfo = clearcoteDebugInfo(context);
+     GetSourceImpl(debugInfo, bufSize, length, buffer);
+ }
+ 
+--- a/third_party/angle/src/libANGLE/Shader.h
++++ b/third_party/angle/src/libANGLE/Shader.h
+@@ -212,6 +212,12 @@
+                       const ShShaderOutput &outputType,
+                       const ShBuiltInResources &resources);
+ 
++    // clearcote: debug info to report for the translated-source query, and the cached HLSL
++    // re-translation behind it (opt-in, see Shader.cpp). Empty cache means no spoof.
++    std::string clearcoteDebugInfo(const Context *context);
++    std::string mClearcoteHlsl;
++    bool mClearcoteHlslDone = false;
++
+     ShaderState mState;
+     std::unique_ptr<rx::ShaderImpl> mImplementation;
+     const gl::Limitations mRendererLimitations;

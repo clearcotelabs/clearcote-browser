@@ -1,3 +1,11 @@
+clearcote 900-windows-build-fixes, re-trimmed for the 151 baseline.
+
+Classified against upstream + ungoogled + the ungoogled-chromium-WINDOWS patch set. That
+last set matters: ungoogled build Windows natively, so windows-disable-rcpy.patch routes .rc
+through rc.exe and tool_wrapper raises "Must run on Windows" on a Linux cross-build. The
+tool_wrapper section below puts rc.py back and is REQUIRED, even though it looks already-applied
+against a baseline that lacks the windows patch set.
+
 --- a/build/config/clang/BUILD.gn
 +++ b/build/config/clang/BUILD.gn
 @@ -243,7 +243,9 @@

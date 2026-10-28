@@ -6,18 +6,18 @@
 #
 #   TARGET  windows | linux   (default: windows)
 #   WORK    working dir (default: ~/clearcote-build)
-#   V       Chromium version for the asset name (default: 150.0.7871.114)
+#   V       Chromium version for the asset name (default: 151.0.7922.108)
 set -euo pipefail
 TARGET="${TARGET:-windows}"
 WORK="${WORK:-$HOME/clearcote-build}"
 SRC="$WORK/build/src"; OUT="${OUT:-$SRC/out/Default}"   # override OUT for a Linux build in out/Linux
 DIST="$WORK/dist"; mkdir -p "$DIST"
-V="${V:-150.0.7871.114}"
+V="${V:-151.0.7922.108}"
 
 if [ "$TARGET" = "windows" ]; then
   ASSET="clearcote-$V-windows-x64.zip"
   cd "$OUT"; rm -f "$DIST/$ASSET"
-  # NOTE: *.manifest (the SxS version-assembly manifest, e.g. 150.0.7871.114.manifest) is
+  # NOTE: *.manifest (the SxS version-assembly manifest, e.g. 151.0.7922.108.manifest) is
   # REQUIRED at the archive root — without it chrome.exe fails to start with "the side-by-side
   # configuration is incorrect" (surfaced as `spawn UNKNOWN` via Playwright). Do not drop it.
   zip -r "$DIST/$ASSET" \

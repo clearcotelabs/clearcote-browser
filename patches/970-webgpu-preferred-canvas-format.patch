@@ -1,0 +1,47 @@
+clearcote: report bgra8unorm from getPreferredCanvasFormat() for a Windows persona.
+
+Every real Windows Chrome returns bgra8unorm (measured: genuine Chrome 151 on real Windows, and our
+own Windows build). Linux returns rgba8unorm because the static GetPreferredCanvasFormat() carries a
+mesa BGRA-interop workaround behind #if IS_ANDROID || IS_LINUX, so the value sits beside a renderer
+string naming Direct3D11 and contradicts it.
+
+ONLY the V8 binding is patched. The static is deliberately left alone: it feeds
+swap_texture_descriptor_.format, so changing it would reconfigure the REAL swapchain rather than the
+reported string -- a rendering bug rather than a coherence fix.
+
+Currently cosmetic, since requestAdapter() returns null and nothing can consume the format. Included
+because it is one line and correct; it is not a justification for returning an adapter, which needs
+967 first.
+
+--- a/third_party/blink/renderer/modules/webgpu/gpu.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu.cc
+@@ -45,6 +45,8 @@
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+ #include "third_party/blink/renderer/platform/weborigin/kurl.h"
+ #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
++#include "build/build_config.h"
++#include "components/ungoogled/persona_profile.h"
+ 
+ namespace blink {
+ 
+@@ -423,6 +425,20 @@
+ }
+ 
+ V8GPUTextureFormat GPU::getPreferredCanvasFormat() {
++  // clearcote(r16): a Windows persona reports bgra8unorm, which is what every real Windows
++  // Chrome returns (measured: genuine Chrome 151 on real Windows, and our Windows build).
++  // The static GetPreferredCanvasFormat() below answers rgba8unorm on Linux because of a
++  // mesa BGRA interop workaround (#if IS_ANDROID || IS_LINUX), so the value sits beside a
++  // renderer string naming Direct3D11 and contradicts it.
++  //
++  // ONLY the V8 binding is patched. The static is deliberately left alone: it feeds
++  // swap_texture_descriptor_.format, so changing it would reconfigure the real swapchain
++  // rather than the reported string, which is a rendering bug rather than a coherence fix.
++#if BUILDFLAG(IS_LINUX)
++  if (ungoogled::GetPersonaPlatform() == ungoogled::PersonaPlatform::kWindows) {
++    return FromDawnEnum(wgpu::TextureFormat::BGRA8Unorm);
++  }
++#endif
+   return FromDawnEnum(GetPreferredCanvasFormat());
+ }
+ 

@@ -36,7 +36,7 @@ Usage:
   python scripts/verify_patches.py --tree ~/clearcote-build/build/src --target windows
   # Layer 2 — against a shipped binary, a directory of binaries, or the release zip:
   python scripts/verify_patches.py --binary out/Default/chrome.dll
-  python scripts/verify_patches.py --binary clearcote-150.0.7871.114-windows-x64.zip
+  python scripts/verify_patches.py --binary clearcote-151.0.7922.108-windows-x64.zip
   # Both (the full pre-release gate):
   python scripts/verify_patches.py --tree <src> --target windows --binary <chrome.dll>
 

@@ -1,0 +1,53 @@
+clearcote: system-ui must resolve, and must resolve to the persona's system font.
+
+Measured: `system-ui` rendered at 841.47 in the container -- byte-identical to an unresolvable
+family name, i.e. it did not resolve AT ALL. On Windows it is 895.86, the same width as Segoe UI
+(genuine Chrome 151 and our Windows build agree exactly). A page comparing the generic against the
+concrete family needs no reference data, and the control for "unresolved" is any garbage string.
+
+Root cause: on Linux FontCache::SystemFontFamily() returns whatever the browser pushed through
+renderer preferences (web_view_impl.cc). In a bare container nothing sets it, so the static
+AtomicString stays EMPTY and system-ui has nothing to resolve to.
+
+A fontconfig <alias> does NOT fix this -- tried and measured, no effect -- because Blink substitutes
+this value before fontconfig is consulted and never asks for a family named "system-ui". The fix has
+to live here.
+
+Answers "Segoe UI", which the bundled fonts.conf already maps to the Selawik clone, and which
+measures correctly in the container today, so the target is known good rather than hoped for. Gated:
+a Linux persona keeps the stock pref-driven value.
+
+--- a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
++++ b/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
+@@ -31,6 +31,8 @@
+ #include "third_party/blink/renderer/platform/fonts/font_platform_data.h"
+ #include "third_party/blink/renderer/platform/fonts/simple_font_data.h"
+ #include "ui/gfx/font_fallback_linux.h"
++#include "build/build_config.h"
++#include "components/ungoogled/persona_profile.h"
+ 
+ namespace blink {
+ 
+@@ -41,6 +43,22 @@
+ 
+ // static
+ const AtomicString& FontCache::SystemFontFamily() {
++  // clearcote(r16): a Windows persona must resolve system-ui to its system font. On Linux this
++  // value comes from renderer preferences (web_view_impl.cc), which nothing sets in a bare
++  // container -- so it stays EMPTY and CSS system-ui resolves to nothing. Measured: system-ui
++  // rendered at exactly the width of an unresolvable family, while a Windows host renders it at
++  // the width of Segoe UI. That is readable with two measureText calls and no reference data.
++  //
++  // Segoe UI is the correct answer for a Windows persona and is already mapped to the bundled
++  // Selawik clone by fonts.conf, where it measures correctly today. A fontconfig alias for
++  // "system-ui" does NOT work (measured): Blink substitutes this value before fontconfig is
++  // consulted, so the fix has to live here.
++#if BUILDFLAG(IS_LINUX)
++  if (ungoogled::GetPersonaPlatform() == ungoogled::PersonaPlatform::kWindows) {
++    DEFINE_THREAD_SAFE_STATIC_LOCAL(AtomicString, cc_segoe, ("Segoe UI"));
++    return cc_segoe;
++  }
++#endif
+   return MutableSystemFontFamily();
+ }
+ 

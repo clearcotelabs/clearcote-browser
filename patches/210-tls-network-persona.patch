@@ -22,16 +22,16 @@
        network::switches::kHostResolverRules,
 --- a/net/BUILD.gn
 +++ b/net/BUILD.gn
-@@ -1115,6 +1115,8 @@
-     "ssl/client_cert_store_empty.h",
+@@ -1117,6 +1117,8 @@
      "ssl/crypto_private_key.cc",
      "ssl/crypto_private_key.h",
+     "ssl/ech_mode_getter.h",
 +    "ssl/network_persona.cc",
 +    "ssl/network_persona.h",
      "ssl/openssl_private_key.cc",
      "ssl/openssl_private_key.h",
      "ssl/openssl_ssl_util.cc",
-@@ -1211,6 +1213,7 @@
+@@ -1213,6 +1215,7 @@
    deps = [
      ":cronet_buildflags",
      ":net_deps",

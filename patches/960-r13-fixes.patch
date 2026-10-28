@@ -1,0 +1,93 @@
+clearcote r13 (Chromium 151): two fixes found by running the live audit against the r1 build.
+
+1. element.idl no longer publishes fakeShadowRoot on Element.prototype. The name was the
+   cheapest possible tell -- one in-operator check identified the build, with no reference
+   data and nothing to compare against. Element::FakeShadowRoot() is kept in element.cc/h
+   (it has no other caller) so the capability can be re-exposed behind a gated binding.
+
+2. The persona claimed Chrome 150 on a 151 engine. Six sites across three files: the persona
+   default major, the weighted version pool, its mirror in fingerprint_data.h, the default
+   full version and the Edge UA version. Real 151 stable builds only.
+
+Tail patch: every file here is already touched by 002/050/071/142/170, so the hunks are
+expressed against the fully-applied stack.
+
+--- a/third_party/blink/renderer/core/dom/element.idl
++++ b/third_party/blink/renderer/core/dom/element.idl
+@@ -81,7 +81,11 @@
+ 
+     [RaisesException, MeasureAs=ElementAttachShadow] ShadowRoot attachShadow(ShadowRootInit shadowRootInitDict);
+     [PerWorldBindings, ImplementedAs=OpenShadowRoot] readonly attribute ShadowRoot? shadowRoot;
+-    [PerWorldBindings, ImplementedAs=FakeShadowRoot] readonly attribute ShadowRoot? fakeShadowRoot;
++    // clearcote: fakeShadowRoot was a readonly attribute here. It is the cheapest possible
++    // tell -- `'fakeShadowRoot' in Element.prototype` identifies the build on any page, with
++    // nothing to compare against, and no shipping browser defines the name. Element::
++    // FakeShadowRoot() is kept in element.cc/h so the capability can be re-exposed behind a
++    // command-line-gated binding, but NO name is published on Element.prototype.
+ 
+     [RaisesException] Element? closest(DOMString selectors);
+     [RaisesException] boolean matches(DOMString selectors);
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -63,8 +63,8 @@
+   uint64_t persona_seed = 0;
+ 
+   // ---- Identity ----
+-  unsigned chrome_major_version = 150;
+-  std::string chrome_full_version;  // e.g. "150.0.7871.114"
++  unsigned chrome_major_version = 151;
++  std::string chrome_full_version;  // e.g. "151.0.7922.108"
+ 
+   // ---- Hardware (one tier: cores <-> RAM correlated) ----
+   unsigned hardware_concurrency = 8;  // logical cores (navigator.hardwareConcurrency)
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -55,12 +55,14 @@
+   const char* renderer;
+ };
+ 
+-// Chrome version pool — clearcote 150 line (mirrors fingerprint_data.h).
++// Chrome version pool — clearcote 151 line (mirrors fingerprint_data.h). Real 151 stable
++// builds only: .109 is current stable, .108 is what this engine actually is, and the two older
++// patch levels cover machines that have not restarted yet.
+ constexpr std::array<WeightedEntry<ChromeVer>, 4> kChromeVersions = {{
+-    {{150, "150.0.7871.114"}, 0.55},
+-    {{150, "150.0.7871.115"}, 0.20},
+-    {{150, "150.0.7871.100"}, 0.15},
+-    {{150, "150.0.7871.46"}, 0.10},
++    {{151, "151.0.7922.109"}, 0.45},
++    {{151, "151.0.7922.108"}, 0.30},
++    {{151, "151.0.7922.77"}, 0.15},
++    {{151, "151.0.7922.75"}, 0.10},
+ }};
+ 
+ // Windows desktop resolutions (StatCounter / Steam-survey weighted). avail_h is
+--- a/components/ungoogled/fingerprint_data.h
++++ b/components/ungoogled/fingerprint_data.h
+@@ -25,20 +25,20 @@
+ 
+ // Chromium version list (for seed-based selection)
+ constexpr const char* kChromiumVersions[] = {
+-    "150.0.7871.114",
+-    "150.0.7871.115",
+-    "150.0.7871.100",
+-    "150.0.7871.46"
++    "151.0.7922.109",
++    "151.0.7922.108",
++    "151.0.7922.77",
++    "151.0.7922.75"
+ };
+ 
+ // Default versions for Client Hints (Sec-CH-UA)
+-constexpr const char* kChromeDefaultVersion = "150.0.7871.114";
++constexpr const char* kChromeDefaultVersion = "151.0.7922.109";
+ constexpr const char* kEdgeDefaultVersion = "150.0.4078.65";
+ constexpr const char* kOperaDefaultVersion = "126.0.5748.0";
+ constexpr const char* kVivaldiDefaultVersion = "7.7.3851.66";
+ 
+ // Default versions for User-Agent string suffix
+-constexpr const char* kEdgeUAVersion = "150.0.0.0";
++constexpr const char* kEdgeUAVersion = "151.0.0.0";
+ constexpr const char* kOperaUAVersion = "126.0.0.0";
+ constexpr const char* kVivaldiUAVersion = "7.7.3851.66";
+ 

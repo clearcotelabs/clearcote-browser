@@ -1,10 +1,11 @@
 # Clearcote reference build configuration — Linux x64, built natively on Linux.
 #
 # This is the effective build configuration used to produce the published Linux pre-release
-# (v0.1.0-pre.23, Chromium 150). It is config/args.gn with the target flipped to Linux: target_os="linux",
+# (v0.1.0-pre.24, Chromium 151). It is config/args.gn with the target flipped to Linux: target_os="linux",
 # use_sysroot=true (build against Chromium's bundled Debian bullseye sysroot -> glibc 2.31 floor),
-# and the Windows-only cross flags (rust_sysroot_absolute, dawn_use_built_dxc) dropped. Everything
-# else — the de-Google set and the release config — is identical to the Windows build.
+# and the Windows-only cross flags (rust_sysroot_absolute, dawn_use_built_dxc) dropped. The de-Google
+# set is identical to the Windows build; the release config differs only where Linux needs it
+# (its own PGO profile, CFI off, mold off, the HLSL translator on, NaCl off).
 # scripts/04-configure-build.sh copies this to out/Default/args.gn when TARGET=linux. (The build host
 # also sets cc_wrapper="ccache", a compile cache that does not change the output.)
 
@@ -35,15 +36,27 @@ target_cpu = "x64"
 is_clang = true
 clang_base_path = "//third_party/llvm-build/Release+Asserts"
 use_sysroot = true                    # Chromium's bundled amd64 bullseye sysroot -> glibc 2.31 floor
+use_mold = false                      # link with lld, as the Windows build does
 
-# --- Release configuration (identical to the Windows build) ---
+# --- Release configuration (official since Chromium 151; see config/args.gn) ---
 is_debug = false
-is_official_build = false             # matches the published pre-release; see docs/RELEASING.md
+is_official_build = true              # ThinLTO + PGO, DCHECKs compiled out
+dcheck_always_on = false              # explicit: the official default, kept visible
+# CFI defaults ON for linux + x64 + official. It aborts the process on any indirect-call type
+# mismatch, which a bindings-heavy patch stack invites; Windows official builds do not enable it.
+is_cfi = false
+use_cfi_icall = false
 is_component_build = false            # single, shippable binary
 symbol_level = 0
 blink_symbol_level = 0
-chrome_pgo_phase = 0                  # no downloaded PGO profiles
+# PGO with Chromium's own Linux profile for this revision; it ships in the source tarball, so no
+# download step is needed on Linux.
+chrome_pgo_phase = 2
+pgo_data_path = "//chrome/build/pgo_profiles/chrome-linux-7922-1785927076-bb17492c37d005d5bd31464529a7c78d371e030c-fe1da440d678744723d81cc39d45fc5ba3ccfa2d.profdata"
 use_remoteexec = false
+# ANGLE's HLSL translator, normally Windows-only. 966-angle-hlsl-dialect-optin needs it on Linux to
+# report the HLSL dialect a Windows persona's D3D11 renderer implies (opt-in at runtime).
+angle_enable_hlsl = true
 
 # --- Media / codecs (match a normal desktop browser) ---
 proprietary_codecs = true

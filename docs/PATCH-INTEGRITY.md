@@ -52,7 +52,9 @@ Before any tree/binary check, `verify_patches.py` asserts the bookkeeping is sou
 what forces the standard to stay honest as patches are added:
 
 - Every entry in `series` exists as a file, and every `*.patch` file is listed in `series`
-  (an **orphan patch never applies** and would otherwise be a silent hole).
+  (an **orphan patch never applies** and would otherwise be a silent hole). Only top-level
+  `patches/*.patch` counts: a subfolder such as `patches/macos-150/` (patches for another build)
+  is neither applied nor checked.
 - No duplicate `series` entries.
 - **Manifest completeness:** every `series` patch has a witness entry in
   [`../scripts/patch_markers.json`](../scripts/patch_markers.json). You **cannot add a patch

@@ -1,0 +1,143 @@
+clearcote: battery substitution moves to the dispatcher seam.
+
+150 pinned the four BatteryManager getters to persona constants but left DidUpdateData() reading
+the real host status and firing chargingchange/levelchange off real old-vs-new comparisons: on a
+laptop a page saw levelchange fire while level stayed 1.0, an event for a value that did not
+change. BatteryDispatcher::OnDidChange() now publishes the persona status (four-argument
+BatteryStatus ctor, so level takes the same two-digit rounding a host reading takes) and the
+getters are upstream again, reading that status. One value, one owner: getters, HasLastData() and
+the four events derive from it and nothing can fire. Values in every mode are the ones 150 served.
+
+--- a/third_party/blink/renderer/modules/battery/battery_dispatcher.cc
++++ b/third_party/blink/renderer/modules/battery/battery_dispatcher.cc
+@@ -4,6 +4,11 @@
+ 
+ #include "third_party/blink/renderer/modules/battery/battery_dispatcher.h"
+ 
++#include <cstdint>
++#include <limits>
++
++#include "base/time/time.h"
++#include "components/ungoogled/persona_profile.h"
+ #include "services/device/public/mojom/battery_status.mojom-blink.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -11,6 +16,36 @@
+ 
+ namespace blink {
+ 
++namespace {
++
++// clearcote: the battery state the persona machine reports, built through the
++// four-argument BatteryStatus ctor so |level| takes the same
++// EnsureTwoSignificantDigits() rounding a host reading takes (the default ctor
++// writes level_ directly and skips it).
++//
++// Desktop personas: a battery-less machine on AC -- the exact tuple real Chrome
++// reports there (charging, chargingTime 0, dischargingTime +Infinity, level 1).
++// Android persona: on battery, discharging; chargingTime +Infinity, a plausible
++// finite dischargingTime, and a seed-derived level in 0.55..0.98 rounded to
++// 0.01 -- the same values the 150 getters served, moved to the one place every
++// reader (getters, HasLastData(), the four *change events) copies from.
++BatteryStatus PersonaBatteryStatus() {
++  const ungoogled::PersonaProfile& p = ungoogled::CurrentPersona();
++  if (!p.mobile) {
++    return BatteryStatus(/*charging=*/true,
++                         /*charging_time=*/base::TimeDelta(),
++                         /*discharging_time=*/base::TimeDelta::Max(),
++                         /*level=*/1.0);
++  }
++  const uint64_t s = p.persona_seed;
++  return BatteryStatus(/*charging=*/false,
++                       /*charging_time=*/base::TimeDelta::Max(),
++                       /*discharging_time=*/base::Seconds(13680),
++                       /*level=*/(55 + static_cast<int>(s % 44)) / 100.0);
++}
++
++}  // namespace
++
+ BatteryDispatcher::BatteryDispatcher(ExecutionContext* context)
+     : monitor_(context), has_latest_data_(false) {}
+ 
+@@ -30,9 +65,16 @@
+ 
+   DCHECK(battery_status);
+ 
+-  UpdateBatteryStatus(BatteryStatus(
+-      battery_status->charging, base::Seconds(battery_status->charging_time),
+-      base::Seconds(battery_status->discharging_time), battery_status->level));
++  // clearcote: the host's power state must never reach the page, neither as a
++  // value nor as an event. This is the ONE place the mojom status becomes the
++  // BatteryStatus every BatteryManager copies from LatestData(); publishing
++  // the persona status here keeps the getters, HasLastData() and the four
++  // *change events on one source, so DidUpdateData() compares the persona
++  // status with itself and dispatches nothing -- what real Chrome does on a
++  // machine whose power state does not change. The monitor pipe stays bound
++  // and re-armed above, so getBattery() resolves after the same IPC round
++  // trip as upstream. The host values are deliberately not read.
++  UpdateBatteryStatus(PersonaBatteryStatus());
+ }
+ 
+ void BatteryDispatcher::UpdateBatteryStatus(
+--- a/third_party/blink/renderer/modules/battery/battery_manager.cc
++++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
+@@ -4,10 +4,6 @@
+ 
+ #include "third_party/blink/renderer/modules/battery/battery_manager.h"
+ 
+-#include <limits>
+-
+-#include "components/ungoogled/persona_profile.h"
+-
+ #include "third_party/blink/public/mojom/frame/lifecycle.mojom-blink.h"
+ #include "third_party/blink/renderer/core/dom/dom_exception.h"
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+@@ -83,41 +79,23 @@
+   return battery_property_->Promise(script_state->World());
+ }
+ 
+-// clearcote: BatteryManager getters pinned to the canonical "Windows 11
+-// desktop on AC power, no battery" values regardless of the host's real
+-// device state. Without this, navigator.getBattery() leaks the host's
+-// actual battery (e.g. a laptop on battery: level<1.0, finite
+-// dischargingTime) while the persona claims a Win11 desktop -- a direct
+-// cross-surface contradiction and a fingerprinting tell. These are the
+-// exact values real Chrome reports on a battery-less desktop. Fixed
+-// constants (not seed-derived): every no-battery desktop reports the same.
++// clearcote: the persona battery state is published by BatteryDispatcher
++// (battery_dispatcher.cc, PersonaBatteryStatus), so these upstream getters
++// read the same status the *change events are computed from.
+ bool BatteryManager::charging() {
+-  // clearcote: a phone persona is on battery (discharging); desktop stays on AC.
+-  return !ungoogled::CurrentPersona().mobile;
++  return battery_status_.Charging();
+ }
+ 
+ double BatteryManager::chargingTime() {
+-  // Discharging phone: chargingTime is +Infinity per spec; desktop on AC: 0.
+-  return ungoogled::CurrentPersona().mobile
+-             ? std::numeric_limits<double>::infinity()
+-             : 0.0;
++  return battery_status_.charging_time().InSecondsF();
+ }
+ 
+ double BatteryManager::dischargingTime() {
+-  // Phone on battery: a finite, granularity-rounded estimate; desktop
+-  // no-battery: +Infinity.
+-  return ungoogled::CurrentPersona().mobile
+-             ? 13680.0
+-             : std::numeric_limits<double>::infinity();
++  return battery_status_.discharging_time().InSecondsF();
+ }
+ 
+ double BatteryManager::level() {
+-  // Phone: a plausible partial charge (seed-derived, 0.55..0.98, rounded to 0.01
+-  // like real Chrome); desktop: 1.0 (full, on AC).
+-  if (!ungoogled::CurrentPersona().mobile)
+-    return 1.0;
+-  uint64_t s = ungoogled::CurrentPersona().persona_seed;
+-  return (55 + static_cast<int>(s % 44)) / 100.0;
++  return battery_status_.Level();
+ }
+ 
+ void BatteryManager::DidUpdateData() {

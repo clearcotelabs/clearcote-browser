@@ -1,0 +1,493 @@
+clearcote: one persona-activation predicate (PersonaActive) for every persona surface.
+
+Persona gates were per patch and most tested the seed switch only, so an imported capture
+(--fingerprint-profile) applied to fonts and WebGL strings but not to screen, DPR, pointer, cores,
+memory or voices; cores, heap limit and audio latency read the persona in EVERY mode (a bare launch
+claimed a persona core count next to host memory); and the UA-CH full version was a second,
+independent draw (raw seed text parsed as int, modulo a table) that could disagree with the
+persona's own version.
+
+PersonaActive() = --fingerprint present OR --fingerprint-profile decoding to a non-empty capture,
+resolved once per process. Modes: no persona = host values everywhere; seed = full persona plus
+farble; profile = full persona from the capture over the seed-0 base, no farble. Farble/noise gates
+(farble seed, canvas/WebGL readback, audio perturbation, the pro coalesced-pointer sampler) stay on
+the seed. A capture's uaFullVersion is honoured only within the engine major. A touch-capable
+desktop persona exposes the coarse pointer bit next to the fine one (any-pointer:coarse), the
+shape a real touch laptop has.
+
+Measured (Windows, headed, loopback page): profile="auto" now serves the donor's screen, DPR,
+voices, UA-CH version, heap limit and GPU string together; seed B's page reports the persona's
+151.0.7922.108 where the old draw gave entry 0; bare and light_stealth unchanged versus r18.
+
+--- a/chrome/browser/ui/window_sizer/window_sizer.cc
++++ b/chrome/browser/ui/window_sizer/window_sizer.cc
+@@ -52,7 +52,7 @@
+ bool PersonaScreenActive() {
+   static const bool kActive = [] {
+     const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+-    return cmd && cmd->HasSwitch(switches::kFingerprint);
++    return cmd && ungoogled::PersonaActive();
+   }();
+   return kActive;
+ }
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -179,23 +179,38 @@
+   return PersonaSeedFromString(cmd->GetSwitchValueASCII(switches::kFingerprint));
+ }
+ 
++// clearcote: decode --fingerprint-profile (base64 + gzip + JSON) ONCE per process.
++// nullptr when the switch is absent or the payload is not a non-empty capture --
++// which is also what makes PersonaActive() false for a switch that carries no
++// usable profile (a raw, undecodable or empty payload must not activate the
++// seed-0 base persona as if it were a real machine).
++const base::DictValue* DecodedProfileSwitch() {
++  static const base::DictValue* const kDict = []() -> const base::DictValue* {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (!cmd || !cmd->HasSwitch(switches::kFingerprintProfile))
++      return nullptr;
++    std::string gz;
++    if (!base::Base64Decode(cmd->GetSwitchValueASCII(switches::kFingerprintProfile), &gz))
++      return nullptr;
++    std::string json;
++    if (!compression::GzipUncompress(gz, &json))
++      return nullptr;
++    auto parsed = base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC);
++    if (!parsed || parsed->empty())
++      return nullptr;
++    return new base::DictValue(std::move(*parsed));  // process-lifetime, intentionally leaked
++  }();
++  return kDict;
++}
++
+ // clearcote: when --fingerprint-profile=<gzip+base64 JSON> is set (a captured real
+ // fingerprint), override the seed-derived persona fields with the imported values.
+ // Absent fields keep their DerivePersona() value, so partial profiles stay coherent.
+ void ApplyProfileOverride(PersonaProfile* p) {
+-  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+-  if (!cmd || !cmd->HasSwitch(switches::kFingerprintProfile))
+-    return;
+-  std::string gz;
+-  if (!base::Base64Decode(cmd->GetSwitchValueASCII(switches::kFingerprintProfile), &gz))
++  const base::DictValue* decoded = DecodedProfileSwitch();
++  if (!decoded)
+     return;
+-  std::string json;
+-  if (!compression::GzipUncompress(gz, &json))
+-    return;
+-  auto parsed = base::JSONReader::ReadDict(json, base::JSON_PARSE_RFC);
+-  if (!parsed)
+-    return;
+-  const base::DictValue& d = *parsed;
++  const base::DictValue& d = *decoded;
+   auto num = [](const base::DictValue& dd, const char* k) -> std::optional<double> {
+     if (auto v = dd.FindDouble(k)) return v;
+     if (auto v = dd.FindInt(k)) return static_cast<double>(*v);
+@@ -270,10 +285,15 @@
+       p->js_heap_size_limit = static_cast<uint64_t>(*v);
+   }
+   if (const std::string* uav = d.FindStringByDottedPath("navigator.uadata.high_entropy.uaFullVersion")) {
+-    if (!uav->empty()) {
++    // clearcote: a capture taken on an older Chrome must not make this engine
++    // claim that version (the 151-port defect: a 150 claim on a 151 engine).
++    // The seed table is pinned to the engine major, so a capture's version is
++    // honoured only when its major matches the table's; otherwise the seed's
++    // engine-matching version stands. persona_validator.cc backstops this
++    // against the real engine version.
++    int maj = 0; base::StringToInt(uav->substr(0, uav->find('.')), &maj);
++    if (!uav->empty() && maj > 0 && static_cast<unsigned>(maj) == p->chrome_major_version) {
+       p->chrome_full_version = *uav;
+-      int maj = 0; base::StringToInt(uav->substr(0, uav->find('.')), &maj);
+-      if (maj > 0) p->chrome_major_version = static_cast<unsigned>(maj);
+     }
+   }
+   if (const base::ListValue* voices = d.FindList("speech")) {
+@@ -454,6 +474,18 @@
+ 
+ }  // namespace
+ 
++bool PersonaActive() {
++  // Resolved once per process: read on hot property paths, and HasSwitch() is
++  // a map lookup plus, on Windows, a lowercasing allocation.
++  static const bool kActive = [] {
++    const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
++    if (cmd && cmd->HasSwitch(switches::kFingerprint))
++      return true;
++    return DecodedProfileSwitch() != nullptr;
++  }();
++  return kActive;
++}
++
+ uint64_t PersonaSeedFromString(const std::string& raw) {
+   uint64_t parsed = 0;
+   if (base::StringToUint64(raw, &parsed)) {
+@@ -832,8 +864,8 @@
+         flag_dpr > 0) {
+       return flag_dpr;
+     }
+-    // A seeded persona carries its own DPR; without --fingerprint there is none.
+-    if (cmd->HasSwitch(switches::kFingerprint)) {
++    // A persona carries its own DPR; without one there is none.
++    if (PersonaActive()) {
+       const double persona_dpr = CurrentPersona().device_pixel_ratio;
+       if (persona_dpr > 0) {
+         return persona_dpr;
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -257,6 +257,35 @@
+ // persona validator sweep derive the SAME seed from the same text.
+ COMPONENT_EXPORT(UNGOOGLED) uint64_t PersonaSeedFromString(const std::string& raw);
+ 
++// clearcote: THE persona-activation predicate. True when this launch carries a
++// persona -- a seed (--fingerprint) or an imported capture (--fingerprint-profile
++// whose payload decodes to a non-empty capture) -- and every surface that can
++// serve a persona value (screen, work area, DPR, pointer/touch, cores, memory,
++// heap limit, audio rate/latency, voices, fonts, UA-CH version, window sizing)
++// consults it through this ONE function.
++//
++// Launch modes, so the split is explicit rather than per patch:
++//   no persona          neither switch: every surface serves the HOST value
++//                       (plus any explicit --fingerprint-<field> override).
++//   seeded              --fingerprint=<seed>: full persona from the seed; the
++//                       seed also keys the canvas/WebGL/audio farble.
++//   imported profile    --fingerprint-profile=<capture>: full persona = the
++//                       capture's fields over the seed-0 base; NO farble seed.
++//                       A payload that does not decode activates nothing.
++//   platform / brand    --fingerprint-platform / --fingerprint-brand alone do
++//                       NOT activate a persona; they only shape the UA family.
++//
++// Before this predicate the gates were per patch: most tested the seed only, so
++// an imported profile applied to fonts and WebGL strings but not to screen, DPR,
++// pointer, cores, memory or voices; and cores, heap limit and audio latency read
++// the persona in EVERY mode, so a bare launch claimed a persona core count over
++// host hardware everywhere else (file 70).
++//
++// Farble/noise gates (farble_seed.cc, the canvas/WebGL readback and audio
++// perturbation paths, the pro coalesced-pointer sampler) deliberately stay on
++// --fingerprint: they need a seed, not a persona.
++COMPONENT_EXPORT(UNGOOGLED) bool PersonaActive();
++
+ // Process-wide singleton persona for this session. The first call reads the
+ // --fingerprint switch (numeric, or FNV-1a-hashed if non-numeric -- matching
+ // the per-site seed parse so browser + renderers agree) and derives the
+--- a/content/browser/speech/speech_synthesis_impl.cc
++++ b/content/browser/speech/speech_synthesis_impl.cc
+@@ -126,8 +126,7 @@
+   // Chrome's asynchronous `voiceschanged` path. Nothing here makes the first
+   // synchronous getVoices() non-empty; that ordering is the tell, independent
+   // of the voice values.
+-  const base::CommandLine* cc_cmd = base::CommandLine::ForCurrentProcess();
+-  if (cc_cmd->HasSwitch("fingerprint")) {
++  if (ungoogled::PersonaActive()) {
+     // Deliberately unconditional on the list being non-empty: a persona whose
+     // voice list is EMPTY (linux / android) must emit an EMPTY list, not fall
+     // through to the host's real voices -- a Windows SAPI roster under a Linux
+--- a/third_party/blink/common/device_memory/approximated_device_memory.cc
++++ b/third_party/blink/common/device_memory/approximated_device_memory.cc
+@@ -71,7 +71,7 @@
+     }
+   }
+ 
+-  if (command_line->HasSwitch(::switches::kFingerprint)) {
++  if (ungoogled::PersonaActive()) {
+     return static_cast<double>(ungoogled::CurrentPersona().device_memory_gb);
+   }
+ 
+--- a/third_party/blink/common/user_agent/user_agent_metadata.cc
++++ b/third_party/blink/common/user_agent/user_agent_metadata.cc
+@@ -329,12 +329,14 @@
+     }
+   }
+ 
+-  // 3. Check if has fingerprint seed
+-  if (command_line->HasSwitch(switches::kFingerprint)) {
+-    int seed = 0;
+-    base::StringToInt(
+-        command_line->GetSwitchValueASCII(switches::kFingerprint), &seed);
+-    return kChromiumVersions[seed % std::size(kChromiumVersions)];
++  // 3. A persona (seed or imported capture) owns the version claim. This used
++  //    to be a second, independent draw (raw seed text parsed as int, modulo the
++  //    table; any non-numeric seed landed on entry 0) that could disagree with
++  //    the persona's own chrome_full_version. One concept, one source.
++  if (ungoogled::PersonaActive()) {
++    const std::string& v = ungoogled::CurrentPersona().chrome_full_version;
++    if (!v.empty())
++      return v;
+   }
+ 
+   // 4. Return first version
+--- a/third_party/blink/renderer/core/css/media_values.cc
++++ b/third_party/blink/renderer/core/css/media_values.cc
+@@ -168,7 +168,7 @@
+ 
+ int MediaValues::CalculateDeviceWidth(LocalFrame* frame) {
+   DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
+-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++  if (ungoogled::PersonaActive())
+     return ungoogled::CurrentPersona().screen_width;
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+@@ -182,7 +182,7 @@
+ 
+ int MediaValues::CalculateDeviceHeight(LocalFrame* frame) {
+   DCHECK(frame && frame->View() && frame->GetSettings() && frame->GetPage());
+-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++  if (ungoogled::PersonaActive())
+     return ungoogled::CurrentPersona().screen_height;
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+@@ -220,7 +220,7 @@
+   // clearcote persona: report the persona's dynamic-range coherently (mirrors
+   // CalculateColorGamut). Desktop personas default to SDR (closing a host-HDR
+   // leak); the OLED Android devices report high dynamic range.
+-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++  if (ungoogled::PersonaActive())
+     return ungoogled::CurrentPersona().dynamic_range_high;
+   return frame->GetPage()
+       ->GetChromeClient()
+@@ -231,7 +231,7 @@
+ int MediaValues::CalculateColorBitsPerComponent(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
+-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++  if (ungoogled::PersonaActive())
+     return static_cast<int>(ungoogled::CurrentPersona().color_depth / 3);
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+@@ -244,7 +244,7 @@
+ int MediaValues::CalculateMonochromeBitsPerComponent(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
+-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint))
++  if (ungoogled::PersonaActive())
+     return 0;  // clearcote persona is a color display
+   const display::ScreenInfo& screen_info =
+       frame->GetPage()->GetChromeClient().GetScreenInfo(*frame);
+@@ -398,8 +398,7 @@
+ }
+ 
+ static bool ClearcotePersonaActive() {
+-  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+-  return cmd && cmd->HasSwitch(::switches::kFingerprint);
++  return ungoogled::PersonaActive();
+ }
+ 
+ // True only when the host exposes a real coarse/fine pointer (i.e. not a headless kPointerNone).
+@@ -454,6 +453,13 @@
+   // device -> coarse-pointer bit only (so (any-pointer:fine) is false).
+   if (ungoogled::CurrentPersona().pointer_coarse)
+     return static_cast<int>(mojom::blink::PointerType::kPointerCoarseType);
++  // clearcote: a desktop persona with a touchscreen (an imported capture with
++  // maxTouchPoints > 0) exposes the coarse bit NEXT TO the fine one, as a real
++  // touch laptop does; maxTouchPoints > 0 with (any-pointer:coarse) false was
++  // the r10 contradiction in the other direction.
++  if (ungoogled::CurrentPersona().max_touch_points > 0)
++    return static_cast<int>(mojom::blink::PointerType::kPointerCoarseType) |
++           static_cast<int>(mojom::blink::PointerType::kPointerFineType);
+   return static_cast<int>(mojom::blink::PointerType::kPointerFineType);
+ }
+ 
+@@ -493,7 +499,7 @@
+ ColorSpaceGamut MediaValues::CalculateColorGamut(LocalFrame* frame) {
+   DCHECK(frame);
+   DCHECK(frame->GetPage());
+-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(switches::kFingerprint)) {
++  if (ungoogled::PersonaActive()) {
+     const std::string& g = ungoogled::CurrentPersona().css_color_gamut;
+     if (g == "rec2020") return ColorSpaceGamut::BT2020;
+     if (g == "p3") return ColorSpaceGamut::P3;
+--- a/third_party/blink/renderer/core/css/media_values_cached.cc
++++ b/third_party/blink/renderer/core/css/media_values_cached.cc
+@@ -21,6 +21,12 @@
+     primary_pointer_type = mojom::blink::PointerType::kPointerCoarseType;
+     available_pointer_types =
+         static_cast<int>(mojom::blink::PointerType::kPointerCoarseType);
++  } else if (ungoogled::PersonaActive() && persona.max_touch_points > 0) {
++    // clearcote: touch-capable desktop persona -- coarse bit next to the fine one,
++    // matching MediaValues::CalculateAvailablePointerTypes.
++    available_pointer_types =
++        static_cast<int>(mojom::blink::PointerType::kPointerCoarseType) |
++        static_cast<int>(mojom::blink::PointerType::kPointerFineType);
+   }
+   if (persona.hover_none) {
+     primary_hover_type = mojom::blink::HoverType::kHoverNone;
+--- a/third_party/blink/renderer/core/events/navigator_events.cc
++++ b/third_party/blink/renderer/core/events/navigator_events.cc
+@@ -74,11 +74,7 @@
+   if (kLsMaxTouch >= 0) {
+     return kLsMaxTouch;
+   }
+-  static const bool kPersonaActive = [] {
+-    return base::CommandLine::ForCurrentProcess()->HasSwitch(
+-        ::switches::kFingerprint);
+-  }();
+-  if (kPersonaActive)
++  if (ungoogled::PersonaActive())
+     return ungoogled::CurrentPersona().max_touch_points;
+   LocalDOMWindow* window = navigator.DomWindow();
+   // clearcote-input-class-coherence: media_values.cc serves the desktop default (fine pointer /
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -117,7 +117,7 @@
+ 
+     if (has_override) {
+       hardware_concurrency = override_concurrency;
+-    } else if (command_line->HasSwitch(switches::kFingerprint)) {
++    } else if (ungoogled::PersonaActive()) {
+       hardware_concurrency = ungoogled::CurrentPersona().hardware_concurrency;
+     }
+     cached_hardware_concurrency_ = hardware_concurrency;
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -1689,7 +1689,7 @@
+ bool PersonaWindowActive() {
+   static const bool kPersonaActive = [] {
+     const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+-    return cmd && cmd->HasSwitch(::switches::kFingerprint);
++    return cmd && ungoogled::PersonaActive();
+   }();
+   return kPersonaActive;
+ }
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -8,6 +8,7 @@
+ 
+ #include "base/command_line.h"
+ #include "base/strings/string_number_conversions.h"
++#include "base/system/sys_info.h"
+ #include "components/ungoogled/persona_profile.h"
+ #include "components/ungoogled/ungoogled_switches.h"
+ 
+@@ -52,7 +53,13 @@
+     return kCustomConcurrency;
+   }
+ 
+-  return ungoogled::CurrentPersona().hardware_concurrency;
++  // clearcote: the persona's core count only when a persona is active. A bare
++  // launch reports the host's, as stock Chrome does -- it used to serve the
++  // persona table in every mode, so an unseeded browser claimed a persona core
++  // count next to host memory (file 70: bare hc 16 on an 8-core host).
++  if (ungoogled::PersonaActive())
++    return ungoogled::CurrentPersona().hardware_concurrency;
++  return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
+ }  // namespace blink
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -57,7 +57,7 @@
+ bool PersonaScreenActive() {
+   static const bool kPersonaActive = [] {
+     const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+-    return cmd && cmd->HasSwitch(switches::kFingerprint);
++    return cmd && ungoogled::PersonaActive();
+   }();
+   return kPersonaActive;
+ }
+--- a/third_party/blink/renderer/core/timing/memory_info.cc
++++ b/third_party/blink/renderer/core/timing/memory_info.cc
+@@ -56,7 +56,12 @@
+   // clearcote: report a realistic, non-round desktop heap limit from the persona
+   // (the raw V8 value is host-RAM-derived and varies by machine; an exact power of
+   // two is itself atypical). Overridable from an imported profile.
+-  info.js_heap_size_limit = ungoogled::CurrentPersona().js_heap_size_limit;
++  if (ungoogled::PersonaActive()) {
++    info.js_heap_size_limit = ungoogled::CurrentPersona().js_heap_size_limit;
++  } else {
++    // No persona: the host's real V8 limit, as stock Chrome reports it.
++    info.js_heap_size_limit = heap_statistics.heap_size_limit();
++  }
+ }
+ 
+ class HeapSizeCache {
+@@ -105,7 +110,10 @@
+     info_.used_js_heap_size = QuantizeMemorySize(info_.used_js_heap_size);
+     info_.total_js_heap_size = QuantizeMemorySize(info_.total_js_heap_size);
+     // clearcote: leave the persona heap limit verbatim -- it is already a realistic
+-    // bucket value; re-quantizing would snap it to a coarser, rounder number.
++    // bucket value; re-quantizing would snap it to a coarser, rounder number. The
++    // host value (no persona) takes stock Chrome's quantization.
++    if (!ungoogled::PersonaActive())
++      info_.js_heap_size_limit = QuantizeMemorySize(info_.js_heap_size_limit);
+   }
+ 
+   std::optional<base::TimeTicks> last_update_time_;
+--- a/third_party/blink/renderer/modules/screen_details/screen_detailed.cc
++++ b/third_party/blink/renderer/modules/screen_details/screen_detailed.cc
+@@ -35,7 +35,7 @@
+ bool PersonaScreenActive() {
+   static const bool kPersonaActive = [] {
+     const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+-    return cmd && cmd->HasSwitch(switches::kFingerprint);
++    return cmd && ungoogled::PersonaActive();
+   }();
+   return kPersonaActive;
+ }
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -126,8 +126,7 @@
+ void SpeechSynthesis::MaybeArmPersonaVoiceBackfill() {
+   if (persona_voice_backfill_armed_ || !voice_list_.empty())
+     return;
+-  const base::CommandLine* cmd = base::CommandLine::ForCurrentProcess();
+-  if (!cmd || !cmd->HasSwitch(switches::kFingerprint))
++  if (!ungoogled::PersonaActive())
+     return;
+   ExecutionContext* context = GetExecutionContext();
+   if (!context)
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+@@ -429,7 +429,9 @@
+   // the persona's Windows WASAPI sample rate so the Linux build host's audio
+   // backend rate cannot leak. An explicitly requested rate is still honoured,
+   // matching real Chrome behaviour.
+-  std::optional<float> sample_rate = ungoogled::CurrentPersona().audio_sample_rate;
++  std::optional<float> sample_rate;
++  if (ungoogled::PersonaActive())
++    sample_rate = ungoogled::CurrentPersona().audio_sample_rate;
+   if (context_options->hasSampleRate()) {
+     sample_rate = context_options->sampleRate();
+   }
+@@ -1197,7 +1199,9 @@
+   // Coherence: real base_latency_ is derived from the host audio backend
+   // (frames-per-buffer / rate) and would expose the Linux build host. Report
+   // the persona's Windows WASAPI baseLatency instead.
+-  return ungoogled::CurrentPersona().audio_base_latency;
++  if (ungoogled::PersonaActive())
++    return ungoogled::CurrentPersona().audio_base_latency;
++  return base_latency_;
+ }
+ 
+ double AudioContext::outputLatency() const {
+@@ -1210,7 +1214,10 @@
+   // quantizer real Chrome uses (8ms with no mic permission, 1ms when granted)
+   // so the reported value always lands on the grid genuine Chrome can produce.
+   double factor = GetOutputLatencyQuantizingFactor();
+-  return std::round(ungoogled::CurrentPersona().audio_output_latency / factor) * factor;
++  const double latency = ungoogled::PersonaActive()
++                             ? ungoogled::CurrentPersona().audio_output_latency
++                             : output_position_.hardware_output_latency;
++  return std::round(latency / factor) * factor;
+ }
+ 
+ AudioPlaybackStats* AudioContext::playbackStats() {
+--- a/third_party/blink/renderer/platform/fonts/font_cache.cc
++++ b/third_party/blink/renderer/platform/fonts/font_cache.cc
+@@ -620,7 +620,6 @@
+   }
+ #endif
+ 
+-  const base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+   // 字体指纹处理逻辑 - 不应用于最后手段字体
+   // clearcote: an imported profile carries its donor machine's own font enumeration, and
+   // that is the whole point of importing one -- so --fingerprint-profile engages this path
+@@ -631,8 +630,7 @@
+   // claiming 293 fonts: no-persona 115, seed-only 62, profile-only 115 (byte-identical to
+   // host truth), profile+seed 104. A launch with NEITHER switch still takes the untouched
+   // host path below, exactly as before.
+-  if ((command_line->HasSwitch(switches::kFingerprint) ||
+-       command_line->HasSwitch(switches::kFingerprintProfile)) &&
++  if (ungoogled::PersonaActive() &&
+       creation_params.CreationType() == kCreateFontByFamily &&
+       alternate_font_name != AlternateFontName::kLastResort) {
+ 

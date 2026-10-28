@@ -116,15 +116,13 @@
       }
     },
     "050-shadow-dom.patch": {
-      "surface": "Exposes a non-standard Element.fakeShadowRoot DOM attribute that returns even closed shadow roots (bypassing the open-mode check); also migrates get*ClientRects farbling from Scale() to a per-site --fingerprint-gated Offset() model that is currently coherence-disabled to zero.",
+      "surface": "Element::FakeShadowRoot() (kept in element.cc/h; its JS binding is removed again by 960, so nothing is published on Element.prototype) and removal of the inherited client-rects noise machinery, so getClientRects()/getBoundingClientRect() report exact, mutually consistent values.",
       "windows_only": false,
-      "markers": [
-        "fakeShadowRoot"
-      ],
+      "markers": [],
       "runtime": {
-        "surface": "Element.prototype.fakeShadowRoot (non-standard DOM attribute exposing closed shadow roots)",
-        "probe": "(() => { const el = document.createElement('div'); const sr = el.attachShadow({ mode: 'closed' }); return el.shadowRoot === null && el.fakeShadowRoot === sr; })()",
-        "expect": "true on a correctly-patched build (closed shadow root is hidden from standard .shadowRoot but returned by the patch-added .fakeShadowRoot); vanilla Chromium returns false because .fakeShadowRoot is undefined. A simpler existence check, 'fakeShadowRoot' in document.createElement('div'), is true patched / false vanilla."
+        "surface": "Element client rects; Element.prototype has no fakeShadowRoot",
+        "probe": "With --fingerprint=seed: const r = document.body.getBoundingClientRect(), q = document.body.getClientRects()[0]; [r.x === q.x && r.width === q.width, 'fakeShadowRoot' in Element.prototype]",
+        "expect": "[true, false]: client rects agree exactly, and the non-standard attribute is absent (960)."
       }
     },
     "060-canvas.patch": {
@@ -429,16 +427,6 @@
       "surface": "Windows-cross-build enabler: guards the Linux-only IDC_* command IDs in chrome/app/chrome_command_ids.h under #if !defined(RC_INVOKED) so the Windows resource compiler can preprocess the header.",
       "windows_only": false
     },
-    "951-gfx-quadf-offset.patch": {
-      "surface": "Carries QuadF::Offset() in ui/gfx/geometry. Nothing calls it since 050 removed the client-rect perturbation, and the linker drops it (no gfx::QuadF::Offset symbol in the shipped binary). Kept only so this patch set reproduces the build tree byte for byte. No behaviour.",
-      "windows_only": false,
-      "markers": [],
-      "runtime": {
-        "surface": "none (dead code)",
-        "probe": "nm -C out/Linux/chrome | grep gfx::QuadF::Offset",
-        "expect": "No match: the function is not linked into the binary."
-      }
-    },
     "955-webgl-persona-parity.patch": {
       "surface": "WebGL persona parity: the advertised extension set equals the gettable set in both directions (WEBGL_debug_renderer_info always exempt), MAX_ELEMENT_INDEX is served from the persona instead of the local renderer, and the default uniform-block counts match real desktop GPUs (12).",
       "windows_only": false,
@@ -449,34 +437,283 @@
         "expect": "Advertised == gettable; MAX_ELEMENT_INDEX == 4294967294 (persona default) even on a GPU-less host."
       }
     },
-    "956-macos-persona-substitution-fonts.patch": {
-      "surface": "macOS only: registers the bundled metric-compatible font clones (assets/fonts/, the same files the Linux release ships) with CoreText at kCTFontManagerScopeProcess, and lets MetricCompatibleSubstitute() answer on a macOS host instead of returning early for every non-Linux host. Without it a cross-OS persona on macOS substitutes nothing and every Windows family reports absent.",
+    "960-r13-fixes.patch": {
+      "surface": "Removes the fakeShadowRoot attribute from Element.prototype (the C++ accessor stays) and moves the persona's Chrome version pool, default full version and Edge UA version to the 151 line.",
       "windows_only": false,
       "markers": [],
       "runtime": {
-        "surface": "Presence of the persona's own font families (canvas advance width)",
-        "probe": "Launch the macOS build with --fingerprint=<seed> --fingerprint-platform=windows and measure canvas advance widths with (f,g)=>{c.font='32px \"'+f+'\", '+g; return c.measureText('WgQmil').width} against a guaranteed-absent family in the same generic context (document.fonts.check() answers true for almost any name and is useless). scripts/verify_macos_persona.py does exactly this.",
-        "expect": "Under --fingerprint-platform=windows on a macOS build, Segoe UI, Calibri, Consolas, Cambria, Candara and Corbel all render at a width different from the absent-family baseline (they resolve to Selawik, Carlito, Inconsolata, Caladea and Carlito). Without this patch every one of them equals the baseline. Not observable on a Windows or Linux build, where the code is #if'd out or the host already has fontconfig."
+        "surface": "Element.prototype / navigator.userAgentData",
+        "probe": "With --fingerprint=seed: ['fakeShadowRoot' in Element.prototype, navigator.userAgentData.brands.find(b => b.brand === 'Google Chrome')?.version]",
+        "expect": "[false, '151'] (was true / '150' on the 150 build)."
       }
     },
-    "957-macos-persona-hides-host-helvetica.patch": {
-      "surface": "macOS only: stops IsBasicFont()'s unconditional cross-OS bypass from serving the host's Helvetica and Helvetica Neue to a Windows persona. Helvetica is resolved as Arial (the HKLM FontSubstitutes answer, and what fonts.conf.template gives Linux); Helvetica Neue is reported absent.",
+    "961-client-hint-dpr-coherence.patch": {
+      "surface": "Sec-CH-DPR (browser navigation hint and renderer fetch hint) follows the persona device pixel ratio instead of the host display.",
       "windows_only": false,
       "markers": [],
       "runtime": {
-        "surface": "Helvetica Neue presence under a Windows persona",
-        "probe": "Launch the macOS build with --fingerprint=<seed> --fingerprint-platform=windows and measure canvas advance widths with (f,g)=>{c.font='32px \"'+f+'\", '+g; return c.measureText('WgQmil').width} against a guaranteed-absent family in the same generic context (document.fonts.check() answers true for almost any name and is useless). scripts/verify_macos_persona.py does exactly this.",
-        "expect": "Under --fingerprint-platform=windows on a macOS build, 'Helvetica Neue' equals the absent-family baseline in every generic context, while 'Helvetica' renders at Arimo's width. Without this patch Helvetica Neue renders at the host's real HelveticaNeue.ttc width (113.82 at 32px) -- the one macOS font left standing in an otherwise Windows-shaped font list."
+        "surface": "Sec-CH-DPR request header vs window.devicePixelRatio",
+        "probe": "Persona with --fingerprint-device-pixel-ratio=1.25; serve a page with Accept-CH: Sec-CH-DPR, reload, and compare the Sec-CH-DPR header the server receives with window.devicePixelRatio.",
+        "expect": "Both read 1.25 (vanilla: the header carries the host's real ratio)."
       }
     },
-    "958-macos-persona-generic-font-families.patch": {
-      "surface": "macOS only: binds the CSS generics to the persona's clones, the CoreText equivalent of the four <alias> lines in assets/fonts/fonts.conf.template. system-ui resolves as Segoe UI (-> Selawik) and the monospace and cursive generics, which arrive as macOS's own defaults Menlo and Apple Chancery, resolve as Consolas (-> Inconsolata) and Comic Sans MS (-> Comic Neue), matching locale_settings_win.grd.",
+    "962-persona-dpr-and-pointer-coherence.patch": {
+      "surface": "Persona DPR reaches media queries, srcset and CSS image-set() selection; pointer event screen coordinates share the persona screen origin.",
       "windows_only": false,
       "markers": [],
       "runtime": {
-        "surface": "CSS generic font families and system-ui (canvas advance width)",
-        "probe": "Launch the macOS build with --fingerprint=<seed> --fingerprint-platform=windows and measure canvas advance widths with (f,g)=>{c.font='32px \"'+f+'\", '+g; return c.measureText('WgQmil').width} against a guaranteed-absent family in the same generic context (document.fonts.check() answers true for almost any name and is useless). scripts/verify_macos_persona.py does exactly this. Also measure each generic on its own: c.font='32px monospace' etc.",
-        "expect": "Under --fingerprint-platform=windows on a macOS build, serif/sans-serif/monospace are three DIFFERENT widths (111.98 / 113.77 / 96.00 at 32px), and 16px system-ui differs from the macos persona's (57.96 vs 56.84). Without this patch serif, monospace and cursive are all 111.98 -- width(monospace)==width(serif) is impossible on real Windows and needs no reference data to spot -- and system-ui is byte-identical between the two personas. Known residual: cursive and fantasy both land on Comic Neue; fantasy is deliberately not remapped because macOS's default for it, Papyrus, is a family real Windows machines have."
+        "surface": "matchMedia resolution vs devicePixelRatio; MouseEvent screenX/Y",
+        "probe": "Persona with --fingerprint-device-pixel-ratio=2: matchMedia('(resolution: 2dppx)').matches and devicePixelRatio; then a click: e.screenX - e.clientX vs window.screenX.",
+        "expect": "resolution query true with devicePixelRatio 2; the event-derived origin matches window.screenX/screenY."
+      }
+    },
+    "963-socks5-auth.patch": {
+      "surface": "Authenticated SOCKS5 (RFC 1929): --socks5-credentials=user:pass, forwarded to the network service; the auth state machine (completed by 984).",
+      "windows_only": false,
+      "markers": [
+        "socks5-credentials"
+      ],
+      "runtime": {
+        "surface": "page load through an authenticated SOCKS5 proxy",
+        "probe": "--proxy-server=socks5://host:port --socks5-credentials=user:pass; load https://example.com.",
+        "expect": "The page loads (vanilla: ERR_SOCKS_CONNECTION_FAILED against a proxy that requires auth)."
+      }
+    },
+    "964-portable-profile-key.patch": {
+      "surface": "Portable profile encryption key: --portable-profile (key stored in the profile) or --profile-encryption-key=<secret> (derived), registered above the platform key providers so existing profiles still decrypt.",
+      "windows_only": false,
+      "markers": [
+        "profile-encryption-key",
+        "clearcote-portable-profile"
+      ],
+      "runtime": {
+        "surface": "cookies in a copied profile",
+        "probe": "Launch with --portable-profile, set a cookie, copy the user data dir to another machine (or delete the platform-wrapped key), relaunch with --portable-profile.",
+        "expect": "The cookie is still present (without the switch, on Windows, it is lost)."
+      }
+    },
+    "965-ucrt-tanh-windows-persona.patch": {
+      "surface": "Math.tanh returns the bit-exact Windows UCRT result when the persona platform is Windows, regardless of the host libm.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "Math.tanh",
+        "probe": "Windows persona on a Linux host: new Float64Array([Math.tanh(0.7)]) read back as a hex uint64.",
+        "expect": "3fe356fb17af2e91 (the Windows value; glibc gives ...92)."
+      }
+    },
+    "966-angle-hlsl-dialect-optin.patch": {
+      "surface": "Opt-in (CLEARCOTE_SHADER_DIALECT=hlsl in the environment): ANGLE reports HLSL from WEBGL_debug_shaders.getTranslatedShaderSource() for a Windows persona on a non-D3D host (needs angle_enable_hlsl=true on Linux).",
+      "windows_only": false,
+      "markers": [
+        "CLEARCOTE_SHADER_DIALECT"
+      ],
+      "runtime": {
+        "surface": "WEBGL_debug_shaders.getTranslatedShaderSource()",
+        "probe": "Windows persona on Linux, launched with CLEARCOTE_SHADER_DIALECT=hlsl: compile a trivial vertex shader and read getTranslatedShaderSource().",
+        "expect": "Output begins with '// INITIAL HLSL BEGIN' instead of a SPIR-V dump."
+      }
+    },
+    "967-webgpu-clamp-persona-limits.patch": {
+      "surface": "WebGPU persona limits are clamped downward to the real Dawn limits (min(persona, real)), so no advertised limit is unbacked.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "GPUAdapter.limits",
+        "probe": "For each key in adapter.limits, allocate/request at the advertised value (e.g. requestDevice({requiredLimits: {maxBufferSize: adapter.limits.maxBufferSize}})).",
+        "expect": "No request at an advertised limit fails validation."
+      }
+    },
+    "968-webgl-precision-d3d11.patch": {
+      "surface": "getShaderPrecisionFormat() reports the D3D11 profile ([127,127,23] float, [31,30,0] int at every tier) for a Windows persona on a non-D3D host.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "WebGLRenderingContext.getShaderPrecisionFormat",
+        "probe": "Windows persona on Linux: getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.MEDIUM_FLOAT).",
+        "expect": "rangeMin 127, rangeMax 127, precision 23 (vanilla SwiftShader/Vulkan: 15/15/10)."
+      }
+    },
+    "969-webgl-drop-d3d-impossible-extensions.patch": {
+      "surface": "A Windows persona on a non-D3D host does not advertise or return the ASTC/ETC/ETC1 compressed-texture extensions, through the single gate behind getSupportedExtensions() and getExtension().",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "WebGL extensions",
+        "probe": "Windows persona on Linux: getSupportedExtensions().filter(x => /astc|etc/i.test(x)) and getExtension('WEBGL_compressed_texture_astc').",
+        "expect": "[] and null."
+      }
+    },
+    "970-webgpu-preferred-canvas-format.patch": {
+      "surface": "navigator.gpu.getPreferredCanvasFormat() returns bgra8unorm for a Windows persona (binding only; the real swapchain format is unchanged).",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "navigator.gpu.getPreferredCanvasFormat()",
+        "probe": "Windows persona on Linux: navigator.gpu.getPreferredCanvasFormat().",
+        "expect": "'bgra8unorm' (vanilla Linux: 'rgba8unorm')."
+      }
+    },
+    "971-system-ui-font-windows-persona.patch": {
+      "surface": "system-ui resolves to the persona's system font (Segoe UI for a Windows persona) on Linux, where nothing else sets it in a bare container.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "canvas measureText with system-ui",
+        "probe": "Windows persona on Linux: compare measureText width of '16px system-ui' with '16px \"Segoe UI\"' and with an unresolvable family.",
+        "expect": "system-ui equals Segoe UI and differs from the unresolvable family."
+      }
+    },
+    "972-persona-window-frame-coherence.patch": {
+      "surface": "outerHeight/outerWidth use the real window frame delta instead of a hard-coded browser-chrome height, so window geometry agrees with pointer-event coordinates.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "window.outerHeight - innerHeight vs MouseEvent coordinates",
+        "probe": "Headed persona window: on a click, screenY - clientY - window.screenY, and outerHeight - innerHeight.",
+        "expect": "The two chrome-height readings are equal."
+      }
+    },
+    "973-socks5-udp-associate.patch": {
+      "surface": "SOCKS5 UDP ASSOCIATE (RFC 1928 section 7): with a SOCKS5 proxy and --socks5-udp, P2P UDP sockets (WebRTC) are relayed through the proxy.",
+      "windows_only": false,
+      "markers": [
+        "socks5-udp"
+      ],
+      "runtime": {
+        "surface": "WebRTC UDP through a SOCKS5 proxy",
+        "probe": "--proxy-server=socks5://host:port --socks5-udp (plus --socks5-credentials for an authenticated proxy); gather ICE against a STUN server.",
+        "expect": "The server-reflexive candidate carries the proxy's exit IP; no UDP leaves the host directly."
+      }
+    },
+    "974-persona-coherence-validator.patch": {
+      "surface": "Persona coherence validator: --clearcote-validate-persona=<N|a,b,c|current> derives the personas a command line would serve, checks cross-surface invariants, prints a report and exits (0 clean, 3 contradictions).",
+      "windows_only": false,
+      "markers": [
+        "clearcote-validate-persona"
+      ],
+      "runtime": {
+        "surface": "validator CLI",
+        "probe": "chrome --clearcote-validate-persona=1000 --fingerprint-platform=windows",
+        "expect": "Exit code 0 and a report with errors=0."
+      }
+    },
+    "975-persona-window-fits-work-area.patch": {
+      "surface": "The initial browser window of a persona fits the persona's work area, so the viewport never exceeds its own screen.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "window.innerWidth/innerHeight vs screen.availWidth/availHeight",
+        "probe": "Headed persona with a small screen: compare innerWidth/innerHeight with screen.availWidth/availHeight.",
+        "expect": "inner <= avail on both axes."
+      }
+    },
+    "976-android-uniform-limit-coherence.patch": {
+      "surface": "Android personas report WebGL2 MAX_VERTEX/FRAGMENT_UNIFORM_COMPONENTS as 4 x their uniform-vector limits (1024 vectors -> 4096 components), the pair ANGLE always reports.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "WebGL2 uniform component vs vector limits",
+        "probe": "Android persona: getParameter(MAX_VERTEX_UNIFORM_VECTORS) and getParameter(MAX_VERTEX_UNIFORM_COMPONENTS) (same for FRAGMENT).",
+        "expect": "components == 4 x vectors (4096 / 1024), not the desktop 16384 next to 1024 vectors."
+      }
+    },
+    "977-persona-active-predicate.patch": {
+      "surface": "One persona-activation predicate for every surface: no persona = host values; --fingerprint = persona plus farble; --fingerprint-profile = the capture, no farble. The UA-CH full version comes from the persona.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "navigator.hardwareConcurrency / deviceMemory / UA-CH",
+        "probe": "Launch bare, with --fingerprint=seed, and with --fingerprint-profile=<capture>; read hardwareConcurrency, deviceMemory, getHighEntropyValues(['uaFullVersion']).",
+        "expect": "Bare: host values. Seed/profile: persona values, and uaFullVersion equals the persona's own version."
+      }
+    },
+    "978-proxy-auth-engine-side.patch": {
+      "surface": "--proxy-auth=user:pass: the engine answers HTTP/HTTPS proxy 407 challenges (Basic and Digest) itself, forwarded to the network service.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "page load through an authenticated HTTP proxy",
+        "probe": "--proxy-server=http://host:port --proxy-auth=user:pass; load https://example.com with no CDP Fetch interception.",
+        "expect": "The page loads; wrong credentials fail closed."
+      }
+    },
+    "979-battery-dispatcher-seam.patch": {
+      "surface": "Battery substitution moves to BatteryDispatcher: getters and chargingchange/levelchange events derive from one persona status, so no event fires for a value that did not change.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "navigator.getBattery()",
+        "probe": "Persona on a laptop host: getBattery() values, and listen for levelchange/chargingchange for a minute while the host battery level changes.",
+        "expect": "charging true, level 1, and no change events."
+      }
+    },
+    "980-persona-schema-v2.patch": {
+      "surface": "Versioned persona schema: schema 1 unchanged and default; --fingerprint-schema=2 couples screen and GPU class to the hardware tier and sizes jsHeapSizeLimit from the persona RAM.",
+      "windows_only": false,
+      "markers": [
+        "fingerprint-schema",
+        "fingerprint-gpu-backend-real"
+      ],
+      "runtime": {
+        "surface": "performance.memory.jsHeapSizeLimit vs navigator.deviceMemory",
+        "probe": "--fingerprint=seed --fingerprint-schema=2: read deviceMemory and performance.memory.jsHeapSizeLimit; repeat without --fingerprint-schema.",
+        "expect": "Schema 2: heap limit follows V8's sizing for that RAM. Schema 1: identical to the 150 values for the same seed."
+      }
+    },
+    "981-schema2-measured-draws.patch": {
+      "surface": "Schema 2 draws touch, gamut, rtt and downlink from measured shares on Chrome's own grids and serves 44100 Hz; navigator.connection is served from the persona.",
+      "windows_only": false,
+      "markers": [
+        "netinfo.rtt_grid",
+        "netinfo.downlink_grid"
+      ],
+      "runtime": {
+        "surface": "navigator.connection",
+        "probe": "--fingerprint=seed --fingerprint-schema=2: navigator.connection.rtt and .downlink.",
+        "expect": "rtt is a multiple of 50 ms (<= 3000); downlink is a 50 kbps bucket <= 10 Mbps."
+      }
+    },
+    "982-webgpu-features-per-model.patch": {
+      "surface": "WebGPU adapter.features follow the GPU model the persona's renderer string names (intersection with the real adapter's features; subtractive only).",
+      "windows_only": false,
+      "markers": [
+        "gpu.webgpu_features_match_model"
+      ],
+      "runtime": {
+        "surface": "GPUAdapter.features",
+        "probe": "Persona claiming an Intel UHD Graphics 770: [...adapter.features].",
+        "expect": "No shader-f16 or subgroups; every listed feature is requestable."
+      }
+    },
+    "983-webgpu-architecture-per-model.patch": {
+      "surface": "WebGPU adapter architecture derived from the GPU model (not one value per vendor); an imported capture's webgpu.info.* is read.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "GPUAdapter.info.architecture",
+        "probe": "Persona whose renderer names a GTX 1060: adapter.info.architecture.",
+        "expect": "'pascal' (was 'ampere' for every NVIDIA persona)."
+      }
+    },
+    "984-socks5-auth-implementation.patch": {
+      "surface": "Completes 963: the RFC 1929 sub-negotiation definitions, the credential parser and the two-method greeting.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "page load through an authenticated SOCKS5 proxy",
+        "probe": "Same as 963: --proxy-server=socks5://host:port --socks5-credentials=user:pass; load https://example.com.",
+        "expect": "The page loads (and the build links: without 984 SOCKS5ClientSocket::DoAuthWrite is undefined)."
+      }
+    },
+    "985-webgl-stencil-masks.patch": {
+      "surface": "The four WebGL stencil masks come from the persona until the page writes stencil state; afterwards the real values, so set-then-read never disagrees.",
+      "windows_only": false,
+      "markers": [],
+      "runtime": {
+        "surface": "getParameter(STENCIL_*MASK)",
+        "probe": "Persona from a capture: read STENCIL_VALUE_MASK, then gl.stencilMask(0x0f) and read STENCIL_WRITEMASK.",
+        "expect": "First read equals the capture; after the write, 15."
       }
     }
   }

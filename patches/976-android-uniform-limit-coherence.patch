@@ -1,0 +1,15 @@
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -745,6 +745,12 @@
+     p.webgl_max_viewport_dim = dev.gl_max_texture_size;
+     p.webgl_max_vertex_uniform_vectors = 1024;
+     p.webgl_max_fragment_uniform_vectors = 1024;
++    // clearcote: the WebGL2 *_UNIFORM_COMPONENTS limits are served from this
++    // same persona and ANGLE always reports them as 4 x the vector limits; the
++    // desktop defaults (16384 / 4096) next to 1024 vectors were a pair no GLES
++    // driver produces (persona validator: gl.*_uniform_vectors_vs_components).
++    p.webgl_max_vertex_uniform_components = 1024 * 4;
++    p.webgl_max_fragment_uniform_components = 1024 * 4;
+     p.webgl_max_varying_vectors = 31;
+     p.webgl_max_combined_texture_image_units = 96;
+     p.webgl_max_samples = 4;

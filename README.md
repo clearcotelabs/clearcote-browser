@@ -455,12 +455,17 @@ There is one open build and one licensed build. The licensed build is offered tw
 | **154** (`154.0.8037.57`) | Available | ~Dec 2026 |
 | **153** (`153.0.8010.53`) | Available | ~Nov 2026 |
 | **152** (`152.0.7977.82`) | Available | ~Nov 2026 |
-| **151** (`151.0.7922.108`) | Available | ~Oct 2026 |
-| **150** (`150.0.7871.114`) | Available | **Available now** |
+| **151** (`151.0.7922.108`) | Available | **Available now** (`v0.1.0-pre.24`) |
+| **150** (`150.0.7871.114`) | Available | Available |
 | **149** (`149.0.7827.114`) | Available | Available |
 
 Open-build dates are estimates on a two-month cadence, not promises. Choose a major with
 `launch(version="155")`, or omit `version` for the newest your tier allows.
+
+The open 151 build is an official, optimized Chromium build: the "page crashed!" / `STATUS_BREAKPOINT`
+crashes of the open 150 build are gone, and it starts as root in a container without extra
+capabilities. It also adds authenticated SOCKS5 and SOCKS5 UDP relaying, and more GPU, WebGL, WebGPU,
+window and screen coherence.
 
 ---
 

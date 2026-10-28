@@ -1,0 +1,132 @@
+clearcote: schema-2 draws from measured shares; navigator.connection served from the persona.
+
+Shares come from the decontaminated audit corpus, Windows desktop Chromium, n = 208 (LOCAL-ONLY
+file 72): 26 desktops with a touchscreen (24 of them 10 points; every one keeps a fine primary
+pointer with any-pointer:coarse), 13 with a P3 gamut, rtt 50 ms in 82 of 180 reporting captures
+(100 ms in 47, 0 in 15), downlink 10 Mbps in 112 of 180 with a real 1.25..1.75 Mbps cluster,
+and an AudioContext sampleRate of 44100 in 207 of 208. Schema 2 draws touch, gamut, rtt and
+downlink from those counts on Chrome's own grids (50 ms multiples <= 3 s; 50 kbps buckets
+<= 10 Mbps) and serves 44100 Hz. Schema 1 is unchanged: the new persona fields default to the
+constants 150 hard-coded (50 ms / 10 Mbps) and its sample rate stays 48000. The validator
+rejects any connection value off the grid in every schema.
+
+--- a/components/ungoogled/persona_profile.cc
++++ b/components/ungoogled/persona_profile.cc
+@@ -150,6 +150,28 @@
+ constexpr std::array<WeightedEntry<size_t>, 2> kGpuTier3 = {{{0u, 0.15}, {1u, 0.85}}};
+ constexpr std::array<WeightedEntry<size_t>, 2> kGpuTier4 = {{{0u, 0.10}, {1u, 0.90}}};
+ 
++// clearcote schema 2: shares measured on the decontaminated audit corpus, Windows desktop
++// Chromium, n = 208 (SESSION-CONTEXT/72, 2026-09-04). Weights are the raw counts; WeightedPick
++// renormalises. Touch: 26/208 desktops have a touchscreen, 24 of them with 10 points; the
++// primary pointer stays fine (media_values exposes any-pointer:coarse from max_touch_points).
++constexpr std::array<WeightedEntry<int>, 2> kDesktopTouch = {{{0, 182.0}, {10, 26.0}}};
++// color-gamut: 13/208 report p3, none rec2020.
++constexpr std::array<WeightedEntry<const char*>, 2> kDesktopGamut = {{{"srgb", 195.0}, {"p3", 13.0}}};
++// navigator.connection.rtt (ms) among the 180 captures reporting it, kept to the 50 ms grid of
++// Chrome 151 (the 75/125 rows in the corpus are older majors) with >= 500 collapsed into 500.
++constexpr std::array<WeightedEntry<unsigned>, 9> kRttMs = {{
++    {50u, 82.0}, {100u, 47.0}, {0u, 15.0}, {200u, 8.0}, {300u, 7.0},
++    {150u, 5.0}, {350u, 4.0}, {250u, 3.0}, {500u, 5.0},
++}};
++// navigator.connection.downlink (Mbps): 10.0 in 112/180; the 1.25..1.75 cluster (52) is the
++// NQE estimate real Chrome reports on many links; the mid values (13) are individual captures.
++constexpr std::array<WeightedEntry<double>, 25> kDownlinkMbps = {{
++    {10.0, 112.0}, {1.25, 1.0}, {1.3, 7.0}, {1.35, 5.0}, {1.4, 5.0}, {1.45, 10.0}, {1.5, 5.0},
++    {1.55, 5.0}, {1.6, 3.0}, {1.65, 4.0}, {1.7, 3.0}, {1.75, 4.0}, {3.4, 1.0}, {3.75, 1.0},
++    {3.85, 1.0}, {5.6, 1.0}, {7.65, 1.0}, {7.7, 1.0}, {7.75, 1.0}, {8.35, 1.0}, {8.7, 1.0},
++    {8.95, 1.0}, {9.3, 1.0}, {9.5, 1.0}, {9.9, 1.0},
++}};
++
+ constexpr std::array<WeightedEntry<WebGLGPU>, 3> kWebGLGPUs = {{
+     {{"Google Inc. (Intel)",
+       "ANGLE (Intel, Intel(R) UHD Graphics 770 (0xA780) Direct3D11 vs_5_0 "
+@@ -745,6 +767,13 @@
+     // fix-up below replaces device_memory_gb from its device table, and a capture may supply
+     // its own limit. 0 marks "not yet sized".
+     p.js_heap_size_limit = 0;
++    // Measured desktop shares (file 72): touchscreen, colour gamut, connection, sample rate.
++    p.max_touch_points = WeightedPick(rng, kDesktopTouch);
++    p.css_color_gamut = WeightedPick(rng, kDesktopGamut);
++    p.netinfo_rtt_ms = WeightedPick(rng, kRttMs);
++    p.netinfo_downlink_mbps = WeightedPick(rng, kDownlinkMbps);
++    // 207/208 real Windows captures report an AudioContext sampleRate of 44100 Hz.
++    p.audio_sample_rate = 44100.0f;
+   }
+ 
+   // Default Windows voice set (closes the getVoices()=0 tell); a profile overrides.
+--- a/components/ungoogled/persona_profile.h
++++ b/components/ungoogled/persona_profile.h
+@@ -135,6 +135,14 @@
+   double audio_base_latency = 0.01;
+   double audio_output_latency = 0.015;
+ 
++  // clearcote: navigator.connection.rtt / .downlink (served by 150-device-sensors). Schema 1
++  // keeps the fixed residential-desktop pair 150 used to hard-code (50 ms / 10 Mbps); schema 2
++  // draws both from the corpus-measured distribution (file 72) on Chrome's own grids: rtt is a
++  // multiple of 50 ms (NetworkStateNotifier::RoundRtt), downlink a 50 kbps bucket capped at
++  // 10 Mbps (RoundMbps).
++  unsigned netinfo_rtt_ms = 50;
++  double netinfo_downlink_mbps = 10.0;
++
+   // clearcote: WebGL2 getParameter limits (canonical ANGLE/D3D11, Win desktop).
+   int webgl_max_3d_texture_size = 2048;
+   int webgl_max_array_texture_layers = 2048;
+--- a/components/ungoogled/persona_validator.cc
++++ b/components/ungoogled/persona_validator.cc
+@@ -510,6 +510,15 @@
+         c.Warn("media.codec_table_complete", std::string("no decodingInfo entry for '") + k + "'");
+     }
+   }
++  if (p.netinfo_rtt_ms % 50 != 0 || p.netinfo_rtt_ms > 3000)
++    c.Error("netinfo.rtt_grid", "rtt " + S(p.netinfo_rtt_ms) + " is not a 50 ms multiple <= 3000");
++  {
++    const double kb = p.netinfo_downlink_mbps * 1000.0;
++    if (p.netinfo_downlink_mbps < 0 || p.netinfo_downlink_mbps > 10.0 ||
++        std::fabs(kb / 50.0 - std::round(kb / 50.0)) > 1e-6)
++      c.Error("netinfo.downlink_grid", "downlink " + S(p.netinfo_downlink_mbps) +
++                                           " is not a 50 kbps bucket <= 10 Mbps");
++  }
+   if (p.audio_sample_rate <= 0) {
+     c.Error("audio.sample_rate_positive", "sampleRate " + S(p.audio_sample_rate));
+   } else if (p.audio_sample_rate != 44100.0f && p.audio_sample_rate != 48000.0f) {
+@@ -668,6 +677,8 @@
+                   " touch=" + S(p.max_touch_points) + " mobile=" + (p.mobile ? "1" : "0") +
+                   " gpu='" + p.webgl_vendor + "|" + p.webgl_renderer + "'" +
+                   " webgpu=" + p.webgpu_vendor + "/" + p.webgpu_architecture +
++                  " rtt=" + S(p.netinfo_rtt_ms) + " dl=" + S(p.netinfo_downlink_mbps) +
++                  " sr=" + S(static_cast<double>(p.audio_sample_rate)) +
+                   " voices=" + S(static_cast<uint64_t>(p.voices.size())) +
+                   " devices=" + S(static_cast<uint64_t>(p.media_devices.size())) +
+                   " real_gpu=" + (p.webgl_real ? "1" : "0");
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -113,18 +113,19 @@
+ }
+ 
+ uint32_t NetworkInformation::rtt() {
+-  // clearcote: fixed residential-desktop RTT. Always a multiple of 50ms in
+-  // real Chrome (RoundRtt granularity); 50 is the modal value and avoids the
+-  // ~0ms datacenter tell. Bypasses the host-derived NetworkStateNotifier.
+-  return 50u;
++  // clearcote: the persona's RTT, always on real Chrome's 50 ms grid
++  // (RoundRtt granularity). Schema 1 serves the fixed modal 50 ms this used to
++  // hard-code (avoids the ~0 ms datacenter tell); schema 2 draws it from the
++  // corpus-measured distribution. Bypasses the host-derived NetworkStateNotifier.
++  return ungoogled::CurrentPersona().netinfo_rtt_ms;
+ }
+ 
+ double NetworkInformation::downlink() {
+-  // clearcote: fixed residential-desktop downlink in Mbps. Real Chrome caps
+-  // downlink at 10.0 Mbps (RoundMbps kMaxDownlinkKbps), so any broadband link
+-  // saturates this value -- it is the single most common reported number and
+-  // maximally non-distinguishing. Bypasses the host-derived notifier.
+-  return 10.0;
++  // clearcote: the persona's downlink in Mbps, a 50 kbps bucket capped at
++  // 10.0 (RoundMbps kMaxDownlinkKbps). Schema 1 serves the fixed 10.0 this used
++  // to hard-code (the single most common value); schema 2 draws it from the
++  // corpus-measured distribution. Bypasses the host-derived notifier.
++  return ungoogled::CurrentPersona().netinfo_downlink_mbps;
+ }
+ 
+ bool NetworkInformation::saveData() const {

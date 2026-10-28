@@ -1,0 +1,65 @@
+clearcote: a Windows persona on a non-D3D host must not advertise ASTC/ETC.
+
+D3D11 cannot expose WEBGL_compressed_texture_astc, _etc or _etc1 at all, so their presence beside a
+renderer string naming Direct3D11 is a self-contained contradiction. Measured: the container
+advertised all three; genuine Chrome 151 on real D3D11 exposes none.
+
+Hooked at ExtensionSupportedAndAllowed(), the SINGLE gate feeding both getSupportedExtensions() and
+getExtension(), so the advertised set and the gettable set cannot drift apart -- an
+enumerate-then-get mismatch is a one-line detector and no real browser produces a null there.
+
+The extension objects are consequently never constructed, and AddCompressedTextureFormat() is only
+reachable from those constructors, so getParameter(COMPRESSED_TEXTURE_FORMATS) stops listing their
+enums without a second, separately-maintained filter. Verified on all three surfaces at once,
+decoding the enum ranges (ASTC 0x93b0-0x93dd, ETC2/EAC 0x9270-0x9279, ETC1 0x8d64) rather than
+trusting the chain: advertised [], gettable [], banned enums [].
+
+Subtractive only -- it removes a claim and never adds one, so unlike an upward spoof it can never
+advertise capability the host cannot back.
+
+KNOWN RESIDUAL: this leaves 27 extensions where genuine D3D11 reports 32. The five-extension gap is
+a pre-existing under-claim (the software backend lacks entries a real GPU has), not something this
+patch introduces -- it removes 3 impossible ones from 30. Under-claiming is a coherent smaller list;
+over-claiming is an incoherent larger one. Closing the remaining gap is separate work.
+
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4089,8 +4089,38 @@
+   return false;
+ }
+ 
++// clearcote(r16): extensions a Direct3D11 backend cannot expose, blocked when the persona claims
++// Windows on a non-D3D host. ANGLE's Vulkan/SwiftShader backend advertises ASTC and ETC because
++// the Linux driver has them; a real D3D11 device does not, so they sit beside a renderer string
++// naming Direct3D11 and contradict it. Measured against genuine Chrome 151 on real D3D11: none of
++// the three present, 32 extensions total.
++//
++// This is the single gate used by BOTH getSupportedExtensions() and getExtension(), so the
++// advertised set and the gettable set stay the same set -- an enumerate-then-get mismatch is a
++// one-line detector. The extension objects are never constructed as a result, and
++// AddCompressedTextureFormat() is only reachable from those constructors, so
++// getParameter(COMPRESSED_TEXTURE_FORMATS) stops listing their enums without a second filter.
++//
++// Subtractive: it removes a claim and never adds one, so unlike an upward limit spoof it can never
++// advertise capability the host cannot back.
++static bool CcPersonaBlocksExtension(const String& name) {
++#if BUILDFLAG(IS_LINUX)
++  if (ungoogled::CurrentPersona().webgl_real ||
++      ungoogled::GetPersonaPlatform() != ungoogled::PersonaPlatform::kWindows) {
++    return false;
++  }
++  return name == "WEBGL_compressed_texture_astc" ||
++         name == "WEBGL_compressed_texture_etc" ||
++         name == "WEBGL_compressed_texture_etc1";
++#else
++  return false;
++#endif
++}
++
+ bool WebGLRenderingContextBase::ExtensionSupportedAndAllowed(
+     const ExtensionTracker* tracker) {
++  if (CcPersonaBlocksExtension(String(tracker->ExtensionName())))
++    return false;
+   if (tracker->Draft() &&
+       !RuntimeEnabledFeatures::WebGLDraftExtensionsEnabled())
+     return false;
