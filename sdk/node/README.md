@@ -8,6 +8,8 @@ The verified Clearcote binary is **auto-downloaded and SHA-256 checked** on firs
 you don't manage zips or paths. Or run the same code on a hosted Clearcote browser with
 `launch({ cloud: true })`: see [Local or cloud](#local-or-cloud).
 
+> **What's new** — without a licence key the SDK now downloads the open build **Chromium 151** ([v0.1.0-pre.25](https://github.com/clearcotelabs/clearcote-browser/releases/tag/v0.1.0-pre.25), `151.0.7922.108`), SDK `clearcote` **0.64.0**. `version: "150"` and `"149"` still resolve.
+
 > **Platform:** Clearcote ships **Windows x64** and **Linux x64** binaries, plus a **macOS arm64** (Apple
 > Silicon) PRO build; `launch()` runs on all of them and the SDK auto-downloads the right one for your OS. On Linux the persona is Linux-native (Linux
 > GPU/voices/audio-device values) and DRM uses the Linux CDM. On an Apple Silicon Mac
@@ -802,10 +804,10 @@ By default the SDK downloads the exact build pinned into this package. To pick a
 major/version instead, pass `version` (or set `CLEARCOTE_BROWSER_VERSION`):
 
 ```ts
-await launch({ fingerprint: "seed-1", version: "150" });     // newest 150.x (free)
-await launch({ version: "150.0.7871.114" });                 // an exact build
+await launch({ fingerprint: "seed-1", version: "151" });     // newest 151.x (free)
+await launch({ version: "151.0.7922.108" });                 // an exact build
 await launch({ version: "latest" });                         // newest you can access
-await launch({ version: "150", licenseKey: "cc_lic_..." });  // a PRO-tier version (see below)
+await launch({ version: "155", licenseKey: "cc_lic_..." });  // a PRO-tier version (see below)
 ```
 
 The request is resolved against a public catalog (`GET /api/v1/versions`) and **validated to exist

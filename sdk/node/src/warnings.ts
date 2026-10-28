@@ -46,7 +46,7 @@ export function coherenceWarnings(
   buildMajor?: string
 ): CoherenceWarning[] {
   const host = hostPlatform ?? process.platform;
-  const bmajor = buildMajor ?? "150";
+  const bmajor = buildMajor ?? "151";
   const out: CoherenceWarning[] = [];
   const warn = (code: string, message: string) => out.push({ severity: "warn", code, message });
   const note = (code: string, message: string) => out.push({ severity: "note", code, message });

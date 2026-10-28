@@ -35,13 +35,13 @@ export interface ReleaseInfo {
 // signed asset + its SHA-256 (the trust anchor) + the inner-binary hash (defense in depth) + how to
 // unpack it. Windows and Linux ship from their own release tags.
 const WINDOWS: ReleaseInfo = {
-  tag: "v0.1.0-pre.23",
-  version: "150.0.7871.114",
-  asset: "clearcote-150.0.7871.114-windows-x64.zip",
-  url: "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.23/clearcote-150.0.7871.114-windows-x64.zip",
-  sha256: "93fc03c45b931d8d82f714814318892929f44dd671b0993788332071d53f3135",
-  exeSha256: "f49b0d6bc5a08857e34f951ddc456abc643283ae45ff330ee7c2c39cd75b4869",
-  size: 245936073,
+  tag: "v0.1.0-pre.25",
+  version: "151.0.7922.108",
+  asset: "clearcote-151.0.7922.108-windows-x64.zip",
+  url: "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.25/clearcote-151.0.7922.108-windows-x64.zip",
+  sha256: "a3e3455c4c2da6187c9224563d99651a0cfd1a2bac5f70c2f9a19366c4c541cd",
+  exeSha256: "e9c88e826534200e62b6544144ff3801c63065edb8940ff45e533918322e8dc0",
+  size: 204317302,
   os: "win32",
   archive: "zip",
   binary: "chrome.exe",
@@ -49,13 +49,13 @@ const WINDOWS: ReleaseInfo = {
 };
 
 const LINUX: ReleaseInfo = {
-  tag: "v0.1.0-pre.23",
-  version: "150.0.7871.114",
-  asset: "clearcote-150.0.7871.114-linux-x64.tar.xz",
-  url: "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.23/clearcote-150.0.7871.114-linux-x64.tar.xz",
-  sha256: "92ebd3de6fbf2c1349d3eb3c210952fcdb8dc9ed35655a35297cd68431fc8ef2",
-  exeSha256: "cc192460484b7dcb1de8df3b3b7bea6f78962d560b6347012d9dbedd3f66720d",
-  size: 149463344,
+  tag: "v0.1.0-pre.25",
+  version: "151.0.7922.108",
+  asset: "clearcote-151.0.7922.108-linux-x64.tar.xz",
+  url: "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.25/clearcote-151.0.7922.108-linux-x64.tar.xz",
+  sha256: "6c06f95783410d09799828b93f7bb26ac8174354b87f580827c8bcf1f2226b7e",
+  exeSha256: "6261bae468ced0b7b1fe0f71d73344cb6feca2d9abf4a1da285ba4f572c546cc",
+  size: 122845968,
   os: "linux",
   archive: "tar.xz",
   binary: "chrome",
@@ -174,6 +174,16 @@ export const CATALOG_FALLBACK: Catalog = {
       version: "150.0.7871.114",
       tier: "free",
       tag: "v0.1.0-pre.23",
+      platforms: {
+        windows: { asset: "clearcote-150.0.7871.114-windows-x64.zip", url: "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.23/clearcote-150.0.7871.114-windows-x64.zip", sha256: "93fc03c45b931d8d82f714814318892929f44dd671b0993788332071d53f3135", exeSha256: "f49b0d6bc5a08857e34f951ddc456abc643283ae45ff330ee7c2c39cd75b4869", size: 245936073, archive: "zip", binary: "chrome.exe" },
+        linux: { asset: "clearcote-150.0.7871.114-linux-x64.tar.xz", url: "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.23/clearcote-150.0.7871.114-linux-x64.tar.xz", sha256: "92ebd3de6fbf2c1349d3eb3c210952fcdb8dc9ed35655a35297cd68431fc8ef2", exeSha256: "cc192460484b7dcb1de8df3b3b7bea6f78962d560b6347012d9dbedd3f66720d", size: 149463344, archive: "tar.xz", binary: "chrome" },
+      },
+    },
+    {
+      major: 151,
+      version: "151.0.7922.108",
+      tier: "free",
+      tag: "v0.1.0-pre.25",
       platforms: {
         windows: { asset: WINDOWS.asset, url: WINDOWS.url, sha256: WINDOWS.sha256, exeSha256: WINDOWS.exeSha256, size: WINDOWS.size, archive: "zip", binary: "chrome.exe" },
         linux: { asset: LINUX.asset, url: LINUX.url, sha256: LINUX.sha256, exeSha256: LINUX.exeSha256, size: LINUX.size, archive: "tar.xz", binary: "chrome" },

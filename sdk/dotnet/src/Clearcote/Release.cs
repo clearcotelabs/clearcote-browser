@@ -42,13 +42,13 @@ public static class Release
 {
     public static readonly ReleaseInfo Windows = new()
     {
-        Tag = "v0.1.0-pre.23",
-        Version = "150.0.7871.114",
-        Asset = "clearcote-150.0.7871.114-windows-x64.zip",
-        Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.23/clearcote-150.0.7871.114-windows-x64.zip",
-        Sha256 = "93fc03c45b931d8d82f714814318892929f44dd671b0993788332071d53f3135",
-        ExeSha256 = "f49b0d6bc5a08857e34f951ddc456abc643283ae45ff330ee7c2c39cd75b4869",
-        Size = 245936073,
+        Tag = "v0.1.0-pre.25",
+        Version = "151.0.7922.108",
+        Asset = "clearcote-151.0.7922.108-windows-x64.zip",
+        Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.25/clearcote-151.0.7922.108-windows-x64.zip",
+        Sha256 = "a3e3455c4c2da6187c9224563d99651a0cfd1a2bac5f70c2f9a19366c4c541cd",
+        ExeSha256 = "e9c88e826534200e62b6544144ff3801c63065edb8940ff45e533918322e8dc0",
+        Size = 204317302,
         Os = "windows",
         Archive = "zip",
         Binary = "chrome.exe",
@@ -57,13 +57,13 @@ public static class Release
 
     public static readonly ReleaseInfo Linux = new()
     {
-        Tag = "v0.1.0-pre.23",
-        Version = "150.0.7871.114",
-        Asset = "clearcote-150.0.7871.114-linux-x64.tar.xz",
-        Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.23/clearcote-150.0.7871.114-linux-x64.tar.xz",
-        Sha256 = "92ebd3de6fbf2c1349d3eb3c210952fcdb8dc9ed35655a35297cd68431fc8ef2",
-        ExeSha256 = "cc192460484b7dcb1de8df3b3b7bea6f78962d560b6347012d9dbedd3f66720d",
-        Size = 149463344,
+        Tag = "v0.1.0-pre.25",
+        Version = "151.0.7922.108",
+        Asset = "clearcote-151.0.7922.108-linux-x64.tar.xz",
+        Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.25/clearcote-151.0.7922.108-linux-x64.tar.xz",
+        Sha256 = "6c06f95783410d09799828b93f7bb26ac8174354b87f580827c8bcf1f2226b7e",
+        ExeSha256 = "6261bae468ced0b7b1fe0f71d73344cb6feca2d9abf4a1da285ba4f572c546cc",
+        Size = 122845968,
         Os = "linux",
         Archive = "tar.xz",
         Binary = "chrome",
@@ -145,6 +145,15 @@ public static class Release
             new()
             {
                 Major = 150, Version = "150.0.7871.114", Tier = "free", Tag = "v0.1.0-pre.23",
+                Platforms = new Dictionary<string, CatalogPlatform>
+                {
+                    ["windows"] = new() { Asset = "clearcote-150.0.7871.114-windows-x64.zip", Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.23/clearcote-150.0.7871.114-windows-x64.zip", Sha256 = "93fc03c45b931d8d82f714814318892929f44dd671b0993788332071d53f3135", ExeSha256 = "f49b0d6bc5a08857e34f951ddc456abc643283ae45ff330ee7c2c39cd75b4869", Size = 245936073, Archive = "zip", Binary = "chrome.exe" },
+                    ["linux"] = new() { Asset = "clearcote-150.0.7871.114-linux-x64.tar.xz", Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.23/clearcote-150.0.7871.114-linux-x64.tar.xz", Sha256 = "92ebd3de6fbf2c1349d3eb3c210952fcdb8dc9ed35655a35297cd68431fc8ef2", ExeSha256 = "cc192460484b7dcb1de8df3b3b7bea6f78962d560b6347012d9dbedd3f66720d", Size = 149463344, Archive = "tar.xz", Binary = "chrome" },
+                },
+            },
+            new()
+            {
+                Major = 151, Version = "151.0.7922.108", Tier = "free", Tag = "v0.1.0-pre.25",
                 Platforms = new Dictionary<string, CatalogPlatform>
                 {
                     ["windows"] = new() { Asset = Windows.Asset, Url = Windows.Url, Sha256 = Windows.Sha256, ExeSha256 = Windows.ExeSha256, Size = Windows.Size, Archive = "zip", Binary = "chrome.exe" },

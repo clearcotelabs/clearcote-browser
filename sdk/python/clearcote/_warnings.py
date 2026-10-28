@@ -56,7 +56,7 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
     `opts` is the resolved option dict (fingerprint kwargs + proxy/geoip/headless/_user_args,
     plus `_font_reach`: the (claimed, reachable) font counts _prepare measured, or None)."""
     host = host_platform or sys.platform
-    build_major = str(build_major) if build_major is not None else "150"
+    build_major = str(build_major) if build_major is not None else "151"
     out = []
     def warn(code, msg): out.append({"severity": "warn", "code": code, "message": msg})
     def note(code, msg): out.append({"severity": "note", "code": code, "message": msg})
