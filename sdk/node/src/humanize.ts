@@ -50,7 +50,7 @@ import {
   modifierLeadMs, planGap, planRepeat, splitChord, submitPauseMs, tabPauseMs, typingTraits, type TabInfo,
 } from "./keys.js";
 import {
-  COVER_CHECK_MS, COVER_RETRY_MS, ISO_ACTIVE_FIELD, ISO_ACTIVE_VALUE, ISO_CSS_BOX, ISO_DESCRIBE, ISO_FORM_CONTROL,
+  COVER_CHECK_MS, COVER_RETRY_MS, SETTLE_MS, SETTLE_TRIES, ISO_COVER, ISO_ACTIVE_FIELD, ISO_ACTIVE_VALUE, ISO_CSS_BOX, ISO_DESCRIBE, ISO_FORM_CONTROL,
   ISO_FRAMES, ISO_HIT_IN_BOX, ISO_LABEL_BY_SEL, ISO_LABEL_OF, ISO_LISTBOX_ROW, ISO_PLATFORM, ISO_SCROLL_BY, ISO_VIEWPORT,
   roundHalfEven, worldFor, type DescribedElement,
 } from "./isolated.js";
@@ -915,6 +915,7 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
       if (wrec?.length) traceRecord("wheel", wrec, { device, dx, dy });
     }
   };
+  const wheelHuman = mouse.wheel as (dx: number, dy: number) => Promise<void>; // unlocked: for use inside a locked action
   const wheelRun = async (device: string, dx: number, dy: number, sendWheel: (a: number, b: number) => Promise<void>): Promise<void> => {
     if (device === "trackpad") {
       // A trackpad persona swipes the exact distance: 2-40 px events at the persona's 60-120/s on a min-jerk
@@ -2608,6 +2609,58 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
     return hit;
   };
 
+  // The element's box once it has stopped moving: two reads ~100 ms apart within 1 px, for up to SETTLE_MS.
+  // null when it never settles or has no box. Read like boxOf (the isolated CSS read, else boundingBox),
+  // with the wheel, so a target the settling scroll left out of view is brought back in.
+  const sameBox = (a: Rect, b: Rect) => Math.abs(a.x - b.x) <= 1 && Math.abs(a.y - b.y) <= 1
+    && Math.abs(a.width - b.width) <= 1 && Math.abs(a.height - b.height) <= 1;
+  const settledBox = async (loc: Locator, timeout: number | undefined, selector: string | null): Promise<Rect | null> => {
+    const deadline = Date.now() + SETTLE_MS;
+    let prev = await boxOf(loc, timeout, false, selector);
+    while (prev && Date.now() < deadline) {
+      await sleep(100);
+      const next = await boxOf(loc, timeout, false, selector);
+      if (!next) return null;
+      if (sameBox(prev, next)) return next;
+      prev = next;
+    }
+    return null;
+  };
+
+  // A target that is not moving yet fails the hit test is covered. Two covers a person deals with without
+  // thinking, which used to send the click to Playwright (r53 /audit, seed 2, 2026-10-28):
+  //  - something the pointer itself opened: it rested on a header link and a hover menu dropped over the
+  //    target. The hand moves off it (below it where there is room, else above) and the menu closes;
+  //  - a fixed or sticky bar (a site header) over a target the scroll left under it: the wheel brings the
+  //    target down into the band a reader looks at.
+  // true when it did one of them (the caller re-reads the box and hit-tests again).
+  const uncover = async (box: Rect, x: number, y: number): Promise<boolean> => {
+    const c = await worldFor(page).evaluate<any>(ISO_COVER,
+      { x, y, b: { x: box.x, y: box.y, width: box.width, height: box.height } });
+    if (!c || !Array.isArray(c.rect)) return false;
+    const [cx, cy, cw, ch] = (c.rect as unknown[]).map(Number);
+    const vp = await viewport();
+    if (st.x >= cx && st.x <= cx + cw && st.y >= cy && st.y <= cy + ch) {
+      // Off its edge by 6-80 px where the viewport has room (a mega menu can leave only a strip), below first.
+      const roomBelow = vp.height - 4 - (cy + ch + 6), roomAbove = cy - 6 - 4;
+      const ty = roomBelow >= 0 ? cy + ch + 6 + rand(0, Math.min(74, roomBelow))
+        : roomAbove >= 0 ? cy - 6 - rand(0, Math.min(74, roomAbove)) : null;
+      if (ty === null) return false;
+      const tx = Math.min(vp.width - 8, Math.max(8, box.x + box.width / 2 + rand(-60, 60)));
+      await glide(tx, ty);
+      await sleep(rand(250, 450)); // a hover menu's close transition
+      return true;
+    }
+    // A cover filling most of the viewport is a modal or a cookie wall, not a bar to scroll out from under.
+    if (c.fixed && cw * ch <= 0.8 * vp.width * vp.height) {
+      const dy = box.y + box.height / 2 - vp.height * rand(0.3, 0.5);
+      if (Math.abs(dy) < 1) return false;
+      await wheelHuman(0, dy);
+      return true;
+    }
+    return false;
+  };
+
   // The viewport point of Playwright's `position` (relative to the PADDING box: the border widths are added).
   const positionPoint = async (box: Rect, pos: { x: number; y: number }): Promise<{ x: number; y: number }> => {
     const info = await describe(box, null);
@@ -2684,27 +2737,48 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
       const loc = page.locator(selector).first();
       // Playwright skips actionability with force: no wait then -- a target it would click hidden goes
       // native at once instead of timing out first.
-      const box = await boxOf(loc, timeout, o.force, selector);
+      let box = await boxOf(loc, timeout, o.force, selector);
       if (!box) throw new NativeSignal("the element has no box");
-      aim = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
       if (!o.force && !(await loc.isEnabled())) throw new NativeSignal("the element is not enabled");
-      let x: number, y: number;
-      if (o.position) {
-        ({ x, y } = await positionPoint(box, o.position));
-        aim = { x, y };
-      } else {
-        ({ x, y } = clickPoint(box, st, persona));
-      }
-      // Whole pixels: the hit test below answers for the pixel DOM.getNodeForLocation rounds to, so the
-      // press goes to that pixel too. A press at 971.6 next to a badge ending at 972 was proven at 972 and
-      // landed on the badge, reported as a success (verifier B, SC 210).
-      x = roundHalfEven(x); y = roundHalfEven(y);
+      let x = 0, y = 0;
+      const aimAt = async (b: Rect) => {
+        aim = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+        if (o.position) {
+          ({ x, y } = await positionPoint(b, o.position));
+          aim = { x, y };
+        } else {
+          ({ x, y } = clickPoint(b, st, persona));
+        }
+        // Whole pixels: the hit test below answers for the pixel DOM.getNodeForLocation rounds to, so the
+        // press goes to that pixel too. A press at 971.6 next to a badge ending at 972 was proven at 972 and
+        // landed on the badge, reported as a success (verifier B, SC 210).
+        x = roundHalfEven(x); y = roundHalfEven(y);
+      };
+      await aimAt(box);
       if (!o.force && orig) {
         // Stability, then covered-by: 50 ms on, the element must still fill `box` (an animation in
         // flight does not) and own the click point -- no trusted press at a point some overlay owns.
         // Either failing goes native: Playwright waits for it.
         await sleep(50);
-        const hit = await reachesPoint(box, x, y, selector);
+        let hit = await reachesPoint(box, x, y, selector);
+        // A target still moving (the scroll that brought it in settling, a layout shift) fails the test with
+        // the box it had. Re-aim at the box it settles at rather than hand the click to Playwright, whose
+        // press and release land in the same millisecond with a one-report jump from rest (/audit
+        // pointer-press-dwell-duration, pointer-jump-from-rest; r53 seed 2, 2026-10-28).
+        // A target that is covered rather than moving is uncovered first (uncover); what stays covered is
+        // handled below.
+        for (let tries = 0; hit === false && tries < SETTLE_TRIES; tries++) {
+          let next = await settledBox(loc, timeout, selector);
+          if (!next) break;
+          if (sameBox(next, box)) {
+            if (!(await uncover(next, x, y))) break;
+            next = await settledBox(loc, timeout, selector);
+            if (!next) break;
+          }
+          box = next;
+          await aimAt(box);
+          hit = await reachesPoint(box, x, y, selector);
+        }
         if (hit === false && !o.position) {
           // The persona's point is covered (a badge, an icon, a floating label over the centre). Before
           // giving the click to Playwright -- which waited out its timeout on 5-7 of 16 badge-covered
