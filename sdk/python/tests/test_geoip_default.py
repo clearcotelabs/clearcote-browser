@@ -175,3 +175,64 @@ def test_docker_default_drops_the_webrtc_ip_without_a_key_and_keeps_it_with_one(
     assert kw["webrtc_ip"] == "203.0.113.7"
     kw = _docker.apply_geoip_before_start({"proxy": PROXY, "geoip": False}, quiet=True)
     assert "timezone" not in kw and "geoip" not in kw
+
+
+# ── pro-r54-06: real STUN with no proxy (--webrtc-direct-stun) ─────────────────────────────────────────
+# The same cases as sdk/node/test/webrtc-direct-stun.test.ts.
+
+def test_apply_geoip_mode_reports_the_egress_ip_it_found(resolver):
+    applied = clearcote.apply_geoip_mode({}, None, "auto", quiet=True)
+    assert applied.ip == "203.0.113.7" and applied.geo["ip"] == "203.0.113.7" and applied.auto_webrtc_ip
+    cached = clearcote.apply_geoip_mode({}, None, "auto", quiet=True)  # from the 10-minute no-proxy cache
+    assert len(resolver["asked"]) == 1 and cached.ip == "203.0.113.7" and cached == (None, True)
+    assert clearcote.apply_geoip_mode({}, PROXY, "strict", quiet=True).ip == "203.0.113.7"
+    assert clearcote.apply_geoip_mode({}, PROXY, "off", quiet=True).ip is None
+
+
+def test_direct_stun_eligible_only_with_no_proxy_and_the_webrtc_ip_the_lookup_found():
+    own = "203.0.113.7"
+    fp = {"webrtc_ip": own}
+    ok = clearcote.direct_stun_eligible
+    assert ok(fp, clearcote.GeoipApplied(None, True, own), None) is True
+    assert ok(fp, clearcote.GeoipApplied(None, False, own), None) is True  # geoip=True
+    assert ok(fp, clearcote.GeoipApplied(None, True, own), PROXY) is False
+    assert ok({"webrtc_ip": "198.51.100.9"}, clearcote.GeoipApplied(None, False, own), None) is False
+    assert ok({}, clearcote.GeoipApplied(None, False, own), None) is False
+    assert ok(fp, clearcote.GeoipApplied(None, False), None) is False  # geoip off, hand-set IP
+    assert ok(fp, (None, True), None) is False  # a plain tuple carries no IP
+
+
+def _engine(tmp_path, name, switch):
+    exe = tmp_path / name
+    exe.write_bytes(b"xx\x00" + switch + b"\x00yy")
+    return str(exe)
+
+
+def test_webrtc_direct_stun_args_only_on_an_engine_that_has_the_switch(tmp_path):
+    from clearcote._launchopts import webrtc_direct_stun_args
+    r54 = _engine(tmp_path, "r54.bin", b"webrtc-direct-stun")
+    r53 = _engine(tmp_path, "r53.bin", b"socks5-udp")
+    assert webrtc_direct_stun_args(r54, True, []) == ["--webrtc-direct-stun"]
+    assert webrtc_direct_stun_args(r53, True, []) == []
+    assert webrtc_direct_stun_args(None, True, []) == []
+    assert webrtc_direct_stun_args(r54, False, []) == []
+    # never alongside a proxy in the caller's own args
+    assert webrtc_direct_stun_args(r54, True, ["--proxy-server=http://p:8080"]) == []
+    assert webrtc_direct_stun_args(r54, True, ["--proxy-pac-url=http://x/p.pac"]) == []
+
+
+def test_launch_emits_direct_stun_only_for_this_machines_own_webrtc_ip(resolver, monkeypatch, tmp_path):
+    monkeypatch.delenv("CLEARCOTE_GEOIP", raising=False)
+    exe = _engine(tmp_path, "r54-chrome.exe", b"webrtc-direct-stun")
+
+    def args(**kw):
+        _exe, a, _pw, *_ = clearcote._prepare({"executable_path": exe, "quiet": True, "widevine": False, **kw})
+        return a
+
+    assert "--webrtc-direct-stun" in args()
+    assert "--webrtc-direct-stun" in args(geoip=True)
+    assert "--webrtc-direct-stun" not in args(proxy=PROXY, _cc_pro=("cc_lic_x", None))
+    assert "--webrtc-direct-stun" not in args(webrtc_ip="198.51.100.9")
+    assert "--webrtc-direct-stun" not in args(geoip=False, webrtc_ip="203.0.113.7")
+    assert "--webrtc-direct-stun" not in args(args=["--proxy-server=http://p:8080"])
+    assert "--webrtc-direct-stun" not in _prepare_args(tmp_path)  # an engine without the switch

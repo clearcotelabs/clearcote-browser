@@ -913,6 +913,17 @@ def stock_runtime_args(exe, enabled=None, user_args=(), quiet=False):
     return [] if STOCK_RUNTIME_SWITCH in (user_args or ()) else [STOCK_RUNTIME_SWITCH]
 
 
+def webrtc_direct_stun_args(exe, eligible, user_args=()):
+    """Engine r54+ (pro-r54-06): ``[--webrtc-direct-stun]`` for a launch with no proxy whose WebRTC IP is this
+    machine's own (see ``direct_stun_eligible``). The browser then sends real STUN binding requests instead of
+    fabricating the server-reflexive candidate, so a page's own STUN server sees the request the candidate
+    came from, as with stock Chrome. The engine re-checks that no proxy is set; a proxy in the caller's own
+    args skips it here too. Older engines never get the switch."""
+    if not eligible or any(str(a).startswith(("--proxy-server", "--proxy-pac-url")) for a in (user_args or ())):
+        return []
+    return ["--webrtc-direct-stun"] if engine_supports_switch(exe, "webrtc-direct-stun") else []
+
+
 def warn_stock_runtime_cloud(enabled=None, quiet=False):
     """A cloud browser does not take ``stock_runtime``: say so once per process when it is on."""
     if stock_runtime_wanted(enabled):

@@ -438,9 +438,10 @@ public static class GeoIp
     /// Tests: forget the cached no-proxy lookup.
     internal static void ResetDirectCache() => _direct = null;
 
-    /// What <see cref="ApplyModeAsync"/> did: the geo, whether the WebRTC IP came from the DEFAULT lookup, and the
-    /// egress-drift check it started (the launch awaits it before it returns).
-    internal sealed record GeoipApplied(GeoInfo? Geo, bool AutoWebrtcIp, Task EgressDrift)
+    /// What <see cref="ApplyModeAsync"/> did: the geo, whether the WebRTC IP came from the DEFAULT lookup, the
+    /// egress-drift check it started (the launch awaits it before it returns), and <c>Ip</c>: the egress IP the lookup
+    /// found (also from the no-proxy cache), with no proxy this machine's own.
+    internal sealed record GeoipApplied(GeoInfo? Geo, bool AutoWebrtcIp, Task EgressDrift, string? Ip = null)
     {
         public static readonly GeoipApplied None = new(null, false, Task.CompletedTask);
     }
@@ -451,7 +452,19 @@ public static class GeoIp
     {
         if (mode == GeoipMode.Off) return GeoipApplied.None;
         if (mode == GeoipMode.Strict)
-            return new GeoipApplied(null, false, await ApplyForLaunchAsync(fp, proxy, quiet).ConfigureAwait(false));
+        {
+            // Capture the geo ApplyForLaunchAsync filled from, for its IP (DirectStunEligible).
+            GeoInfo? found = null;
+            var strictResolver = Resolver;
+            Func<ProxyOptions?, bool, int?, Task<GeoResult>> recordingStrict = async (p, q, t) =>
+            {
+                var r = await strictResolver(p, q, t).ConfigureAwait(false);
+                found = r.Geo;
+                return r;
+            };
+            var strictDrift = await ApplyForLaunchAsync(fp, proxy, quiet, resolver: recordingStrict).ConfigureAwait(false);
+            return new GeoipApplied(null, false, strictDrift, NonEmpty(found?.Ip));
+        }
         if (!string.IsNullOrEmpty(fp.Timezone) && !string.IsNullOrEmpty(fp.AcceptLanguage) &&
             !string.IsNullOrEmpty(fp.Location) && !string.IsNullOrEmpty(fp.WebrtcIp)) return GeoipApplied.None;
         var hadWebrtcIp = !string.IsNullOrEmpty(fp.WebrtcIp);
@@ -463,7 +476,7 @@ public static class GeoIp
             if (string.IsNullOrEmpty(fp.AcceptLanguage) && !string.IsNullOrEmpty(cached.AcceptLanguage)) fp.AcceptLanguage = cached.AcceptLanguage;
             if (string.IsNullOrEmpty(fp.Location) && !string.IsNullOrEmpty(cached.Location)) fp.Location = cached.Location;
             if (string.IsNullOrEmpty(fp.WebrtcIp) && !string.IsNullOrEmpty(cached.WebrtcIp)) fp.WebrtcIp = cached.WebrtcIp;
-            return new GeoipApplied(null, !hadWebrtcIp && !string.IsNullOrEmpty(fp.WebrtcIp), Task.CompletedTask);
+            return new GeoipApplied(null, !hadWebrtcIp && !string.IsNullOrEmpty(fp.WebrtcIp), Task.CompletedTask, NonEmpty(cached.WebrtcIp));
         }
         var envTimeout = (Environment.GetEnvironmentVariable("CLEARCOTE_GEOIP_TIMEOUT_SECONDS") ?? "").Trim();
         GeoInfo? geo = null;
@@ -480,7 +493,7 @@ public static class GeoIp
             var drift = await ApplyForLaunchAsync(fp, proxy, quiet, envTimeout.Length > 0 ? TimeoutMs() : AutoTimeoutMs, recording).ConfigureAwait(false);
             if (geo is { Timezone.Length: > 0 } && direct)
                 _direct = new DirectGeo(geo.Timezone, geo.AcceptLanguage, geo.Location, geo.Ip, DateTime.UtcNow);
-            return new GeoipApplied(geo, !hadWebrtcIp && !string.IsNullOrEmpty(fp.WebrtcIp), drift);
+            return new GeoipApplied(geo, !hadWebrtcIp && !string.IsNullOrEmpty(fp.WebrtcIp), drift, NonEmpty(geo?.Ip));
         }
         catch (GeoipException e)
         {
@@ -503,6 +516,15 @@ public static class GeoIp
     {
         if (applied.AutoWebrtcIp && !string.IsNullOrEmpty(proxy?.Server) && !licensed) fp.WebrtcIp = null;
     }
+
+    private static string? NonEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
+
+    /// Engine r54+ (pro-r54-06): whether this launch may send real STUN instead of fabricating the WebRTC IP. Only
+    /// with no proxy at all, and only when the WebRTC IP is this machine's own egress as the lookup found it
+    /// (<see cref="GeoipApplied.Ip"/>): a hand-set WebrtcIp may name another place on purpose, and real STUN would
+    /// contradict it.
+    internal static bool DirectStunEligible(FingerprintOptions fp, GeoipApplied applied, ProxyOptions? proxy)
+        => string.IsNullOrEmpty(proxy?.Server) && !string.IsNullOrEmpty(applied.Ip) && fp.WebrtcIp == applied.Ip;
 
     // country (ISO-3166 alpha-2) -> the OS locale a machine there most plausibly runs. ONE tag, not a
     // list: the launch expands it the way Chrome does (DE -> de-DE -> UI "de", languages de-DE,de,en-US,en;

@@ -187,7 +187,7 @@ public static partial class Clearcote
         if (reqUpstream is not null) proxyArgs.AddRange(RequestProxy.RequestProxyArgs(proxyArgs));
         var args = AssembleArgs(Agent.WithPersona(options), ExtensionAndPortableArgs(options),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
-            Extras(options, exe, headed: options.Headless == false));
+            Extras(options, exe, headed: options.Headless == false, prepared.Geo));
         EmitCoherenceWarnings(options, exe, args, options.Headless, PassThroughDevtools(options.PlaywrightLaunchOptions), userAgent: null);
 
         var licVersion = options.Version ?? Environment.GetEnvironmentVariable("CLEARCOTE_BROWSER_VERSION");
@@ -384,7 +384,7 @@ public static partial class Clearcote
         if (reqUpstream is not null) proxyArgs.AddRange(RequestProxy.RequestProxyArgs(proxyArgs));
         var args = AssembleArgs(Agent.WithPersona(options), ExtensionAndPortableArgs(options),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, userArgs, options.Proxy, options.Socks5Udp,
-            Extras(options, exe, headed: options.Headless == false));
+            Extras(options, exe, headed: options.Headless == false, prepared.Geo));
         EmitCoherenceWarnings(options, exe, args, options.Headless, PassThroughDevtools(options.PlaywrightContextOptions),
             options.PlaywrightContextOptions?.UserAgent);
 
@@ -525,7 +525,7 @@ public static partial class Clearcote
         // blocklist rule still applies to a headed endpoint and on Windows.
         var engineArgs = AssembleArgs(Agent.WithPersona(options), ExtensionAndPortableArgs(options),
             proxyArgs, options.DisablePrivacySandbox, options.WebrtcIp, options.Args ?? Array.Empty<string>(), options.Proxy, options.Socks5Udp,
-            Extras(options, exe, headed: options.Headless == false, viaPlaywright: false));
+            Extras(options, exe, headed: options.Headless == false, prepared.Geo, viaPlaywright: false));
 
         var port = options.Port ?? FreePort();
         var ownUdd = string.IsNullOrEmpty(options.UserDataDir);
@@ -716,13 +716,14 @@ public static partial class Clearcote
     // taken into account; see LaunchOpts.PlaywrightFeatureOverrideArgs.
     // StockRuntime: LaunchOptions.StockRuntime (engine r32+; null follows CLEARCOTE_STOCK_RUNTIME).
     // RuntimeBindings: LaunchOptions.RuntimeBindings (engine r54+; null follows CLEARCOTE_RUNTIME_BINDINGS).
+    // DirectStun: no proxy and the WebRTC IP is this machine's own (GeoIp.DirectStunEligible): real STUN on r54+.
     internal sealed record EngineExtras(string? Exe, bool Headed, bool Quiet, bool? AllowThirdPartyCookies, bool? TransparentProxy,
         bool ViaPlaywright = false, IReadOnlyList<string>? IgnoreDefaultArgs = null, bool? StockRuntime = null,
-        bool? RuntimeBindings = null);
+        bool? RuntimeBindings = null, bool DirectStun = false);
 
-    private static EngineExtras Extras(LaunchOptions o, string exe, bool headed, bool viaPlaywright = true)
+    private static EngineExtras Extras(LaunchOptions o, string exe, bool headed, GeoIp.GeoipApplied geo, bool viaPlaywright = true)
         => new(exe, headed, o.Quiet, o.AllowThirdPartyCookies, o.TransparentProxy, viaPlaywright, o.IgnoreDefaultArgs, o.StockRuntime,
-            o.RuntimeBindings);
+            o.RuntimeBindings, GeoIp.DirectStunEligible(o, geo, o.Proxy));
 
     /// fpArgs + extArgs + proxyArgs + quic + (privacy-sandbox unless disabled==false) + webrtc-deny
     /// (+ engine extras + GPU blocklist), then userArgs appended last, then feature-flags collapsed,
@@ -767,6 +768,7 @@ public static partial class Clearcote
             // Opt-in, engine r54+: only the bindings part of it (ExposeFunctionAsync across navigations); see
             // LaunchOpts.RuntimeBindingsArgs.
             baseList.AddRange(LaunchOpts.RuntimeBindingsArgs(extra.Exe, extra.RuntimeBindings, baseList.Concat(userArgs), extra.Quiet));
+            baseList.AddRange(LaunchOpts.WebrtcDirectStunArgs(extra.Exe, extra.DirectStun, userArgs));
             baseList.AddRange(LaunchOpts.GpuBlocklistArgs(extra.Headed, null, userArgs));
             // On a Linux host, render WebGL through the backend whose limits match the CLAIMED
             // platform (read back from the built persona switch; absent = pass-through).

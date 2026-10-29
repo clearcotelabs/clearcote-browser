@@ -80,6 +80,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     stock_runtime_args,
     web_bluetooth_args,
     webrtc_default_deny_args,
+    webrtc_direct_stun_args,
 )
 from ._profile import Profile, list_profiles, load_profile, resolve_profile_options
 from ._reqproxy import (close_on_failure, request_proxy_args, request_proxy_upstream, route_request_api,
@@ -488,25 +489,47 @@ def _reset_direct_geo_cache():
     _direct_geo = None
 
 
+class GeoipApplied(tuple):
+    """What :func:`apply_geoip_mode` did: the same 2-tuple ``(geo, auto_webrtc_ip)`` as before (it still
+    unpacks and compares as one), plus ``.ip``: the egress IP the lookup found (also from the no-proxy
+    cache), with no proxy this machine's own."""
+
+    def __new__(cls, geo=None, auto_webrtc_ip=False, ip=None):
+        self = super().__new__(cls, (geo, auto_webrtc_ip))
+        self.ip = ip or None
+        return self
+
+    @property
+    def geo(self):
+        return self[0]
+
+    @property
+    def auto_webrtc_ip(self):
+        return self[1]
+
+
 def apply_geoip_mode(fp, proxy, mode, quiet=False):
-    """Apply geoip in ``mode`` (see :func:`clearcote.geoip.geoip_mode`) -> ``(geo, auto_webrtc_ip)``,
-    where ``auto_webrtc_ip`` says the WebRTC IP came from the default lookup. "strict" is
+    """Apply geoip in ``mode`` (see :func:`clearcote.geoip.geoip_mode`) -> ``(geo, auto_webrtc_ip)``
+    (a :class:`GeoipApplied`, whose ``.ip`` is the egress IP the lookup found), where
+    ``auto_webrtc_ip`` says the WebRTC IP came from the default lookup. "strict" is
     :func:`apply_geoip`. "auto" skips the lookup when every field it fills is already set, reuses a
     no-proxy lookup for 10 minutes, and on failure warns once and launches without filling anything."""
     global _direct_geo
     if mode == "off":
-        return None, False
+        return GeoipApplied()
     if mode == "strict":
-        return apply_geoip(fp, proxy, quiet=quiet), False
+        geo = apply_geoip(fp, proxy, quiet=quiet)
+        return GeoipApplied(geo, False, (geo or {}).get("ip"))
     if all(fp.get(k) is not None for k in ("timezone", "accept_language", "location", "webrtc_ip")):
-        return None, False
+        return GeoipApplied()
     had_webrtc_ip = fp.get("webrtc_ip") is not None
     direct = not proxy
     if direct and _direct_geo is not None and time.monotonic() - _direct_geo[1] < _DIRECT_GEO_TTL:
         for k, v in _direct_geo[0].items():
             if fp.get(k) is None and v is not None:
                 fp[k] = v
-        return None, not had_webrtc_ip and fp.get("webrtc_ip") is not None
+        return GeoipApplied(None, not had_webrtc_ip and fp.get("webrtc_ip") is not None,
+                            _direct_geo[0].get("webrtc_ip"))
     env = str(os.environ.get("CLEARCOTE_GEOIP_TIMEOUT_SECONDS") or "").strip()
     try:
         geo = apply_geoip(fp, proxy, quiet=quiet, timeout=geoip_timeout_seconds() if env else _AUTO_GEOIP_TIMEOUT)
@@ -515,11 +538,20 @@ def apply_geoip_mode(fp, proxy, mode, quiet=False):
             msg = str(e).replace("geoip: ", "geoip (on by default): ", 1).split(" Launching anyway")[0]
             sys.stderr.write(f"clearcote: warning: {msg} Launching with the persona's default timezone and "
                              "language; pass geoip=True to fail instead, or geoip=False to skip the lookup.\n")
-        return None, False
+        return GeoipApplied()
     if geo and direct:
         _direct_geo = ({"timezone": geo.get("timezone"), "accept_language": geo.get("accept_language"),
                         "location": geo.get("location"), "webrtc_ip": geo.get("ip")}, time.monotonic())
-    return geo, not had_webrtc_ip and fp.get("webrtc_ip") is not None
+    return GeoipApplied(geo, not had_webrtc_ip and fp.get("webrtc_ip") is not None, (geo or {}).get("ip"))
+
+
+def direct_stun_eligible(fp, applied, proxy):
+    """Engine r54+ (pro-r54-06): whether this launch may send real STUN instead of fabricating the WebRTC
+    IP. Only with no proxy at all, and only when the WebRTC IP is this machine's own egress as the lookup
+    found it (``applied``: what :func:`apply_geoip_mode` returned): a hand-set webrtc_ip may name another
+    place on purpose, and real STUN would contradict it."""
+    ip = getattr(applied, "ip", None)
+    return not proxy and bool(ip) and fp.get("webrtc_ip") == ip
 
 
 def drop_auto_webrtc_ip(fp, applied, proxy, licensed):
@@ -706,6 +738,8 @@ def _prepare(kwargs):
     # Opt-in, engine r54+: only the bindings part of it (expose_function() across navigations); see
     # runtime_bindings_args.
     base += runtime_bindings_args(exe, runtime_bindings, base + user, quiet=quiet)
+    # Engine r54+: real STUN with no proxy when the WebRTC IP is this machine's own (direct_stun_eligible).
+    base += webrtc_direct_stun_args(exe, direct_stun_eligible(fp, geo_applied, proxy_opt), user)
     # Pairs with stripping Playwright's --enable-unsafe-swiftshader (DEFAULT_IGNORED_ARGS).
     base += gpu_blocklist_args(headed, sys.platform, user)
     # On a Linux host, render WebGL through the backend whose limits match the CLAIMED platform:

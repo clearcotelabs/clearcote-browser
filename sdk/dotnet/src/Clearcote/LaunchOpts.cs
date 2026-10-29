@@ -817,6 +817,18 @@ public static class LaunchOpts
         return userArgs.Contains(StockRuntimeSwitch) ? new() : new() { StockRuntimeSwitch };
     }
 
+    /// Engine r54+ (pro-r54-06): <c>--webrtc-direct-stun</c> for a launch with no proxy whose WebRTC IP is this
+    /// machine's own (<see cref="GeoIp.DirectStunEligible"/>). The browser then sends real STUN binding requests
+    /// instead of fabricating the server-reflexive candidate, so a page's own STUN server sees the request the
+    /// candidate came from, as with stock Chrome. The engine re-checks that no proxy is set; a proxy in the
+    /// caller's own args skips it here too. Older engines never get the switch.
+    public static List<string> WebrtcDirectStunArgs(string? exe, bool eligible, IEnumerable<string> userArgs)
+    {
+        if (!eligible || userArgs.Any(a => a.StartsWith("--proxy-server", StringComparison.Ordinal)
+                                           || a.StartsWith("--proxy-pac-url", StringComparison.Ordinal))) return new();
+        return EngineSupportsSwitch(exe, "webrtc-direct-stun") ? new() { "--webrtc-direct-stun" } : new();
+    }
+
     /// Whether this launch's browser runs with <see cref="StockRuntimeSwitch"/>: <paramref name="args"/> (the SDK's
     /// own and the caller's) carry it and the engine implements it. The coherence notes leave the one about
     /// console events out then.
