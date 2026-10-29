@@ -274,7 +274,16 @@ _ENGINE_NOTES = (
      "unhandledrejection handlers fire normally. To capture console output, collect it in-page "
      "and read it back with page.evaluate(). An engine from r32 on forwards them with "
      "stock_runtime=True (off by default: pages can observe part of what it restores)."),
+    ("cdp-bindings",
+     "the engine does not carry Runtime.addBinding bindings into documents opened after they "
+     "were added, by design, as part of the same protection: page.expose_function() and "
+     "page.expose_binding() fail after page.goto() or a reload. An engine from r54 on keeps them "
+     "with runtime_bindings=True (off by default; the page sees the binding's global, as in "
+     "Chrome), and stock_runtime=True (engine r32+) also restores them."),
 )
+# A note that is not said for a launch whose browser already has the behaviour back: the opts key that says so.
+_ENGINE_NOTE_RESTORED_BY = {"cdp-console-events": ("_stock_runtime",),
+                            "cdp-bindings": ("_stock_runtime", "_runtime_bindings")}
 
 
 def warn_once(code, message, quiet=False):
@@ -290,8 +299,9 @@ def warn_once(code, message, quiet=False):
 def emit_coherence_warnings(opts, quiet=False, host_platform=None, build_major=None):
     """Print coherence warnings to stderr (unless quiet=True or CLEARCOTE_NO_WARN is set).
     NOTE-level lines (and the host warnings in _ONCE_PER_PROCESS) fire at most once per process; the
-    other WARN-level lines fire every launch. ``opts["_stock_runtime"]``: this launch's browser has
-    --disable-runtime-suppression, so the note that it forwards no console events is not said for it."""
+    other WARN-level lines fire every launch. ``opts["_stock_runtime"]`` / ``opts["_runtime_bindings"]``: this
+    launch's browser has --disable-runtime-suppression / --enable-runtime-bindings, so the engine notes about what
+    those restore are not said for it (_ENGINE_NOTE_RESTORED_BY)."""
     if quiet or os.environ.get("CLEARCOTE_NO_WARN"):
         return
     for w in coherence_warnings(opts, host_platform=host_platform, build_major=build_major):
@@ -302,7 +312,7 @@ def emit_coherence_warnings(opts, quiet=False, host_platform=None, build_major=N
         label = "warning" if w["severity"] == "warn" else "note"
         print("clearcote: %s: %s" % (label, w["message"]), file=sys.stderr, flush=True)
     for code, message in _ENGINE_NOTES:
-        if code in _seen_notes or (code == "cdp-console-events" and opts.get("_stock_runtime")):
+        if code in _seen_notes or any(opts.get(k) for k in _ENGINE_NOTE_RESTORED_BY.get(code, ())):
             continue
         _seen_notes.add(code)
         print("clearcote: note: %s" % message, file=sys.stderr, flush=True)

@@ -817,14 +817,20 @@ STOCK_RUNTIME_ENV = "CLEARCOTE_STOCK_RUNTIME"
 _STOCK_RUNTIME_ON = ("1", "true", "yes", "on")
 
 
-def stock_runtime_wanted(value=None):
-    """The ``stock_runtime`` option: an explicit value wins; None follows ``CLEARCOTE_STOCK_RUNTIME`` (on for
+def _option_on(value, env):
+    """An on/off SDK option: an explicit value wins; None follows the environment variable ``env`` (on for
     1/true/yes/on, off otherwise)."""
     if value is None:
-        return os.environ.get(STOCK_RUNTIME_ENV, "").strip().lower() in _STOCK_RUNTIME_ON
+        return os.environ.get(env, "").strip().lower() in _STOCK_RUNTIME_ON
     if isinstance(value, str):  # "0"/"false" from a config file must not mean on
         return value.strip().lower() in _STOCK_RUNTIME_ON
     return bool(value)
+
+
+def stock_runtime_wanted(value=None):
+    """The ``stock_runtime`` option: an explicit value wins; None follows ``CLEARCOTE_STOCK_RUNTIME`` (on for
+    1/true/yes/on, off otherwise)."""
+    return _option_on(value, STOCK_RUNTIME_ENV)
 
 
 def stock_runtime_args(exe, enabled=None, user_args=(), quiet=False):
@@ -850,6 +856,52 @@ def warn_stock_runtime_cloud(enabled=None, quiet=False):
         from ._warnings import warn_once
         warn_once("stock-runtime-cloud",
                   "stock_runtime (CLEARCOTE_STOCK_RUNTIME) only applies to local and Docker launches; a cloud "
+                  "browser does not take it, so it was not applied.", quiet)
+
+
+# -- Runtime.addBinding bindings across navigations (engine r54+) ----------------------------------
+
+# Patch 110 also keeps Runtime.addBinding bindings out of documents created after the binding was added, so with
+# Playwright expose_function() / expose_binding() fail after page.goto() or a reload (clearcote-browser#43). Engine
+# r54 (pro-r54-04) restores only that with this switch and leaves the rest of the suppression on. Off by default. A
+# binding exists only when the client adds one, so a launch that adds none looks the same to a page; one that does
+# shows the page that binding's global (Playwright: __playwright__binding__), as stock Chrome does. stock_runtime
+# already includes it.
+RUNTIME_BINDINGS_SWITCH = "--enable-runtime-bindings"
+RUNTIME_BINDINGS_ENV = "CLEARCOTE_RUNTIME_BINDINGS"
+
+
+def runtime_bindings_wanted(value=None):
+    """The ``runtime_bindings`` option: an explicit value wins; None follows ``CLEARCOTE_RUNTIME_BINDINGS``."""
+    return _option_on(value, RUNTIME_BINDINGS_ENV)
+
+
+def runtime_bindings_args(exe, enabled=None, present=(), quiet=False):
+    """``[--enable-runtime-bindings]`` when ``runtime_bindings`` is on and the engine that will run has the switch;
+    else nothing. ``present`` is the command line so far (the SDK's and the caller's): with stock_runtime's switch on
+    it the bindings are already restored, and a switch the caller wrote is not added twice. An engine without it
+    would ignore it without a word, so it is not passed and the SDK says so once per process."""
+    if not runtime_bindings_wanted(enabled):
+        return []
+    present = [str(a) for a in (present or ())]
+    if STOCK_RUNTIME_SWITCH in present:
+        return []
+    if not engine_supports_switch(exe, RUNTIME_BINDINGS_SWITCH[2:]):
+        from ._warnings import warn_once
+        warn_once("runtime-bindings-unsupported",
+                  "runtime_bindings (CLEARCOTE_RUNTIME_BINDINGS) is on, but this engine does not support it (it needs "
+                  "an engine from r54 on), so expose_function() and expose_binding() stop working after a "
+                  "navigation. stock_runtime=True (engine r32+) also restores them.", quiet)
+        return []
+    return [] if RUNTIME_BINDINGS_SWITCH in present else [RUNTIME_BINDINGS_SWITCH]
+
+
+def warn_runtime_bindings_cloud(enabled=None, quiet=False):
+    """A cloud browser does not take ``runtime_bindings``: say so once per process when it is on."""
+    if runtime_bindings_wanted(enabled):
+        from ._warnings import warn_once
+        warn_once("runtime-bindings-cloud",
+                  "runtime_bindings (CLEARCOTE_RUNTIME_BINDINGS) only applies to local and Docker launches; a cloud "
                   "browser does not take it, so it was not applied.", quiet)
 
 

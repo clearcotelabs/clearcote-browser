@@ -203,6 +203,8 @@ On an older engine each of these is skipped with a warning; the launch still wor
 
 `stock_runtime=True` (or `CLEARCOTE_STOCK_RUNTIME=1`) gives Playwright the browser's stock DevTools behaviour back: `page.on("console")` and `page.on("pageerror")` receive events, `page.set_content()` works, and `expose_function()` / `expose_binding()` keep working after a navigation. It is off by default because pages can observe some of what it restores. It needs an engine from r32 on; an older engine launches without it and the SDK warns once. It applies to local and Docker launches, not to cloud browsers.
 
+`runtime_bindings=True` (or `CLEARCOTE_RUNTIME_BINDINGS=1`) restores only the last of those: `expose_function()` / `expose_binding()` (and any CDP `Runtime.addBinding`) keep working after `page.goto()` or a reload, while console events stay suppressed. A launch that adds no binding looks the same to a page; one that does shows the page that binding's global, as Chrome does. Off by default. It needs an engine from r54 on; an older engine launches without it and the SDK warns once. Local and Docker launches only.
+
 ### On engines from r32 (`persona_env`, light or dark)
 
 Two more things change on an engine that supports them (the licensed build from r32). The SDK checks the binary

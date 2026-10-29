@@ -52,6 +52,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     DEFAULT_IGNORED_ARGS,
     GATED_ENGINE_SWITCHES,
     QUIET_GATED_ENGINE_SWITCHES,
+    RUNTIME_BINDINGS_SWITCH,
     STOCK_RUNTIME_SWITCH,
     engine_extras_args,
     engine_supports_switch,
@@ -74,6 +75,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     quic_args,
     socks5_udp_args,
     resolve_proxy,
+    runtime_bindings_args,
     stock_runtime_args,
     web_bluetooth_args,
     webrtc_default_deny_args,
@@ -544,6 +546,7 @@ def _prepare(kwargs):
     allow_third_party_cookies = kwargs.pop("allow_third_party_cookies", None)
     transparent_proxy = kwargs.pop("transparent_proxy", None)
     stock_runtime = kwargs.pop("stock_runtime", None)  # engine r32+, None follows CLEARCOTE_STOCK_RUNTIME
+    runtime_bindings = kwargs.pop("runtime_bindings", None)  # engine r54+, None follows CLEARCOTE_RUNTIME_BINDINGS
     kwargs.pop("license_through_proxy", None)  # consumed by _acquire_lease_from_kwargs
     # serve() drives headless itself and pops it from kwargs, so it tells us explicitly.
     headed_flag = kwargs.pop("_cc_headed", None)
@@ -632,6 +635,9 @@ def _prepare(kwargs):
     # Opt-in, engine r32+: Chromium's own DevTools Runtime behaviour (console/pageerror events, set_content(),
     # expose_function() across navigations). Only on an engine that has the switch; see stock_runtime_args.
     base += stock_runtime_args(exe, stock_runtime, user, quiet=quiet)
+    # Opt-in, engine r54+: only the bindings part of it (expose_function() across navigations); see
+    # runtime_bindings_args.
+    base += runtime_bindings_args(exe, runtime_bindings, base + user, quiet=quiet)
     # Pairs with stripping Playwright's --enable-unsafe-swiftshader (DEFAULT_IGNORED_ARGS).
     base += gpu_blocklist_args(headed, sys.platform, user)
     # On a Linux host, render WebGL through the backend whose limits match the CLAIMED platform:
@@ -676,7 +682,9 @@ def _prepare(kwargs):
          "_user_args": user, "_font_reach": font_reachability(fp.get("fingerprint_profile")),
          "_sdk_font_profile": not caller_profile and fp.get("fingerprint_profile") is not None,
          "_stock_runtime": (STOCK_RUNTIME_SWITCH in args
-                            and engine_supports_switch(exe, STOCK_RUNTIME_SWITCH[2:]))},
+                            and engine_supports_switch(exe, STOCK_RUNTIME_SWITCH[2:])),
+         "_runtime_bindings": (RUNTIME_BINDINGS_SWITCH in args
+                               and engine_supports_switch(exe, RUNTIME_BINDINGS_SWITCH[2:]))},
         quiet=quiet, build_major=str(RELEASE["version"]).split(".")[0])
     # The motor-persona seed is the EFFECTIVE fingerprint (after the profile= merge above), i.e. the
     # same value that becomes --fingerprint — not the raw pre-merge kwarg. A profile-based launch
