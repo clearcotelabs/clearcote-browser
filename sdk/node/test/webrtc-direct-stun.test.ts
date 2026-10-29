@@ -1,14 +1,15 @@
 // pro-r54-06: real STUN without a proxy (--webrtc-direct-stun), only for this machine's own WebRTC IP, only on r54+.
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { directStunEligible, type GeoFillable } from "../src/geoip.js";
 import { webrtcDirectStunArgs } from "../src/launchopts.js";
 
 const dir = mkdtempSync(join(tmpdir(), "cc-direct-stun-"));
 const r54 = join(dir, "r54.bin"); writeFileSync(r54, Buffer.from("xx\0webrtc-direct-stun\0yy", "latin1"));
 const r53 = join(dir, "r53.bin"); writeFileSync(r53, Buffer.from("xx\0socks5-udp\0yy", "latin1"));
+afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 describe("directStunEligible", () => {
   const own = "203.0.113.7";
