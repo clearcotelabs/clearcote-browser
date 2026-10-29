@@ -15,7 +15,7 @@ namespace Clearcote;
 public static partial class Clearcote
 {
     /// This SDK's version (kept in lockstep with the npm/PyPI SDKs).
-    public const string Version = "0.66.1";
+    public const string Version = "0.67.0";
 
     private static readonly SemaphoreSlim PwLock = new(1, 1);
     private static IPlaywright? _pw;
