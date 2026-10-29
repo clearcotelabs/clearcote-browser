@@ -513,9 +513,13 @@ export function resolveProxy(proxy: PwProxy | undefined, engineSupportsProxyAuth
  * `--hide-scrollbars` is added by Playwright to every HEADLESS launch; with it the page measures 0 px
  * scrollbars, while genuine Chrome shows 15 px on Windows -- headed OR plain `--headless=new` (measured on
  * Chrome 154). Stripping it only restores Chrome's own default; it is a no-op headed.
+ * `--disable-popup-blocking` is added by Playwright to every launch; with it a page script's `window.open`
+ * without a user gesture opens a popup, while genuine Chrome blocks it (measured 2026-10-28: real Chrome
+ * 155/156 without the switch blocked, r53 with it opened). Stripping it restores Chrome's blocker; popups
+ * opened by a click or from `page.evaluate` (a user gesture) still open.
  * A caller's own `ignoreDefaultArgs` always wins.
  */
-export const DEFAULT_IGNORED_ARGS: readonly string[] = ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars"];
+export const DEFAULT_IGNORED_ARGS: readonly string[] = ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking"];
 
 /**
  * `--ignore-gpu-blocklist` for headed launches and for every launch on Windows.

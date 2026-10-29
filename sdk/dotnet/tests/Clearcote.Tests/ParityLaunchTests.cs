@@ -37,7 +37,7 @@ public class ParityLaunchTests : IDisposable
 
     [Fact]
     public void Strips_automation_AND_swiftshader_defaults()
-        => Assert.Equal(new[] { "--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars" }, LaunchOpts.DefaultIgnoredArgs);
+        => Assert.Equal(new[] { "--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking" }, LaunchOpts.DefaultIgnoredArgs);
 
     [Fact]
     public void Gpu_blocklist_when_headed_on_any_os_and_always_on_windows()

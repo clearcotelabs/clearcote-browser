@@ -36,7 +36,7 @@ function fakeEngine(switches: string[]): string {
 
 describe("GPU launch defaults (#1 + #2)", () => {
   it("strips Playwright's automation AND SwiftShader defaults", () => {
-    expect(DEFAULT_IGNORED_ARGS).toEqual(["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars"]);
+    expect(DEFAULT_IGNORED_ARGS).toEqual(["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking"]);
   });
 
   it("adds --ignore-gpu-blocklist when headed, on any OS", () => {
