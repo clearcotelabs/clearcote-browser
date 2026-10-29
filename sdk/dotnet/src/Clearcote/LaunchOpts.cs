@@ -792,8 +792,12 @@ public static class LaunchOpts
 
     /// <see cref="LaunchOptions.StockRuntime"/>: an explicit value wins; null follows CLEARCOTE_STOCK_RUNTIME
     /// (on for 1/true/yes/on, off otherwise).
-    public static bool StockRuntimeWanted(bool? value)
-        => value ?? StockRuntimeOn.Contains((Environment.GetEnvironmentVariable(StockRuntimeEnv) ?? "").Trim().ToLowerInvariant());
+    public static bool StockRuntimeWanted(bool? value) => OptionOn(value, StockRuntimeEnv);
+
+    /// An on/off SDK option: an explicit value wins; null follows the environment variable <paramref name="env"/>
+    /// (on for 1/true/yes/on, off otherwise).
+    private static bool OptionOn(bool? value, string env)
+        => value ?? StockRuntimeOn.Contains((Environment.GetEnvironmentVariable(env) ?? "").Trim().ToLowerInvariant());
 
     /// <c>[--disable-runtime-suppression]</c> when StockRuntime is on and the engine that will run has the switch;
     /// else nothing. A normal browser argument, not a persona switch (<see cref="PersonaEnv"/> leaves it on the
@@ -826,6 +830,59 @@ public static class LaunchOpts
         LaunchWarnings.EmitOnce(new[] { new LaunchWarnings.Warning(LaunchWarnings.StockRuntimeCloud,
             "StockRuntime (CLEARCOTE_STOCK_RUNTIME) only applies to local and Docker launches; a cloud browser does " +
             "not take it, so it was not applied.") }, quiet);
+    }
+
+    // ── Runtime.addBinding bindings across navigations (engine r54+) ─────────
+
+    /// Patch 110 also keeps Runtime.addBinding bindings out of documents created after the binding was added, so
+    /// with Playwright ExposeFunctionAsync / ExposeBindingAsync fail after GotoAsync or a reload
+    /// (clearcote-browser#43). Engine r54 (pro-r54-04) restores only that with this switch and leaves the rest of the
+    /// suppression on. Off by default. A binding exists only when the client adds one, so a launch that adds none
+    /// looks the same to a page; one that does shows the page that binding's global (Playwright:
+    /// __playwright__binding__), as stock Chrome does. <see cref="StockRuntimeSwitch"/> already includes it.
+    public const string RuntimeBindingsSwitch = "--enable-runtime-bindings";
+    /// The environment variable <see cref="LaunchOptions.RuntimeBindings"/> = null follows.
+    public const string RuntimeBindingsEnv = "CLEARCOTE_RUNTIME_BINDINGS";
+
+    /// <see cref="LaunchOptions.RuntimeBindings"/>: an explicit value wins; null follows CLEARCOTE_RUNTIME_BINDINGS
+    /// (on for 1/true/yes/on, off otherwise).
+    public static bool RuntimeBindingsWanted(bool? value) => OptionOn(value, RuntimeBindingsEnv);
+
+    /// <c>[--enable-runtime-bindings]</c> when RuntimeBindings is on and the engine that will run has the switch;
+    /// else nothing. <paramref name="present"/> is the command line so far (the SDK's and the caller's): with
+    /// <see cref="StockRuntimeSwitch"/> on it the bindings are already restored, and a switch the caller wrote is
+    /// not added twice. A normal browser argument, not a persona switch. An engine without it would ignore it
+    /// without a word, so it is not passed and the SDK says so once per process (Quiet and CLEARCOTE_NO_WARN
+    /// silence it without using it up).
+    public static List<string> RuntimeBindingsArgs(string? exe, bool? enabled, IEnumerable<string> present, bool quiet = false)
+    {
+        if (!RuntimeBindingsWanted(enabled)) return new();
+        var line = present.ToList();
+        if (line.Contains(StockRuntimeSwitch)) return new();
+        if (!EngineSupportsSwitch(exe, RuntimeBindingsSwitch[2..]))
+        {
+            LaunchWarnings.EmitOnce(new[] { new LaunchWarnings.Warning(LaunchWarnings.RuntimeBindingsUnsupported,
+                "RuntimeBindings (CLEARCOTE_RUNTIME_BINDINGS) is on, but this engine does not support it (it needs an " +
+                "engine from r54 on), so ExposeFunctionAsync and ExposeBindingAsync stop working after a navigation. " +
+                "StockRuntime = true (engine r32+) also restores them.") }, quiet);
+            return new();
+        }
+        return line.Contains(RuntimeBindingsSwitch) ? new() : new() { RuntimeBindingsSwitch };
+    }
+
+    /// Whether this launch's browser runs with <see cref="RuntimeBindingsSwitch"/>: <paramref name="args"/> (the
+    /// SDK's own and the caller's) carry it and the engine implements it. The coherence notes leave the one about
+    /// bindings out then.
+    public static bool RuntimeBindingsRunning(string? exe, IEnumerable<string> args)
+        => args.Contains(RuntimeBindingsSwitch) && EngineSupportsSwitch(exe, RuntimeBindingsSwitch[2..]);
+
+    /// A cloud browser does not take RuntimeBindings: say so once per process when it is on.
+    public static void WarnRuntimeBindingsCloud(bool? enabled, bool quiet = false)
+    {
+        if (!RuntimeBindingsWanted(enabled)) return;
+        LaunchWarnings.EmitOnce(new[] { new LaunchWarnings.Warning(LaunchWarnings.RuntimeBindingsCloud,
+            "RuntimeBindings (CLEARCOTE_RUNTIME_BINDINGS) only applies to local and Docker launches; a cloud browser " +
+            "does not take it, so it was not applied.") }, quiet);
     }
 
     /// Serve as root on Linux needs --no-sandbox (unless the caller already passed it): serve spawns

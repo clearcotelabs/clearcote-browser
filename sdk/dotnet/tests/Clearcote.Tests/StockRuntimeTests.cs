@@ -39,7 +39,7 @@ public class StockRuntimeTests : IDisposable
         // temp directory of our own for the profiles the launches make.
         _sb.TempHome();
         var temp = Dir("cc-sr-tmp-");
-        _sb.Env("CLEARCOTE_LICENSE_KEY", null).Env(EnvName, null).Env("CLEARCOTE_NO_WARN", null)
+        _sb.Env("CLEARCOTE_LICENSE_KEY", null).Env(EnvName, null).Env("CLEARCOTE_RUNTIME_BINDINGS", null).Env("CLEARCOTE_NO_WARN", null)
             .Env(PersonaEnv.OptOutEnv, null).Env(PersonaEnv.EnvVar, null).Env("CLEARCOTE_CLOUD", null)
             .Env("CLEARCOTE_DOCKER", null).Env("CLEARCOTE_BINARY", null).Env("CLEARCOTE_BROWSER_VERSION", null)
             .Env("TMPDIR", temp).Env("TMP", temp).Env("TEMP", temp);

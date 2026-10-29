@@ -673,11 +673,16 @@ public static partial class Clearcote
 
     /// The coherence warnings (and once-per-process notes) for a local launch: the persona after geoip, the
     /// caller's proxy and args, and the Playwright pass-through's Devtools / UserAgent. <paramref name="args"/>:
-    /// the assembled browser args, to tell whether this browser runs with the stock DevTools Runtime.
+    /// the assembled browser args, to tell whether this browser runs with the stock DevTools Runtime or with
+    /// runtime bindings.
     private static void EmitCoherenceWarnings(LaunchOptions o, string exe, IEnumerable<string> args, bool? headless, bool devtools, string? userAgent)
-        => LaunchWarnings.EmitCoherence(
+    {
+        var all = args.Concat(o.Args ?? Array.Empty<string>()).ToList();
+        LaunchWarnings.EmitCoherence(
             LaunchWarnings.Coherence(o, o.Proxy, o.Geoip == true, headless, o.Args, devtools, userAgent),
-            o.Quiet, stockRuntime: LaunchOpts.StockRuntimeRunning(exe, args.Concat(o.Args ?? Array.Empty<string>())));
+            o.Quiet, stockRuntime: LaunchOpts.StockRuntimeRunning(exe, all),
+            runtimeBindings: LaunchOpts.RuntimeBindingsRunning(exe, all));
+    }
 
 #pragma warning disable CS0612, CS0618   // Devtools is deprecated in Playwright, and still honoured: it opens DevTools
     private static bool PassThroughDevtools(BrowserTypeLaunchOptions? o) => o?.Devtools == true;
@@ -710,11 +715,14 @@ public static partial class Clearcote
     // its --disable-features list is on the line and is replaced with the caller's IgnoreDefaultArgs
     // taken into account; see LaunchOpts.PlaywrightFeatureOverrideArgs.
     // StockRuntime: LaunchOptions.StockRuntime (engine r32+; null follows CLEARCOTE_STOCK_RUNTIME).
+    // RuntimeBindings: LaunchOptions.RuntimeBindings (engine r54+; null follows CLEARCOTE_RUNTIME_BINDINGS).
     internal sealed record EngineExtras(string? Exe, bool Headed, bool Quiet, bool? AllowThirdPartyCookies, bool? TransparentProxy,
-        bool ViaPlaywright = false, IReadOnlyList<string>? IgnoreDefaultArgs = null, bool? StockRuntime = null);
+        bool ViaPlaywright = false, IReadOnlyList<string>? IgnoreDefaultArgs = null, bool? StockRuntime = null,
+        bool? RuntimeBindings = null);
 
     private static EngineExtras Extras(LaunchOptions o, string exe, bool headed, bool viaPlaywright = true)
-        => new(exe, headed, o.Quiet, o.AllowThirdPartyCookies, o.TransparentProxy, viaPlaywright, o.IgnoreDefaultArgs, o.StockRuntime);
+        => new(exe, headed, o.Quiet, o.AllowThirdPartyCookies, o.TransparentProxy, viaPlaywright, o.IgnoreDefaultArgs, o.StockRuntime,
+            o.RuntimeBindings);
 
     /// fpArgs + extArgs + proxyArgs + quic + (privacy-sandbox unless disabled==false) + webrtc-deny
     /// (+ engine extras + GPU blocklist), then userArgs appended last, then feature-flags collapsed,
@@ -756,6 +764,9 @@ public static partial class Clearcote
             baseList.AddRange(LaunchOpts.EngineExtrasArgs(extra.AllowThirdPartyCookies, extra.TransparentProxy, proxyForQuic, extra.Quiet));
             // Opt-in, engine r32+: Chromium's own DevTools Runtime behaviour, only on an engine that has the switch.
             baseList.AddRange(LaunchOpts.StockRuntimeArgs(extra.Exe, extra.StockRuntime, userArgs, extra.Quiet));
+            // Opt-in, engine r54+: only the bindings part of it (ExposeFunctionAsync across navigations); see
+            // LaunchOpts.RuntimeBindingsArgs.
+            baseList.AddRange(LaunchOpts.RuntimeBindingsArgs(extra.Exe, extra.RuntimeBindings, baseList.Concat(userArgs), extra.Quiet));
             baseList.AddRange(LaunchOpts.GpuBlocklistArgs(extra.Headed, null, userArgs));
             // On a Linux host, render WebGL through the backend whose limits match the CLAIMED
             // platform (read back from the built persona switch; absent = pass-through).

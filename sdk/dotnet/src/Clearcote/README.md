@@ -466,6 +466,7 @@ var r = Clearcote.Clearcote.FontReportFor("/opt/clearcote/chrome");
 | `FontDirs` | Linux: your own fonts, listed ahead of the bundled lookalikes (see below) |
 | `PersonaEnv = false` | keep the persona switches on the browser's command line (see below) |
 | `StockRuntime = true` | stock DevTools behaviour for debugging (see below) |
+| `RuntimeBindings = true` | `ExposeFunctionAsync` / `ExposeBindingAsync` across navigations, engine r54+ (see below) |
 | `PortableProfile` / `EncryptionKey` | a profile directory that opens on another machine (engine switch) |
 | `PlaywrightLaunchOptions` / `PlaywrightContextOptions` | any other Playwright launch / persistent-context field (`DownloadsPath`, `Locale`, `RecordVideoDir`, `StorageStatePath`, ...); a field `LaunchOptions` has its own property for throws |
 | `Humanize` / `HumanizeOptions` / `ShowCursor` | humanize every page of the launch, seeded from `Fingerprint` (see [Human input](#human-input-humanize)) |
@@ -554,7 +555,7 @@ different family from the one you expected (`claimedGpu`), with a warning per fi
 `CLEARCOTE_PROFILE_SOURCE`, `CLEARCOTE_PROFILE_KEY`, `CLEARCOTE_SERVE_IDLE_TIMEOUT`, `CLEARCOTE_SHADER_DIALECT`,
 `CLEARCOTE_HUMANIZE_ENGINE_CLICKS`, `CLEARCOTE_HUMANIZE_ENGINE_EXT`, `CLEARCOTE_HUMANIZE_SCORE`,
 `CLEARCOTE_HUMANIZE_SCORE_FILE`,
-`CLEARCOTE_CACHE`, `CLEARCOTE_AUTO_UPDATE`, `CLEARCOTE_STOCK_RUNTIME`, `CLEARCOTE_PERSONA_ENV`,
+`CLEARCOTE_CACHE`, `CLEARCOTE_AUTO_UPDATE`, `CLEARCOTE_STOCK_RUNTIME`, `CLEARCOTE_RUNTIME_BINDINGS`, `CLEARCOTE_PERSONA_ENV`,
 `CLEARCOTE_FONT_DIRS`, `CLEARCOTE_FALLBACK_FONT_DIRS`, `CLEARCOTE_GEOIP_TIMEOUT_SECONDS`, `CLEARCOTE_GEOIP_ECHO_URL`,
 `CLEARCOTE_GEOIP_IPAPI`, `CLEARCOTE_NO_WARN`, `CLEARCOTE_WIDEVINE`, `CLEARCOTE_WIDEVINE_DIR`,
 `CLEARCOTE_WIDEVINE_TIMEOUT_SECONDS`, `CLEARCOTE_HUMANIZE_TYPO_RATE` (the humanized typing's slip rate, 0-1,
@@ -594,6 +595,12 @@ back: the page's `Console` and `PageError` events fire, `SetContentAsync` works,
 `ExposeBindingAsync` keep working after a navigation. It is off by default because pages can observe some of what
 it restores. It needs an engine from r32 on; an older engine launches without it and the SDK warns once. It applies
 to local and Docker launches, not to cloud browsers.
+
+`RuntimeBindings = true` (or `CLEARCOTE_RUNTIME_BINDINGS=1`) restores only the last of those: `ExposeFunctionAsync` /
+`ExposeBindingAsync` (and any CDP `Runtime.addBinding`) keep working after `GotoAsync` or a reload, while console
+events stay suppressed. A launch that adds no binding looks the same to a page; one that does shows the page that
+binding's global, as Chrome does. Off by default. It needs an engine from r54 on; an older engine launches without it
+and the SDK warns once. Local and Docker launches only.
 
 On an engine from r32 two more things change; the SDK checks the binary first, so an older engine launches
 exactly as before:

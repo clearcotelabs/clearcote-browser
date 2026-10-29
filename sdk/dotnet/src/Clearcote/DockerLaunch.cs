@@ -131,7 +131,7 @@ internal static class DockerLaunch
         ["FingerprintNoise"] = "CC_FINGERPRINT_NOISE", ["CanvasNoise"] = "CC_CANVAS_NOISE", ["GpuStringSpoof"] = "CC_GPU_STRING_SPOOF",
     };
     private static readonly string[] Special =
-        { "DevicePixelRatio", "FingerprintProfile", "Headless", "Proxy", "Args", "LicenseKey", "LicenseApiBase", "PersonaEnv", "StockRuntime" };
+        { "DevicePixelRatio", "FingerprintProfile", "Headless", "Proxy", "Args", "LicenseKey", "LicenseApiBase", "PersonaEnv", "StockRuntime", "RuntimeBindings" };
     // Geoip: resolved on this side before the container starts (StartContainerAsync), its answers go in as CC_*.
     private static readonly string[] SdkSide = { "Timeout", "SlowMo", "Quiet", "Docker", "DockerImage", "Geoip", "Humanize", "HumanizeOptions", "ShowCursor" };
 
@@ -230,6 +230,8 @@ internal static class DockerLaunch
         // StockRuntime (engine r32+) goes in with the other engine switches; the image's entrypoint keeps it only on an
         // engine that has it, as a launch here does (docker/serve.py).
         if (LaunchOpts.StockRuntimeWanted(o.StockRuntime) && !args.Contains(LaunchOpts.StockRuntimeSwitch)) args.Add(LaunchOpts.StockRuntimeSwitch);
+        // RuntimeBindings (engine r54+) the same way; the entrypoint drops it where StockRuntime already restores it.
+        if (LaunchOpts.RuntimeBindingsWanted(o.RuntimeBindings) && !args.Contains(LaunchOpts.RuntimeBindingsSwitch)) args.Add(LaunchOpts.RuntimeBindingsSwitch);
         if (args.Count > 0) env["CC_EXTRA_ARGS"] = string.Join(' ', args);
         if (License.ResolveLicenseKey(o.LicenseKey) is { } key) env["CLEARCOTE_LICENSE_KEY"] = key;   // as a local launch: option > env > saved key
         if (!string.IsNullOrEmpty(o.LicenseApiBase)) env["CLEARCOTE_LICENSE_API"] = o.LicenseApiBase;
