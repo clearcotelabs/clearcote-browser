@@ -241,6 +241,10 @@ public static class LaunchWarnings
                 "headless with no CanvasBridge/DisableGpuFingerprint/FingerprintProfile - canvas and WebGL may " +
                 "render on software here while the persona claims a hardware GPU (a render-vs-string mismatch on " +
                 "canvas-scored sites). Use CanvasBridge, DisableGpuFingerprint, or a real-GPU host.");
+        if (gpuV is not null && gpuR is null && !profile)
+            Warn("gpu-vendor-alone",
+                "GpuVendor is set without GpuRenderer - the renderer still comes from the persona (or this host), and a " +
+                "vendor naming another GPU maker than it is a contradiction a page reads directly. Pin both, or neither.");
         if (bridgeOn && gpuR is null && gpuV is null && !profile)
             Note("bridge-no-gpu",
                 "CanvasBridge is set but GpuVendor/GpuRenderer aren't pinned - the WebGL renderer string may not " +

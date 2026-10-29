@@ -556,7 +556,11 @@ def resolve_proxy(proxy, engine_supports_proxy_auth=False):
 # ``--hide-scrollbars`` is added by Playwright to every HEADLESS launch; with it the page measures
 # 0 px scrollbars, while genuine Chrome shows 15 px on Windows -- headed OR plain ``--headless=new``
 # (measured on Chrome 154). Stripping it only restores Chrome's own default; it is a no-op headed.
-DEFAULT_IGNORED_ARGS = ("--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars")
+# ``--disable-popup-blocking`` is added by Playwright to every launch; with it a page script's
+# ``window.open`` without a user gesture opens a popup, while genuine Chrome blocks it (measured
+# 2026-10-28: real Chrome 155/156 without the switch blocked, r53 with it opened). Stripping it restores
+# Chrome's blocker; popups opened by a click or from ``page.evaluate`` (a user gesture) still open.
+DEFAULT_IGNORED_ARGS = ("--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking")
 
 
 def gpu_blocklist_args(headed, platform=None, user_args=()):

@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Clearcote;
 
@@ -341,6 +342,49 @@ public static class Fingerprint
         => value is not null && string.Equals(value.Trim(), "off", StringComparison.OrdinalIgnoreCase);
 
     /// Build the Chromium switches for a set of fingerprint options (ports fingerprintArgs()).
+    private static readonly Dictionary<string, string> GpuMakerNames = new()
+    {
+        ["intel"] = "Intel", ["nvidia"] = "NVIDIA", ["amd"] = "AMD", ["apple"] = "Apple", ["qualcomm"] = "Qualcomm",
+        ["arm"] = "ARM", ["microsoft"] = "Microsoft", ["google"] = "Google",
+    };
+
+    /// The GPU maker a vendor or renderer string names ("intel", "nvidia", "amd", ...), or null. An ANGLE renderer
+    /// ("ANGLE (AMD, AMD Radeon(TM) Graphics ...)") and a Chrome vendor ("Google Inc. (Intel)") name it first.
+    public static string? GpuMaker(string s)
+    {
+        var m = Regex.Match(s, @"^ANGLE \(([^,]+),");
+        if (!m.Success) m = Regex.Match(s.Trim(), @"^Google Inc\. \((.+)\)$");
+        var t = (m.Success ? m.Groups[1].Value : s).Trim().ToLowerInvariant();
+        if (t is "google inc." or "webkit") return null;   // older Chrome's bare vendor and the masked one name no maker
+        if (t.Contains("nvidia")) return "nvidia";
+        if (Regex.IsMatch(t, @"\bamd\b|advanced micro|\bati\b|radeon")) return "amd";
+        if (t.Contains("intel")) return "intel";
+        if (t.Contains("apple")) return "apple";
+        if (Regex.IsMatch(t, "qualcomm|adreno")) return "qualcomm";
+        if (Regex.IsMatch(t, @"\barm\b|mali")) return "arm";
+        if (t.Contains("microsoft")) return "microsoft";
+        if (Regex.IsMatch(t, "google|swiftshader")) return "google";
+        return null;
+    }
+
+    /// The UNMASKED_VENDOR_WEBGL string to send for <see cref="FingerprintOptions.GpuVendor"/>. Chrome reports
+    /// "Google Inc. (&lt;maker&gt;)" ("Google Inc. (Intel Inc.)" for an Intel Mac); a short name ("intel", "NVIDIA",
+    /// "Intel Inc.") went out verbatim, a string no Chrome reports (measured 2026-10-28, SC 295), so it is rewritten to
+    /// Chrome's form. A string that names no known maker goes out as given. Throws <see cref="ArgumentException"/>
+    /// when the renderer names another maker: a page reads both, and "intel" next to an AMD renderer is a
+    /// contradiction no real machine shows.
+    public static string GpuVendorFor(string vendor, string? renderer = null, string? platform = null)
+    {
+        var maker = GpuMaker(vendor);
+        var rmaker = string.IsNullOrEmpty(renderer) ? null : GpuMaker(renderer);
+        if (maker is not null && rmaker is not null && maker != rmaker)
+            throw new ArgumentException($"GpuVendor '{vendor}' names {GpuMakerNames[maker]} but GpuRenderer names " +
+                $"{GpuMakerNames[rmaker]} ('{renderer}'): a page reads both, and a real machine never reports two makers. " +
+                "Pass a matching pair.");
+        if (maker is null || Regex.IsMatch(vendor.Trim(), @"^Google Inc\. \(.+\)$")) return vendor;
+        return $"Google Inc. ({(maker == "intel" && platform == "macos" ? "Intel Inc." : GpuMakerNames[maker])})";
+    }
+
     public static List<string> Args(FingerprintOptions o)
     {
         if (IsFingerprintPassthrough(o.Fingerprint))
@@ -388,7 +432,8 @@ public static class Fingerprint
         Set("fingerprint-platform-version", o.PlatformVersion);
         Set("fingerprint-brand", o.Brand ?? "chrome");
         Set("fingerprint-brand-version", o.BrandVersion);
-        Set("fingerprint-gpu-vendor", o.GpuVendor);
+        Set("fingerprint-gpu-vendor", string.IsNullOrEmpty(o.GpuVendor) ? o.GpuVendor
+            : GpuVendorFor(o.GpuVendor, o.GpuRenderer, o.Platform ?? HostPlatform));
         Set("fingerprint-gpu-renderer", o.GpuRenderer);
         Set("fingerprint-hardware-concurrency", o.HardwareConcurrency);
         // Native metadata overrides (flag > persona > real). Read directly by the getters — no

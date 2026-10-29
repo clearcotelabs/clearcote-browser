@@ -478,6 +478,47 @@ export function defaultTimezone(primaryLang: string): string | undefined {
   return "America/New_York";
 }
 
+// ── GPU vendor ─────────────────────────────────────────────────────────────────────────────────
+
+const GPU_MAKER_NAMES: Record<string, string> = {
+  intel: "Intel", nvidia: "NVIDIA", amd: "AMD", apple: "Apple", qualcomm: "Qualcomm", arm: "ARM", microsoft: "Microsoft", google: "Google",
+};
+
+/** The GPU maker a vendor or renderer string names ("intel", "nvidia", "amd", ...), or null. An ANGLE renderer
+ * ("ANGLE (AMD, AMD Radeon(TM) Graphics ...)") and a Chrome vendor ("Google Inc. (Intel)") name it first. */
+export function gpuMaker(s: string): string | null {
+  const m = /^ANGLE \(([^,]+),/.exec(s) ?? /^Google Inc\. \((.+)\)$/.exec(s.trim());
+  const t = (m ? m[1] : s).trim().toLowerCase();
+  if (t === "google inc." || t === "webkit") return null;   // older Chrome's bare vendor and the masked one name no maker
+  if (t.includes("nvidia")) return "nvidia";
+  if (/\bamd\b|advanced micro|\bati\b|radeon/.test(t)) return "amd";
+  if (t.includes("intel")) return "intel";
+  if (t.includes("apple")) return "apple";
+  if (/qualcomm|adreno/.test(t)) return "qualcomm";
+  if (/\barm\b|mali/.test(t)) return "arm";
+  if (t.includes("microsoft")) return "microsoft";
+  if (/google|swiftshader/.test(t)) return "google";
+  return null;
+}
+
+/**
+ * The UNMASKED_VENDOR_WEBGL string to send for `gpuVendor`. Chrome reports "Google Inc. (<maker>)" ("Google Inc.
+ * (Intel Inc.)" for an Intel Mac); a short name ("intel", "NVIDIA", "Intel Inc.") went out verbatim, a string no
+ * Chrome reports (measured 2026-10-28, SC 295), so it is rewritten to Chrome's form. A string that names no known
+ * maker goes out as given. Throws when `gpuRenderer` names another maker: a page reads both, and "intel" next to an
+ * AMD renderer is a contradiction no real machine shows.
+ */
+export function gpuVendorFor(vendor: string, renderer?: string, platform?: string): string {
+  const maker = gpuMaker(vendor);
+  const rmaker = renderer ? gpuMaker(renderer) : null;
+  if (maker && rmaker && maker !== rmaker) {
+    throw new Error(`gpuVendor '${vendor}' names ${GPU_MAKER_NAMES[maker]} but gpuRenderer names ${GPU_MAKER_NAMES[rmaker]} ` +
+      `('${renderer}'): a page reads both, and a real machine never reports two makers. Pass a matching pair.`);
+  }
+  if (!maker || /^Google Inc\. \(.+\)$/.test(vendor.trim())) return vendor;
+  return `Google Inc. (${maker === "intel" && platform === "macos" ? "Intel Inc." : GPU_MAKER_NAMES[maker]})`;
+}
+
 export function fingerprintArgs(o: FingerprintOptions): string[] {
   const args: string[] = [];
   o = { ...o }; // never mutate the caller's options
@@ -523,7 +564,7 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // UA/UA-CH mismatch some bot detectors flag). Override via brand: "Edge" etc.
   set("fingerprint-brand", o.brand ?? "chrome");
   set("fingerprint-brand-version", o.brandVersion);
-  set("fingerprint-gpu-vendor", o.gpuVendor);
+  set("fingerprint-gpu-vendor", o.gpuVendor ? gpuVendorFor(o.gpuVendor, o.gpuRenderer, o.platform ?? hostPersonaPlatform()) : o.gpuVendor);
   set("fingerprint-gpu-renderer", o.gpuRenderer);
   set("fingerprint-hardware-concurrency", o.hardwareConcurrency);
   // Native metadata overrides (flag > persona > real). Read directly by the getters — no

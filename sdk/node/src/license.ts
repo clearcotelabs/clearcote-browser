@@ -15,6 +15,7 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import { spawnSync } from "node:child_process";
 import { proxiedRequest, toProxySpec, type ProxySpec, type SimpleResponse } from "./net.js";
 
 /** Default backend. Override with `licenseApiBase` or CLEARCOTE_LICENSE_API. */
@@ -1049,6 +1050,9 @@ class MachineLease {
     if (typeof exp === "number") writeGrace(this.key, token, exp);
   }
 
+  /** The machine lease's own check-in went through (shutdown()); exitCheckin() then skips it. */
+  private checkedIn = false;
+
   async shutdown(): Promise<void> {
     this.tokenFiles.closeAll();
     // Per-browser leases still open at exit (a browser nobody closed): release their slots too.
@@ -1057,13 +1061,27 @@ class MachineLease {
       clearInterval(this.timer);
       this.timer = null;
     }
-    if (this.owner && this.leaseId) {
+    if (this.owner && this.leaseId && !this.checkedIn) {
       try {
-        await this.post("/api/v1/lease/checkin", { lease_id: this.leaseId });
+        const res = await this.post("/api/v1/lease/checkin", { lease_id: this.leaseId });
+        if (res.status < 500) this.checkedIn = true;
       } catch {
         /* best-effort; the lease TTL reclaims it anyway */
       }
     }
+  }
+
+  /**
+   * What is still checked out at process exit: this lease's own id (when it holds one) and every
+   * per-browser lease whose check-in has not gone through. Null over a proxied route (licenseThroughProxy:
+   * the synchronous exit call can't use the proxy, and must not go direct) or when nothing is left.
+   */
+  exitCheckin(): { bases: string[]; key: string; leaseIds: string[] } | null {
+    if (this.proxy) return null;
+    const leaseIds = [...this.browsers].filter((b) => !b.checkedIn).map((b) => b.leaseId);
+    if (this.owner && this.leaseId && !this.checkedIn) leaseIds.push(this.leaseId);
+    if (!leaseIds.length) return null;
+    return { bases: [this.route.primary, ...(this.route.fallback ? [this.route.fallback] : [])], key: this.key, leaseIds };
   }
 }
 
@@ -1082,6 +1100,8 @@ class BrowserLease {
   /** Bind a per-launch token file that follows this browser's rotating token. */
   bindLaunch(): { file: string; release: () => void } { return this.tokenFiles.bind(this._token); }
   leaseId: string;
+  /** The check-in went through; the exit hook skips this lease. */
+  checkedIn = false;
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
 
@@ -1154,12 +1174,14 @@ class BrowserLease {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.onStop();
     try {
-      await this.owner.post("/api/v1/lease/checkin", { lease_id: this.leaseId });
+      const res = await this.owner.post("/api/v1/lease/checkin", { lease_id: this.leaseId });
+      if (res.status < 500) this.checkedIn = true;
     } catch {
-      /* best-effort; the lease TTL reclaims it */
+      /* best-effort; the lease TTL reclaims it (or the exit hook, while the process lives) */
     }
+    // Leaves the owner's set only once the check-in was tried, so an exit during it still sends one.
+    this.onStop();
   }
 
   session(): LeaseSession {
@@ -1229,8 +1251,72 @@ export async function acquireLease(
     process.once("beforeExit", () => {
       for (const m of machineLeases.values()) void m.shutdown();
     });
+    hookExitRelease();
   }
   return ml.acquire();
+}
+
+/** Longest a signal or the exit hook waits for the check-ins before the process goes. */
+const EXIT_CHECKIN_MS = 3_000;
+
+/**
+ * Release the slots when the process ends some other way than draining its event loop.
+ *
+ * "beforeExit" only fires when the loop drains: Ctrl+C, SIGTERM (`docker stop`, a supervisor) and
+ * `process.exit()` skip it, and a free or capped plan's slot then stayed taken for its full lease TTL
+ * (6 min). Two hooks cover them:
+ * - a signal with no other listener (Node's default would kill the process right away, with no "exit"
+ *   event): check in, at most {@link EXIT_CHECKIN_MS}, then raise the signal again so the process ends as
+ *   it would have. With another listener (Playwright's own SIGINT handler, the app's) that listener owns
+ *   the exit and this one does nothing.
+ * - "exit" (process.exit(), Playwright's handler exiting with 130): async calls can't finish there, so the
+ *   check-ins left run in a short child process the exit waits for.
+ */
+function hookExitRelease(): void {
+  const signals: NodeJS.Signals[] = process.platform === "win32" ? ["SIGINT", "SIGTERM"] : ["SIGINT", "SIGTERM", "SIGHUP"];
+  const onSignal = (sig: NodeJS.Signals): void => {
+    if (process.listenerCount(sig) > 1) return;
+    for (const s of signals) process.off(s, onSignal);
+    const all = Promise.all([...machineLeases.values()].map((m) => m.shutdown()));
+    void Promise.race([all, sleep(EXIT_CHECKIN_MS)]).finally(() => process.kill(process.pid, sig));
+  };
+  for (const s of signals) process.on(s, onSignal);
+  process.once("exit", () => {
+    for (const m of machineLeases.values()) {
+      const left = m.exitCheckin();
+      if (left) checkinSync(left);
+    }
+  });
+}
+
+/** Child script for checkinSync(): each lease id to the first base that answers (the lease server, then its fallback). */
+const CHECKIN_SCRIPT = `
+const { bases, ids, ua } = JSON.parse(process.env.CLEARCOTE_EXIT_CHECKIN);
+const key = process.env.CLEARCOTE_EXIT_KEY;
+Promise.all(ids.map(async (id) => {
+  for (const base of bases) {
+    try {
+      const r = await fetch(base + "/api/v1/lease/checkin", { method: "POST", signal: AbortSignal.timeout(2500),
+        headers: { authorization: "Bearer " + key, "content-type": "application/json", "User-Agent": ua },
+        body: JSON.stringify({ lease_id: id }) });
+      if (r.status < 500) return;
+    } catch {}
+  }
+}));`;
+
+/** Check leases in from an "exit" handler: a child process the exit waits for (at most EXIT_CHECKIN_MS). */
+function checkinSync(left: { bases: string[]; key: string; leaseIds: string[] }): void {
+  try {
+    spawnSync(process.execPath, ["-e", CHECKIN_SCRIPT], {
+      // The key goes in the env, never on the command line. ELECTRON_RUN_AS_NODE: an Electron host's
+      // execPath is the app, which runs as plain Node with it.
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", CLEARCOTE_EXIT_KEY: left.key,
+        CLEARCOTE_EXIT_CHECKIN: JSON.stringify({ bases: left.bases, ids: left.leaseIds, ua: LICENSE_USER_AGENT }) },
+      timeout: EXIT_CHECKIN_MS, stdio: "ignore", windowsHide: true,
+    });
+  } catch {
+    /* best-effort; the lease TTL reclaims the slots */
+  }
 }
 
 /** Merge the run-token into a child-process env (base defaults to the parent env). */

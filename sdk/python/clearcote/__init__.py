@@ -211,7 +211,7 @@ __all__ = [
     "RELEASE",
     "__version__",
 ]
-__version__ = "0.64.1"
+__version__ = "0.65.0"
 
 _pw = None  # the shared, lazily-started Playwright driver (one per process)
 
@@ -661,7 +661,7 @@ def _prepare(kwargs):
     args = args + widevine_launch_args(exe, widevine, bool(_cc_pro), user, quiet=quiet)
     # Drop Playwright's default automation flag so the engine's AutomationControlled feature stays
     # OFF (it otherwise flips navigator.webdriver-adjacent tells), --enable-unsafe-swiftshader and the
-    # headless --hide-scrollbars (see DEFAULT_IGNORED_ARGS). The control transport (--remote-debugging-pipe) is left intact.
+    # headless --hide-scrollbars and --disable-popup-blocking (see DEFAULT_IGNORED_ARGS). The control transport (--remote-debugging-pipe) is left intact.
     # Caller can override via their own ignore_default_args.
     # NOTE: launch_persistent_context sets this BEFORE the Widevine helper so that helper appends
     # --disable-component-update rather than clobbering the automation strip.

@@ -191,7 +191,7 @@ public partial class LaunchOptions : FingerprintOptions
     /// (default 120 000 there: the hosted browser starts as you connect).
     public float? Timeout { get; set; }
     /// Override the default strip of Playwright's <c>--enable-automation</c>,
-    /// <c>--enable-unsafe-swiftshader</c> and <c>--hide-scrollbars</c> (Playwright ignoreDefaultArgs). See <see cref="LaunchOpts.DefaultIgnoredArgs"/>.
+    /// <c>--enable-unsafe-swiftshader</c>, <c>--hide-scrollbars</c> and <c>--disable-popup-blocking</c> (Playwright ignoreDefaultArgs). See <see cref="LaunchOpts.DefaultIgnoredArgs"/>.
     public IReadOnlyList<string>? IgnoreDefaultArgs { get; set; }
     /// Emulated viewport for the context. Leave unset to take the SDK's default: NoViewport when
     /// headed or when a persona owns the screen, otherwise a screen-fitted viewport (see

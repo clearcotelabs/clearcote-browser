@@ -1166,7 +1166,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     return chromium.launch({
       // Drop Playwright's --enable-automation (keeps AutomationControlled off), --enable-unsafe-swiftshader
       // (see DEFAULT_IGNORED_ARGS; paired with --ignore-gpu-blocklist in assembleArgs) and the headless
-      // --hide-scrollbars. Caller can override via ignoreDefaultArgs.
+      // --hide-scrollbars and --disable-popup-blocking. Caller can override via ignoreDefaultArgs.
       ignoreDefaultArgs: [...DEFAULT_IGNORED_ARGS],
       ...(pwOptions as PlaywrightLaunchOptions),
       executablePath: exePath,
