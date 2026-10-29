@@ -185,6 +185,11 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
              "WebGL may render on software here while the persona claims a hardware GPU (a render-vs-"
              "string mismatch on canvas-scored sites). Use canvas_bridge, disable_gpu_fingerprint, or a "
              "real-GPU host.")
+    if gpu_v and not gpu_r and not profile:
+        warn("gpu-vendor-alone",
+             "gpu_vendor is set without gpu_renderer - the renderer still comes from the persona (or this host), "
+             "and a vendor naming another GPU maker than it is a contradiction a page reads directly. Pin both, "
+             "or neither.")
     if bridge_on and not gpu_r and not gpu_v and not profile:
         note("bridge-no-gpu",
              "canvas_bridge is set but gpu_vendor/gpu_renderer aren't pinned - the WebGL renderer "

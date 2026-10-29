@@ -616,7 +616,7 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `platformVersion` | `--fingerprint-platform-version` | UA-CH platform version. |
 | `brand` | `--fingerprint-brand` | `Chrome` \| `Edge` \| `Opera` \| `Vivaldi`. |
 | `brandVersion` | `--fingerprint-brand-version` | Brand version. |
-| `gpuVendor` | `--fingerprint-gpu-vendor` | WebGL UNMASKED vendor. |
+| `gpuVendor` | `--fingerprint-gpu-vendor` | WebGL UNMASKED vendor. A short name (`"intel"`) is sent as Chrome reports it (`Google Inc. (Intel)`); a vendor and `gpuRenderer` from two GPU makers throw. Pin both. |
 | `gpuRenderer` | `--fingerprint-gpu-renderer` | WebGL UNMASKED renderer. |
 | `hardwareConcurrency` | `--fingerprint-hardware-concurrency` | `navigator.hardwareConcurrency`. |
 | `location` | `--fingerprint-location` | `"lat,lng"` (only when geo permission is granted). |

@@ -115,6 +115,10 @@ export function coherenceWarnings(
       "headless with no canvasBridge/disableGpuFingerprint/fingerprintProfile - canvas and WebGL may " +
       "render on software here while the persona claims a hardware GPU (a render-vs-string mismatch on " +
       "canvas-scored sites). Use canvasBridge, disableGpuFingerprint, or a real-GPU host.");
+  if (gpuV && !gpuR && !profile)
+    warn("gpu-vendor-alone",
+      "gpuVendor is set without gpuRenderer - the renderer still comes from the persona (or this host), and a " +
+      "vendor naming another GPU maker than it is a contradiction a page reads directly. Pin both, or neither.");
   if (bridgeOn && !gpuR && !gpuV && !profile)
     note("bridge-no-gpu",
       "canvasBridge is set but gpuVendor/gpuRenderer aren't pinned - the WebGL renderer string may not " +

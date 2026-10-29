@@ -446,7 +446,7 @@ var r = Clearcote.Clearcote.FontReportFor("/opt/clearcote/chrome");
 | `Platform` | `--fingerprint-platform` = `windows` \| `linux` \| `macos` \| `android` |
 | `Brand` / `BrandVersion` | `--fingerprint-brand` / `-brand-version` (`Chrome`, `Edge`, …) |
 | `TlsProfile` | `--fingerprint-tls-profile` — keep the TLS ClientHello coherent with the claimed Chrome major |
-| `GpuVendor` / `GpuRenderer` | WebGL `UNMASKED_VENDOR` / `RENDERER` |
+| `GpuVendor` / `GpuRenderer` | WebGL `UNMASKED_VENDOR` / `RENDERER`. A short vendor name (`"intel"`) is sent as Chrome reports it (`Google Inc. (Intel)`); a vendor and renderer from two GPU makers throw `ArgumentException`. Pin both. |
 | `HardwareConcurrency` | `navigator.hardwareConcurrency` |
 | `Timezone` / `AcceptLanguage` | IANA tz + `navigator.languages` (+ coherent `Intl` locale) |
 | `WebrtcIp` | WebRTC egress IP (fabricated srflx; no real STUN leaks) |

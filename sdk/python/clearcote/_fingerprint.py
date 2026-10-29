@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import sys
 
 from ._languages import resolve_languages
@@ -336,6 +337,55 @@ def persona_platform(opts):
     return str(claimed).strip().lower() if claimed else host_persona_platform()
 
 
+# -- GPU vendor ---------------------------------------------------------------------------------
+_GPU_MAKER_NAMES = {"intel": "Intel", "nvidia": "NVIDIA", "amd": "AMD", "apple": "Apple", "qualcomm": "Qualcomm",
+                    "arm": "ARM", "microsoft": "Microsoft", "google": "Google"}
+
+
+def gpu_maker(s):
+    """The GPU maker a vendor or renderer string names ("intel", "nvidia", "amd", ...), or None. An ANGLE renderer
+    ("ANGLE (AMD, AMD Radeon(TM) Graphics ...)") and a Chrome vendor ("Google Inc. (Intel)") name it first."""
+    m = re.match(r"^ANGLE \(([^,]+),", s) or re.match(r"^Google Inc\. \((.+)\)$", s.strip())
+    t = (m.group(1) if m else s).strip().lower()
+    if t in ("google inc.", "webkit"):   # older Chrome's bare vendor and the masked one name no maker
+        return None
+    if "nvidia" in t:
+        return "nvidia"
+    if re.search(r"\bamd\b|advanced micro|\bati\b|radeon", t):
+        return "amd"
+    if "intel" in t:
+        return "intel"
+    if "apple" in t:
+        return "apple"
+    if re.search(r"qualcomm|adreno", t):
+        return "qualcomm"
+    if re.search(r"\barm\b|mali", t):
+        return "arm"
+    if "microsoft" in t:
+        return "microsoft"
+    if re.search(r"google|swiftshader", t):
+        return "google"
+    return None
+
+
+def gpu_vendor_for(vendor, renderer=None, platform=None):
+    """The UNMASKED_VENDOR_WEBGL string to send for ``gpu_vendor``. Chrome reports "Google Inc. (<maker>)" ("Google
+    Inc. (Intel Inc.)" for an Intel Mac); a short name ("intel", "NVIDIA", "Intel Inc.") went out verbatim, a string
+    no Chrome reports (measured 2026-10-28, SC 295), so it is rewritten to Chrome's form. A string that names no known
+    maker goes out as given. Raises ValueError when ``renderer`` names another maker: a page reads both, and "intel"
+    next to an AMD renderer is a contradiction no real machine shows."""
+    maker = gpu_maker(vendor)
+    rmaker = gpu_maker(renderer) if renderer else None
+    if maker and rmaker and maker != rmaker:
+        raise ValueError("gpu_vendor %r names %s but gpu_renderer names %s (%r): a page reads both, and a real "
+                         "machine never reports two makers. Pass a matching pair."
+                         % (vendor, _GPU_MAKER_NAMES[maker], _GPU_MAKER_NAMES[rmaker], renderer))
+    if not maker or re.match(r"^Google Inc\. \(.+\)$", vendor.strip()):
+        return vendor
+    name = "Intel Inc." if maker == "intel" and platform == "macos" else _GPU_MAKER_NAMES[maker]
+    return "Google Inc. (%s)" % name
+
+
 def fingerprint_args(opts):
     """Build the Chromium switches for a dict of fingerprint options."""
     args = []
@@ -373,6 +423,9 @@ def fingerprint_args(opts):
             args.append("--window-size={},{}".format(int(opts["avail_width"]), int(opts["avail_height"])))
         except (KeyError, TypeError, ValueError):
             pass
+    if opts.get("gpu_vendor"):
+        opts["gpu_vendor"] = gpu_vendor_for(str(opts["gpu_vendor"]), opts.get("gpu_renderer"),
+                                            opts.get("platform") or host_persona_platform())
     for key, flag in _FLAGS.items():
         value = opts.get(key)
         if value is not None and value != "":
