@@ -35,7 +35,7 @@ import { AGENT_KEYS } from "./agent.js";
 import { FINGERPRINT_KEYS } from "./fingerprint.js";
 import { installHumanize, installHumanizeOnContext } from "./humanize.js";
 import { humanizePayload, resolveHumanize, type HumanizeSetting } from "./hzoptions.js";
-import { warnStockRuntimeCloud } from "./launchopts.js";
+import { warnRuntimeBindingsCloud, warnStockRuntimeCloud } from "./launchopts.js";
 import { toProxySpec } from "./net.js";
 
 export const DEFAULT_API_URL = "https://www.clearcotelabs.com";
@@ -188,8 +188,10 @@ const CONNECT_OPTIONS = ["timeout", "slowMo"] as const;
 // default is 30 s). The browser starts as the client connects, and a launch with a country can take
 // over 30 s; a launch that fails is answered at once, so the longer wait only covers one in progress.
 const CLOUD_CONNECT_TIMEOUT_MS = 120_000;
-// stockRuntime (engine r32+) is a local and Docker option: a cloud launch only says once that it was not applied.
-export const SDK_SIDE_OPTIONS: readonly string[] = ["humanize", "showCursor", "quiet", "apiKey", "apiUrl", "stockRuntime", ...CONNECT_OPTIONS];
+// stockRuntime (engine r32+) and runtimeBindings (r54+) are local and Docker options: a cloud launch only says once
+// that it was not applied.
+export const SDK_SIDE_OPTIONS: readonly string[] = ["humanize", "showCursor", "quiet", "apiKey", "apiUrl", "stockRuntime",
+  "runtimeBindings", ...CONNECT_OPTIONS];
 
 /** Everything launch() accepts that only makes sense for a browser on this machine: derived from
  * the local launch surface (persona switches, agent switches, binary, licence, profile directory and
@@ -1133,6 +1135,7 @@ export async function launchCloud(options: Record<string, unknown>, persistent =
   const cloud = options.cloud;
   const { sdk, body } = prepareLaunch(options, persistent, userDataDir);
   warnStockRuntimeCloud(sdk.stockRuntime, sdk.quiet as boolean | undefined);
+  warnRuntimeBindingsCloud(sdk.runtimeBindings, sdk.quiet as boolean | undefined);
   const client = cloud instanceof Cloud ? cloud : new Cloud({ apiKey: sdk.apiKey as string | undefined, baseUrl: sdk.apiUrl as string | undefined });
   const created = await client.browsers._create(body);
   const connect: Record<string, unknown> = { timeout: CLOUD_CONNECT_TIMEOUT_MS };
