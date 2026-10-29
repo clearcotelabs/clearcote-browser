@@ -180,7 +180,9 @@ async function locate(page: any, loc: Locator, timeout: number | undefined, want
     const h = await fw.hit(box.x + box.width * fx, box.y + box.height * fy);
     if (!h) throw new NativeSignal("frame: no CDP hit test here");
     const [nid, fid] = h;
-    if (fid === main) {
+    if ((loc as any)._ccMainFrame) {
+      if (fid !== main) continue;   // an element handle of the main frame: only a main-frame node can be it
+    } else if (fid === main) {
       if (await fw.call(main!, nid, IS_FRAME)) owners++;
       continue;
     }
@@ -347,11 +349,29 @@ async function doSetChecked(page: Page, loc: Locator, checked: boolean, kw: any)
   throw sdkPlaywrightError("Clicking the checkbox did not change its state");
 }
 
+/**
+ * An ElementHandle seen as the locator the routes above read (waitFor, boundingBox, scrollIntoViewIfNeeded,
+ * focus, isChecked, page(), _frame). A main-frame handle is hit-tested against main-frame nodes only.
+ */
+export function handleAsLocator(handle: any, frame: any, page: any): any {
+  return {
+    _frame: frame,
+    _selector: undefined,
+    _ccMainFrame: frame === page.mainFrame(),
+    page: () => page,
+    waitFor: (o: any = {}) => handle.waitForElementState(o.state ?? "visible", { timeout: o.timeout }),
+    boundingBox: () => handle.boundingBox(),
+    scrollIntoViewIfNeeded: (o: any = {}) => handle.scrollIntoViewIfNeeded(o),
+    focus: () => handle.focus(),
+    isChecked: () => handle.isChecked(),
+  };
+}
+
 /** Run `action` on frame locator `loc` through the humanized page input; NATIVE (after reporting why) for the
  * caller to run Playwright's own method. Playwright's errors (a timeout, strict mode) propagate. */
-export async function frameRoute(loc: any, action: string, args: any[], kw: any = {}): Promise<any> {
+export async function frameRoute(loc: any, action: string, args: any[], kw: any = {}, apiPrefix = "locator"): Promise<any> {
   const page = loc.page();
-  const api = "locator." + action;
+  const api = apiPrefix + "." + action;
   kw = kw ?? {};
   try {
     switch (action) {

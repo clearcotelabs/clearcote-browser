@@ -162,6 +162,16 @@ export function withCallerApi<R>(api: string, fn: () => Promise<R>): Promise<R> 
   return caller.getStore() === undefined ? caller.run(api, fn) : fn();
 }
 
+/** Whether a humanized SDK method is running in this async context (its own Playwright calls, its native fallback). */
+export function inHumanizedCall(): boolean {
+  return caller.getStore() !== undefined;
+}
+
+/** The outermost public SDK entry point running in this async context ("page.check", "locator.click"), if any. */
+export function callerApi(): string | undefined {
+  return caller.getStore();
+}
+
 export function optionsOf(page: unknown): ResolvedHumanize | null {
   const o = (page as any)?._clearcoteHz;
   return o && o[RESOLVED] ? (o as ResolvedHumanize) : null;

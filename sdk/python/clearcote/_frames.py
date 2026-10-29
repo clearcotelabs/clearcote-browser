@@ -32,6 +32,7 @@ import random
 import time
 
 from ._forms import classify_field, formatted_equal, plan_select
+from ._hzoptions import _CALLER
 from ._isolated import (
     DESCRIBE, FORM_CONTROL, HIT_IN_BOX, SCROLL_BY, VIEWPORT, _call_params, _node_at_params, _parents, _value, async_world_for,
     world_for,
@@ -271,7 +272,10 @@ def _locate(page, loc, timeout, want):
         if h is None:
             raise _Native("frame: no CDP hit test here")
         nid, fid = h
-        if fid == main:
+        if getattr(loc, "_cc_main_frame", False):
+            if fid != main:
+                continue   # an element handle of the main frame: only a main-frame node can be it
+        elif fid == main:
             if fw.call(main, nid, IS_FRAME):
                 owners += 1   # the point is answered by an <iframe>: a frame this session cannot see into
             continue
@@ -489,12 +493,12 @@ def do_set_checked(page, loc, checked, kw):
     raise PlaywrightError("Clicking the checkbox did not change its state")
 
 
-def route(loc, action, args, kw):
+def route(loc, action, args, kw, api_prefix="Locator"):
     """Run ``action`` on frame locator ``loc`` through the humanized page input, or return NATIVE
     (after reporting why) for the caller to run Playwright's own method. Errors that Playwright would
     raise -- a timeout, the strict-mode error -- propagate."""
     page = loc.page
-    api = "Locator." + action
+    api = api_prefix + "." + action
     try:
         if action in ("click", "dblclick", "hover"):
             return do_click(page, loc, kw, no_click=action == "hover", count=2 if action == "dblclick" else None)
@@ -642,7 +646,10 @@ async def _alocate(page, loc, timeout, want):
         if h is None:
             raise _Native("frame: no CDP hit test here")
         nid, fid = h
-        if fid == main:
+        if getattr(loc, "_cc_main_frame", False):
+            if fid != main:
+                continue
+        elif fid == main:
             if await fw.call(main, nid, IS_FRAME):
                 owners += 1
             continue
@@ -846,10 +853,10 @@ async def ado_set_checked(page, loc, checked, kw):
     raise PlaywrightError("Clicking the checkbox did not change its state")
 
 
-async def aroute(loc, action, args, kw):
+async def aroute(loc, action, args, kw, api_prefix="Locator"):
     """Async ``route``."""
     page = loc.page
-    api = "Locator." + action
+    api = api_prefix + "." + action
     try:
         if action in ("click", "dblclick", "hover"):
             return await ado_click(page, loc, kw, no_click=action == "hover",
@@ -888,10 +895,11 @@ _frame_patched = set()
 
 
 def patch_frame_class(is_async=False):
-    """Route a CHILD frame's selector actions (``page.frames[1].click("#x")``, ``frame.fill(...)``)
-    through ``frame.locator(selector).first`` -- the patched Locator, which takes the frame route on a
-    humanized page. The main frame and pages without humanize keep Playwright's own methods (a main
-    frame's page.* methods are the humanized ones already). Patched once per API."""
+    """Route a frame's selector actions (``page.frames[1].click("#x")``, ``page.main_frame.fill(...)``)
+    through ``frame.locator(selector).first`` -- the patched Locator, which takes the page route for the main
+    frame and the frame route for a child frame on a humanized page. Pages without humanize, and the SDK's own
+    calls (a humanized method running), keep Playwright's own methods. Patched once per API; ElementHandle
+    actions are patched alongside (patch_handle_class)."""
     key = "async" if is_async else "sync"
     if key in _frame_patched:
         return
@@ -907,13 +915,13 @@ def patch_frame_class(is_async=False):
     def wrap(name, orig):
         if is_async:
             async def m(self, selector, *a, **kw):
-                if humanized(self.page) and self.parent_frame is not None:
+                if humanized(self.page) and _CALLER.get() is None and isinstance(selector, str):
                     kw.pop("strict", None)   # Frame actions are not strict: .first, as Playwright's
                     return await getattr(self.locator(selector).first, name)(*a, **kw)
                 return await orig(self, selector, *a, **kw)
         else:
             def m(self, selector, *a, **kw):
-                if humanized(self.page) and self.parent_frame is not None:
+                if humanized(self.page) and _CALLER.get() is None and isinstance(selector, str):
                     kw.pop("strict", None)
                     return getattr(self.locator(selector).first, name)(*a, **kw)
                 return orig(self, selector, *a, **kw)
@@ -925,3 +933,139 @@ def patch_frame_class(is_async=False):
         orig = getattr(Frame, name, None)
         if orig is not None:
             setattr(Frame, name, wrap(name, orig))
+    patch_handle_class(is_async)
+
+
+# ============================================================================ ElementHandle class
+# ElementHandle actions went straight to Playwright: a 0.4 ms press, one teleporting move, 1-4 ms key holds,
+# with no fallback report even in strict mode (measured on Node 2026-10-28, SC 295; Python had the same gap).
+# On a humanized page they take the frame route with the handle as its target: the browser's own hit test
+# proves the press lands on it, then the page's humanized mouse and keyboard.
+_HANDLE_METHODS = ("click", "dblclick", "hover", "fill", "type", "press", "select_option", "check", "uncheck",
+                   "set_checked")
+_HANDLE_VALUE_FIRST = ("fill", "type", "press", "select_option", "set_checked")
+_handle_patched = set()
+
+
+class _NoSelector:
+    _selector = None
+
+
+class _HandleAsLocator:
+    """An ElementHandle seen as the locator the routes read (wait_for, bounding_box, scroll_into_view_if_needed,
+    focus, is_checked, page). A main-frame handle is hit-tested against main-frame nodes only."""
+    _impl_obj = _NoSelector()
+
+    def __init__(self, handle, frame):
+        self._h = handle
+        self.page = frame.page
+        self._cc_main_frame = frame.parent_frame is None
+
+    def wait_for(self, state="visible", timeout=None):
+        return self._h.wait_for_element_state(state, timeout=timeout)
+
+    def bounding_box(self):
+        return self._h.bounding_box()
+
+    def scroll_into_view_if_needed(self, timeout=None):
+        return self._h.scroll_into_view_if_needed(timeout=timeout)
+
+    def focus(self, timeout=None):
+        return self._h.focus()
+
+    def is_checked(self, timeout=None):
+        return self._h.is_checked()
+
+
+class _AsyncHandleAsLocator(_HandleAsLocator):
+    """Async _HandleAsLocator: the same calls, awaited."""
+
+    async def wait_for(self, state="visible", timeout=None):
+        return await self._h.wait_for_element_state(state, timeout=timeout)
+
+    async def bounding_box(self):
+        return await self._h.bounding_box()
+
+    async def scroll_into_view_if_needed(self, timeout=None):
+        return await self._h.scroll_into_view_if_needed(timeout=timeout)
+
+    async def focus(self, timeout=None):
+        return await self._h.focus()
+
+    async def is_checked(self, timeout=None):
+        return await self._h.is_checked()
+
+
+def _handle_args(name, a, kw):
+    """The route's positional arguments for ElementHandle.<name>(*a, **kw): the value of fill/type/press/
+    select_option/set_checked, nothing for the click family."""
+    if name not in _HANDLE_VALUE_FIRST:
+        return []
+    if a:
+        return [a[0]]
+    return [kw.pop("value", None) if name == "select_option" else None]
+
+
+def patch_handle_class(is_async=False):
+    """ElementHandle.<action> on a humanized page: the frame route with the handle as its target; where it does
+    not apply it reports the fallback (strict mode raises) and Playwright's own method runs. humanize=False, the
+    SDK's own calls and pages without humanize keep Playwright's method. Patched once per API."""
+    key = "async" if is_async else "sync"
+    if key in _handle_patched:
+        return
+    _handle_patched.add(key)
+    try:
+        if is_async:
+            from playwright.async_api._generated import ElementHandle
+        else:
+            from playwright.sync_api._generated import ElementHandle
+    except Exception:  # noqa: BLE001
+        return
+
+    def wrap(name, orig):
+        api = "ElementHandle." + name
+        if is_async:
+            async def m(self, *a, humanize=None, **kw):
+                frame = None
+                if humanize is not False and _CALLER.get() is None:
+                    frame = await self.owner_frame()
+                if frame is None or not humanized(frame.page):
+                    kw.pop("dwell", None)
+                    return await orig(self, *a, **kw)
+                token = _CALLER.set(api)
+                try:
+                    rkw = dict(kw)
+                    r = await aroute(_AsyncHandleAsLocator(self, frame), name, _handle_args(name, a, rkw), rkw,
+                                     "ElementHandle")
+                    if r is NATIVE:
+                        kw.pop("dwell", None)
+                        return await orig(self, *a, **kw)
+                    return r
+                finally:
+                    _CALLER.reset(token)
+        else:
+            def m(self, *a, humanize=None, **kw):
+                frame = None
+                if humanize is not False and _CALLER.get() is None:
+                    frame = self.owner_frame()
+                if frame is None or not humanized(frame.page):
+                    kw.pop("dwell", None)
+                    return orig(self, *a, **kw)
+                token = _CALLER.set(api)
+                try:
+                    rkw = dict(kw)
+                    r = route(_HandleAsLocator(self, frame), name, _handle_args(name, a, rkw), rkw, "ElementHandle")
+                    if r is NATIVE:
+                        kw.pop("dwell", None)
+                        return orig(self, *a, **kw)
+                    return r
+                finally:
+                    _CALLER.reset(token)
+        m.__name__ = name
+        m.__doc__ = getattr(orig, "__doc__", None)
+        return m
+
+    for name in _HANDLE_METHODS:
+        orig = getattr(ElementHandle, name, None)
+        if orig is not None:
+            setattr(ElementHandle, name, wrap(name, orig))

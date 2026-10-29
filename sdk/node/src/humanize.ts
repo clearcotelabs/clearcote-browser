@@ -54,7 +54,7 @@ import {
   ISO_FRAMES, ISO_HIT_IN_BOX, ISO_LABEL_BY_SEL, ISO_LABEL_OF, ISO_LISTBOX_ROW, ISO_PLATFORM, ISO_SCROLL_BY, ISO_VIEWPORT,
   roundHalfEven, worldFor, type DescribedElement,
 } from "./isolated.js";
-import { NATIVE, frameLocatorOf, frameRoute, humanized as frameHumanized, strictMode } from "./frames.js";
+import { NATIVE, frameLocatorOf, frameRoute, handleAsLocator, humanized as frameHumanized, strictMode } from "./frames.js";
 
 export { reportFallback, strictMode } from "./frames.js";
 
@@ -86,7 +86,7 @@ import {
   ENGINE_KEY_SEQUENCE, engineClickParams, engineHeldBits, engineKeyPlan,
 } from "./forms.js";
 import {
-  applyToPersona, engineModeFor, optionsOf, reportFallback, resolveHumanize, typoRateFor, withCallerApi,
+  applyToPersona, callerApi, engineModeFor, inHumanizedCall, optionsOf, reportFallback, resolveHumanize, typoRateFor, withCallerApi,
   type HumanizeSetting,
 } from "./hzoptions.js";
 
@@ -404,6 +404,7 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
   const tempo = hz.tempo; // preset: every planned duration x1.4 / x1.0 / x0.7
   // The stock methods, for per-call { humanize: false } (wired at the end of attach).
   const stockPage: Record<string, any> = {}, stockMouse: Record<string, any> = {}, stockKb: Record<string, any> = {};
+  patchPageClass(page);   // before the stock methods are taken: they are the scoped prototype methods
   for (const n of PAGE_METHODS) if (typeof (page as any)[n] === "function") stockPage[n] = (page as any)[n].bind(page);
   for (const n of MOUSE_METHODS) if (typeof (page.mouse as any)[n] === "function") stockMouse[n] = (page.mouse as any)[n].bind(page.mouse);
   for (const n of KB_METHODS) if (typeof (page.keyboard as any)[n] === "function") stockKb[n] = (page.keyboard as any)[n].bind(page.keyboard);
@@ -3159,6 +3160,8 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
   // Marker the Locator-class patch keys off: humanize is active for THIS page.
   (page as any)._clearcoteHumanized = true;
   patchLocatorClass(page.locator("html"));
+  patchFrameClass(page.mainFrame());
+  await patchHandleClass(page);
 }
 
 /** Options of `locator.dragBy(dx, dy, options)` / `page.dragBy(selector, dx, dy, options)`. */
@@ -3603,6 +3606,109 @@ function patchLocatorClass(sample: Locator): void {
   for (const [name, stock] of Object.entries(stockOf)) {
     if (typeof stock === "function" && typeof proto[name] === "function") proto[name] = perCallOff(stock, proto[name]);
   }
+}
+
+// --------------------------------------------------------------------------- frame + element handle patch
+// The Frame API (frame.click(selector), page.mainFrame().fill(...)) and ElementHandle actions went straight to
+// Playwright: a 0.2 ms press, one teleporting move, 1-4 ms key holds, with no fallback report even in strict mode
+// (measured 2026-10-28, SC 295). Both now take the humanized routes the locators take.
+const FRAME_ACTIONS = ["click", "dblclick", "hover", "fill", "type", "press", "selectOption", "check", "uncheck", "setChecked", "tap", "focus"];
+const HANDLE_ACTIONS = ["click", "dblclick", "hover", "fill", "type", "press", "selectOption", "check", "uncheck", "setChecked"];
+/** ElementHandle actions whose first argument is not the options object (fill(value, options), ...). */
+const HANDLE_VALUE_FIRST = new Set(["fill", "type", "press", "selectOption", "setChecked"]);
+let framePatched = false;
+let handlePatching: Promise<boolean> | null = null;
+
+let pagePatched = false;
+
+/** Playwright's own page.<action> is `this._mainFrame.<action>(...)`: run it as an SDK call so the Frame patch below
+ * leaves it to Playwright. The stock call (`{ humanize: false }`, a native fallback, a caller reaching the
+ * prototype) stays Playwright's, worded "page.<action>: ...". */
+function patchPageClass(sample: any): void {
+  if (pagePatched) return;
+  const proto: any = sample && Object.getPrototypeOf(sample);
+  if (!proto) return;
+  pagePatched = true;
+  for (const name of FRAME_ACTIONS) {
+    const orig = proto[name];
+    if (typeof orig !== "function") continue;
+    proto[name] = function (this: any, ...a: any[]) { return withCallerApi("page." + name, () => orig.apply(this, a)); };
+  }
+}
+
+/** frame.<action>(selector, ...) on a humanized page runs as the locator action: `frame.locator(selector)`
+ * (`.first()` unless the call asked for `strict`, Playwright's frame default), so a main-frame selector takes
+ * the page route and a child frame's the frame route. Inside the SDK's own calls (Locator.click calls
+ * frame.click; a native fallback) and on other pages, Playwright's own method. */
+function patchFrameClass(sample: any): void {
+  if (framePatched) return;
+  const proto: any = sample && Object.getPrototypeOf(sample);
+  if (!proto) return;
+  framePatched = true;
+  for (const name of FRAME_ACTIONS) {
+    const orig = proto[name];
+    if (typeof orig !== "function") continue;
+    const api = "frame." + name;
+    // Playwright words an error after the API the caller's code called, read off the stack: with this wrapper on
+    // it, page.check's own error read "frame.check: ...". Worded after the SDK entry point running instead.
+    const native = async (self: any, a: any[]): Promise<any> => {
+      try { return await orig.apply(self, a); } catch (e) { const c = callerApi(); throw c ? asApiError(e, c) : e; }
+    };
+    const routed = async function (this: any, selector: any, ...rest: any[]): Promise<any> {
+      let pg: any = null;
+      try { pg = this.page(); } catch { /* a detached frame: Playwright's own call raises */ }
+      if (!pg?._clearcoteHumanized || inHumanizedCall() || typeof selector !== "string") return native(this, [selector, ...rest]);
+      return withCallerApi(api, async () => {
+        const last = rest[rest.length - 1];
+        let strict = false;
+        if (last && typeof last === "object" && !Array.isArray(last) && "strict" in last) {
+          const { strict: s, ...o } = last;
+          strict = s === true;
+          rest = [...rest.slice(0, -1), o];
+        }
+        const loc = strict ? this.locator(selector) : this.locator(selector).first();
+        try { return await loc[name](...rest); } catch (e) { throw asApiError(e, api); }
+      });
+    };
+    proto[name] = perCallOff(function (this: any, ...a: any[]) { return native(this, a); }, routed);
+  }
+}
+
+/** elementHandle.<action>(...) on a humanized page: the frame route (frames.ts) with the handle as its target --
+ * the browser's own hit test proves the press lands on it, then the page's humanized mouse and keyboard. Where the
+ * route does not apply it reports the fallback (strict mode throws) and Playwright's own method runs. The prototype
+ * is read off one `:root` handle (a utility-world query; nothing runs in the page). */
+function patchHandleClass(page: any): Promise<boolean> {
+  handlePatching ??= (async () => {
+    let h: any = null;
+    try { h = await page.mainFrame().$(":root"); } catch { /* a closing page: the next page patches */ }
+    const proto: any = h && Object.getPrototypeOf(h);
+    if (h) h.dispose().catch(() => {});
+    if (!proto) { handlePatching = null; return false; }
+    for (const name of HANDLE_ACTIONS) {
+      const orig = proto[name];
+      if (typeof orig !== "function") continue;
+      const api = "elementHandle." + name;
+      const routed = async function (this: any, ...a: any[]): Promise<any> {
+        if (inHumanizedCall()) return orig.apply(this, a);
+        let frame: any = null;
+        try { frame = await this.ownerFrame(); } catch { /* disposed: Playwright's own call raises */ }
+        let pg: any = null;
+        try { pg = frame?.page(); } catch { /* detached */ }
+        if (!pg?._clearcoteHumanized) return orig.apply(this, a);
+        return withCallerApi(api, async () => {
+          const n = HANDLE_VALUE_FIRST.has(name) ? 1 : 0;
+          try {
+            const r = await frameRoute(handleAsLocator(this, frame, pg), name, a.slice(0, n), a[n] ?? {}, "elementHandle");
+            return r === NATIVE ? await orig.apply(this, a) : r;
+          } catch (e) { throw asApiError(e, api); }
+        });
+      };
+      proto[name] = perCallOff(orig, routed);
+    }
+    return true;
+  })();
+  return handlePatching;
 }
 
 /** Install humanize/showCursor on a browser: wraps newPage/newContext so every page is covered. */

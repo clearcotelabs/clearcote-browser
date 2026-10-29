@@ -148,6 +148,27 @@ iframe{{display:block;margin:8px 0}}</style></head>
     });
 
     [Fact]
+    public Task The_IFrame_overloads_take_the_frame_and_page_routes() => Live(async (page, events) =>
+    {
+        // frame.HumanFillAsync("#ct", ...) is frame.Locator("#ct").First.HumanFillAsync(...) (FrameHumanize.cs)
+        var f = page.Frame("same")!;
+        await Reset(f);
+        await f.HumanFillAsync("#ct", "by frame");
+        Assert.Equal("by frame", await f.Locator("#ct").InputValueAsync());
+        var keys = await Ev(f, "keydown", "ct");
+        Assert.True(keys.Count >= 8, $"{keys.Count} keydowns");
+        Assert.All(keys, k => Assert.True(k.GetProperty("tr").GetBoolean()));
+        await Reset(f);
+        await f.HumanClickAsync("#cc");
+        Assert.True(await f.Locator("#cc").IsCheckedAsync());
+        var downs = await Ev(f, "mousedown", "cc");
+        Assert.Single(downs);
+        Assert.True(downs[0].GetProperty("tr").GetBoolean());
+        Assert.Equal(new[] { "v2" }, await page.MainFrame.HumanSelectOptionAsync("#s", "v2"));
+        Assert.True(events.Count == 0, Fallbacks(events));
+    });
+
+    [Fact]
     public Task A_cross_origin_frame_falls_back_to_Playwright_reported() => Live(async (page, events) =>
     {
         var got = await page.FrameLocator("#cross").Locator("#cs").HumanSelectOptionAsync("Peru");
