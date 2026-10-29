@@ -74,6 +74,16 @@ public partial class LaunchOptions : FingerprintOptions
     /// launches without it, with one warning per process. Local and Docker launches only: a cloud launch says once
     /// that it was not applied. A normal browser argument, never part of the persona payload.</para>
     public bool? StockRuntime { get; set; }
+    /// Runtime.addBinding bindings across navigations (engine r54+, <c>--enable-runtime-bindings</c>): only the
+    /// bindings part of <see cref="StockRuntime"/>, so Playwright's ExposeFunctionAsync / ExposeBindingAsync (and any
+    /// CDP <c>Runtime.addBinding</c>) keep working after GotoAsync or a reload, while console events stay suppressed.
+    ///
+    /// <para>Off by default. A launch that adds no binding looks the same to a page; one that does shows the page that
+    /// binding's global, as Chrome does. Null follows CLEARCOTE_RUNTIME_BINDINGS (1/true/yes/on); an explicit value
+    /// wins over it. An engine without the switch launches without it, with one warning per process; next to
+    /// StockRuntime it is not passed (that already restores bindings). Local and Docker launches only: a cloud launch
+    /// says once that it was not applied. A normal browser argument, never part of the persona payload.</para>
+    public bool? RuntimeBindings { get; set; }
     /// Google's Widevine CDM, so DRM/EME works (<c>requestMediaKeySystemAccess('com.widevine.alpha')</c>
     /// resolves) and the EME surface matches a real Chrome instead of being a no-Widevine tell.
     ///

@@ -56,6 +56,11 @@ public static class LaunchWarnings
     public const string StockRuntimeUnsupported = "stock-runtime-unsupported";
     public const string StockRuntimeCloud = "stock-runtime-cloud";
 
+    /// The codes of the once-per-process warnings <see cref="LaunchOptions.RuntimeBindings"/> gives: on an engine
+    /// without the switch, and on a cloud launch (see <see cref="LaunchOpts.RuntimeBindingsArgs"/>).
+    public const string RuntimeBindingsUnsupported = "runtime-bindings-unsupported";
+    public const string RuntimeBindingsCloud = "runtime-bindings-cloud";
+
     /// Warnings for a local launch of persona <paramref name="o"/> on host <paramref name="hostOs"/>
     /// ("windows", "linux", "macos"; default: this machine).
     /// <para>On a Windows host the GPU runs through Direct3D 11, which clamps the WebGL and WebGPU limits
@@ -117,6 +122,10 @@ public static class LaunchWarnings
     /// The code of the once-per-process note that the engine forwards no console / page-error events.
     public const string CdpConsoleEvents = "cdp-console-events";
 
+    /// The code of the once-per-process note that the engine does not carry Runtime.addBinding bindings into
+    /// documents opened after they were added.
+    public const string CdpBindings = "cdp-bindings";
+
     private static readonly (string Code, string Message)[] EngineNotes =
     {
         (CdpConsoleEvents,
@@ -126,6 +135,12 @@ public static class LaunchWarnings
             "unhandledrejection handlers fire normally. To capture console output, collect it in-page " +
             "and read it back with page.EvaluateAsync(). An engine from r32 on forwards them with " +
             "StockRuntime = true (off by default: pages can observe part of what it restores)."),
+        (CdpBindings,
+            "the engine does not carry Runtime.addBinding bindings into documents opened after they " +
+            "were added, by design, as part of the same protection: page.ExposeFunctionAsync() and " +
+            "page.ExposeBindingAsync() fail after page.GotoAsync() or a reload. An engine from r54 on keeps them " +
+            "with RuntimeBindings = true (off by default; the page sees the binding's global, as in " +
+            "Chrome), and StockRuntime = true (engine r32+) also restores them."),
     };
 
     private static string? HostFamily(string host)
@@ -257,18 +272,29 @@ public static class LaunchWarnings
 
     /// Print <see cref="Coherence"/> to stderr unless <paramref name="quiet"/> or CLEARCOTE_NO_WARN. Notes (and the
     /// host warning a Linux persona on Windows gets) are said once per process; the other warnings every launch.
-    /// Then the engine notes, once per process: the one that the engine forwards no console events is left out
-    /// when <paramref name="stockRuntime"/> (this launch's browser has <c>--disable-runtime-suppression</c>).
-    public static void EmitCoherence(IEnumerable<Warning> warnings, bool quiet, bool stockRuntime = false)
+    /// Then the engine notes, once per process, each left out for a launch whose browser already has that behaviour
+    /// back: <paramref name="stockRuntime"/> (this launch's browser has <c>--disable-runtime-suppression</c>) leaves
+    /// out the notes about console events and bindings, <paramref name="runtimeBindings"/>
+    /// (<c>--enable-runtime-bindings</c>) the one about bindings.
+    public static void EmitCoherence(IEnumerable<Warning> warnings, bool quiet, bool stockRuntime = false, bool runtimeBindings = false)
     {
         if (quiet || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLEARCOTE_NO_WARN"))) return;
         Emit(warnings.Where(w => !(w.IsNote || OncePerProcess.Contains(w.Code)) || Said.TryAdd(w.Code, 0)).ToList(), quiet);
         foreach (var (code, message) in EngineNotes)
         {
-            if (code == CdpConsoleEvents && stockRuntime) continue;
+            if (RestoredBy(code, stockRuntime, runtimeBindings)) continue;
             if (Said.TryAdd(code, 0)) Emit(new[] { new Warning(code, message, IsNote: true) }, quiet);
         }
     }
+
+    /// Whether this launch's browser already has back what engine note <paramref name="code"/> is about, so the
+    /// note is not said for it (Python _ENGINE_NOTE_RESTORED_BY).
+    private static bool RestoredBy(string code, bool stockRuntime, bool runtimeBindings) => code switch
+    {
+        CdpConsoleEvents => stockRuntime,
+        CdpBindings => stockRuntime || runtimeBindings,
+        _ => false,
+    };
 
     // The value of the LAST name=value in args (Chromium keeps the last), else null.
     private static string? SwitchValue(IEnumerable<string> args, string name)

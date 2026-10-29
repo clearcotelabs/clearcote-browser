@@ -34,9 +34,10 @@ internal static class CloudLaunch
     };
 
     // ... and those handled on THIS side: the switch, the account, and Playwright's connect options. StockRuntime
-    // (engine r32+) is a local and Docker option: a cloud launch only says once that it was not applied.
+    // (engine r32+) and RuntimeBindings (r54+) are local and Docker options: a cloud launch only says once that it
+    // was not applied.
     // Humanize / HumanizeOptions / ShowCursor run in the SDK, exactly as for a local browser (HumanizeSession).
-    internal static readonly string[] SdkSideOptions = { "Cloud", "CloudClient", "ApiKey", "ApiUrl", "Quiet", "SlowMo", "Timeout", "StockRuntime",
+    internal static readonly string[] SdkSideOptions = { "Cloud", "CloudClient", "ApiKey", "ApiUrl", "Quiet", "SlowMo", "Timeout", "StockRuntime", "RuntimeBindings",
         "Humanize", "HumanizeOptions", "ShowCursor" };
 
     // How long the connect waits when the caller gives no Timeout (Playwright's own default is 30 s).
@@ -105,6 +106,7 @@ internal static class CloudLaunch
         var hz = HumanizeSession(session, o);
         var body = Cloud.SessionBody(session, run: false);
         LaunchOpts.WarnStockRuntimeCloud(o.StockRuntime, o.Quiet);
+        LaunchOpts.WarnRuntimeBindingsCloud(o.RuntimeBindings, o.Quiet);
         var (browser, _) = await ConnectAsync(o, body, persistent: false, hz).ConfigureAwait(false);
         return browser;
     }
@@ -135,6 +137,7 @@ internal static class CloudLaunch
         var session = SessionOptionsOf(o);
         var hz = HumanizeSession(session, o);
         LaunchOpts.WarnStockRuntimeCloud(o.StockRuntime, o.Quiet);
+        LaunchOpts.WarnRuntimeBindingsCloud(o.RuntimeBindings, o.Quiet);
         if (persistent)
         {
             if (session.Profile is null)

@@ -29,6 +29,7 @@ public class LaunchLaneTests : IDisposable
         _sb.Env("CLEARCOTE_LICENSE_KEY", null).Env("CLEARCOTE_NO_WARN", null).Env("CLEARCOTE_CLOUD", null).Env("CLEARCOTE_DOCKER", null)
             .Env("CLEARCOTE_BINARY", null).Env("CLEARCOTE_BROWSER_VERSION", null).Env("CLEARCOTE_RELEASE_CHANNEL", null)
             .Env("CLEARCOTE_LICENSE_API", null).Env("CLEARCOTE_CACHE", null).Env(PersonaEnv.EnvVar, null)
+            .Env("CLEARCOTE_STOCK_RUNTIME", null).Env("CLEARCOTE_RUNTIME_BINDINGS", null)
             .Env("TMPDIR", temp).Env("TMP", temp).Env("TEMP", temp);
         LaunchWarnings.ForgetSaid();
         Console.SetError(TextWriter.Synchronized(_err));
@@ -248,6 +249,7 @@ public class LaunchLaneTests : IDisposable
         Assert.Equal(1, Times("clearcote: warning: a Linux persona on a Windows host"));
         Assert.Equal(1, Times("clearcote: note: headless with no CanvasBridge"));
         Assert.Equal(1, Times("clearcote: note: the engine does not forward console or page-error events"));
+        Assert.Equal(1, Times("clearcote: note: the engine does not carry Runtime.addBinding bindings"));
     }
 
     [Fact]
@@ -263,6 +265,8 @@ public class LaunchLaneTests : IDisposable
         LaunchWarnings.EmitCoherence(Array.Empty<LaunchWarnings.Warning>(), quiet: false);
         Assert.Contains("clearcote: note: the engine does not forward console or page-error events", _err.ToString());
         Assert.Contains("StockRuntime = true", _err.ToString());
+        Assert.Contains("clearcote: note: the engine does not carry Runtime.addBinding bindings", _err.ToString());
+        Assert.Contains("RuntimeBindings = true", _err.ToString());
     }
 
     [Fact]

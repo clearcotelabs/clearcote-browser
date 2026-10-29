@@ -22,6 +22,7 @@ public class AgentTests : IDisposable
         _sb.TempHome();
         _temp = Dir("cc-agent-tmp-");
         _sb.Env("CLEARCOTE_LICENSE_KEY", null).Env("CLEARCOTE_NO_WARN", null).Env("CLEARCOTE_STOCK_RUNTIME", null)
+            .Env("CLEARCOTE_RUNTIME_BINDINGS", null)
             .Env(PersonaEnv.OptOutEnv, null).Env(PersonaEnv.EnvVar, null).Env("CLEARCOTE_CLOUD", null)
             .Env("CLEARCOTE_DOCKER", null).Env("CLEARCOTE_BINARY", null).Env("CLEARCOTE_BROWSER_VERSION", null)
             .Env("TMPDIR", _temp).Env("TMP", _temp).Env("TEMP", _temp);
