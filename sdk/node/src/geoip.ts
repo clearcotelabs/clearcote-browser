@@ -353,8 +353,9 @@ export interface GeoFillable {
  * mismatch geoip exists to prevent. A caller who set BOTH `timezone` and `acceptLanguage`
  * explicitly still launches (with a warning), since nothing geoip would fill is missing.
  */
-export async function applyGeoip(fp: GeoFillable, proxy: unknown, quiet?: boolean): Promise<Geo | undefined> {
-  const result = await geoResolver.resolve(proxy as { server?: string; username?: string; password?: string } | undefined, { quiet });
+export async function applyGeoip(fp: GeoFillable, proxy: unknown, quiet?: boolean, timeoutMs?: number): Promise<Geo | undefined> {
+  const result = await geoResolver.resolve(proxy as { server?: string; username?: string; password?: string } | undefined,
+    timeoutMs === undefined ? { quiet } : { quiet, timeoutMs });
   const geo: Geo | null = result.geo;
   if (!geo || !geo.timezone) {
     if (fp.timezone && fp.acceptLanguage) {
@@ -374,6 +375,76 @@ export async function applyGeoip(fp: GeoFillable, proxy: unknown, quiet?: boolea
   // the srflx candidate at this IP; no real STUN leaves the host).
   if (geo.ip && fp.webrtcIp == null) fp.webrtcIp = geo.ip;
   return geo;
+}
+
+/**
+ * geoip is ON by default (since 0.66.0): with no `geoip` option the launch looks the egress up (the
+ * proxy's exit, or this machine's own public IP when no proxy is set) so timezone, language, location
+ * and the WebRTC IP describe the place sites see the connection come from.
+ *   - "strict": `geoip: true`. Fails closed ({@link GeoipError}), as before.
+ *   - "auto":   the default. A lookup that fails warns and launches with the persona's defaults.
+ *   - "off":    `geoip: false`, or CLEARCOTE_GEOIP=0/false/no/off (an explicit `geoip: true` still wins).
+ */
+export type GeoipMode = "off" | "auto" | "strict";
+export const GEOIP_ENV = "CLEARCOTE_GEOIP";
+
+export function geoipMode(geoip: boolean | undefined | null, env: Record<string, string | undefined> = process.env): GeoipMode {
+  if (geoip === true) return "strict";
+  if (geoip === false) return "off";
+  return /^(0|false|no|off)$/i.test((env[GEOIP_ENV] ?? "").trim()) ? "off" : "auto";
+}
+
+/** The default lookup's budget: CLEARCOTE_GEOIP_TIMEOUT_SECONDS when set, else 10 s (strict keeps 20 s). */
+const AUTO_TIMEOUT_MS = 10_000;
+/** This machine's own egress rarely moves; one lookup serves the process for 10 minutes. */
+const DIRECT_CACHE_MS = 10 * 60_000;
+let _direct: { geo: GeoFillable; at: number } | null = null;
+/** @internal tests */
+export function resetDirectGeoCache(): void { _direct = null; }
+
+/** What {@link applyGeoipMode} did: the geo, and whether the WebRTC IP came from the default lookup. */
+export interface GeoipApplied { geo?: Geo; autoWebrtcIp: boolean }
+
+/**
+ * Apply geoip in `mode` (see {@link geoipMode}). "auto" skips the lookup when every field it fills is
+ * already set, reuses a no-proxy lookup for 10 minutes, and on failure warns once and launches.
+ */
+export async function applyGeoipMode(fp: GeoFillable, proxy: unknown, mode: GeoipMode, quiet?: boolean): Promise<GeoipApplied> {
+  if (mode === "off") return { autoWebrtcIp: false };
+  if (mode === "strict") return { geo: await applyGeoip(fp, proxy, quiet), autoWebrtcIp: false };
+  if (fp.timezone != null && fp.acceptLanguage != null && fp.location != null && fp.webrtcIp != null) return { autoWebrtcIp: false };
+  const hadWebrtcIp = fp.webrtcIp != null;
+  const direct = !proxy;
+  if (direct && _direct && Date.now() - _direct.at < DIRECT_CACHE_MS) {
+    for (const k of ["timezone", "acceptLanguage", "location", "webrtcIp"] as const)
+      if (fp[k] == null && _direct.geo[k] != null) fp[k] = _direct.geo[k];
+    return { autoWebrtcIp: !hadWebrtcIp && fp.webrtcIp != null };
+  }
+  const env = (process.env.CLEARCOTE_GEOIP_TIMEOUT_SECONDS ?? "").trim();
+  try {
+    const before: GeoFillable = { ...fp };
+    const geo = await applyGeoip(fp, proxy, quiet, env ? geoipTimeoutMs() : AUTO_TIMEOUT_MS);
+    if (geo && direct) _direct = { geo: { timezone: geo.timezone, acceptLanguage: geo.acceptLanguage, location: geo.location, webrtcIp: geo.ip }, at: Date.now() };
+    return { geo, autoWebrtcIp: before.webrtcIp == null && fp.webrtcIp != null };
+  } catch (e) {
+    if (!(e instanceof GeoipError)) throw e;
+    if (!quiet && !process.env.CLEARCOTE_NO_WARN)
+      process.stderr.write(`clearcote: warning: ${e.message.replace(/^geoip: /, "geoip (on by default): ")
+        .replace(/ Launching anyway[\s\S]*$/, "")} Launching with the persona's default timezone and language; ` +
+        "pass geoip: true to fail instead, or geoip: false to skip the lookup.\n");
+    return { autoWebrtcIp: false };
+  }
+}
+
+/**
+ * The open build (no licence) has no WebRTC UDP egress block, and a WebRTC IP there re-enables UDP that
+ * does not go through the proxy: a page's own TURN server would read this machine's real address off the
+ * packets. So a WebRTC IP the DEFAULT lookup filled is dropped again on an open-build launch through a
+ * proxy. With no proxy the real address is the exit anyway; `geoip: true` or an explicit webrtcIp is the
+ * caller's choice and is kept.
+ */
+export function dropAutoWebrtcIp(fp: GeoFillable, applied: GeoipApplied, proxy: unknown, licensed: boolean): void {
+  if (applied.autoWebrtcIp && proxy && !licensed) delete fp.webrtcIp;
 }
 
 /**

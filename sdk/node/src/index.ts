@@ -31,7 +31,7 @@ import type {
 import { makeRecoveredCopy, recoveredExe, removeFailedLaunchDirs } from "./winlaunch.js";
 import { checkInstall, ensureBinary, ensureRunnableHere, ensureVersion, proEnsureBinary, resolvedEngineVersion, resolveReleaseChannel, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
-import { applyGeoip, resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
+import { applyGeoipMode, dropAutoWebrtcIp, geoipMode, resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
 import { defaultColorScheme, engineDecidesColorScheme, installColorSchemeDefault } from "./colorscheme.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeLaunchOptions } from "./humanize.js";
 import { resolveHumanize } from "./hzoptions.js";
@@ -123,7 +123,7 @@ export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
 export { proEnsureBinary, type ProDownloadOptions } from "./download.js";
 export { checkInstall, verifyInstall } from "./download.js";
-export { applyGeoip, resolveGeo, resolveGeoDetailed, geoipTimeoutMs, GeoipError, type Geo, type GeoResult } from "./geoip.js";
+export { applyGeoip, resolveGeo, resolveGeoDetailed, geoipTimeoutMs, geoipMode, GeoipError, type Geo, type GeoResult, type GeoipMode } from "./geoip.js";
 export { proxiedRequest, toProxySpec, type ProxySpec } from "./net.js";
 export { resolveReleaseChannel, type ReleaseChannel } from "./download.js";
 export { isFingerprintPassthrough } from "./fingerprint.js";
@@ -190,8 +190,10 @@ export {
 } from "./license.js";
 export { PersonaServiceError } from "./persona.js";  // r51+: the persona service refused or could not be reached
 
-/** When true (and a proxy is set), resolve the proxy's exit-IP geo and auto-fill any unset
- * `timezone` + `acceptLanguage` (+ `location`) so they match the proxy region. */
+/** On by default (since 0.66.0): resolve the egress geo (the proxy's exit IP, or this machine's own
+ * public IP without a proxy) and fill any unset `timezone`, `acceptLanguage`, `location` and `webrtcIp`
+ * so they match where the connection comes from. Left unset, a failed lookup warns and launches;
+ * `true` fails the launch instead ({@link GeoipError}); `false` (or CLEARCOTE_GEOIP=0) skips it. */
 interface GeoipOption {
   geoip?: boolean;
 }
@@ -1097,7 +1099,9 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
-  const geo = geoip ? await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet) : undefined;
+  // geoip is on by default: the proxy's exit, or this machine's own IP without a proxy (./geoip.ts)
+  const geoApplied = await applyGeoipMode(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, geoipMode(geoip), quiet);
+  const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
   const egressDrift = startEgressDriftCheck((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, geo?.ip ?? undefined, quiet);
   // The binary is resolved before the proxy route is chosen: http(s) credentials go to the
@@ -1109,6 +1113,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   const pro = offline ? undefined : proSelector(licenseKey, licenseApiBase);
   const exe = await executablePath(offline ? { executablePath: exeOption, quiet } : { executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro });  // capability-gated proxy route
   ensureRunnableHere(exe);
+  dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline);  // open build + proxy: no default WebRTC IP
   // Before the warnings below, so they judge the persona that will actually run (as in Python).
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
   // Widevine: on by default for a licensed launch (`pro`: the key that selects the PRO build, which claims
@@ -1234,7 +1239,9 @@ async function launchLocalPersistentContext(
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
-  const geo = geoip ? await applyGeoip(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, quiet) : undefined;
+  // geoip is on by default: the proxy's exit, or this machine's own IP without a proxy (./geoip.ts)
+  const geoApplied = await applyGeoipMode(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, geoipMode(geoip), quiet);
+  const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
   const egressDrift = startEgressDriftCheck((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, geo?.ip ?? undefined, quiet);
   requireOfflineBinary(offlineKey, exeOption);  // offline mode never downloads (./offline.ts)
@@ -1243,6 +1250,7 @@ async function launchLocalPersistentContext(
   const pro = offline ? undefined : proSelector(licenseKey, licenseApiBase);
   const exe = await executablePath(offline ? { executablePath: exeOption, quiet } : { executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro });  // capability-gated proxy route
   ensureRunnableHere(exe);
+  dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline);  // open build + proxy: no default WebRTC IP
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
   const { args: proxyArgs, proxy } = resolveProxy((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
@@ -1566,7 +1574,8 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined;
-  const geo = geoip ? await applyGeoip(fingerprint, proxyOpt, quiet) : undefined;
+  const geoApplied = await applyGeoipMode(fingerprint, proxyOpt, geoipMode(geoip), quiet);  // on by default (./geoip.ts)
+  const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
   const egressDrift = startEgressDriftCheck(proxyOpt, geo?.ip ?? undefined, quiet);
   requireOfflineBinary(offlineKey, exeOption);  // offline mode never downloads (./offline.ts)
@@ -1575,6 +1584,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   const pro = offline ? undefined : proSelector(licenseKey, licenseApiBase);
   const exe = await executablePath(offline ? { executablePath: exeOption, quiet } : { executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro });  // capability-gated proxy route
   ensureRunnableHere(exe);
+  dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline);  // open build + proxy: no default WebRTC IP
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
   // Widevine: as launch() (on by default for a licensed launch on an r32+ engine, opt-in otherwise).
   const widevineCdm = await widevineLaunchArgs(exe, widevine, !!pro, userArgs, { quiet });

@@ -52,7 +52,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
 import { installColorSchemeDefaultConnected } from "./colorscheme.js";
-import { applyGeoip, type GeoFillable } from "./geoip.js";
+import { applyGeoipMode, dropAutoWebrtcIp, geoipMode, type GeoFillable } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext } from "./humanize.js";
 import { STOCK_RUNTIME_SWITCH, stockRuntimeWanted } from "./launchopts.js";
 import { resolveLicenseKey } from "./license.js";
@@ -815,12 +815,14 @@ const GEOIP_FILLED = ["timezone", "acceptLanguage", "location", "webrtcIp"] as c
  * (en-US -> America/New_York). Removes `geoip` from `options`.
  */
 export async function applyGeoipBeforeStart(options: Record<string, unknown>): Promise<void> {
-  const geoip = options.geoip;
+  const mode = geoipMode(options.geoip as boolean | undefined);  // on by default, as a native launch
   delete options.geoip;
-  if (!geoip) return;
+  if (mode === "off") return;
   const fp: GeoFillable = {};
   for (const k of GEOIP_FILLED) if (options[k] != null) (fp as Record<string, unknown>)[k] = options[k];
-  await applyGeoip(fp, options.proxy, !!options.quiet);
+  const applied = await applyGeoipMode(fp, options.proxy, mode, !!options.quiet);
+  // no key = the image's open build, which has no WebRTC UDP egress block (see dropAutoWebrtcIp)
+  dropAutoWebrtcIp(fp, applied, options.proxy, !!resolveLicenseKey(options.licenseKey as string | undefined));
   Object.assign(options, fp);
 }
 
