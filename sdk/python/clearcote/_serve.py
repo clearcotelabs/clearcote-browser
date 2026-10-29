@@ -324,7 +324,9 @@ def _cli_main(argv=None):
     ap.add_argument("--proxy", default=None, help="proxy, e.g. http://user:pass@host:port")
     ap.add_argument("--timezone", default=None, help="IANA timezone, e.g. America/New_York")
     ap.add_argument("--accept-language", dest="accept_language", default=None, help="e.g. en-US,en")
-    ap.add_argument("--geoip", action="store_true", help="derive timezone/locale/WebRTC IP from the proxy exit IP")
+    ap.add_argument("--geoip", action="store_true",
+                    help="fail when the egress region cannot be resolved (geoip is on by default; "
+                         "CLEARCOTE_GEOIP=0 turns it off)")
     ap.add_argument("--executable", default=None, help="path to the clearcote chrome binary (optional; auto-downloaded)")
     a = ap.parse_args(argv)
 

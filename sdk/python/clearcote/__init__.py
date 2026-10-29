@@ -120,7 +120,8 @@ from ._net import proxied_request, to_proxy_spec
 from .download import (
     ensure_binary, list_cached_builds, resolve_release_channel, resolved_engine_version, warm_files,
 )
-from .geoip import GeoipError, geoip_timeout_seconds, resolve_geo, resolve_geo_detailed, warn_on_egress_drift
+from .geoip import (GeoipError, geoip_mode, geoip_timeout_seconds, resolve_geo, resolve_geo_detailed,
+                    warn_on_egress_drift)
 from .release import RELEASE
 from ._serve import Server, serve
 from .cloud import (
@@ -151,6 +152,7 @@ __all__ = [
     "resolve_geo",
     "resolve_geo_detailed",
     "geoip_timeout_seconds",
+    "geoip_mode",
     "GeoipError",
     "proxied_request",
     "to_proxy_spec",
@@ -397,11 +399,11 @@ def _apply_auto_profile(fp, exe, select, quiet=False, pro=None, lease=None):
     # caller against itself on a per-browser plan, and the probe is strictly inside this launch.
     # cloud=False: the probe measures THIS host, whatever CLEARCOTE_CLOUD says.
     # widevine=False: the probe reads GPU + display only; the CDM (on by default for a licensed launch)
-    # would only cost it a fetch.
+    # would only cost it a fetch. geoip=False likewise: the default egress lookup would only cost time.
     host = measure_host(
         lambda **kw: launch(
             license_key=license_key, license_api_base=api_base, ephemeral_profile=False,
-            _cc_lease=lease, cloud=False, docker=False, widevine=False, **kw
+            _cc_lease=lease, cloud=False, docker=False, widevine=False, geoip=False, **kw
         ),
         exe,
         major,
@@ -437,20 +439,22 @@ def _apply_auto_profile(fp, exe, select, quiet=False, pro=None, lease=None):
         )
 
 
-def apply_geoip(fp, proxy, quiet=False):
-    """Fill unset timezone/accept_language/location/webrtc_ip on ``fp`` from the proxy's exit-IP geo.
+def apply_geoip(fp, proxy, quiet=False, timeout=None):
+    """Fill unset timezone/accept_language/location/webrtc_ip on ``fp`` from the proxy's exit-IP geo
+    and return the geo (None when the explicit timezone and accept_language were kept instead).
+    ``timeout`` bounds the lookup in seconds (default :func:`geoip_timeout_seconds`).
 
     FAILS CLOSED: if the region cannot be resolved, raises :class:`GeoipError` instead of
     continuing on the host's clock and a default language (UTC + en-US on most servers) -- the exact
     mismatch geoip exists to prevent. A caller who set BOTH ``timezone`` and ``accept_language``
     explicitly still launches (with a warning), since nothing geoip would fill is missing."""
-    geo, reason, _ms = resolve_geo_detailed(proxy, quiet=quiet)
+    geo, reason, _ms = resolve_geo_detailed(proxy, quiet=quiet, timeout=timeout)
     if not geo or not geo.get("timezone"):
         if fp.get("timezone") and fp.get("accept_language"):
             if not quiet:
                 warnings.warn(f"clearcote: geoip could not resolve the region ({reason}); using the "
                               "explicit timezone and accept_language.", stacklevel=3)
-            return
+            return None
         whose = "proxy's" if proxy else "connection's"
         raise GeoipError(
             f"geoip: could not resolve the {whose} region ({reason}). Launching anyway would use "
@@ -465,6 +469,64 @@ def apply_geoip(fp, proxy, quiet=False):
         fp["webrtc_ip"] = geo["ip"]
     # A rotating proxy changes the exit per connection, making all of the above stale at once.
     warn_on_egress_drift(proxy, geo.get("ip"), quiet=quiet)
+    return geo
+
+
+# The default lookup's budget: CLEARCOTE_GEOIP_TIMEOUT_SECONDS when set, else 10 s (strict keeps 20 s).
+_AUTO_GEOIP_TIMEOUT = 10.0
+# This machine's own egress rarely moves; one lookup serves the process for 10 minutes.
+_DIRECT_GEO_TTL = 600.0
+_direct_geo = None  # (fields, time.monotonic()) of the last no-proxy lookup
+
+
+def _reset_direct_geo_cache():
+    """Tests: forget the cached no-proxy lookup."""
+    global _direct_geo
+    _direct_geo = None
+
+
+def apply_geoip_mode(fp, proxy, mode, quiet=False):
+    """Apply geoip in ``mode`` (see :func:`clearcote.geoip.geoip_mode`) -> ``(geo, auto_webrtc_ip)``,
+    where ``auto_webrtc_ip`` says the WebRTC IP came from the default lookup. "strict" is
+    :func:`apply_geoip`. "auto" skips the lookup when every field it fills is already set, reuses a
+    no-proxy lookup for 10 minutes, and on failure warns once and launches without filling anything."""
+    global _direct_geo
+    if mode == "off":
+        return None, False
+    if mode == "strict":
+        return apply_geoip(fp, proxy, quiet=quiet), False
+    if all(fp.get(k) is not None for k in ("timezone", "accept_language", "location", "webrtc_ip")):
+        return None, False
+    had_webrtc_ip = fp.get("webrtc_ip") is not None
+    direct = not proxy
+    if direct and _direct_geo is not None and time.monotonic() - _direct_geo[1] < _DIRECT_GEO_TTL:
+        for k, v in _direct_geo[0].items():
+            if fp.get(k) is None and v is not None:
+                fp[k] = v
+        return None, not had_webrtc_ip and fp.get("webrtc_ip") is not None
+    env = str(os.environ.get("CLEARCOTE_GEOIP_TIMEOUT_SECONDS") or "").strip()
+    try:
+        geo = apply_geoip(fp, proxy, quiet=quiet, timeout=geoip_timeout_seconds() if env else _AUTO_GEOIP_TIMEOUT)
+    except GeoipError as e:
+        if not quiet and not os.environ.get("CLEARCOTE_NO_WARN"):
+            msg = str(e).replace("geoip: ", "geoip (on by default): ", 1).split(" Launching anyway")[0]
+            sys.stderr.write(f"clearcote: warning: {msg} Launching with the persona's default timezone and "
+                             "language; pass geoip=True to fail instead, or geoip=False to skip the lookup.\n")
+        return None, False
+    if geo and direct:
+        _direct_geo = ({"timezone": geo.get("timezone"), "accept_language": geo.get("accept_language"),
+                        "location": geo.get("location"), "webrtc_ip": geo.get("ip")}, time.monotonic())
+    return geo, not had_webrtc_ip and fp.get("webrtc_ip") is not None
+
+
+def drop_auto_webrtc_ip(fp, applied, proxy, licensed):
+    """The open build (no licence) has no WebRTC UDP egress block, and a WebRTC IP there re-enables UDP
+    that does not go through the proxy: a page's own TURN server would read this machine's real address
+    off the packets. So a WebRTC IP the DEFAULT lookup filled (``applied``: what :func:`apply_geoip_mode`
+    returned) is dropped again on an open-build launch through a proxy. With no proxy the real address
+    is the exit anyway; ``geoip=True`` or an explicit webrtc_ip is the caller's choice and is kept."""
+    if applied[1] and proxy and not licensed:
+        fp.pop("webrtc_ip", None)
 
 
 _REQUEST_ROUTE_KEY = "_cc_request_route"  # _prepare -> the launch: (proxy, proxy_args, quiet) to route
@@ -499,7 +561,7 @@ def _prepare(kwargs):
     if profile is not None and not is_auto:
         for key, value in resolve_profile_options(profile).items():
             kwargs.setdefault(key, value)
-    geoip = kwargs.pop("geoip", False)
+    geoip = kwargs.pop("geoip", None)  # None = on by default (geoip_mode)
     # True | False | "strict" | HumanizeOptions | dict: validated here, before anything is started
     humanize = _hz_normalize(kwargs.pop("humanize", False))
     show_cursor = kwargs.pop("show_cursor", False)
@@ -552,13 +614,16 @@ def _prepare(kwargs):
     direct_launch = kwargs.pop("_cc_direct", False)
     passthrough = is_fingerprint_passthrough(fp.get("fingerprint"))
     proxy_opt = kwargs.get("proxy")  # captured before resolve_proxy rewrites it (for quic + warnings)
-    if geoip:
-        # resolve the proxy's exit-IP geo and fill any UNSET timezone/accept_language/location/
-        # webrtc_ip. Raises GeoipError (before any browser starts) when the region is unresolvable.
-        apply_geoip(fp, kwargs.get("proxy"), quiet=quiet)
+    # geoip is on by default: resolve the egress geo (the proxy's exit, or this machine's own IP
+    # without a proxy) and fill any UNSET timezone/accept_language/location/webrtc_ip. geoip=True
+    # raises GeoipError (before any browser starts) when the region is unresolvable; the default warns.
+    geo_applied = apply_geoip_mode(fp, kwargs.get("proxy"), geoip_mode(geoip), quiet=quiet)
     exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update, pro=_cc_pro, version=version,
                           release_channel=release_channel)
     _guard(exe)
+    # open build + proxy: no default WebRTC IP (offline mode runs the licensed bundle)
+    drop_auto_webrtc_ip(fp, geo_applied, proxy_opt,
+                        bool(_cc_pro) or isinstance(outer_lease, _offline.OfflineLease))
     # profile="auto" -> resolve a REAL captured fingerprint for this host and apply it as
     # fingerprint_profile. Deliberately does NOT set a seed: with no --fingerprint the farbling
     # machinery stays off, which is the whole reason this path survives strict scoring.
@@ -1204,9 +1269,11 @@ def launch(cloud=None, **kwargs):
 
     Fingerprint kwargs: fingerprint, platform, platform_version, brand, brand_version,
     gpu_vendor, gpu_renderer, hardware_concurrency, location, timezone, accept_language,
-    webrtc_ip, disable_gpu_fingerprint. Pass geoip=True to resolve the proxy's exit-IP geo and
-    auto-fill any unset timezone/accept_language/location. Pass license_key=... (or set
-    CLEARCOTE_LICENSE_KEY) to check out a concurrency slot for the PRO engine. ``widevine``: Google's
+    webrtc_ip, disable_gpu_fingerprint. ``geoip`` is on by default (since 0.66.0): the egress geo (the
+    proxy's exit IP, or this machine's own public IP without a proxy) fills any unset
+    timezone/accept_language/location/webrtc_ip. Left unset, a failed lookup warns and launches;
+    ``geoip=True`` raises :class:`GeoipError` instead; ``geoip=False`` (or CLEARCOTE_GEOIP=0) skips
+    it. Pass license_key=... (or set CLEARCOTE_LICENSE_KEY) to check out a concurrency slot for the PRO engine. ``widevine``: Google's
     Widevine CDM, on by default for a licensed launch and opt-in for a free one (see
     :func:`launch_persistent_context`). All other kwargs (headless, proxy, args, timeout, ...) pass
     through to Playwright.

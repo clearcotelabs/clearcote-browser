@@ -16,8 +16,9 @@ Settings:
 * CLEARCOTE_GEOIP_IPAPI=1 -- also ask ip-api.com (exit IP + geo in one call) when the database has
   no answer, e.g. while it is still downloading on first use. Off by default: ip-api.com's free
   endpoint is for non-commercial use only and allows 45 requests a minute per IP.
-* CLEARCOTE_GEOIP_TIMEOUT_SECONDS (default 20) bounds the whole resolution. A lookup that runs out
-  of budget fails rather than hanging a launch.
+* CLEARCOTE_GEOIP_TIMEOUT_SECONDS (default 20; 10 for the default lookup) bounds the whole
+  resolution. A lookup that runs out of budget fails rather than hanging a launch.
+* CLEARCOTE_GEOIP=0 -- turn the default lookup off (see :func:`geoip_mode`).
 """
 
 import json
@@ -89,6 +90,24 @@ def geoip_timeout_seconds(env=None):
     if not math.isfinite(n) or n <= 0:
         return 20.0
     return n
+
+
+# geoip is ON by default (since 0.66.0): with no ``geoip`` option the launch looks the egress up (the
+# proxy's exit, or this machine's own public IP when no proxy is set) so timezone, language, location
+# and the WebRTC IP describe the place sites see the connection come from.
+#   "strict": geoip=True. Fails closed (GeoipError), as before.
+#   "auto":   the default. A lookup that fails warns and launches with the persona's defaults.
+#   "off":    geoip=False, or CLEARCOTE_GEOIP=0/false/no/off (an explicit geoip=True still wins).
+GEOIP_ENV = "CLEARCOTE_GEOIP"
+_GEOIP_ENV_OFF = ("0", "false", "no", "off")
+
+
+def geoip_mode(geoip, env=None):
+    """``"off"`` | ``"auto"`` | ``"strict"`` for a launch's ``geoip`` option (None = the default)."""
+    if geoip is not None:  # any explicit value, as the old `if geoip:` read it
+        return "strict" if geoip else "off"
+    env = os.environ if env is None else env
+    return "off" if str(env.get(GEOIP_ENV) or "").strip().lower() in _GEOIP_ENV_OFF else "auto"
 
 
 class GeoipError(RuntimeError):

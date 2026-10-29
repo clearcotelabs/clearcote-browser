@@ -197,20 +197,25 @@ GEOIP_FILLED = ("timezone", "accept_language", "location", "webrtc_ip")
 
 
 def apply_geoip_before_start(kwargs: dict, quiet=False) -> dict:
-    """``geoip=True`` on the Docker path: resolve the proxy's exit region HERE, before any container
-    starts, and hand the container what it filled (timezone, accept_language, location, webrtc_ip ->
-    the CC_* variables of the same name). The same :func:`clearcote.apply_geoip` as a native launch,
-    so it fails closed the same way: GeoipError and no container when the region is unresolvable;
-    an explicit timezone AND accept_language warn and launch. Without geoip the container's
-    entrypoint builds the persona as a native launch does: Accept-Language defaults to en-US and the
-    timezone follows its primary tag (en-US -> America/New_York; see _fingerprint._default_timezone).
-    Pops ``geoip`` from ``kwargs`` and returns it."""
-    geoip = kwargs.pop("geoip", None)
-    if not geoip:
+    """geoip on the Docker path (on by default, as a native launch): resolve the egress region HERE,
+    before any container starts, and hand the container what it filled (timezone, accept_language,
+    location, webrtc_ip -> the CC_* variables of the same name). The same
+    :func:`clearcote.apply_geoip_mode` as a native launch, so ``geoip=True`` fails closed the same
+    way (GeoipError and no container when the region is unresolvable; an explicit timezone AND
+    accept_language warn and launch) and the default warns and starts the container unfilled. With
+    geoip off the container's entrypoint builds the persona as a native launch does: Accept-Language
+    defaults to en-US and the timezone follows its primary tag (en-US -> America/New_York; see
+    _fingerprint._default_timezone). Pops ``geoip`` from ``kwargs`` and returns it."""
+    from . import apply_geoip_mode, drop_auto_webrtc_ip
+    from ._license import resolve_license_key
+    from .geoip import geoip_mode
+    mode = geoip_mode(kwargs.pop("geoip", None))
+    if mode == "off":
         return kwargs
-    from . import apply_geoip
     fp = {k: kwargs[k] for k in GEOIP_FILLED if kwargs.get(k) is not None}
-    apply_geoip(fp, kwargs.get("proxy"), quiet=quiet)
+    applied = apply_geoip_mode(fp, kwargs.get("proxy"), mode, quiet=quiet)
+    # no key = the image's open build, which has no WebRTC UDP egress block (see drop_auto_webrtc_ip)
+    drop_auto_webrtc_ip(fp, applied, kwargs.get("proxy"), bool(resolve_license_key(kwargs.get("license_key"))))
     kwargs.update(fp)
     return kwargs
 
@@ -926,7 +931,7 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     raises: a browser on the open engine, one sending traffic direct, or one whose every request the proxy
     turns away is never handed back in their place. The container
     carries this process's owner token for sweep_stale()."""
-    apply_geoip_before_start(kwargs, quiet)  # geoip=True: the region first; GeoipError starts nothing
+    apply_geoip_before_start(kwargs, quiet)  # geoip (default on): the region first; GeoipError starts nothing
     env = container_env(kwargs)
     idle = idle_exit_seconds()
     exe, arch = docker_info()

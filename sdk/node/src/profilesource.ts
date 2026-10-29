@@ -160,7 +160,8 @@ export async function measureHost(
   const cached = readCachedHost(exe);
   if (cached) return cached;
 
-  const browser = await launchFn({ executablePath: exe, headless: true, quiet: true });
+  // geoip: false -- the probe measures the host, not the egress; the default lookup would only cost time
+  const browser = await launchFn({ executablePath: exe, headless: true, quiet: true, geoip: false });
   try {
     const ctx = await browser.newContext();
     const page = (await ctx.newPage()) as {
