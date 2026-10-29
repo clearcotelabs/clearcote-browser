@@ -396,6 +396,20 @@ if _stock_runtime:
         print("[clearcote] WARNING: stock_runtime (--disable-runtime-suppression) needs an engine from r32 on; "
               "this engine does not support it, so chrome starts without it.", flush=True)
 
+# --enable-runtime-bindings (engine r54+; the SDKs' runtime_bindings option): only the Runtime.addBinding part of
+# the above, so expose_function()/expose_binding() survive navigation. The same gate; redundant next to it.
+_RUNTIME_BINDINGS = "--enable-runtime-bindings"
+if _RUNTIME_BINDINGS in extra:
+    try:
+        from clearcote._launchopts import engine_supports_switch as _has_switch
+    except ImportError:
+        from proxy_relay import engine_supports_switch as _has_switch
+    if _stock_runtime or not _has_switch(exe, _RUNTIME_BINDINGS[2:]):
+        extra = [a for a in extra if a != _RUNTIME_BINDINGS]
+        if not _stock_runtime:
+            print("[clearcote] WARNING: runtime_bindings (--enable-runtime-bindings) needs an engine from r54 on; "
+                  "this engine does not support it, so chrome starts without it.", flush=True)
+
 # Same discipline as the SDK's _geometry.caller_sized_the_window: ANY window/screen switch the
 # caller wrote themselves means hands off the entire block. Half-honouring it -- their window inside
 # our claimed screen, or our window inside their claimed screen -- rebuilds the very contradiction
@@ -794,6 +808,7 @@ _applied = {
     "sandbox": sandbox,
     "persona_env": _persona_env,  # 1021: the persona travels in the environment, not on chrome's command line
     "stock_runtime": _stock_runtime,  # r32: --disable-runtime-suppression is on chrome's command line
+    "runtime_bindings": _RUNTIME_BINDINGS in extra,  # r54: --enable-runtime-bindings is on chrome's command line
 }
 print("[clearcote] serve-state %s" % json.dumps(_applied, sort_keys=True), flush=True)
 

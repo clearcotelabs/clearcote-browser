@@ -128,7 +128,7 @@ _BOOL_ENV = {
 }
 # Handled specially below, or on this side of the connection.
 _SPECIAL = ("location", "fingerprint_profile", "headless", "proxy", "args", "license_key", "license_api_base",
-            "persona_env", "stock_runtime", "geoip")
+            "persona_env", "stock_runtime", "runtime_bindings", "geoip")
 SDK_SIDE = ("timeout", "slow_mo", "humanize", "show_cursor", "quiet", "docker", "docker_image",
             "ephemeral_profile")
 ACCEPTED = tuple(_STR_ENV) + tuple(_INT_ENV) + tuple(_FLOAT_ENV) + tuple(_BOOL_ENV) + _SPECIAL + SDK_SIDE
@@ -273,6 +273,10 @@ def container_env(kwargs: dict) -> dict:
     from ._launchopts import STOCK_RUNTIME_SWITCH, stock_runtime_wanted
     if stock_runtime_wanted(kwargs.get("stock_runtime")) and STOCK_RUNTIME_SWITCH not in [str(a) for a in args]:
         args.append(STOCK_RUNTIME_SWITCH)
+    # runtime_bindings (engine r54+) the same way; the entrypoint drops it where stock_runtime already restores it.
+    from ._launchopts import RUNTIME_BINDINGS_SWITCH, runtime_bindings_wanted
+    if runtime_bindings_wanted(kwargs.get("runtime_bindings")) and RUNTIME_BINDINGS_SWITCH not in [str(a) for a in args]:
+        args.append(RUNTIME_BINDINGS_SWITCH)
     if args:
         env["CC_EXTRA_ARGS"] = " ".join(str(a) for a in args)
     from ._license import resolve_license_key
