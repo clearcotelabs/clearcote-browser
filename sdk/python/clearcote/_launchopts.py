@@ -287,6 +287,78 @@ def relay_proxy_by_ip(proxy, socks5_udp, quiet=False, lookup=_lookup_ipv4):
     return {**proxy, "server": m.group(1) + at + ip + hostport[len(host):] + m.group(3)}
 
 
+_SOCKS5_REPLIES = {1: "general failure", 2: "not allowed by the proxy's rules", 3: "network unreachable",
+                   4: "host unreachable", 5: "connection refused", 6: "TTL expired", 7: "command not supported",
+                   8: "address type not supported"}
+
+
+def socks5_udp_refused(proxy, timeout=6.0):
+    """Asks a ``socks5://`` proxy for a UDP association (RFC 1928 section 7) and reads its answer: the reason
+    when the proxy refuses the ASSOCIATE command, ``None`` otherwise. Only a clear refusal counts: no
+    answer, a network error, or a login the proxy rejects (a launch problem of its own) all return ``None``."""
+    import socket
+    if not isinstance(proxy, dict):
+        return None
+    m = re.match(r"^socks5h?://(?:([^@/?#]*)@)?([^/?#]+)", (proxy.get("server") or "").strip(), re.I)
+    if not m:
+        return None
+    hostport = m.group(2)
+    v6 = re.match(r"^\[([^\]]+)\](?::(\d+))?$", hostport)
+    if v6:
+        host, port = v6.group(1), int(v6.group(2) or 1080)
+    else:
+        host, _, p = hostport.rpartition(":") if ":" in hostport else (hostport, "", "")
+        port = int(p) if p else 1080
+    url_user, _, url_pass = (m.group(1) or "").partition(":")
+    user = proxy.get("username") if proxy.get("username") is not None else unquote(url_user)
+    password = proxy.get("password") if proxy.get("password") is not None else unquote(url_pass)
+
+    def read(s, n):
+        b = b""
+        while len(b) < n:
+            chunk = s.recv(n - len(b))
+            if not chunk:
+                raise OSError("closed")
+            b += chunk
+        return b
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.sendall(bytes([5, 2, 0, 2]) if (user or password) else bytes([5, 1, 0]))
+            method = read(s, 2)[1]
+            if method == 2:
+                u, pw = (user or "").encode(), (password or "").encode()
+                s.sendall(bytes([1, len(u)]) + u + bytes([len(pw)]) + pw)
+                if read(s, 2)[1] != 0:
+                    return None
+            elif method != 0:
+                return None
+            s.sendall(bytes([5, 3, 0, 1, 0, 0, 0, 0, 0, 0]))
+            rep = read(s, 2)[1]
+    except (OSError, ValueError):
+        return None
+    return None if rep == 0 else "reply %d, %s" % (rep, _SOCKS5_REPLIES.get(rep, "unknown"))
+
+
+def udp_relay_or_fallback(proxy, socks5_udp, quiet=False, probe=socks5_udp_refused):
+    """With ``socks5_udp=True`` and a ``socks5://`` proxy, whether this launch keeps the UDP relay. The proxy
+    is asked for a UDP association before the browser starts; a proxy that refuses it (common among cheap
+    residential pools) gets no relay, with a warning, so the browser runs as without ``socks5_udp`` (WebRTC's
+    public address filled in, HTTP/3 off) instead of with a relay that closes every UDP socket at once.
+    Asking first also pins a sticky session to its UDP-capable exit before geoip looks the exit up:
+    residential vendors move the session at its first association (CR-LYJSFW)."""
+    if socks5_udp is not True or not isinstance(proxy, dict) or \
+            not re.match(r"^socks5h?://", (proxy.get("server") or "").strip(), re.I):
+        return socks5_udp
+    refused = probe(proxy)
+    if not refused:
+        return True
+    if not quiet and not os.environ.get("CLEARCOTE_NO_WARN"):
+        warnings.warn("clearcote: socks5_udp: the proxy refused a UDP association (%s), so UDP is not relayed on this "
+                      "launch: WebRTC and HTTP/3 behave as without socks5_udp. Use a proxy plan that carries UDP."
+                      % refused, stacklevel=3)
+    return False
+
+
 def socks5_udp_args(socks5_udp, proxy):
     """Carry WebRTC's UDP through the SOCKS5 proxy with UDP ASSOCIATE (RFC 1928 section 7) instead
     of letting it egress on the host's own path.

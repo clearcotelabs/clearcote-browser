@@ -190,6 +190,88 @@ public static class LaunchOpts
 
     private static readonly Regex Socks5Url = new(@"^(socks5h?://)([^/?#]*)(.*)$", RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
+    private static readonly Dictionary<int, string> Socks5Replies = new()
+    {
+        [1] = "general failure", [2] = "not allowed by the proxy's rules", [3] = "network unreachable", [4] = "host unreachable",
+        [5] = "connection refused", [6] = "TTL expired", [7] = "command not supported", [8] = "address type not supported",
+    };
+
+    /// Asks a <c>socks5://</c> proxy for a UDP association (RFC 1928 section 7) and reads its answer: the reason when
+    /// the proxy refuses the ASSOCIATE command, null otherwise. Only a clear refusal counts: no answer, a network
+    /// error, or a login the proxy rejects (a launch problem of its own) all return null.
+    public static async Task<string?> Socks5UdpRefusedAsync(ProxyOptions? proxy, int timeoutMs = 6000)
+    {
+        var m = Regex.Match((proxy?.Server ?? "").Trim(), @"^socks5h?://(?:([^@/?#]*)@)?([^/?#]+)", RegexOptions.IgnoreCase);
+        if (!m.Success) return null;
+        var hostport = m.Groups[2].Value;
+        var v6 = Regex.Match(hostport, @"^\[([^\]]+)\](?::(\d+))?$");
+        string host; int port;
+        if (v6.Success) { host = v6.Groups[1].Value; port = v6.Groups[2].Success ? int.Parse(v6.Groups[2].Value) : 1080; }
+        else
+        {
+            var colon = hostport.LastIndexOf(':');
+            host = colon < 0 ? hostport : hostport.Substring(0, colon);
+            port = colon < 0 ? 1080 : int.Parse(hostport.Substring(colon + 1));
+        }
+        var urlInfo = m.Groups[1].Success ? m.Groups[1].Value.Split(new[] { ':' }, 2) : Array.Empty<string>();
+        var user = proxy?.Username ?? (urlInfo.Length > 0 ? Uri.UnescapeDataString(urlInfo[0]) : "");
+        var pass = proxy?.Password ?? (urlInfo.Length > 1 ? Uri.UnescapeDataString(urlInfo[1]) : "");
+        try
+        {
+            using var cts = new System.Threading.CancellationTokenSource(timeoutMs);
+            using var tcp = new System.Net.Sockets.TcpClient();
+            await tcp.ConnectAsync(host, port, cts.Token).ConfigureAwait(false);
+            var s = tcp.GetStream();
+            async Task<byte[]> Read(int n)
+            {
+                var b = new byte[n];
+                for (var got = 0; got < n;)
+                {
+                    var r = await s.ReadAsync(b.AsMemory(got, n - got), cts.Token).ConfigureAwait(false);
+                    if (r == 0) throw new System.IO.IOException("closed");
+                    got += r;
+                }
+                return b;
+            }
+            var login = user.Length > 0 || pass.Length > 0;
+            await s.WriteAsync(login ? new byte[] { 5, 2, 0, 2 } : new byte[] { 5, 1, 0 }, cts.Token).ConfigureAwait(false);
+            var method = (await Read(2).ConfigureAwait(false))[1];
+            if (method == 2)
+            {
+                var u = System.Text.Encoding.UTF8.GetBytes(user); var p = System.Text.Encoding.UTF8.GetBytes(pass);
+                var auth = new List<byte> { 1, (byte)u.Length }; auth.AddRange(u); auth.Add((byte)p.Length); auth.AddRange(p);
+                await s.WriteAsync(auth.ToArray(), cts.Token).ConfigureAwait(false);
+                if ((await Read(2).ConfigureAwait(false))[1] != 0) return null;
+            }
+            else if (method != 0) return null;
+            await s.WriteAsync(new byte[] { 5, 3, 0, 1, 0, 0, 0, 0, 0, 0 }, cts.Token).ConfigureAwait(false);
+            var rep = (await Read(2).ConfigureAwait(false))[1];
+            return rep == 0 ? null : $"reply {rep}, {(Socks5Replies.TryGetValue(rep, out var why) ? why : "unknown")}";
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// With <c>Socks5Udp</c> and a <c>socks5://</c> proxy, whether this launch keeps the UDP relay. The proxy is
+    /// asked for a UDP association before the browser starts; a proxy that refuses it (common among cheap
+    /// residential pools) gets no relay, with a warning, so the browser runs as without <c>Socks5Udp</c> (WebRTC's
+    /// public address filled in, HTTP/3 off) instead of with a relay that closes every UDP socket at once. Asking
+    /// first also pins a sticky session to its UDP-capable exit before geoip looks the exit up: residential vendors
+    /// move the session at its first association (CR-LYJSFW).
+    public static async Task<bool> UdpRelayOrFallbackAsync(ProxyOptions? proxy, bool socks5Udp, bool quiet = false,
+        Func<ProxyOptions?, Task<string?>>? probe = null)
+    {
+        if (!socks5Udp || !Regex.IsMatch((proxy?.Server ?? "").Trim(), @"^socks5h?://", RegexOptions.IgnoreCase)) return socks5Udp;
+        var refused = await (probe ?? (px => Socks5UdpRefusedAsync(px)))(proxy).ConfigureAwait(false);
+        if (refused is null) return true;
+        if (!quiet && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLEARCOTE_NO_WARN")))
+            Console.Error.WriteLine($"clearcote: warning: socks5Udp: the proxy refused a UDP association ({refused}), so UDP is " +
+                                    "not relayed on this launch: WebRTC and HTTP/3 behave as without Socks5Udp. Use a proxy plan that carries UDP.");
+        return false;
+    }
+
     /// With socks5Udp and a socks5:// proxy given by host name, the same proxy with that name looked up to an
     /// IPv4 address. The engine relays UDP (WebRTC, and HTTP/3 on PRO r54+) only through a proxy given as an
     /// IP address: it opens the UDP association without a host lookup of its own, so a provider gateway given

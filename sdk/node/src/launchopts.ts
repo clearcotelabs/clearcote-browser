@@ -271,6 +271,74 @@ export async function relayProxyByIp(
   }
 }
 
+const SOCKS5_REPLIES: Record<number, string> = {
+  1: "general failure", 2: "not allowed by the proxy's rules", 3: "network unreachable", 4: "host unreachable",
+  5: "connection refused", 6: "TTL expired", 7: "command not supported", 8: "address type not supported",
+};
+
+/** Asks a `socks5://` proxy for a UDP association (RFC 1928 §7) and reads its answer: the reason when
+ * the proxy refuses the ASSOCIATE command, `null` otherwise. Only a clear refusal counts: no answer, a
+ * network error, or a login the proxy rejects (a launch problem of its own) all return `null`. */
+export async function socks5UdpRefused(proxy: PwProxy | undefined, timeoutMs = 6000): Promise<string | null> {
+  const m = /^socks5h?:\/\/(?:([^@/?#]*)@)?([^/?#]+)/i.exec((proxy?.server ?? "").trim());
+  if (!m) return null;
+  const hostport = m[2];
+  const v6 = /^\[([^\]]+)\](?::(\d+))?$/.exec(hostport);
+  const colon = hostport.lastIndexOf(":");
+  const host = v6 ? v6[1] : colon < 0 ? hostport : hostport.slice(0, colon);
+  const port = Number(v6 ? v6[2] ?? 1080 : colon < 0 ? 1080 : hostport.slice(colon + 1));
+  const [urlUser, urlPass] = m[1] ? m[1].split(":").map((s) => decodeURIComponent(s)) : [];
+  const user = proxy?.username ?? urlUser ?? "";
+  const pass = proxy?.password ?? urlPass ?? "";
+  const { Socket } = await import("node:net");
+  return await new Promise<string | null>((resolve) => {
+    const sock = new Socket();
+    let buf = Buffer.alloc(0);
+    let step = 0;
+    const done = (r: string | null) => { sock.destroy(); resolve(r); };
+    sock.setTimeout(timeoutMs, () => done(null));
+    sock.on("error", () => done(null));
+    const associate = () => { step = 2; sock.write(Buffer.from([5, 3, 0, 1, 0, 0, 0, 0, 0, 0])); };
+    sock.on("data", (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (buf.length < 2) return;
+      const b = buf; buf = Buffer.alloc(0);
+      if (step === 0) {
+        if (b[1] === 0) return associate();
+        if (b[1] !== 2) return done(null);
+        const u = Buffer.from(user), p = Buffer.from(pass);
+        step = 1;
+        sock.write(Buffer.concat([Buffer.from([1, u.length]), u, Buffer.from([p.length]), p]));
+      } else if (step === 1) {
+        return b[1] === 0 ? associate() : done(null);
+      } else {
+        done(b[1] === 0 ? null : `reply ${b[1]}, ${SOCKS5_REPLIES[b[1]] ?? "unknown"}`);
+      }
+    });
+    sock.connect(port, host, () => sock.write(Buffer.from(user || pass ? [5, 2, 0, 2] : [5, 1, 0])));
+  });
+}
+
+/** With `socks5Udp` and a `socks5://` proxy, whether this launch keeps the UDP relay. The proxy is asked
+ * for a UDP association before the browser starts; a proxy that refuses it (common among cheap
+ * residential pools) gets no relay, with a warning, so the browser runs as without `socks5Udp` (WebRTC's
+ * public address filled in, HTTP/3 off) instead of with a relay that closes every UDP socket at once.
+ * Asking first also pins a sticky session to its UDP-capable exit before geoip looks the exit up:
+ * residential vendors move the session at its first association (CR-LYJSFW). */
+export async function udpRelayOrFallback(
+  proxy: PwProxy | undefined,
+  socks5Udp: boolean | undefined,
+  quiet?: boolean,
+  probe: (proxy: PwProxy | undefined) => Promise<string | null> = socks5UdpRefused,
+): Promise<boolean | undefined> {
+  if (socks5Udp !== true || !/^socks5h?:\/\//i.test((proxy?.server ?? "").trim())) return socks5Udp;
+  const refused = await probe(proxy);
+  if (!refused) return true;
+  warnOnce("socks5-udp-refused", `socks5Udp: the proxy refused a UDP association (${refused}), so UDP is not ` +
+    "relayed on this launch: WebRTC and HTTP/3 behave as without socks5Udp. Use a proxy plan that carries UDP.", quiet);
+  return false;
+}
+
 /** Default WebRTC to disable_non_proxied_udp, so no UDP can egress around the proxy.
  *
  * This used to be skipped whenever `webrtcIp` was set, on the theory that the engine's srflx

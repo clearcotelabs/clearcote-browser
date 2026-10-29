@@ -11,6 +11,8 @@ import {
   privacySandboxArgs,
   quicArgs,
   relayProxyByIp,
+  socks5UdpRefused,
+  udpRelayOrFallback,
   socks5UdpArgs,
   webrtcDefaultDenyArgs,
 } from "../src/launchopts.js";
@@ -564,5 +566,72 @@ describe("relayProxyByIp", () => {
   it("keeps the name when it does not resolve", async () => {
     const bad = { server: "socks5://nope.invalid:1080" };
     expect(await relayProxyByIp(bad, true, true, lookup)).toBe(bad);
+  });
+});
+
+// A local SOCKS5 server that answers the greeting, an optional login, and UDP ASSOCIATE with `rep`.
+async function fakeSocks5(rep: number, login = false): Promise<{ server: string; seen: string[]; close: () => void }> {
+  const { createServer } = await import("node:net");
+  const seen: string[] = [];
+  const srv = createServer((c) => {
+    let step = 0;
+    c.on("data", (d) => {
+      if (step === 0) { step = login ? 1 : 2; c.write(Buffer.from([5, login ? 2 : 0])); return; }
+      if (step === 1) {
+        const u = d.subarray(2, 2 + d[1]).toString(); const p = d.subarray(3 + d[1], 3 + d[1] + d[2 + d[1]]).toString();
+        seen.push(`login ${u}:${p}`); step = 2; c.write(Buffer.from([1, 0])); return;
+      }
+      seen.push(`cmd ${d[1]}`);
+      c.write(Buffer.from([5, rep, 0, 1, 127, 0, 0, 1, 0x30, 0x39]));
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+  const port = (srv.address() as { port: number }).port;
+  return { server: `socks5://127.0.0.1:${port}`, seen, close: () => srv.close() };
+}
+
+describe("socks5UdpRefused", () => {
+  it("names the refusal when the proxy answers UDP ASSOCIATE with an error", async () => {
+    const f = await fakeSocks5(2);
+    try {
+      expect(await socks5UdpRefused({ server: f.server })).toBe("reply 2, not allowed by the proxy's rules");
+      expect(f.seen).toEqual(["cmd 3"]);
+    } finally { f.close(); }
+  });
+
+  it("is null when the proxy grants the association, logging in with the proxy's credentials", async () => {
+    const f = await fakeSocks5(0, true);
+    try {
+      expect(await socks5UdpRefused({ server: f.server, username: "u-1", password: "p:2" })).toBeNull();
+      expect(f.seen).toEqual(["login u-1:p:2", "cmd 3"]);
+    } finally { f.close(); }
+  });
+
+  it("is null when nothing answers (not a refusal)", async () => {
+    expect(await socks5UdpRefused({ server: "socks5://127.0.0.1:9" }, 2000)).toBeNull();
+  });
+});
+
+describe("udpRelayOrFallback", () => {
+  afterEach(() => vi.restoreAllMocks());
+  const px = { server: "socks5://203.0.113.5:1080" };
+
+  it("keeps the relay when the proxy does not refuse", async () => {
+    expect(await udpRelayOrFallback(px, true, true, async () => null)).toBe(true);
+  });
+
+  it("drops the relay, with one warning, when the proxy refuses", async () => {
+    const warn = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    expect(await udpRelayOrFallback(px, true, false, async () => "reply 2, not allowed")).toBe(false);
+    const said = warn.mock.calls.map((c) => String(c[0])).join(" ");
+    expect(said).toContain("refused a UDP association (reply 2, not allowed)");
+  });
+
+  it("asks nothing without socks5Udp or without a socks5 proxy", async () => {
+    const probe = vi.fn(async () => "refused");
+    expect(await udpRelayOrFallback(px, false, true, probe)).toBe(false);
+    expect(await udpRelayOrFallback(px, undefined, true, probe)).toBeUndefined();
+    expect(await udpRelayOrFallback({ server: "http://203.0.113.5:8080" }, true, true, probe)).toBe(true);
+    expect(probe).not.toHaveBeenCalled();
   });
 });

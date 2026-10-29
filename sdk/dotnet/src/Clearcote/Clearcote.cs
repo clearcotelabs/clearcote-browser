@@ -653,6 +653,9 @@ public static partial class Clearcote
         var copy = (T)options.Clone();
         // LocalProfile = a saved persona: its options fill what the caller left unset ("auto" waits for the binary).
         ProfileOptionsMap.MergeSaved(copy);
+        // Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (LaunchOpts.UdpRelayOrFallbackAsync), asked before
+        // geoip so a sticky session is already on its UDP-capable exit when geoip looks the exit up.
+        copy.Socks5Udp = await LaunchOpts.UdpRelayOrFallbackAsync(copy.Proxy, copy.Socks5Udp, copy.Quiet).ConfigureAwait(false);
         // geoip is on by default: the proxy's exit, or this machine's own IP without a proxy (GeoIp.Mode).
         var geo = await GeoIp.ApplyModeAsync(copy, copy.Proxy, GeoIp.Mode(copy.Geoip), copy.Quiet).ConfigureAwait(false);
         return (copy, geo.EgressDrift, geo);

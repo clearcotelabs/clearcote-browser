@@ -56,6 +56,7 @@ import {
   quicArgs,
   relayProxyByIp,
   socks5UdpArgs,
+  udpRelayOrFallback,
   webBluetoothArgs,
   webrtcDefaultDenyArgs,
   webrtcDirectStunArgs,
@@ -1109,7 +1110,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // profile= a saved persona: its options are the base, explicit options override. ("auto" is
   // resolved later, once the executable is known.)
   const merged = mergeSavedProfile(options);
-  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, crlset, crlsetTimeout, version, licenseKey, licenseApiBase, licenseThroughProxy, offlineKey, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, runtimeBindings, ...rest } = merged;
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp: socks5UdpOpt, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, crlset, crlsetTimeout, version, licenseKey, licenseApiBase, licenseThroughProxy, offlineKey, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, runtimeBindings, ...rest } = merged;
   // incognito has no profile to seed a CRLSet into (see ./crlset.ts): drop the options, warn if asked for
   if (crlset !== undefined && crlset !== null && crlset !== false) {
     process.stderr.write("clearcote: crlset: ephemeralProfile: false has no profile to seed a CRLSet into; launching without one\n");
@@ -1121,6 +1122,9 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
   // geoip is on by default: the proxy's exit, or this machine's own IP without a proxy (./geoip.ts)
+  // Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udpRelayOrFallback), asked before geoip so a
+  // sticky session is already on its UDP-capable exit when geoip looks the exit up.
+  const socks5Udp = await udpRelayOrFallback((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, socks5UdpOpt, quiet);
   const geoApplied = await applyGeoipMode(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, geoipMode(geoip), quiet);
   const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
@@ -1256,13 +1260,16 @@ async function launchLocalPersistentContext(
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
   const merged = mergeSavedProfile(options);
-  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, crlset, crlsetTimeout, version, licenseKey, licenseApiBase, licenseThroughProxy, offlineKey, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, runtimeBindings, ...rest } = merged;
+  const { profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp: socks5UdpOpt, encryptionKey, disablePrivacySandbox, executablePath: exeOption, args, geoip, humanize, showCursor, autoUpdate, cacheDir, quiet, widevine, crlset, crlsetTimeout, version, licenseKey, licenseApiBase, licenseThroughProxy, offlineKey, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, runtimeBindings, ...rest } = merged;
   resolveHumanize(humanize); // true | "strict" | HumanizeOptions: an unknown option throws before anything starts
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy;  // captured before resolveProxy drops it
   // geoip is on by default: the proxy's exit, or this machine's own IP without a proxy (./geoip.ts)
+  // Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udpRelayOrFallback), asked before geoip so a
+  // sticky session is already on its UDP-capable exit when geoip looks the exit up.
+  const socks5Udp = await udpRelayOrFallback((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, socks5UdpOpt, quiet);
   const geoApplied = await applyGeoipMode(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, geoipMode(geoip), quiet);
   const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
@@ -1592,13 +1599,16 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   // Build the same stealth arg set as launch(), then launch the binary ourselves.
   const merged = mergeSavedProfile(launchOpts);
   const {
-    profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
+    profile, profileSelect, extensions, portableProfile, shaderDialect, personaEnv, fontDirs, socks5Udp: socks5UdpOpt, encryptionKey, disablePrivacySandbox, executablePath: exeOption,
     args: userArgs, geoip, autoUpdate, cacheDir, quiet, widevine, version, licenseKey, licenseApiBase, licenseThroughProxy, offlineKey, releaseChannel, allowThirdPartyCookies, transparentProxy, stockRuntime, runtimeBindings, ...rest
   } = merged;
   const { fingerprint, rest: afterFp } = splitFingerprintOptions(rest);
   const { agent, rest: pwOptions } = splitAgentOptions(afterFp);
   const fontDirList = checkFontDirs(fontDirs);  // Linux fontconfig dirs: a typo throws before the lease
   const proxyOpt = (pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined;
+  // Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udpRelayOrFallback), asked before geoip so a
+  // sticky session is already on its UDP-capable exit when geoip looks the exit up.
+  const socks5Udp = await udpRelayOrFallback(proxyOpt as PwProxy | undefined, socks5UdpOpt, quiet);
   const geoApplied = await applyGeoipMode(fingerprint, proxyOpt, geoipMode(geoip), quiet);  // on by default (./geoip.ts)
   const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.

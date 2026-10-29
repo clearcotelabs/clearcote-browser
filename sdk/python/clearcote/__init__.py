@@ -75,6 +75,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     quic_args,
     relay_proxy_by_ip,
     socks5_udp_args,
+    udp_relay_or_fallback,
     resolve_proxy,
     runtime_bindings_args,
     stock_runtime_args,
@@ -653,6 +654,9 @@ def _prepare(kwargs):
     # geoip is on by default: resolve the egress geo (the proxy's exit, or this machine's own IP
     # without a proxy) and fill any UNSET timezone/accept_language/location/webrtc_ip. geoip=True
     # raises GeoipError (before any browser starts) when the region is unresolvable; the default warns.
+    # Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udp_relay_or_fallback), asked before geoip
+    # so a sticky session is already on its UDP-capable exit when geoip looks the exit up.
+    socks5_udp = udp_relay_or_fallback(kwargs.get("proxy"), socks5_udp, quiet)
     geo_applied = apply_geoip_mode(fp, kwargs.get("proxy"), geoip_mode(geoip), quiet=quiet)
     exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update, pro=_cc_pro, version=version,
                           release_channel=release_channel)
