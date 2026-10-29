@@ -34,6 +34,7 @@ from ._humanize import (
 )
 from ._isolated import (
     ACTIVE_FIELD as ISO_ACTIVE_FIELD, ACTIVE_VALUE as ISO_ACTIVE_VALUE, COVER_CHECK_MS, COVER_RETRY_MS,
+    COVER as ISO_COVER, SETTLE_MS, SETTLE_TRIES,
     CSS_BOX as ISO_CSS_BOX, DESCRIBE as ISO_DESCRIBE, FORM_CONTROL, HIT_IN_BOX as ISO_HIT_IN_BOX,
     FRAMES as ISO_FRAMES, LABEL_BY_SEL as ISO_LABEL_BY_SEL, LABEL_OF as ISO_LABEL_OF,
     LISTBOX_ROW as ISO_LISTBOX_ROW, SCROLL_BY as ISO_SCROLL_BY,
@@ -2578,6 +2579,61 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
             hit = await _hit_in_box(box, x, y, sel)
         return hit
 
+    def _same_box(a, b):
+        return (abs(a["x"] - b["x"]) <= 1 and abs(a["y"] - b["y"]) <= 1
+                and abs(a["width"] - b["width"]) <= 1 and abs(a["height"] - b["height"]) <= 1)
+
+    async def _settled_box(loc, timeout, selector):
+        """The element's box once it has stopped moving (two reads ~100 ms apart within 1 px, for up to
+        SETTLE_MS), read like _box_of, with the wheel; None when it never settles or has no box. See
+        _humanize._settled_box."""
+        clock = asyncio.get_running_loop().time
+        deadline = clock() + SETTLE_MS / 1000.0
+        prev = await _box_of(loc, timeout, False, selector)
+        while prev and clock() < deadline:
+            await asyncio.sleep(0.1)
+            nxt = await _box_of(loc, timeout, False, selector)
+            if not nxt:
+                return None
+            if _same_box(prev, nxt):
+                return nxt
+            prev = nxt
+        return None
+
+    async def _uncover(box, x, y):
+        """Uncover a target that is not moving yet fails the hit test (r53 /audit, seed 2, 2026-10-28):
+        glide off a cover the pointer rests on (a hover menu it opened), or wheel the target out from
+        under a fixed or sticky bar. True when it did one of them. See _humanize._uncover."""
+        c = await async_world_for(page).evaluate(ISO_COVER, {"x": x, "y": y, "b": {
+            "x": box["x"], "y": box["y"], "width": box["width"], "height": box["height"]}})
+        if not isinstance(c, dict) or not isinstance(c.get("rect"), list) or len(c["rect"]) != 4:
+            return False
+        cx, cy, cw, ch = (float(v) for v in c["rect"])
+        vw, vh = await _viewport()
+        px, py = st["pos"]
+        if cx <= px <= cx + cw and cy <= py <= cy + ch:
+            # Off its edge by 6-80 px where the viewport has room (a mega menu can leave only a strip),
+            # below first.
+            room_below, room_above = vh - 4 - (cy + ch + 6), cy - 6 - 4
+            if room_below >= 0:
+                ty = cy + ch + 6 + _rand(0, min(74, room_below))
+            elif room_above >= 0:
+                ty = cy - 6 - _rand(0, min(74, room_above))
+            else:
+                return False
+            tx = min(vw - 8, max(8, box["x"] + box["width"] / 2 + _rand(-60, 60)))
+            await _glide(tx, ty)
+            await asyncio.sleep(_rand(250, 450) / 1000.0)   # a hover menu's close transition
+            return True
+        # A cover filling most of the viewport is a modal or a cookie wall, not a bar to scroll out from under.
+        if c.get("fixed") and cw * ch <= 0.8 * vw * vh:
+            dy = box["y"] + box["height"] / 2 - vh * _rand(0.3, 0.5)
+            if abs(dy) < 1:
+                return False
+            await hwheel(0, dy)   # the internal wheel: the click already holds the lock
+            return True
+        return False
+
     async def _position_point(box, o):
         """The viewport point of Playwright's `position` (relative to the PADDING box)."""
         info = await _describe(box, None)
@@ -2657,24 +2713,46 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
             box = await _box_of(loc, timeout, o["force"], selector)
             if not box:
                 raise _Native("the element has no box")
-            aim.append((box["x"] + box["width"] / 2, box["y"] + box["height"] / 2))
             if not o["force"] and not await loc.is_enabled():
                 raise _Native("the element is not enabled")
-            if o["position"]:
-                x, y = await _position_point(box, o)
-                aim.append((x, y))
-            else:
-                x, y = click_point(box, st["pos"], persona)
-            # Whole pixels: the hit test below answers for the pixel DOM.getNodeForLocation rounds to,
-            # so the press goes to that pixel too. A press at 971.6 next to a badge ending at 972 was
-            # proven at 972 and landed on the badge, reported as a success (verifier B, SC 210).
-            x, y = float(round(x)), float(round(y))
+
+            async def aim_at(b):
+                aim.append((b["x"] + b["width"] / 2, b["y"] + b["height"] / 2))
+                if o["position"]:
+                    px, py = await _position_point(b, o)
+                    aim.append((px, py))
+                else:
+                    px, py = click_point(b, st["pos"], persona)
+                # Whole pixels: the hit test below answers for the pixel DOM.getNodeForLocation rounds
+                # to, so the press goes to that pixel too. A press at 971.6 next to a badge ending at 972
+                # was proven at 972 and landed on the badge, reported as a success (verifier B, SC 210).
+                return float(round(px)), float(round(py))
+
+            x, y = await aim_at(box)
             if not o["force"] and orig is not None:
                 # Stability, then covered-by: 50 ms on, the element must still fill `box` (an
                 # animation in flight does not) and own the click point -- no trusted press at a
                 # point some overlay owns. Either failing goes native: Playwright waits for it.
                 await asyncio.sleep(0.05)
                 hit = await _reaches_point(box, x, y, selector)
+                # A target still moving (a scroll settling, a layout shift) is re-aimed at the box it
+                # settles at, and a covered one is uncovered first (_uncover), rather than handing the
+                # click to Playwright (see _humanize._targeted_click); what stays covered is handled below.
+                tries = 0
+                while hit is False and tries < SETTLE_TRIES:
+                    tries += 1
+                    nxt = await _settled_box(loc, timeout, selector)
+                    if not nxt:
+                        break
+                    if _same_box(nxt, box):
+                        if not await _uncover(nxt, x, y):
+                            break
+                        nxt = await _settled_box(loc, timeout, selector)
+                        if not nxt:
+                            break
+                    box = nxt
+                    x, y = await aim_at(box)
+                    hit = await _reaches_point(box, x, y, selector)
                 if hit is False and not o["position"]:
                     # The persona's point is covered (a badge, an icon, a floating label over the
                     # centre). Before giving the click to Playwright -- which waited out its timeout on

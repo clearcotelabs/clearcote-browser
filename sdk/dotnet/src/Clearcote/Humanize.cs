@@ -354,6 +354,10 @@ public static partial class Humanize
 
     // How long a covered click point is re-checked (an overlay fading out) before the native path takes over.
     internal const float CoverCheckMs = 400;
+    // How long a click waits for a target that is still moving (a scroll settling, a layout shift) to stop before
+    // it re-aims; and how many times it re-aims before the native path takes over.
+    internal const int SettleMs = 1500;
+    internal const int SettleTries = 3;
     // The timeout of the utility-world value reads that prove a fill landed. (It was also the one longer look
     // of the Playwright trial that checked a point inside a child frame; no Playwright trial runs in humanized
     // mode any more: such a point is answered by its <iframe> element, see IsolatedWorld.NodeAtAsync.)
@@ -788,23 +792,26 @@ public static partial class Humanize
             else if (!o.Force && !await loc.IsEnabledAsync().ConfigureAwait(false)) goNative = Report(page, api, "the element is not enabled", SelectorOf(loc));
             else
             {
-                double x, y;
-                if (o.Position is { } pos)
+                async Task<(double X, double Y)> AimAtAsync(LocatorBoundingBoxResult b)
                 {
-                    (x, y) = await PositionPointAsync(page, bb, pos).ConfigureAwait(false);
+                    double ax, ay;
+                    if (o.Position is { } pos)
+                    {
+                        (ax, ay) = await PositionPointAsync(page, b, pos).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        var from = st.Known ? new Point(st.X, st.Y) : new Point(b.X - 120, b.Y - 90);
+                        var pt = Motion.ClickPoint(new Box(b.X, b.Y, b.Width, b.Height), from, p);
+                        ax = pt.X;
+                        ay = pt.Y;
+                    }
+                    // Whole pixels: the hit test answers for the pixel DOM.getNodeForLocation rounds to, so the press goes
+                    // to that pixel too. A press at 971.6 next to a badge ending at 972 was proven at 972 and landed on
+                    // the badge, reported as a success (verifier B, SC 210).
+                    return (Math.Round(ax), Math.Round(ay));
                 }
-                else
-                {
-                    var from = st.Known ? new Point(st.X, st.Y) : new Point(bb.X - 120, bb.Y - 90);
-                    var pt = Motion.ClickPoint(new Box(bb.X, bb.Y, bb.Width, bb.Height), from, p);
-                    x = pt.X;
-                    y = pt.Y;
-                }
-                // Whole pixels: the hit test answers for the pixel DOM.getNodeForLocation rounds to, so the press goes
-                // to that pixel too. A press at 971.6 next to a badge ending at 972 was proven at 972 and landed on
-                // the badge, reported as a success (verifier B, SC 210).
-                x = Math.Round(x);
-                y = Math.Round(y);
+                var (x, y) = await AimAtAsync(bb).ConfigureAwait(false);
                 if (!o.Force)
                 {
                     // Stability, then covered-by: 50 ms on, the element must still fill `bb` (an animation in
@@ -812,6 +819,24 @@ public static partial class Humanize
                     // owns. Either failing goes native: Playwright waits for it.
                     await Task.Delay(50).ConfigureAwait(false);
                     var hit = await ReachesPointAsync(page, bb, x, y, CssOf(loc)).ConfigureAwait(false);
+                    // A target still moving (the scroll that brought it in settling, a layout shift) fails the test with
+                    // the box it had: re-aim at the box it settles at rather than hand the click to Playwright, whose
+                    // press and release land in the same millisecond with a one-report jump from rest. A target that
+                    // is covered rather than moving is uncovered first (UncoverAsync; r53 /audit seed 2, 2026-10-28).
+                    for (int tries = 0; hit == false && tries < SettleTries; tries++)
+                    {
+                        var next = await SettledBoxAsync(loc, options.Timeout).ConfigureAwait(false);
+                        if (next is null) break;
+                        if (SameBox(next, bb))
+                        {
+                            if (!await UncoverAsync(page, p, st, next, x, y).ConfigureAwait(false)) break;
+                            next = await SettledBoxAsync(loc, options.Timeout).ConfigureAwait(false);
+                            if (next is null) break;
+                        }
+                        bb = next;
+                        (x, y) = await AimAtAsync(bb).ConfigureAwait(false);
+                        hit = await ReachesPointAsync(page, bb, x, y, CssOf(loc)).ConfigureAwait(false);
+                    }
                     if (hit == false && o.Position is null
                         && await ProvenClickPointAsync(page, bb, CssOf(loc)).ConfigureAwait(false) is { } alt)
                     {
@@ -945,6 +970,71 @@ public static partial class Humanize
         }
         if (hit is null) FallbackTrace?.Invoke("click: the hit test cannot run here");
         return hit;
+    }
+
+    private static bool SameBox(LocatorBoundingBoxResult a, LocatorBoundingBoxResult b)
+        => Math.Abs(a.X - b.X) <= 1 && Math.Abs(a.Y - b.Y) <= 1 && Math.Abs(a.Width - b.Width) <= 1 && Math.Abs(a.Height - b.Height) <= 1;
+
+    /// <summary>
+    /// The element's box once it has stopped moving: two reads ~100 ms apart within 1 px, for up to
+    /// <see cref="SettleMs"/>. Null when it never settles or has no box. Read like BoxOfAsync (with the wheel, so a
+    /// target the settling scroll left out of view is brought back in).
+    /// </summary>
+    private static async Task<LocatorBoundingBoxResult?> SettledBoxAsync(ILocator loc, float? timeout)
+    {
+        var deadline = Environment.TickCount64 + SettleMs;
+        var prev = await BoxOfAsync(loc, timeout, false).ConfigureAwait(false);
+        while (prev is not null && Environment.TickCount64 < deadline)
+        {
+            await Task.Delay(100).ConfigureAwait(false);
+            var next = await BoxOfAsync(loc, timeout, false).ConfigureAwait(false);
+            if (next is null) return null;
+            if (SameBox(prev, next)) return next;
+            prev = next;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// A target that is not moving yet fails the hit test is covered. Two covers a person deals with without thinking:
+    /// something the pointer itself opened (it rested on a header link and a hover menu dropped over the target: the
+    /// hand moves off it, below where there is room, else above, and the menu closes); and a fixed or sticky bar over a
+    /// target the scroll left under it (the wheel brings the target down into the band a reader looks at). True when it
+    /// did one of them (the caller re-reads the box and hit-tests again).
+    /// </summary>
+    private static async Task<bool> UncoverAsync(IPage page, Persona p, PointerState st, LocatorBoundingBoxResult box, double x, double y)
+    {
+        var r = await IsolatedWorld.For(page).EvaluateAsync(IsolatedWorld.Cover, new Dictionary<string, object?>
+        {
+            ["x"] = x, ["y"] = y,
+            ["b"] = new Dictionary<string, object?> { ["x"] = (double)box.X, ["y"] = (double)box.Y, ["width"] = (double)box.Width, ["height"] = (double)box.Height },
+        }).ConfigureAwait(false);
+        if (r is not { ValueKind: JsonValueKind.Object } c || !c.TryGetProperty("rect", out var rect)
+            || rect.ValueKind != JsonValueKind.Array || rect.GetArrayLength() != 4) return false;
+        double cx = rect[0].GetDouble(), cy = rect[1].GetDouble(), cw = rect[2].GetDouble(), ch = rect[3].GetDouble();
+        bool fixedBar = c.TryGetProperty("fixed", out var f) && f.ValueKind == JsonValueKind.True;
+        var (vw, vh) = await ViewportAsync(page).ConfigureAwait(false);
+        if (st.Known && st.X >= cx && st.X <= cx + cw && st.Y >= cy && st.Y <= cy + ch)
+        {
+            // Off its edge by 6-80 px where the viewport has room (a mega menu can leave only a strip), below first.
+            double roomBelow = vh - 4 - (cy + ch + 6), roomAbove = cy - 6 - 4;
+            double? ty = roomBelow >= 0 ? cy + ch + 6 + Rand(0, Math.Min(74, roomBelow))
+                : roomAbove >= 0 ? cy - 6 - Rand(0, Math.Min(74, roomAbove)) : null;
+            if (ty is not { } tyv) return false;
+            double tx = Math.Min(vw - 8, Math.Max(8, box.X + box.Width / 2 + Rand(-60, 60)));
+            await GlideAsync(page, p, st, tx, tyv, 60).ConfigureAwait(false);
+            await Task.Delay((int)Rand(250, 450)).ConfigureAwait(false);   // a hover menu's close transition
+            return true;
+        }
+        // A cover filling most of the viewport is a modal or a cookie wall, not a bar to scroll out from under.
+        if (fixedBar && cw * ch <= 0.8 * vw * vh)
+        {
+            double dy = box.Y + box.Height / 2 - vh * Rand(0.3, 0.5);
+            if (Math.Abs(dy) < 1) return false;
+            await WheelCoreAsync(page, 0, (float)dy).ConfigureAwait(false);   // unlocked: inside the click's lock
+            return true;
+        }
+        return false;
     }
 
     /// <summary>

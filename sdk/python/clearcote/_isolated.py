@@ -299,6 +299,32 @@ def async_world_for(page):
 
 # How long a covered click point is re-checked (an overlay fading out) before the native path takes over.
 COVER_CHECK_MS = 400
+# How long a click waits for a target that is still moving (a scroll settling, a layout shift) to stop
+# before it re-aims; and how many times it re-aims before the native path takes over.
+SETTLE_MS = 1500
+SETTLE_TRIES = 3
+# What covers viewport point (a.x, a.y) over the element filling box a.b: the union of the rects from the
+# topmost element up to (not including) the first ancestor that holds the target, and whether any of
+# them is fixed or sticky. null when nothing covers it. Read in the isolated world: the page sees nothing.
+COVER = """(a) => {
+  const same = r => Math.abs(r.x - a.b.x) <= 1.5 && Math.abs(r.y - a.b.y) <= 1.5 &&
+    Math.abs(r.width - a.b.width) <= 1.5 && Math.abs(r.height - a.b.height) <= 1.5;
+  const stack = document.elementsFromPoint(a.x, a.y);
+  if (!stack.length) return null;
+  const tgt = stack.find(e => same(e.getBoundingClientRect())) || null;
+  if (tgt && (stack[0] === tgt || tgt.contains(stack[0]))) return null;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, fixed = false;
+  for (let e = stack[0], n = 0; e && e !== document.body && e !== document.documentElement && n < 64; e = e.parentElement, n++) {
+    if (tgt && e.contains(tgt)) break;
+    const r = e.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) {
+      x0 = Math.min(x0, r.x); y0 = Math.min(y0, r.y); x1 = Math.max(x1, r.right); y1 = Math.max(y1, r.bottom);
+    }
+    const p = getComputedStyle(e).position;
+    if (p === 'fixed' || p === 'sticky') fixed = true;
+  }
+  return isFinite(x0) ? { rect: [x0, y0, x1 - x0, y1 - y0], fixed } : null;
+}"""
 # The timeout of the utility-world value reads that prove a fill landed. (It was also the one longer
 # look of the Playwright trial that checked a point inside a child frame; no Playwright trial runs in
 # humanized mode any more: such a point is answered by its <iframe> element, see node_at.)
