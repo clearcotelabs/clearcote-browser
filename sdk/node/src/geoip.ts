@@ -403,7 +403,12 @@ let _direct: { geo: GeoFillable; at: number } | null = null;
 export function resetDirectGeoCache(): void { _direct = null; }
 
 /** What {@link applyGeoipMode} did: the geo, and whether the WebRTC IP came from the default lookup. */
-export interface GeoipApplied { geo?: Geo; autoWebrtcIp: boolean }
+export interface GeoipApplied {
+  geo?: Geo;
+  autoWebrtcIp: boolean;
+  /** The egress IP the lookup found (also from the no-proxy cache): with no proxy, this machine's own. */
+  ip?: string;
+}
 
 /**
  * Apply geoip in `mode` (see {@link geoipMode}). "auto" skips the lookup when every field it fills is
@@ -411,21 +416,24 @@ export interface GeoipApplied { geo?: Geo; autoWebrtcIp: boolean }
  */
 export async function applyGeoipMode(fp: GeoFillable, proxy: unknown, mode: GeoipMode, quiet?: boolean): Promise<GeoipApplied> {
   if (mode === "off") return { autoWebrtcIp: false };
-  if (mode === "strict") return { geo: await applyGeoip(fp, proxy, quiet), autoWebrtcIp: false };
+  if (mode === "strict") {
+    const geo = await applyGeoip(fp, proxy, quiet);
+    return { geo, autoWebrtcIp: false, ip: geo?.ip };
+  }
   if (fp.timezone != null && fp.acceptLanguage != null && fp.location != null && fp.webrtcIp != null) return { autoWebrtcIp: false };
   const hadWebrtcIp = fp.webrtcIp != null;
   const direct = !proxy;
   if (direct && _direct && Date.now() - _direct.at < DIRECT_CACHE_MS) {
     for (const k of ["timezone", "acceptLanguage", "location", "webrtcIp"] as const)
       if (fp[k] == null && _direct.geo[k] != null) fp[k] = _direct.geo[k];
-    return { autoWebrtcIp: !hadWebrtcIp && fp.webrtcIp != null };
+    return { autoWebrtcIp: !hadWebrtcIp && fp.webrtcIp != null, ip: _direct.geo.webrtcIp };
   }
   const env = (process.env.CLEARCOTE_GEOIP_TIMEOUT_SECONDS ?? "").trim();
   try {
     const before: GeoFillable = { ...fp };
     const geo = await applyGeoip(fp, proxy, quiet, env ? geoipTimeoutMs() : AUTO_TIMEOUT_MS);
     if (geo && direct) _direct = { geo: { timezone: geo.timezone, acceptLanguage: geo.acceptLanguage, location: geo.location, webrtcIp: geo.ip }, at: Date.now() };
-    return { geo, autoWebrtcIp: before.webrtcIp == null && fp.webrtcIp != null };
+    return { geo, autoWebrtcIp: before.webrtcIp == null && fp.webrtcIp != null, ip: geo?.ip };
   } catch (e) {
     if (!(e instanceof GeoipError)) throw e;
     if (!quiet && !process.env.CLEARCOTE_NO_WARN)
@@ -443,6 +451,15 @@ export async function applyGeoipMode(fp: GeoFillable, proxy: unknown, mode: Geoi
  * proxy. With no proxy the real address is the exit anyway; `geoip: true` or an explicit webrtcIp is the
  * caller's choice and is kept.
  */
+/**
+ * Engine r54+ (pro-r54-06): whether this launch may send real STUN instead of fabricating the WebRTC IP.
+ * Only with no proxy at all, and only when the WebRTC IP is this machine's own egress as the lookup
+ * found it: a hand-set webrtcIp may name another place on purpose, and real STUN would contradict it.
+ */
+export function directStunEligible(fp: GeoFillable, applied: GeoipApplied, proxy: unknown): boolean {
+  return !proxy && !!applied.ip && fp.webrtcIp === applied.ip;
+}
+
 export function dropAutoWebrtcIp(fp: GeoFillable, applied: GeoipApplied, proxy: unknown, licensed: boolean): void {
   if (applied.autoWebrtcIp && proxy && !licensed) delete fp.webrtcIp;
 }

@@ -378,6 +378,18 @@ const switchCache = new Map<string, boolean>();
  * selects the legacy (Playwright) path — slower, never silently broken.
  */
 /**
+ * Engine r54+ (pro-r54-06): `--webrtc-direct-stun` for a launch with no proxy whose WebRTC IP is this
+ * machine's own (see directStunEligible in ./geoip.ts). The browser then sends real STUN binding
+ * requests instead of fabricating the server-reflexive candidate, so a page's own STUN server sees the
+ * request the candidate came from, as with stock Chrome. The engine re-checks that no proxy is set; a
+ * proxy in the caller's own args skips it here too. Older engines never get the switch.
+ */
+export function webrtcDirectStunArgs(exe: string | undefined, eligible: boolean, userArgs: string[]): string[] {
+  if (!eligible || userArgs.some((a) => a.startsWith("--proxy-server") || a.startsWith("--proxy-pac-url"))) return [];
+  return engineSupportsSwitch(exe, "webrtc-direct-stun") ? ["--webrtc-direct-stun"] : [];
+}
+
+/**
  * For a macOS bundle executable (`X.app/Contents/MacOS/X`), the framework binary that holds the engine
  * (`X.app/Contents/Frameworks/X Framework.framework/Versions/Current/X Framework`); null for anything
  * else. The executable itself is a small launcher with no switch strings.

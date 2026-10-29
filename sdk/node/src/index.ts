@@ -31,7 +31,7 @@ import type {
 import { makeRecoveredCopy, recoveredExe, removeFailedLaunchDirs } from "./winlaunch.js";
 import { checkInstall, ensureBinary, ensureRunnableHere, ensureVersion, proEnsureBinary, resolvedEngineVersion, resolveReleaseChannel, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
-import { applyGeoipMode, dropAutoWebrtcIp, geoipMode, resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
+import { applyGeoipMode, directStunEligible, dropAutoWebrtcIp, geoipMode, resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
 import { defaultColorScheme, engineDecidesColorScheme, installColorSchemeDefault } from "./colorscheme.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeLaunchOptions } from "./humanize.js";
 import { resolveHumanize } from "./hzoptions.js";
@@ -58,6 +58,7 @@ import {
   socks5UdpArgs,
   webBluetoothArgs,
   webrtcDefaultDenyArgs,
+  webrtcDirectStunArgs,
   DEFAULT_IGNORED_ARGS,
   gpuBlocklistArgs,
   gpuBackendArgs,
@@ -551,6 +552,8 @@ function assembleArgs(
     /** Set when Playwright starts this browser (launch / launchPersistentContext, not serve): the
      * caller's ignoreDefaultArgs, `null` when they passed none. See playwrightFeatureOverrideArgs. */
     playwrightIgnoreDefaultArgs?: string[] | boolean | null;
+    /** No proxy and the WebRTC IP is this machine's own (directStunEligible): real STUN on r54+. */
+    directStun?: boolean;
   },
 ): string[] {
   // webBluetoothArgs: navigator.bluetooth must follow the CLAIM, in both directions. A Linux
@@ -583,6 +586,7 @@ function assembleArgs(
     base.push(...(extra.stockRuntimeArgs ?? []));
     // Opt-in, engine r54+: only the bindings part of it (exposeFunction() across navigations).
     base.push(...(extra.runtimeBindingsArgs ?? []));
+    base.push(...webrtcDirectStunArgs(extra.exe, !!extra.directStun, userArgs));
     base.push(...gpuBlocklistArgs(!!extra.headed, process.platform, userArgs));
     // On a Linux host, render WebGL through the backend whose limits match the CLAIMED platform
     // (read back from the built persona switch; absent = pass-through). See gpuBackendArgs.
@@ -1166,7 +1170,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, args ?? [], proxyOpt as PwProxy | undefined, socks5Udp,
-    { exe, headed, quiet, allowThirdPartyCookies, transparentProxy, stockRuntimeArgs: stockArgs, runtimeBindingsArgs: bindArgs,
+    { exe, headed, quiet, allowThirdPartyCookies, transparentProxy, stockRuntimeArgs: stockArgs, runtimeBindingsArgs: bindArgs, directStun: directStunEligible(fingerprint, geoApplied, proxyOpt),
       playwrightIgnoreDefaultArgs: ((pwOptions as PlaywrightLaunchOptions).ignoreDefaultArgs as string[] | boolean | undefined) ?? null });
   // On Linux, point FONTCONFIG_FILE at the bundled metric-compatible clones (Segoe UI, Arial, …)
   // and LANGUAGE at the persona's UI locale (after engineArgs: it reads their --lang).
@@ -1333,7 +1337,7 @@ async function launchLocalPersistentContext(
     engineVersion: () => resolvedEngineVersion(version, !!resolveLicenseKey(licenseKey)),
   });
   const engineArgs = assembleArgs(fingerprintArgs(fingerprint), agentArgs(agent), [...extensionArgs(extensions), ...portableArgs(portableProfile, encryptionKey)], proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs, proxyOpt as PwProxy | undefined, socks5Udp,
-    { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy, stockRuntimeArgs: stockArgs, runtimeBindingsArgs: bindArgs,
+    { exe, headed: opts.headless === false, quiet, allowThirdPartyCookies, transparentProxy, stockRuntimeArgs: stockArgs, runtimeBindingsArgs: bindArgs, directStun: directStunEligible(fingerprint, geoApplied, proxyOpt),
       playwrightIgnoreDefaultArgs: ignoreDefaultArgs ?? null });
   const ctxEnv = withShaderDialect(shaderDialect, fontLaunchEnv(exe, (opts as PlaywrightLaunchOptions).env, engineArgs, fontDirList), engineArgs);
   const launchToken = lease?.bindLaunch();
@@ -1630,7 +1634,8 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
     proxyArgs, disablePrivacySandbox, fingerprint.webrtcIp, userArgs ?? [], proxyOpt, socks5Udp,
     // serve launches the binary directly, so Playwright's SwiftShader default is never added; the
     // blocklist rule still applies to a headed endpoint and on Windows.
-    { exe, headed: !headless, quiet, allowThirdPartyCookies, transparentProxy, stockRuntimeArgs: stockArgs, runtimeBindingsArgs: bindArgs });
+    { exe, headed: !headless, quiet, allowThirdPartyCookies, transparentProxy, stockRuntimeArgs: stockArgs, runtimeBindingsArgs: bindArgs,
+      directStun: directStunEligible(fingerprint, geoApplied, proxyOpt) });
 
   const resolvedPort = port ?? (await freePort());
   const ownUdd = !uddOption;
