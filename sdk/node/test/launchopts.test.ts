@@ -386,6 +386,14 @@ describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
       .toEqual(["--disable-features=MediaRouter,Translate"]);
   });
 
+  it("re-enables OptimizationHints (2026-10-29)", async () => {
+    // Off, the built-in AI APIs answer availability() "unavailable", where genuine Chrome answers
+    // "downloadable" (measured on Chrome 156 launched plainly vs by Playwright).
+    const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
+    expect(playwrightFeatureOverrideArgs(undefined, ["MediaRouter", "OptimizationHints", "Translate"], false))
+      .toEqual(["--disable-features=MediaRouter,Translate"]);
+  });
+
   it("is skipped only when Playwright's exact switch is dropped", async () => {
     const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
     const exact = `--disable-features=${PW157.join(",")}`;

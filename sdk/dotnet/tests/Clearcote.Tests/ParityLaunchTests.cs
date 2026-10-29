@@ -284,9 +284,11 @@ public class ParityLaunchTests : IDisposable
     public void Override_re_enables_only_what_a_site_can_observe_and_needs_the_exact_switch_to_skip()
     {
         var pw = new[] { "AcceptCHFrame", "LazyFrameLoading", "MediaRouter", "ThirdPartyStoragePartitioning", "Translate",
-                         "AvoidCorsURLLoaderRestartOnRedirect" };
+                         "AvoidCorsURLLoaderRestartOnRedirect", "OptimizationHints" };
         // AvoidCorsURLLoaderRestartOnRedirect off sends Sec-Fetch-Storage-Access: active on same-origin
         // requests in cross-site iframes, which genuine Chrome omits (measured 2026-10-28, Chrome 156).
+        // OptimizationHints off makes the built-in AI APIs answer "unavailable", where genuine Chrome
+        // answers "downloadable" (measured 2026-10-29, Chrome 156).
         Assert.Equal(new[] { "--disable-features=MediaRouter,Translate" },
             LaunchOpts.PlaywrightFeatureOverrideArgs(null, pw, screenshotSurface: false));
         Assert.Empty(LaunchOpts.PlaywrightFeatureOverrideArgs(new[] { "--disable-features=" + string.Join(",", pw) }, pw, false));

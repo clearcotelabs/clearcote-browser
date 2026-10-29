@@ -61,10 +61,14 @@ public static class LaunchOpts
     /// genuine Chrome never sends there (measured 2026-10-28, genuine Chrome 156.0.8078.48 launched
     /// plainly vs by Playwright 1.64.1). Playwright disables it because Chromium 155 aborts a
     /// preflighted cross-origin redirect while route interception is on; Args
-    /// "--disable-features=AvoidCorsURLLoaderRestartOnRedirect" turns it back off.
+    /// "--disable-features=AvoidCorsURLLoaderRestartOnRedirect" turns it back off. OptimizationHints:
+    /// with it off, the built-in AI APIs (LanguageModel, Summarizer, LanguageDetector) answer
+    /// availability() "unavailable" at once, where genuine Chrome on desktop hardware answers
+    /// "downloadable" (measured 2026-10-29, genuine Chrome 156.0.8078.73 plain vs launched by
+    /// Playwright; a bisect of Playwright's switches pins it to this feature).
     public static readonly IReadOnlySet<string> PageVisiblePlaywrightFeatures = new HashSet<string>(StringComparer.Ordinal)
         { "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading",
-          "AvoidCorsURLLoaderRestartOnRedirect" };
+          "AvoidCorsURLLoaderRestartOnRedirect", "OptimizationHints" };
 
     private static readonly Regex PwAssign = new(@"\bdisabledFeatures\s*=", RegexOptions.Compiled);
     private static readonly Regex PwArray = new(@"^\s*(?:\([^)]*\)\s*=>\s*)?\[([\s\S]*?)\]", RegexOptions.Compiled);

@@ -103,12 +103,18 @@ PLAYWRIGHT_DISABLED_FEATURES = (
 #:   disabled, sends it. Note for automation: Playwright disables it because Chromium 155 aborts a
 #:   preflighted cross-origin redirect with net::ERR_ABORTED while page.route() interception is on;
 #:   args=["--disable-features=AvoidCorsURLLoaderRestartOnRedirect"] turns it back off.
+#: * OptimizationHints: with it off, the built-in AI APIs (LanguageModel, Summarizer,
+#:   LanguageDetector) answer availability() "unavailable" at once, where genuine Chrome on desktop
+#:   hardware answers "downloadable". Measured 2026-10-29 (genuine Chrome 156.0.8078.73, Windows,
+#:   RTX 3070): plain Chrome "downloadable" for all three; launched by Playwright "unavailable"; a
+#:   bisect of Playwright's switches pins it to this one feature. On r53 re-enabling it brings
+#:   LanguageDetector back; LanguageModel/Summarizer stay "unavailable" for an engine reason.
 #:
 #: Deliberately left off although a page could observe it: BoundaryEventDispatchTracksNodeRemoval
 #: (Playwright 1.61, microsoft/playwright#38568), which Playwright's own pointer actions rely on.
 PAGE_VISIBLE_PLAYWRIGHT_FEATURES = frozenset(
     {"ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading",
-     "AvoidCorsURLLoaderRestartOnRedirect"})
+     "AvoidCorsURLLoaderRestartOnRedirect", "OptimizationHints"})
 
 _PW_ASSIGN = re.compile(r"\bdisabledFeatures\s*=")
 _PW_ARRAY = re.compile(r"^\s*(?:\([^)]*\)\s*=>\s*)?\[(.*?)\]", re.S)
