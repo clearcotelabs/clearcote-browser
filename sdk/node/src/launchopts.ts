@@ -836,7 +836,13 @@ const STOCK_RUNTIME_ON = ["1", "true", "yes", "on"];
 /** The `stockRuntime` option: an explicit value wins; unset follows CLEARCOTE_STOCK_RUNTIME (on for
  * 1/true/yes/on, off otherwise). */
 export function stockRuntimeWanted(value?: unknown): boolean {
-  if (value === undefined || value === null) return STOCK_RUNTIME_ON.includes((process.env[STOCK_RUNTIME_ENV] ?? "").trim().toLowerCase());
+  return optionOn(value, STOCK_RUNTIME_ENV);
+}
+
+/** An on/off SDK option: an explicit value wins; unset follows the environment variable `env` (on for
+ * 1/true/yes/on, off otherwise). */
+function optionOn(value: unknown, env: string): boolean {
+  if (value === undefined || value === null) return STOCK_RUNTIME_ON.includes((process.env[env] ?? "").trim().toLowerCase());
   if (typeof value === "string") return STOCK_RUNTIME_ON.includes(value.trim().toLowerCase()); // "0" from a config file is off
   return !!value;
 }
@@ -870,4 +876,54 @@ export function warnStockRuntimeCloud(enabled: unknown, quiet?: boolean): void {
   warnOnce("stock-runtime-cloud",
     "stockRuntime (CLEARCOTE_STOCK_RUNTIME) only applies to local and Docker launches; a cloud browser does not " +
     "take it, so it was not applied.", quiet);
+}
+
+// ── Runtime.addBinding bindings across navigations (engine r54+) ───────────────────────────────────
+
+/** Patch 110 also keeps Runtime.addBinding bindings out of documents created after the binding was added, so with
+ * Playwright exposeFunction() / exposeBinding() fail after page.goto() or a reload (clearcote-browser#43). Engine
+ * r54 (pro-r54-04) restores only that with this switch and leaves the rest of the suppression on. Off by default. A
+ * binding exists only when the client adds one, so a launch that adds none looks the same to a page; one that does
+ * shows the page that binding's global (Playwright: __playwright__binding__), as stock Chrome does. stockRuntime
+ * already includes it. */
+export const RUNTIME_BINDINGS_SWITCH = "--enable-runtime-bindings";
+export const RUNTIME_BINDINGS_ENV = "CLEARCOTE_RUNTIME_BINDINGS";
+
+/** The `runtimeBindings` option: an explicit value wins; unset follows CLEARCOTE_RUNTIME_BINDINGS. */
+export function runtimeBindingsWanted(value?: unknown): boolean {
+  return optionOn(value, RUNTIME_BINDINGS_ENV);
+}
+
+/**
+ * `[--enable-runtime-bindings]` when `runtimeBindings` is on and the engine that will run has the switch; else
+ * nothing. `present` is the command line so far (the SDK's and the caller's): with stockRuntime's switch on it the
+ * bindings are already restored, and a switch the caller wrote is not added twice. Not a persona switch
+ * (personaenv.ts leaves it on the command line). An engine without it would ignore it without a word, so it is not
+ * passed and the SDK says so once per process (quiet and CLEARCOTE_NO_WARN silence it without using it up).
+ */
+export function runtimeBindingsArgs(exe: string | undefined, enabled: unknown, present: readonly string[] = [], quiet?: boolean): string[] {
+  if (!runtimeBindingsWanted(enabled)) return [];
+  const have = present.map(String);
+  if (have.includes(STOCK_RUNTIME_SWITCH)) return [];
+  if (!engineSupportsSwitch(exe, RUNTIME_BINDINGS_SWITCH.slice(2))) {
+    warnOnce("runtime-bindings-unsupported",
+      "runtimeBindings (CLEARCOTE_RUNTIME_BINDINGS) is on, but this engine does not support it (it needs an engine " +
+      "from r54 on), so exposeFunction() and exposeBinding() stop working after a navigation. stockRuntime: true " +
+      "(engine r32+) also restores them.", quiet);
+    return [];
+  }
+  return have.includes(RUNTIME_BINDINGS_SWITCH) ? [] : [RUNTIME_BINDINGS_SWITCH];
+}
+
+/** Whether a browser launched from `exe` with `args` has the switch in effect (the bindings note is left out then). */
+export function runtimeBindingsOn(exe: string | undefined, args: readonly string[]): boolean {
+  return args.includes(RUNTIME_BINDINGS_SWITCH) && engineSupportsSwitch(exe, RUNTIME_BINDINGS_SWITCH.slice(2));
+}
+
+/** A cloud browser does not take `runtimeBindings`: say so once per process when it is on. */
+export function warnRuntimeBindingsCloud(enabled: unknown, quiet?: boolean): void {
+  if (!runtimeBindingsWanted(enabled)) return;
+  warnOnce("runtime-bindings-cloud",
+    "runtimeBindings (CLEARCOTE_RUNTIME_BINDINGS) only applies to local and Docker launches; a cloud browser does " +
+    "not take it, so it was not applied.", quiet);
 }

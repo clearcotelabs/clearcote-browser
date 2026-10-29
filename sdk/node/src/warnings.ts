@@ -194,7 +194,18 @@ const ENGINE_NOTES: ReadonlyArray<readonly [string, string]> = [
     "unhandledrejection handlers fire normally. To capture console output, collect it in-page " +
     "and read it back with page.evaluate(). An engine from r32 on forwards them with " +
     "stockRuntime: true (off by default: pages can observe part of what it restores)."],
+  ["cdp-bindings",
+    "the engine does not carry Runtime.addBinding bindings into documents opened after they " +
+    "were added, by design, as part of the same protection: page.exposeFunction() and " +
+    "page.exposeBinding() fail after page.goto() or a reload. An engine from r54 on keeps them " +
+    "with runtimeBindings: true (off by default; the page sees the binding's global, as in " +
+    "Chrome), and stockRuntime: true (engine r32+) also restores them."],
 ];
+/** A note that is not said for a launch whose browser already has the behaviour back: the opts keys that say so. */
+const ENGINE_NOTE_RESTORED_BY: Readonly<Record<string, readonly string[]>> = {
+  "cdp-console-events": ["_stockRuntime"],
+  "cdp-bindings": ["_stockRuntime", "_runtimeBindings"],
+};
 
 /** Tests: forget which once-per-process lines were already said. */
 export function resetSeenWarnings(): void {
@@ -211,8 +222,9 @@ export function warnOnce(code: string, message: string, quiet?: boolean): void {
 }
 
 /** Print coherence warnings to stderr unless quiet or CLEARCOTE_NO_WARN. NOTE lines (and the host warnings in
- *  ONCE_PER_PROCESS) fire once per process; the other WARN lines fire every launch. `opts._stockRuntime`: this
- *  launch's browser has --disable-runtime-suppression, so the note that it forwards no console events is left out. */
+ *  ONCE_PER_PROCESS) fire once per process; the other WARN lines fire every launch. `opts._stockRuntime` /
+ *  `opts._runtimeBindings`: this launch's browser has --disable-runtime-suppression / --enable-runtime-bindings, so
+ *  the engine notes about what those restore are left out (ENGINE_NOTE_RESTORED_BY). */
 export function emitCoherenceWarnings(
   opts: Record<string, unknown>,
   quiet?: boolean,
@@ -228,7 +240,7 @@ export function emitCoherenceWarnings(
     process.stderr.write(`clearcote: ${w.severity === "warn" ? "warning" : "note"}: ${w.message}\n`);
   }
   for (const [code, message] of ENGINE_NOTES) {
-    if (seenNotes.has(code) || (code === "cdp-console-events" && opts._stockRuntime)) continue;
+    if (seenNotes.has(code) || (ENGINE_NOTE_RESTORED_BY[code] ?? []).some((k) => opts[k])) continue;
     seenNotes.add(code);
     process.stderr.write(`clearcote: note: ${message}\n`);
   }
