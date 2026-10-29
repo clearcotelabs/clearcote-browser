@@ -295,10 +295,11 @@ async function doPress(page: Page, loc: Locator, key: string, kw: any): Promise<
 }
 
 async function doSelect(page: Page, loc: Locator, values: any, kw: any): Promise<string[]> {
-  const { selectWants, wantIndex } = await import("./humanize.js");
+  const { commitSelect, selectDeadline, selectWants, wantIndex } = await import("./humanize.js");
   if (kw.force) throw new NativeSignal("frame: force is Playwright's own");
   const wants = selectWants(values);
   if (!wants) throw new NativeSignal("frame: nothing to select by value/label/index");
+  const dl = selectDeadline(kw, page);
   const t = await locate(page, loc, kw.timeout, "select");
   const info = t.info!;
   if (info.tag !== "select" || info.disabled) throw new NativeSignal("frame: not an enabled select");
@@ -330,8 +331,10 @@ async function doSelect(page: Page, loc: Locator, values: any, kw: any): Promise
     }
   }
   await sleep(rand(150, 400));
-  await page.keyboard.press("Enter");           // commits: ONE trusted input + change
-  await sleep(rand(80, 160));
+  // commits: ONE trusted input + change; a document that is navigating away cannot answer the read-back
+  if (await commitSelect(page, selectorOf(loc) ?? "the select", dl, () => page.keyboard.press("Enter"), rand(80, 160))) {
+    return [opts[tgt].value ?? ""];
+  }
   const again = await frameWorldsFor(page).call<DescribedElement>(t.fid, t.nid, ISO_DESCRIBE, { want: "select" });
   if (again?.selectedIndex === tgt) return [opts[tgt].value ?? ""];
   throw new NativeAfter("frame: the drop-down did not commit the option");

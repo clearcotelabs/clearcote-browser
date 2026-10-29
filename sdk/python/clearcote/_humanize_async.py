@@ -30,6 +30,7 @@ from ._humanize import (
     FRAMES_WAIT_MS, _boxes_overlap, _is_timeout, _needs_shift, _no_touch, _rand, _sel_kw, _shift_lag_s, _shift_lead_s,
     as_api_error,
     default_timeout_ms, engine_path_memo, trial_timeout_error, typo_rate, _MOD_KEYS,
+    SELECT_COMMIT_WHY, is_navigation, select_deadline, select_left_ms,
     TAP_NOT_HUMANIZED, label_draw, native_select_args, report_fallback, select_wants, strict_mode, want_index,
 )
 from ._isolated import (
@@ -67,6 +68,33 @@ from ._keys import (
     typing_traits,
 )
 from ._pacing import keep_in_view as _keep_in_view, trim_to as _trim_ambient, walk_async as _paced_walk
+
+
+async def commit_select_async(page, selector, dl, press, settle_ms):
+    """Async _humanize.commit_select: ``press()`` (the Enter, a coroutine) bounded by the select's
+    deadline ``dl``, then ``settle_ms`` of rest. True when the commit navigated the page."""
+    navs = []
+
+    def on_request(req):
+        if is_navigation(req):
+            navs.append(req)
+    listen = callable(getattr(page, "on", None)) and callable(getattr(page, "remove_listener", None))
+    if listen:
+        page.on("request", on_request)
+    try:
+        ms = select_left_ms(dl)
+        if not ms:
+            await press()
+        else:
+            try:
+                await asyncio.wait_for(press(), ms / 1000.0)
+            except asyncio.TimeoutError:
+                raise trial_timeout_error(selector, dl[1], SELECT_COMMIT_WHY) from None
+        await asyncio.sleep(settle_ms / 1000.0)
+    finally:
+        if listen:
+            page.remove_listener("request", on_request)
+    return bool(navs)
 
 
 async def _release(coro):
@@ -2280,13 +2308,14 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         "Locator.select_text", _select_text,
         lambda s, **o: _LOCATOR_NATIVE["select_text"](page.locator(s).first, **o)))
 
-    async def _open_and_pick(selector, plan, at=None):
+    async def _open_and_pick(selector, plan, at=None, dl=None):
         """Open the drop-down with a click, move its highlight with the planned keys, commit with
         Enter: one trusted input+change. While the popup is open its keys never reach the page
         (measured on r37: value unchanged until Enter). The opening click is the full humanized click
         -- including the covered-point check -- at the point the hit test proved when the centre is
         covered (``at``, a Playwright `position`), so a floating label over the select's centre
-        cannot swallow it and leave the letters to change a closed select one per key."""
+        cannot swallow it and leave the letters to change a closed select one per key. ``dl`` is the
+        select's deadline (select_deadline); True when the commit navigated the page (_commit_pick)."""
         await _targeted_click(native_page_click, selector, {"position": at} if at else {}, no_click=False,
                               native_opts=None, move_off=False)
         # Every pause here is the persona's (timing_traits.pause_scale): the windows were one fixed
@@ -2301,8 +2330,13 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
             await asyncio.sleep(pause_ms(persona, 120, 300) / 1000.0)
             await _arrow_run("ArrowDown" if n > 0 else "ArrowUp", abs(n))
         await asyncio.sleep(pause_ms(persona, 150, 400) / 1000.0)
-        await _key("Enter")
-        await asyncio.sleep(pause_ms(persona, 80, 160) / 1000.0)
+        return await _commit_pick(selector, dl)
+
+    async def _commit_pick(selector, dl):
+        """Enter with the persona's hold, bounded by the select's deadline (commit_select_async)."""
+        return await commit_select_async(page, selector, dl,
+                                         lambda: native_kb_press("Enter", delay=_kdwell()),
+                                         pause_ms(persona, 80, 160))
 
     async def _arrow_run(key, n):
         """``n`` presses of an arrow key in an OPEN drop-down, held through the OS auto-repeat model
@@ -2420,6 +2454,7 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         wants = select_wants(value, options.get("index"), options.get("label"))
         if not wants:
             return None
+        dl = select_deadline(options, page)
         loc = page.locator(selector).first
         box = await _box_of(loc, options.get("timeout"), options.get("force"), selector)
         info = await _describe(box, "select")
@@ -2447,8 +2482,9 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         pt = _proven_point(box, info)
         at = ({"x": pt[0] - box["x"] - info.get("bl", 0), "y": pt[1] - box["y"] - info.get("bt", 0)}
               if pt else None)
-        await _open_and_pick(selector, plan, at)
-        if await loc.input_value() == opts[t]["value"]:
+        if await _open_and_pick(selector, plan, at, dl):
+            return [opts[t]["value"]]   # the change handler navigated: nothing left to read back
+        if await loc.input_value(timeout=select_left_ms(dl)) == opts[t]["value"]:
             return [opts[t]["value"]]
         # One correction from wherever the highlight landed (arrows only), then give up to native.
         again = await _redescribe(info, "select")
@@ -2457,8 +2493,9 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         fix = plan_select(labels, again.get("selectedIndex", -1), t, max_prefix=0)
         if fix is None:
             return None
-        await _open_and_pick(selector, fix, at)
-        return [opts[t]["value"]] if await loc.input_value() == opts[t]["value"] else None
+        if await _open_and_pick(selector, fix, at, dl):
+            return [opts[t]["value"]]
+        return [opts[t]["value"]] if await loc.input_value(timeout=select_left_ms(dl)) == opts[t]["value"] else None
 
     async def hselect_option(selector, value=None, **options):
         """page.select_option, humanized (see _select_humanized)."""

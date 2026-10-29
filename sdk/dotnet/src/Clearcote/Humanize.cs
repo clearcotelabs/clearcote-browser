@@ -1138,6 +1138,67 @@ public static partial class Humanize
         }
     }
 
+    // The least a select's commit (and its read-back) is given when the humane motion already spent the
+    // caller's timeout: stock SelectOption commits at once, so a short timeout must not fail a healthy page.
+    internal const float SelectCommitFloorMs = 1000;
+
+    /// <summary>When a humanized SelectOption must be done by (Environment.TickCount64; null for timeout 0, no
+    /// limit) and the timeout that is, from its Timeout or the page default, as for Playwright's own.</summary>
+    internal readonly record struct SelectDeadline(long? End, float Ms)
+    {
+        internal static SelectDeadline For(IPage page, float? timeout)
+        {
+            float ms = timeout ?? DefaultTimeoutMs(page);
+            return new SelectDeadline(ms > 0 ? Environment.TickCount64 + (long)ms : null, ms);
+        }
+
+        /// <summary>What is left for one Playwright wait, never under the commit floor; 0 (no limit) without a deadline.</summary>
+        internal float Left() => End is long e ? Math.Max(SelectCommitFloorMs, e - Environment.TickCount64) : 0;
+    }
+
+    /// <summary>A request that navigates one of the page's frames: a change handler that sets location (of the
+    /// page, or of the frame a select lives in). Counted only around a commit; a stray one skips nothing but
+    /// the read-back, which stock SelectOption never makes.</summary>
+    internal static bool IsNavigation(IRequest r)
+    {
+        try { return r.IsNavigationRequest; }
+        catch (PlaywrightException) { return false; }
+    }
+
+    /// <summary>
+    /// Enter, which commits a select's pick and runs the page's change handlers, bounded by the select's
+    /// deadline like Playwright's own SelectOption. A handler that blocks the renderer (a sync XHR that is never
+    /// answered) leaves the key unacknowledged for good -- Keyboard.PressAsync takes no timeout: a
+    /// TimeoutException instead. True when the commit navigated the page: the document is leaving and cannot
+    /// answer a read-back (stock SelectOption returns at once there too).
+    /// </summary>
+    internal static async Task<bool> CommitSelectAsync(IPage page, Persona p, string what, SelectDeadline dl)
+    {
+        bool navigated = false;
+        void OnRequest(object? _, IRequest r) { if (IsNavigation(r)) navigated = true; }
+        page.Request += OnRequest;
+        try
+        {
+            var press = KeyAsync(page, p, "Enter");
+            float ms = dl.Left();
+            if (ms > 0 && await Task.WhenAny(press, Task.Delay(TimeSpan.FromMilliseconds(ms))).ConfigureAwait(false) != press)
+            {
+                // answered after the deadline (or never): nobody waits for it
+                _ = press.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                throw new System.TimeoutException(
+                    $"Timeout {dl.Ms:0}ms exceeded.\nCall log:\n  - waiting for {what}\n"
+                    + "  - waiting for the page to handle the selection (its change handler has not returned)");
+            }
+            await press.ConfigureAwait(false);
+            await Task.Delay((int)Motion.PauseMs(p, 80, 160)).ConfigureAwait(false);
+        }
+        finally
+        {
+            page.Request -= OnRequest;
+        }
+        return navigated;
+    }
+
     /// <summary>
     /// Press where the last glide ended, the way the options ask: the button, the click count (a double
     /// click is two presses with a human gap, not one event), the caller's hold or the persona's, and
@@ -2848,6 +2909,7 @@ public static partial class Humanize
     {
         if (wants.Count == 0) return null;
         var page = loc.Page;
+        var dl = SelectDeadline.For(page, timeout);
         var box = await BoxOfAsync(loc, timeout, force).ConfigureAwait(false);
         var info = await DescribeAsync(page, box, "select").ConfigureAwait(false);
         if (box is null || info is null || info.Tag != "select" || info.Disabled) return null;
@@ -2875,15 +2937,15 @@ public static partial class Humanize
         Position? at = ProvenPoint(box, info) is { } pt
             ? new Position { X = (float)(pt.X - box.X - info.Bl), Y = (float)(pt.Y - box.Y - info.Bt) }
             : null;
-        await OpenAndPickAsync(loc, plan, at).ConfigureAwait(false);
-        if (await loc.InputValueAsync().ConfigureAwait(false) == want) return new[] { want };
+        if (await OpenAndPickAsync(loc, plan, at, dl).ConfigureAwait(false)) return new[] { want };   // navigated: nothing to read back
+        if (await loc.InputValueAsync(new() { Timeout = dl.Left() }).ConfigureAwait(false) == want) return new[] { want };
         // One correction from wherever the highlight landed (arrows only), then give up to native.
         var again = await RedescribeAsync(page, info, "select").ConfigureAwait(false);   // the same node: no new handle
         if (again is null) return null;
         var fix = Forms.PlanSelect(labels, again.SelectedIndex, t, maxPrefix: 0);
         if (fix is null) return null;
-        await OpenAndPickAsync(loc, fix, at).ConfigureAwait(false);
-        return await loc.InputValueAsync().ConfigureAwait(false) == want ? new[] { want } : null;
+        if (await OpenAndPickAsync(loc, fix, at, dl).ConfigureAwait(false)) return new[] { want };
+        return await loc.InputValueAsync(new() { Timeout = dl.Left() }).ConfigureAwait(false) == want ? new[] { want } : null;
     }
 
     /// <summary>
@@ -2892,9 +2954,9 @@ public static partial class Humanize
     /// keys never reach the page (measured on r37: value unchanged until Enter). The opening click is the
     /// full humanized click -- covered-point check included -- at <paramref name="at"/> (a padding-box
     /// position the hit test proved) when the centre is covered, so an overlay cannot swallow it and leave
-    /// the letters to change a closed select one per key.
+    /// the letters to change a closed select one per key. True when the commit navigated the page (CommitSelectAsync).
     /// </summary>
-    private static async Task OpenAndPickAsync(ILocator loc, SelectPlan plan, Position? at)
+    private static async Task<bool> OpenAndPickAsync(ILocator loc, SelectPlan plan, Position? at, SelectDeadline dl)
     {
         var page = loc.Page;
         var p = PersonaFor(page);
@@ -2917,8 +2979,7 @@ public static partial class Humanize
             await ArrowRunAsync(page, p, plan.Arrows > 0 ? "ArrowDown" : "ArrowUp", Math.Abs(plan.Arrows)).ConfigureAwait(false);
         }
         await Task.Delay((int)Motion.PauseMs(p, 150, 400)).ConfigureAwait(false);
-        await KeyAsync(page, p, "Enter").ConfigureAwait(false);
-        await Task.Delay((int)Motion.PauseMs(p, 80, 160)).ConfigureAwait(false);
+        return await CommitSelectAsync(page, p, loc.ToString() ?? "the select", dl).ConfigureAwait(false);
     }
 
     /// <summary>

@@ -242,6 +242,73 @@ export function trialTimeoutError(selector: string, ms: number, why: string): Er
   return Object.assign(new Error(msg), { name: "TimeoutError", [SDK_PW_ERROR]: true });
 }
 
+// The least a select's commit (and its read-back) is given when the humane motion already spent the
+// caller's timeout: stock selectOption commits at once, so a short timeout must not fail a healthy page.
+export const SELECT_COMMIT_FLOOR_MS = 1000;
+export const SELECT_COMMIT_WHY = "waiting for the page to handle the selection (its change handler has not returned)";
+
+/** @internal exported for tests. When a humanized selectOption must be done by (Date.now()) and the
+ * timeout that is, from its `timeout` or the page default, as for Playwright's own; end null for
+ * timeout 0 (no limit). */
+export function selectDeadline(options: any, page: any): { end: number | null; ms: number } {
+  const ms = typeof options?.timeout === "number" ? options.timeout : defaultTimeoutMs(page);
+  return { end: ms > 0 ? Date.now() + ms : null, ms };
+}
+
+/** @internal exported for tests. What is left of a select deadline for one Playwright wait, never
+ * under the commit floor; 0 (no limit) when there is no deadline. */
+export function selectLeftMs(dl: { end: number | null } | null): number {
+  if (!dl || dl.end === null) return 0;
+  return Math.max(SELECT_COMMIT_FLOOR_MS, dl.end - Date.now());
+}
+
+/** @internal exported for tests. A request that navigates one of the page's frames: a change handler
+ * that sets location (of the page, or of the frame a select lives in). Counted only around a commit; a
+ * stray one skips nothing but the read-back, which stock selectOption never makes. */
+export function isNavigation(req: any): boolean {
+  try {
+    return Boolean(req.isNavigationRequest());
+  } catch {
+    return false;
+  }
+}
+
+/** @internal exported for tests. `p` raced against `ms` (0: no limit): true when it settled first,
+ * false when the deadline passed (its later rejection is swallowed). Calls like keyboard.press take
+ * no timeout, and a renderer blocked by the page never acknowledges them. */
+export async function settlesWithin(p: Promise<unknown>, ms: number): Promise<boolean> {
+  if (!ms) { await p; return true; }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<false>((res) => { timer = setTimeout(() => res(false), ms); });
+  try {
+    return await Promise.race([p.then(() => true as const), late]);
+  } finally {
+    clearTimeout(timer);
+    p.catch(() => { /* answered after the deadline: nobody waits for it */ });
+  }
+}
+
+/** @internal exported for frames.ts. Enter (`press()`), which commits a select's pick and runs the
+ * page's change handlers, bounded by the select's deadline `dl` (selectDeadline) like Playwright's own
+ * selectOption. A handler that blocks the renderer (a sync XHR that is never answered) leaves the key
+ * unacknowledged for good: Playwright's TimeoutError instead. Then `settleMs` of rest. True when the
+ * commit navigated the page: the document is leaving and cannot answer a read-back (stock selectOption
+ * returns at once there too). */
+export async function commitSelect(page: any, selector: string, dl: { end: number | null; ms: number },
+  press: () => Promise<unknown>, settleMs: number): Promise<boolean> {
+  let navigated = false;
+  const onRequest = (req: any): void => { if (isNavigation(req)) navigated = true; };
+  const listen = typeof page.on === "function" && typeof page.off === "function";
+  if (listen) page.on("request", onRequest);
+  try {
+    if (!(await settlesWithin(press(), selectLeftMs(dl)))) throw trialTimeoutError(selector, dl.ms, SELECT_COMMIT_WHY);
+    await new Promise((r) => setTimeout(r, settleMs));
+  } finally {
+    if (listen) page.off("request", onRequest);
+  }
+  return navigated;
+}
+
 // The characters a US-layout keyboard (Playwright's, and the engine's keyboard.getLayoutMap())
 // types with Shift held: capitals and the shifted symbols.
 const SHIFTED_SYMBOLS = new Set('~!@#$%^&*()_+{}|:"<>?');
@@ -2297,7 +2364,9 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
   // full humanized click -- including the covered-point check -- at the point the hit test proved when
   // the centre is covered (`at`, a Playwright `position`), so a floating label over the select's centre
   // cannot swallow it and leave the letters to change a closed select one per key.
-  const openAndPick = async (selector: string, plan: SelectPlan, at: { x: number; y: number } | null): Promise<void> => {
+  // `dl` is the select's deadline (selectDeadline); true when the commit navigated the page (commitPick).
+  const openAndPick = async (selector: string, plan: SelectPlan, at: { x: number; y: number } | null,
+    dl: { end: number | null; ms: number } | null = null): Promise<boolean> => {
     // moveOff false: the popup is open now and this sequence owns the pointer until the pick lands.
     await targetedClick(nativePageClick, selector, at ? { position: at } : {}, false, null, undefined, false);
     // Every pause here is the persona's (timingTraits.pauseScale): the windows were one fixed set for
@@ -2314,9 +2383,13 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
       await arrowRun(n > 0 ? "ArrowDown" : "ArrowUp", Math.abs(n));
     }
     await sleep(pauseMs(persona, 150, 400));
-    await key("Enter");
-    await sleep(pauseMs(persona, 80, 160));
+    return commitPick(selector, dl);
   };
+
+  // Enter with the persona's hold, bounded by the select's deadline (commitSelect).
+  const commitPick = (selector: string, dl: { end: number | null; ms: number } | null): Promise<boolean> =>
+    commitSelect(page, selector, dl ?? { end: null, ms: 0 }, () => nativeKbPress("Enter", { delay: kdwell() }),
+      pauseMs(persona, 80, 160));
 
   // `n` presses of an arrow key in an OPEN drop-down. A long run is HELD, the way a person crosses a
   // long list: one press, the keyboard's repeat delay, then auto-repeat at its rate -- Playwright sends
@@ -2444,6 +2517,7 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
   const selectHumanized = async (selector: string, values: any, options: any): Promise<string[] | null> => {
     const wants = selectWants(values);
     if (!wants) return null;
+    const dl = selectDeadline(options, page);
     const loc = page.locator(selector).first();
     const box = await boxOf(loc, options?.timeout, Boolean(options?.force), selector);
     const info = await describe(box, "select");
@@ -2465,15 +2539,15 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
     if (plan === null) return null;
     const pt = provenPoint(box, info);
     const at = pt ? { x: pt[0] - box.x - (info.bl || 0), y: pt[1] - box.y - (info.bt || 0) } : null;
-    await openAndPick(selector, plan, at);
-    if ((await loc.inputValue()) === opts[t].value) return [opts[t].value];
+    if (await openAndPick(selector, plan, at, dl)) return [opts[t].value]; // navigated: nothing to read back
+    if ((await loc.inputValue({ timeout: selectLeftMs(dl) })) === opts[t].value) return [opts[t].value];
     // One correction from wherever the highlight landed (arrows only), then give up to native.
     const again = await redescribe(info, "select");
     if (!again) return null;
     const fix = planSelect(labels, again.selectedIndex ?? -1, t, 0);
     if (fix === null) return null;
-    await openAndPick(selector, fix, at);
-    return (await loc.inputValue()) === opts[t].value ? [opts[t].value] : null;
+    if (await openAndPick(selector, fix, at, dl)) return [opts[t].value];
+    return (await loc.inputValue({ timeout: selectLeftMs(dl) })) === opts[t].value ? [opts[t].value] : null;
   };
 
   // page.selectOption, humanized: no more script-assigned value with an untrusted change event

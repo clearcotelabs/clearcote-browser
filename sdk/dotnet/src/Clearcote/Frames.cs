@@ -515,6 +515,7 @@ public static partial class Humanize
         if (wants.Count == 0) throw new FrameNativeException("frame: nothing to select by value/label/index");
         var page = loc.Page;
         var p = PersonaFor(page);
+        var dl = SelectDeadline.For(page, timeout);
         var t = await FrameLocateAsync(loc, timeout, "select").ConfigureAwait(false);
         var info = t.Info!;
         if (info.Tag != "select" || info.Disabled) throw new FrameNativeException("frame: not an enabled select");
@@ -548,8 +549,9 @@ public static partial class Humanize
             await ArrowRunAsync(page, p, plan.Arrows > 0 ? "ArrowDown" : "ArrowUp", Math.Abs(plan.Arrows)).ConfigureAwait(false);
         }
         await Task.Delay((int)Motion.PauseMs(p, 150, 400)).ConfigureAwait(false);
-        await KeyAsync(page, p, "Enter").ConfigureAwait(false);   // commits: ONE trusted input + change
-        await Task.Delay((int)Motion.PauseMs(p, 80, 160)).ConfigureAwait(false);
+        // commits: ONE trusted input + change; a document that is navigating away cannot answer the read-back
+        if (await CommitSelectAsync(page, p, loc.ToString() ?? "the select", dl).ConfigureAwait(false))
+            return new[] { opts[tgt].Value ?? "" };
         var again = await FrameDescribeAsync(page, t, "select").ConfigureAwait(false);
         if (again?.SelectedIndex == tgt) return new[] { opts[tgt].Value ?? "" };
         throw new FrameNativeException("frame: the drop-down did not commit the option");

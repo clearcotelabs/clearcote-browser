@@ -275,6 +275,92 @@ def trial_timeout_error(selector, ms, why):
                                   % (ms, selector, why))
 
 
+# The least a select's commit (and its read-back) is given when the humane motion already spent the
+# caller's timeout: stock select_option commits at once, so a short timeout must not fail a healthy page.
+SELECT_COMMIT_FLOOR_MS = 1000.0
+SELECT_COMMIT_WHY = "waiting for the page to handle the selection (its change handler has not returned)"
+
+
+def select_deadline(options, page):
+    """(end, ms): when a humanized select_option must be done by (time.monotonic()) and the timeout
+    that is, from its `timeout` or the page default, as for Playwright's own; end None for
+    timeout=0 (no limit)."""
+    t = options.get("timeout")
+    ms = float(t) if t is not None else default_timeout_ms(page)
+    return (time.monotonic() + ms / 1000.0 if ms > 0 else None), ms
+
+
+def select_left_ms(dl):
+    """What is left of a select deadline for one Playwright wait, never under the commit floor; 0 (no
+    limit) when there is no deadline."""
+    if dl is None or dl[0] is None:
+        return 0
+    return max(SELECT_COMMIT_FLOOR_MS, (dl[0] - time.monotonic()) * 1000.0)
+
+
+def is_navigation(req):
+    """A request that navigates one of the page's frames: a change handler that sets location (of the
+    page, or of the frame a select lives in). Counted only around a commit; a stray one skips nothing
+    but the read-back, which stock select_option never makes."""
+    try:
+        return bool(req.is_navigation_request())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def bounded_sync(owner, call, ms):
+    """``call(owner._impl_obj)`` -- a Playwright impl coroutine -- run through the sync object
+    ``owner`` with a deadline of ``ms`` (0: none). True when it finished, False when the deadline
+    passed first: the waiter is cancelled and Playwright drops the late answer. Calls like
+    keyboard.press take no timeout, and a renderer blocked by the page never acknowledges them.
+    None when there is no deadline or ``owner`` is not a Playwright sync wrapper: the caller makes
+    the plain call."""
+    sync, impl = getattr(owner, "_sync", None), getattr(owner, "_impl_obj", None)
+    if not ms or sync is None or impl is None:
+        return None
+    import asyncio
+
+    async def run():
+        try:
+            await asyncio.wait_for(call(impl), ms / 1000.0)
+            return True
+        except asyncio.TimeoutError:
+            return False
+    return sync(run())
+
+
+def commit_select(page, selector, dl, delay, settle_ms, press):
+    """Enter, which commits a select's pick and runs the page's change handlers, bounded by the
+    select's deadline ``dl`` (select_deadline) like Playwright's own select_option. A handler that
+    blocks the renderer (a sync XHR that is never answered) leaves the key unacknowledged for good:
+    Playwright's TimeoutError instead. ``press()`` is the plain Enter, for a keyboard that is not
+    Playwright's sync wrapper; ``delay`` its hold. Then ``settle_ms`` of rest. True when the commit
+    navigated the page: the document is leaving and cannot answer a read-back (stock select_option
+    returns at once there too)."""
+    navs = []
+
+    def on_request(req):
+        if is_navigation(req):
+            navs.append(req)
+    listen = callable(getattr(page, "on", None)) and callable(getattr(page, "remove_listener", None))
+    if listen:
+        page.on("request", on_request)
+    try:
+        done = bounded_sync(page.keyboard, lambda k: k.press("Enter", delay=delay), select_left_ms(dl))
+        if done is None:
+            press()
+        elif not done:
+            raise trial_timeout_error(selector, dl[1], SELECT_COMMIT_WHY)
+        if listen and callable(getattr(page, "wait_for_timeout", None)):
+            page.wait_for_timeout(settle_ms)   # unlike time.sleep, delivers a navigation's request event
+        else:
+            time.sleep(settle_ms / 1000.0)
+    finally:
+        if listen:
+            page.remove_listener("request", on_request)
+    return bool(navs)
+
+
 def _engine_clicks_mode():
     """Which clicks the engine pointer path (Browser.dispatchPointerPath) may walk, from
     CLEARCOTE_HUMANIZE_ENGINE_CLICKS: "off" (also 0/false/no) never; "all" (also "selector") coordinate
@@ -2757,14 +2843,15 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
     # an AttributeError raised while wiring this one up.
     native_page_select_option = getattr(page, "select_option", None)
 
-    def _open_and_pick(selector, plan, at=None):
+    def _open_and_pick(selector, plan, at=None, dl=None):
         """Open the drop-down with a click, move its highlight with the planned keys, commit with
         Enter: one trusted input+change, the sequence a mouse-and-keyboard user produces. While the
         popup is open its keys never reach the page (measured on r37: value unchanged until Enter).
         The opening click is the full humanized click -- including the covered-point check -- at the
         point the hit test proved when the centre is covered (``at``, a Playwright `position`), so a
         floating label over the select's centre cannot swallow it and leave the letters to change a
-        closed select one per key."""
+        closed select one per key. ``dl`` is the select's deadline (select_deadline); True when the
+        commit navigated the page (_commit_pick)."""
         # move_off=False: the popup is open now and this sequence owns the pointer until the pick lands.
         _targeted_click(native_page_click, selector, {"position": at} if at else {}, no_click=False,
                         native_opts=None, move_off=False)
@@ -2780,8 +2867,13 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
             time.sleep(pause_ms(persona, 120, 300) / 1000.0)
             _arrow_run("ArrowDown" if n > 0 else "ArrowUp", abs(n))
         time.sleep(pause_ms(persona, 150, 400) / 1000.0)
-        _key("Enter")
-        time.sleep(pause_ms(persona, 80, 160) / 1000.0)
+        return _commit_pick(selector, dl)
+
+    def _commit_pick(selector, dl):
+        """Enter with the persona's hold, bounded by the select's deadline (commit_select)."""
+        dwell = _kdwell()
+        return commit_select(page, selector, dl, dwell, pause_ms(persona, 80, 160),
+                             lambda: native_kb_press("Enter", delay=dwell))
 
     def _arrow_run(key, n):
         """``n`` presses of an arrow key in an OPEN drop-down. A long run is HELD, the way a person
@@ -2903,6 +2995,7 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
         wants = select_wants(value, options.get("index"), options.get("label"))
         if not wants:
             return None
+        dl = select_deadline(options, page)
         loc = page.locator(selector).first
         box = _box_of(loc, options.get("timeout"), options.get("force"), selector)
         info = _describe(box, "select")
@@ -2930,8 +3023,9 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
         pt = _proven_point(box, info)
         at = ({"x": pt[0] - box["x"] - info.get("bl", 0), "y": pt[1] - box["y"] - info.get("bt", 0)}
               if pt else None)
-        _open_and_pick(selector, plan, at)
-        if loc.input_value() == opts[t]["value"]:
+        if _open_and_pick(selector, plan, at, dl):
+            return [opts[t]["value"]]   # the change handler navigated: nothing left to read back
+        if loc.input_value(timeout=select_left_ms(dl)) == opts[t]["value"]:
             return [opts[t]["value"]]
         # One correction from wherever the highlight landed (arrows only), then give up to native.
         again = _redescribe(info, "select")
@@ -2940,8 +3034,9 @@ def attach_humanize(browser, page, humanize=False, show_cursor=False, seed=None)
         fix = plan_select(labels, again.get("selectedIndex", -1), t, max_prefix=0)
         if fix is None:
             return None
-        _open_and_pick(selector, fix, at)
-        return [opts[t]["value"]] if loc.input_value() == opts[t]["value"] else None
+        if _open_and_pick(selector, fix, at, dl):
+            return [opts[t]["value"]]
+        return [opts[t]["value"]] if loc.input_value(timeout=select_left_ms(dl)) == opts[t]["value"] else None
 
     def hselect_option(selector, value=None, **options):
         """page.select_option, humanized (see _select_humanized)."""

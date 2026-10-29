@@ -122,6 +122,15 @@ def _same(rect, box):
             and abs(rect[2] - box["width"]) <= 1.5 and abs(rect[3] - box["height"]) <= 1.5)
 
 
+def _enter_dwell(page):
+    """The persona's key hold for a commit's Enter (the humanized keyboard's), None without one."""
+    persona = getattr(page, "_clearcote_persona", None)
+    if persona is None:
+        return None
+    from ._motion import key_dwell
+    return key_dwell(persona)
+
+
 def _rand(a, b):
     return a + random.random() * (b - a)
 
@@ -430,12 +439,13 @@ def do_press(page, loc, key, kw):
 
 
 def do_select(page, loc, value, kw):
-    from ._humanize import select_wants, want_index
+    from ._humanize import commit_select, select_deadline, select_wants, want_index
     if kw.get("element") is not None or kw.get("force"):
         raise _Native("frame: element handles / force are Playwright's own")
     wants = select_wants(value, kw.get("index"), kw.get("label"))
     if not wants:
         raise _Native("frame: nothing to select by value/label/index")
+    dl = select_deadline(kw, page)
     t = _locate(page, loc, kw.get("timeout"), "select")
     info = t.info
     if info.get("tag") != "select" or info.get("disabled"):
@@ -469,8 +479,10 @@ def do_select(page, loc, value, kw):
             page.keyboard.press("ArrowDown" if n > 0 else "ArrowUp")
             time.sleep(_rand(0.06, 0.15))
     time.sleep(_rand(0.15, 0.40))
-    page.keyboard.press("Enter")               # commits: ONE trusted input + change
-    time.sleep(_rand(0.08, 0.16))
+    # commits: ONE trusted input + change; a document that is navigating away cannot answer the read-back
+    if commit_select(page, _selector_of(loc), dl, _enter_dwell(page), _rand(80, 160),
+                     lambda: page.keyboard.press("Enter")):
+        return [opts[tgt]["value"]]
     again = worlds_for(page).call(t.fid, t.nid, DESCRIBE, {"want": "select"})
     if again and again.get("selectedIndex") == tgt:
         return [opts[tgt]["value"]]
@@ -790,12 +802,14 @@ async def ado_press(page, loc, key, kw):
 
 
 async def ado_select(page, loc, value, kw):
-    from ._humanize import select_wants, want_index
+    from ._humanize import select_deadline, select_wants, want_index
+    from ._humanize_async import commit_select_async
     if kw.get("element") is not None or kw.get("force"):
         raise _Native("frame: element handles / force are Playwright's own")
     wants = select_wants(value, kw.get("index"), kw.get("label"))
     if not wants:
         raise _Native("frame: nothing to select by value/label/index")
+    dl = select_deadline(kw, page)
     t = await _alocate(page, loc, kw.get("timeout"), "select")
     info = t.info
     if info.get("tag") != "select" or info.get("disabled"):
@@ -829,8 +843,8 @@ async def ado_select(page, loc, value, kw):
             await page.keyboard.press("ArrowDown" if n > 0 else "ArrowUp")
             await asyncio.sleep(_rand(0.06, 0.15))
     await asyncio.sleep(_rand(0.15, 0.40))
-    await page.keyboard.press("Enter")
-    await asyncio.sleep(_rand(0.08, 0.16))
+    if await commit_select_async(page, _selector_of(loc), dl, lambda: page.keyboard.press("Enter"), _rand(80, 160)):
+        return [opts[tgt]["value"]]   # navigated: nothing left to read back
     again = await async_worlds_for(page).call(t.fid, t.nid, DESCRIBE, {"want": "select"})
     if again and again.get("selectedIndex") == tgt:
         return [opts[tgt]["value"]]
