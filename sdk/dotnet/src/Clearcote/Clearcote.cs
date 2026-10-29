@@ -171,6 +171,7 @@ public static partial class Clearcote
         var egressDrift = prepared.EgressDrift;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        DropAutoWebrtcIp(options, prepared.Geo);  // open build + proxy: no default WebRTC IP
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
@@ -347,6 +348,7 @@ public static partial class Clearcote
         var egressDrift = prepared.EgressDrift;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        DropAutoWebrtcIp(options, prepared.Geo);  // open build + proxy: no default WebRTC IP
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
@@ -505,6 +507,7 @@ public static partial class Clearcote
         var host = string.IsNullOrEmpty(options.Host) ? "127.0.0.1" : options.Host;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
+        DropAutoWebrtcIp(options, prepared.Geo);  // open build + proxy: no default WebRTC IP
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
@@ -637,21 +640,29 @@ public static partial class Clearcote
 
     // ── internals ────────────────────────────────────────────────────────────
 
-    /// Copy the caller's options (never mutate them), layer a saved LocalProfile under them, and apply geoip,
-    /// which fails closed BEFORE the binary is resolved or any browser starts.
+    /// Copy the caller's options (never mutate them), layer a saved LocalProfile under them, and apply geoip
+    /// (on by default; <c>Geoip = true</c> fails closed BEFORE the binary is resolved or any browser starts).
     internal static async Task<T> PrepareAsync<T>(T options) where T : LaunchOptions
         => (await PrepareLaunchAsync(options).ConfigureAwait(false)).Options;
 
     /// <see cref="PrepareAsync"/>, plus the geoip egress-drift check it started (a completed task without geoip):
-    /// the launch awaits it before it returns, as the Node and Python SDKs do.
-    internal static async Task<(T Options, Task EgressDrift)> PrepareLaunchAsync<T>(T options) where T : LaunchOptions
+    /// the launch awaits it before it returns, as the Node and Python SDKs do. <c>Geo</c>: what geoip did, for
+    /// <see cref="DropAutoWebrtcIp"/> once the binary is resolved.
+    internal static async Task<(T Options, Task EgressDrift, GeoIp.GeoipApplied Geo)> PrepareLaunchAsync<T>(T options) where T : LaunchOptions
     {
         var copy = (T)options.Clone();
         // LocalProfile = a saved persona: its options fill what the caller left unset ("auto" waits for the binary).
         ProfileOptionsMap.MergeSaved(copy);
-        var drift = copy.Geoip ? await GeoIp.ApplyForLaunchAsync(copy, copy.Proxy, copy.Quiet).ConfigureAwait(false) : Task.CompletedTask;
-        return (copy, drift);
+        // geoip is on by default: the proxy's exit, or this machine's own IP without a proxy (GeoIp.Mode).
+        var geo = await GeoIp.ApplyModeAsync(copy, copy.Proxy, GeoIp.Mode(copy.Geoip), copy.Quiet).ConfigureAwait(false);
+        return (copy, geo.EgressDrift, geo);
     }
+
+    /// Open build + proxy: no WebRTC IP from the DEFAULT geoip lookup (<see cref="GeoIp.DropAutoWebrtcIp"/>). Licensed
+    /// = a licence key resolves (the PRO build) or offline mode (index.ts <c>!!pro || offline</c>).
+    internal static void DropAutoWebrtcIp(LaunchOptions o, GeoIp.GeoipApplied geo)
+        => GeoIp.DropAutoWebrtcIp(o, geo, o.Proxy,
+            licensed: Offline.OfflineKeyPath(o.OfflineKey) is not null || License.ResolveLicenseKey(o.LicenseKey) is not null);
 
     // ── launch lane: shared steps of LaunchAsync / LaunchPersistentContextAsync / ServeAsync ──
 
@@ -665,7 +676,7 @@ public static partial class Clearcote
     /// the assembled browser args, to tell whether this browser runs with the stock DevTools Runtime.
     private static void EmitCoherenceWarnings(LaunchOptions o, string exe, IEnumerable<string> args, bool? headless, bool devtools, string? userAgent)
         => LaunchWarnings.EmitCoherence(
-            LaunchWarnings.Coherence(o, o.Proxy, o.Geoip, headless, o.Args, devtools, userAgent),
+            LaunchWarnings.Coherence(o, o.Proxy, o.Geoip == true, headless, o.Args, devtools, userAgent),
             o.Quiet, stockRuntime: LaunchOpts.StockRuntimeRunning(exe, args.Concat(o.Args ?? Array.Empty<string>())));
 
 #pragma warning disable CS0612, CS0618   // Devtools is deprecated in Playwright, and still honoured: it opens DevTools

@@ -159,7 +159,8 @@ public static class ProfileSource
         var cached = ReadCachedHost(exe);
         if (cached is not null) return cached;
 
-        var browser = await launch(new LaunchOptions { ExecutablePath = exe, Headless = true, Quiet = true }).ConfigureAwait(false);
+        // Geoip = false: the probe measures the host, not the egress; the default lookup would only cost time.
+        var browser = await launch(new LaunchOptions { ExecutablePath = exe, Headless = true, Quiet = true, Geoip = false }).ConfigureAwait(false);
         try
         {
             var ctx = await browser.NewContextAsync().ConfigureAwait(false);

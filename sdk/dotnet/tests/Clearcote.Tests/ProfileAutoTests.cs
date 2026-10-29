@@ -438,6 +438,7 @@ public sealed class ProfileAutoTests : IDisposable
         Assert.False(seen.Cloud);   // measures THIS host, whatever CLEARCOTE_CLOUD says
         Assert.False(seen.Docker);
         Assert.False(seen.Widevine);
+        Assert.False(seen.Geoip);   // measures the host, not the egress: no default geoip lookup
         Assert.Null(ProfileAuto.LocalProfileOf(seen));   // no selector: it cannot recurse
     }
 
@@ -449,5 +450,15 @@ public sealed class ProfileAutoTests : IDisposable
         await Assert.ThrowsAsync<PlaywrightException>(() =>
             ProfileSource.MeasureHostAsync(_ => throw new PlaywrightException("no browser here"), exe, 150));
         Assert.Null(ProfileSource.ReadCachedHost(exe));
+    }
+
+    [Fact]
+    public async Task MeasureHost_probe_turns_the_default_geoip_lookup_off()
+    {
+        LaunchOptions? seen = null;
+        var exe = Path.Combine(_root, "chrome");
+        await Assert.ThrowsAsync<PlaywrightException>(() =>
+            ProfileSource.MeasureHostAsync(o => { seen = o; throw new PlaywrightException("stop here"); }, exe, 150));
+        Assert.False(seen!.Geoip);   // the probe measures the host, not the egress (profilesource.ts measureHost)
     }
 }

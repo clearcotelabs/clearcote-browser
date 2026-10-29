@@ -968,6 +968,34 @@ public sealed class DockerLaunchTests : IDisposable
     }
 
     [Fact]
+    public async Task Geoip_default_fills_the_container_but_the_open_image_through_a_proxy_gets_no_WebRTC_IP()
+    {
+        _sb.Env(GeoIp.GeoipEnv, null);   // the default, on (the suite turns it off: NoGeoip)
+        GeoIp.ResetDirectCache();
+        var asked = GeoAnswers(Berlin);
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        await Clearcote.LaunchAsync(new LaunchOptions { Proxy = GeoProxy, Quiet = true });
+        Assert.Single(asked);
+        var (_, env, _) = _docker.Call("create");
+        Assert.Equal("Europe/Berlin", env["CC_TIMEZONE"]);
+        Assert.Equal("de-DE", env["CC_ACCEPT_LANGUAGE"]);
+        Assert.False(env.ContainsKey("CC_WEBRTC_IP"));   // no key = the open build: its WebRTC UDP would skip the proxy
+    }
+
+    [Fact]
+    public async Task Geoip_default_failure_warns_and_still_starts_the_container()
+    {
+        _sb.Env(GeoIp.GeoipEnv, null);
+        GeoAnswers(null, "could not determine the exit IP through the proxy");
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        await Clearcote.LaunchAsync(new LaunchOptions { Proxy = GeoProxy, Quiet = true });
+        var (_, env, _) = _docker.Call("create");
+        Assert.False(env.ContainsKey("CC_TIMEZONE"));
+    }
+
+    [Fact]
     public async Task A_failed_connect_after_the_container_started_removes_it()
     {
         using var stub = new CdpStub();

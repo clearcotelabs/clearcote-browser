@@ -14,7 +14,8 @@ public sealed record GeoInfo(string? Ip, string? Country, string? Timezone, stri
 /// Outcome of a geo resolution: the geo, or why there is none.
 public sealed record GeoResult(GeoInfo? Geo, string? Reason, long ElapsedMs);
 
-/// Thrown by a launch with <see cref="LaunchOptions.Geoip"/> when the region could not be resolved.
+/// Thrown by a launch with <see cref="LaunchOptions.Geoip"/> = true when the region could not be resolved (the
+/// default, unset Geoip, warns and launches instead).
 ///
 /// Failing closed is the point: continuing would launch with the host's clock and a default
 /// language — UTC + en-US on most servers — which is exactly the mismatch geoip exists to prevent.
@@ -25,6 +26,10 @@ public sealed class GeoipException : Exception
     public string Code => "GEOIP_UNRESOLVED";
     public GeoipException(string message) : base(message) { }
 }
+
+/// How a launch applies geoip (<see cref="GeoIp.Mode"/>): Off, Auto (the default: fails open) or Strict
+/// (<c>Geoip = true</c>: fails closed).
+public enum GeoipMode { Off, Auto, Strict }
 
 /// Region lookup for the connection a launch will use (ports geoip.ts).
 ///
@@ -380,9 +385,10 @@ public static class GeoIp
 
     /// <see cref="ApplyAsync"/> for a launch: returns the egress-drift check it started, which the launch awaits
     /// before it returns.
-    internal static async Task<Task> ApplyForLaunchAsync(FingerprintOptions fp, ProxyOptions? proxy, bool quiet = false, int? timeoutMs = null)
+    internal static async Task<Task> ApplyForLaunchAsync(FingerprintOptions fp, ProxyOptions? proxy, bool quiet = false, int? timeoutMs = null,
+        Func<ProxyOptions?, bool, int?, Task<GeoResult>>? resolver = null)
     {
-        var result = await Resolver(proxy, quiet, timeoutMs).ConfigureAwait(false);
+        var result = await (resolver ?? Resolver)(proxy, quiet, timeoutMs).ConfigureAwait(false);
         var geo = result.Geo;
         if (geo is null || string.IsNullOrEmpty(geo.Timezone))
         {
@@ -402,6 +408,100 @@ public static class GeoIp
         if (string.IsNullOrEmpty(fp.Location) && !string.IsNullOrEmpty(geo.Location)) fp.Location = geo.Location;
         if (string.IsNullOrEmpty(fp.WebrtcIp) && !string.IsNullOrEmpty(geo.Ip)) fp.WebrtcIp = geo.Ip;
         return StartEgressDriftCheck(proxy, geo.Ip, quiet);
+    }
+
+    // ── on by default (geoip.ts geoipMode / applyGeoipMode / dropAutoWebrtcIp) ──────────────────────
+
+    /// The variable that turns the default lookup off: CLEARCOTE_GEOIP=0/false/no/off (an explicit
+    /// <see cref="LaunchOptions.Geoip"/> = true still wins).
+    public const string GeoipEnv = "CLEARCOTE_GEOIP";
+
+    /// geoip is ON by default (since 0.66.0): with <see cref="LaunchOptions.Geoip"/> unset the launch looks the
+    /// egress up (the proxy's exit, or this machine's own public IP when no proxy is set) so timezone, language,
+    /// location and the WebRTC IP describe the place sites see the connection come from.
+    ///   - Strict: <c>Geoip = true</c>. Fails closed (<see cref="GeoipException"/>), as before.
+    ///   - Auto:   the default. A lookup that fails warns and launches with the persona's defaults.
+    ///   - Off:    <c>Geoip = false</c>, or CLEARCOTE_GEOIP=0/false/no/off.
+    public static GeoipMode Mode(bool? geoip, IDictionary<string, string?>? env = null)
+    {
+        if (geoip == true) return GeoipMode.Strict;
+        if (geoip == false) return GeoipMode.Off;
+        return (Env(env, GeoipEnv) ?? "").Trim().ToLowerInvariant() is "0" or "false" or "no" or "off" ? GeoipMode.Off : GeoipMode.Auto;
+    }
+
+    /// The default lookup's budget: CLEARCOTE_GEOIP_TIMEOUT_SECONDS when set, else 10 s (Strict keeps 20 s).
+    private const int AutoTimeoutMs = 10_000;
+    /// This machine's own egress rarely moves; one lookup serves the process for 10 minutes.
+    private static readonly TimeSpan DirectCacheFor = TimeSpan.FromMinutes(10);
+    private sealed record DirectGeo(string? Timezone, string? AcceptLanguage, string? Location, string? WebrtcIp, DateTime At);
+    private static DirectGeo? _direct;
+    /// Tests: forget the cached no-proxy lookup.
+    internal static void ResetDirectCache() => _direct = null;
+
+    /// What <see cref="ApplyModeAsync"/> did: the geo, whether the WebRTC IP came from the DEFAULT lookup, and the
+    /// egress-drift check it started (the launch awaits it before it returns).
+    internal sealed record GeoipApplied(GeoInfo? Geo, bool AutoWebrtcIp, Task EgressDrift)
+    {
+        public static readonly GeoipApplied None = new(null, false, Task.CompletedTask);
+    }
+
+    /// Apply geoip in <paramref name="mode"/> (see <see cref="Mode"/>). Auto skips the lookup when every field it
+    /// fills is already set, reuses a no-proxy lookup for 10 minutes, and on failure warns once and launches.
+    internal static async Task<GeoipApplied> ApplyModeAsync(FingerprintOptions fp, ProxyOptions? proxy, GeoipMode mode, bool quiet = false)
+    {
+        if (mode == GeoipMode.Off) return GeoipApplied.None;
+        if (mode == GeoipMode.Strict)
+            return new GeoipApplied(null, false, await ApplyForLaunchAsync(fp, proxy, quiet).ConfigureAwait(false));
+        if (!string.IsNullOrEmpty(fp.Timezone) && !string.IsNullOrEmpty(fp.AcceptLanguage) &&
+            !string.IsNullOrEmpty(fp.Location) && !string.IsNullOrEmpty(fp.WebrtcIp)) return GeoipApplied.None;
+        var hadWebrtcIp = !string.IsNullOrEmpty(fp.WebrtcIp);
+        var direct = string.IsNullOrEmpty(proxy?.Server);
+        var cached = _direct;
+        if (direct && cached is not null && DateTime.UtcNow - cached.At < DirectCacheFor)
+        {
+            if (string.IsNullOrEmpty(fp.Timezone) && !string.IsNullOrEmpty(cached.Timezone)) fp.Timezone = cached.Timezone;
+            if (string.IsNullOrEmpty(fp.AcceptLanguage) && !string.IsNullOrEmpty(cached.AcceptLanguage)) fp.AcceptLanguage = cached.AcceptLanguage;
+            if (string.IsNullOrEmpty(fp.Location) && !string.IsNullOrEmpty(cached.Location)) fp.Location = cached.Location;
+            if (string.IsNullOrEmpty(fp.WebrtcIp) && !string.IsNullOrEmpty(cached.WebrtcIp)) fp.WebrtcIp = cached.WebrtcIp;
+            return new GeoipApplied(null, !hadWebrtcIp && !string.IsNullOrEmpty(fp.WebrtcIp), Task.CompletedTask);
+        }
+        var envTimeout = (Environment.GetEnvironmentVariable("CLEARCOTE_GEOIP_TIMEOUT_SECONDS") ?? "").Trim();
+        GeoInfo? geo = null;
+        var resolver = Resolver;
+        try
+        {
+            // Capture the geo ApplyForLaunchAsync filled from, for the no-proxy cache.
+            Func<ProxyOptions?, bool, int?, Task<GeoResult>> recording = async (p, q, t) =>
+            {
+                var r = await resolver(p, q, t).ConfigureAwait(false);
+                geo = r.Geo;
+                return r;
+            };
+            var drift = await ApplyForLaunchAsync(fp, proxy, quiet, envTimeout.Length > 0 ? TimeoutMs() : AutoTimeoutMs, recording).ConfigureAwait(false);
+            if (geo is { Timezone.Length: > 0 } && direct)
+                _direct = new DirectGeo(geo.Timezone, geo.AcceptLanguage, geo.Location, geo.Ip, DateTime.UtcNow);
+            return new GeoipApplied(geo, !hadWebrtcIp && !string.IsNullOrEmpty(fp.WebrtcIp), drift);
+        }
+        catch (GeoipException e)
+        {
+            if (!quiet && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLEARCOTE_NO_WARN")))
+            {
+                var msg = Regex.Replace(Regex.Replace(e.Message, "^geoip: ", "geoip (on by default): "), @" Launching anyway[\s\S]*$", "");
+                Console.Error.WriteLine($"clearcote: warning: {msg} Launching with the persona's default timezone and language; " +
+                                        "pass Geoip = true to fail instead, or Geoip = false to skip the lookup.");
+            }
+            return GeoipApplied.None;
+        }
+    }
+
+    /// The open build (no licence) has no WebRTC UDP egress block, and a WebRTC IP there re-enables UDP that does
+    /// not go through the proxy: a page's own TURN server would read this machine's real address off the packets.
+    /// So a WebRTC IP the DEFAULT lookup filled is dropped again on an open-build launch through a proxy. With no
+    /// proxy the real address is the exit anyway; <c>Geoip = true</c> or an explicit WebrtcIp is the caller's
+    /// choice and is kept.
+    internal static void DropAutoWebrtcIp(FingerprintOptions fp, GeoipApplied applied, ProxyOptions? proxy, bool licensed)
+    {
+        if (applied.AutoWebrtcIp && !string.IsNullOrEmpty(proxy?.Server) && !licensed) fp.WebrtcIp = null;
     }
 
     // country (ISO-3166 alpha-2) -> the OS locale a machine there most plausibly runs. ONE tag, not a

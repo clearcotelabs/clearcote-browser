@@ -88,9 +88,9 @@ internal static class CloudLaunch
         {
             Fingerprint = o.Fingerprint, Platform = o.Platform, Brand = o.Brand, Timezone = o.Timezone,
             Locale = o.AcceptLanguage, LightStealth = o.LightStealth,
-            // Geoip is a plain bool locally, so "unset" and "false" look the same: send it only when on,
-            // and leave the server's own default (on when neither Timezone nor AcceptLanguage is set) alone.
-            Geoip = o.Geoip ? true : null,
+            // Sent only when on, as before Geoip became nullable: leave the server's own default (on when
+            // neither Timezone nor AcceptLanguage is set) alone.
+            Geoip = o.Geoip == true ? true : null,
             Headless = o.Headless, Proxy = o.Proxy, Version = o.Version, Identity = o.Identity,
             Country = o.Country, State = o.State, City = o.City, ProxySession = o.ProxySession,
             TimeoutSec = o.TimeoutSec, IdleTimeoutSec = o.IdleTimeoutSec, MaxGb = o.MaxGb, Profile = o.Profile,

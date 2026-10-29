@@ -981,17 +981,22 @@ internal static class DockerLaunch
     /// owner token for SweepStaleAsync.
     internal static async Task<(DockerContainer Container, string Exe)> StartContainerAsync(LaunchOptions o)
     {
-        // Geoip = true on the Docker path: resolve the proxy's exit region HERE, before any container starts, and
-        // hand the container what it filled (Timezone, AcceptLanguage, Location, WebrtcIp -> the CC_* variables of
-        // the same name). The same GeoIp.ApplyAsync as a native launch, so it fails closed the same way:
-        // GeoipException and no container when the region is unresolvable; an explicit Timezone AND AcceptLanguage
-        // warn and launch. On a copy, as the native launch does: the caller's options are never written to. Without
-        // Geoip the container's entrypoint builds the persona as a native launch does: Accept-Language defaults to
-        // en-US and the timezone follows its primary tag (en-US -> America/New_York).
-        if (o.Geoip)
+        // geoip on the Docker path (on by default, as a native launch): resolve the egress region HERE (the proxy's
+        // exit, or this machine's own IP without a proxy), before any container starts, and hand the container what
+        // it filled (Timezone, AcceptLanguage, Location, WebrtcIp -> the CC_* variables of the same name). The same
+        // GeoIp.ApplyModeAsync as a native launch: Geoip = true fails closed the same way (GeoipException and no
+        // container when the region is unresolvable; an explicit Timezone AND AcceptLanguage warn and launch), the
+        // default warns and launches. No licence key = the image's open build, which has no WebRTC UDP egress
+        // block: through a proxy it gets no WebRTC IP from the default lookup (GeoIp.DropAutoWebrtcIp). On a copy,
+        // as the native launch does: the caller's options are never written to. With geoip off the container's
+        // entrypoint builds the persona as a native launch does: Accept-Language defaults to en-US and the timezone
+        // follows its primary tag (en-US -> America/New_York).
+        var geoMode = GeoIp.Mode(o.Geoip);
+        if (geoMode != GeoipMode.Off)
         {
             o = (LaunchOptions)o.Clone();
-            await GeoIp.ApplyAsync(o, o.Proxy, o.Quiet).ConfigureAwait(false);
+            var applied = await GeoIp.ApplyModeAsync(o, o.Proxy, geoMode, o.Quiet).ConfigureAwait(false);
+            GeoIp.DropAutoWebrtcIp(o, applied, o.Proxy, licensed: License.ResolveLicenseKey(o.LicenseKey) is not null);
         }
         var env = ContainerEnv(o);
         var idle = IdleExitSeconds();

@@ -57,13 +57,16 @@ var browser = await Clearcote.Clearcote.LaunchAsync(new LaunchOptions
 });
 ```
 
-In Docker (`Docker = true`), `Geoip = true` works exactly as for a native launch: the SDK resolves the proxy's exit
-IP before the container is started and hands the container the timezone and Accept-Language it resolved (any
-`Timezone` / `AcceptLanguage` you set yourself still wins). Without `Geoip` (and no `Timezone` / `AcceptLanguage` of
-your own) the container's entrypoint builds the persona the way a native launch does: Accept-Language defaults to
-`en-US` and the timezone is derived from its primary tag (`en-US` -> `America/New_York`), so every such container is
-New York, English. A container has no WebRTC ICE candidates at all unless `WebrtcIp` is given; the value to give is
-the proxy's exit IP, which `Geoip = true` fills in as it does for a native launch.
+In Docker (`Docker = true`), geoip works exactly as for a native launch (on by default): the SDK resolves the proxy's
+exit IP (or this machine's own IP without a proxy) before the container is started and hands the container the
+timezone and Accept-Language it resolved (any `Timezone` / `AcceptLanguage` you set yourself still wins). With
+`Geoip = false` or `CLEARCOTE_GEOIP=0` (and no `Timezone` / `AcceptLanguage` of your own) the container's entrypoint
+builds the persona the way a native launch does: Accept-Language defaults to `en-US` and the timezone is derived from
+its primary tag (`en-US` -> `America/New_York`), so every such container is New York, English. A container has no
+WebRTC ICE candidates at all unless `WebrtcIp` is given; the value to give is the proxy's exit IP, which geoip fills in
+as it does for a native launch. Without a licence key (the image's open build) a launch through a proxy keeps no WebRTC
+IP from the default lookup, since the open build would send WebRTC UDP outside the proxy; `Geoip = true` or an
+explicit `WebrtcIp` is kept.
 
 Credentials stay off Playwright: a SOCKS5 proxy's always, and an http(s) proxy's on an engine with
 `--proxy-auth` (r19+), go to the browser's own switches, because credentials handed to Playwright make it turn
@@ -574,9 +577,11 @@ higher-level add-ons of the Node/Python SDKs are here as well: the humanized cur
 pointer route and humanized child frames), saved personas and `LocalProfile = "auto"`, the multi-identity endpoint,
 the in-browser AI agent and the render-coherence check. Only the command-line tools are Node/Python-only.
 
-Also available (0.29.0): `Geoip = true` (through the proxy, incl. SOCKS5; one
-`CLEARCOTE_GEOIP_TIMEOUT_SECONDS` deadline; throws `GeoipException` before launch if unresolved unless
-`Timezone` and `AcceptLanguage` are both set; the exit IP comes from an IP echo through the proxy, its geo from the
+Also available (0.29.0; on by default since 0.66.0): geoip (through the proxy, incl. SOCKS5, or this machine's own IP
+without a proxy; one `CLEARCOTE_GEOIP_TIMEOUT_SECONDS` deadline. Left unset, it fills only what you did not set,
+runs within 10 s, warns and launches when the lookup fails, and keeps no WebRTC IP on an open-build launch through a
+proxy; `Geoip = false` or `CLEARCOTE_GEOIP=0` turns it off. `Geoip = true` throws `GeoipException` before launch if
+unresolved unless `Timezone` and `AcceptLanguage` are both set; the exit IP comes from an IP echo through the proxy, its geo from the
 offline geoip-all-in-one database shared with the Python and Node SDKs, downloaded on first use;
 `CLEARCOTE_GEOIP_ECHO_URL` points the echo at your own endpoint(s), and `CLEARCOTE_GEOIP_IPAPI=1` also asks
 ip-api.com, whose free endpoint is for non-commercial use only), `Fingerprint = "off"` (no persona), `FingerprintVoices = false`,

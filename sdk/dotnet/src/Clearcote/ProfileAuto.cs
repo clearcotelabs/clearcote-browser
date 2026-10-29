@@ -331,7 +331,8 @@ public static class ProfileAuto
         // is the gated build, and with no run-token the engine gate kills it at startup — surfacing as a closed
         // target that names neither licensing nor a call the caller wrote. The incognito LaunchAsync: the probe reads
         // GPU/display off about:blank and needs no profile directory. Cloud and Docker off: the probe measures THIS
-        // host. Widevine off: the CDM would only cost the probe a fetch.
+        // host. Widevine off: the CDM would only cost the probe a fetch. Geoip off: the probe measures the host, not
+        // the egress, and the default lookup would only cost it time.
         var host = await MeasureHost(probe =>
         {
             probe.LicenseKey = opts.LicenseKey;
@@ -339,6 +340,7 @@ public static class ProfileAuto
             probe.Cloud = false;
             probe.Docker = false;
             probe.Widevine = false;
+            probe.Geoip = false;
             return ProbeLaunch(probe);
         }, exe, PinnedMajor()).ConfigureAwait(false);
 

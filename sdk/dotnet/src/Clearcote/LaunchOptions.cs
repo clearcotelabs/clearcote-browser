@@ -29,11 +29,21 @@ public partial class LaunchOptions : FingerprintOptions
     public ReleaseChannel? ReleaseChannel { get; set; }
 
     // ── geoip ────────────────────────────────────────────────────────────────
-    /// Fill unset Timezone / AcceptLanguage / Location / WebrtcIp from the exit IP's region, looked up
-    /// THROUGH <see cref="Proxy"/> (HTTP or SOCKS5). Bounded by CLEARCOTE_GEOIP_TIMEOUT_SECONDS
-    /// (default 20). Fails closed with <see cref="GeoipException"/> before any browser starts, unless
-    /// both Timezone and AcceptLanguage were set explicitly (then it warns and launches).
-    public bool Geoip { get; set; }
+    /// On by default (since 0.66.0): fill unset Timezone / AcceptLanguage / Location / WebrtcIp from the
+    /// region of the egress IP, looked up THROUGH <see cref="Proxy"/> (HTTP or SOCKS5), or this machine's own
+    /// public IP when no proxy is set.
+    /// <list type="bullet">
+    /// <item><c>null</c> (unset, the default): the lookup runs within 10 s (CLEARCOTE_GEOIP_TIMEOUT_SECONDS when
+    /// set) and is skipped when all four fields are set already; a no-proxy answer is reused in-process for 10
+    /// minutes. A lookup that fails warns once on stderr and launches without filling anything. An open-build
+    /// launch (no licence) through a proxy keeps no WebRTC IP from this default lookup: the open build would
+    /// send WebRTC UDP outside the proxy. CLEARCOTE_GEOIP=0/false/no/off turns the default off.</item>
+    /// <item><c>true</c>: always looked up (bounded by CLEARCOTE_GEOIP_TIMEOUT_SECONDS, default 20) and fails
+    /// closed with <see cref="GeoipException"/> before any browser starts, unless both Timezone and
+    /// AcceptLanguage were set explicitly (then it warns and launches). CLEARCOTE_GEOIP=0 does not turn it off.</item>
+    /// <item><c>false</c>: no lookup.</item>
+    /// </list>
+    public bool? Geoip { get; set; }
 
     // ── saved persona / profile "auto" (local launches) ──────────────────────
     /// A saved persona (<see cref="global::Clearcote.Profile"/>): a name (under CLEARCOTE_PROFILE_DIR), a path, or a
