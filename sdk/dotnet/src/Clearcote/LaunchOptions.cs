@@ -53,7 +53,7 @@ public partial class LaunchOptions : FingerprintOptions
     /// <para><c>"auto"</c> is special: instead of a saved option set, it resolves a REAL CAPTURED FINGERPRINT for this
     /// machine — the licensed profile service first, a local imported directory as backup — and applies it as
     /// <see cref="FingerprintOptions.FingerprintProfile"/> with NO seed. With no <c>--fingerprint</c> the farbling
-    /// machinery never engages and canvas/WebGL/audio readbacks are byte-identical to an unmodified browser, which is
+    /// machinery never engages and canvas/WebGL readbacks are byte-identical to an unmodified browser, which is
     /// why the profile path survives strict anti-bot scoring where a synthetic seed does not. It may launch the engine
     /// once, headless and with no persona, to measure this host's GPU and display (cached per binary for 30 days). An
     /// engine before 150 cannot apply a profile: it gets a stable seed persona instead, with a note. Tune it with

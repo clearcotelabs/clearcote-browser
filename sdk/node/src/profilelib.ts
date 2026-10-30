@@ -3,7 +3,7 @@
 // The persona path this serves is `--fingerprint-profile` WITHOUT `--fingerprint`. That
 // distinction is load-bearing and is why this module exists: measured against a strict
 // anti-bot device check, a seed persona failed 13/13 while a profile-only persona passed. With no
-// seed the farbling machinery never engages, so canvas/WebGL/audio readbacks come back
+// seed the farbling machinery never engages, so canvas/WebGL readbacks come back
 // byte-identical to an unmodified browser — the profile is static value substitution over a
 // real, coherent capture rather than perturbation of this machine's.
 //

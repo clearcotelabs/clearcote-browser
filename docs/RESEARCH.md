@@ -61,7 +61,7 @@ Evidence in `brave-core`: a dedicated `components/brave_shields/content/browser/
 | Canvas 2D | ✅ noise | Brave per-site farble | ➕ make per-eTLD+1 |
 | WebGL params/vendor/renderer | ✅ | Brave + Camoufox MaskConfig | ➕ per-site + coherent GPU |
 | **WebGPU** | ⚠️ | Brave `webgpu_farbling` | ➕ often-missed surface |
-| AudioContext | ✅ | Brave webaudio farble | ➕ per-site |
+| AudioContext | ✅ | Brave webaudio farble | ➕ per-site — **not built**: audio samples are left as Chromium computes them, by design (see [PATCHES.md §2.2](PATCHES.md#22--audio)) |
 | Fonts (list + metrics) | ⚠️ partial | Camoufox font-hijacker; Cromite font mitigations | ➕ list + Skia/HarfBuzz metrics |
 | Screen / display / DPR / taskbar | ✅ | ChromiumFish display | ✅ keep |
 | Hardware (cores/mem) **correlated** | ✅ values | ChromiumFish fingerprint-profile | ➕ enforce coherence |
@@ -128,7 +128,7 @@ Evidence in `brave-core`: a dedicated `components/brave_shields/content/browser/
 2. **Port fingerprint patches `142 → 149`** (adryfish 144 source isn't published yet; 142 is the newest available tag). Diff adryfish-142 tree vs vanilla 142, replay onto 149, resolve rejects, fix API breaks, compile. *(Recon this first — dry-run the apply, count rejects.)*
 3. **Layer the upgrades**, priority order:
    1. **TLS pinning** (ChromiumFish concept) — highest ROI, mandatory given 149 base.
-   2. **Per-eTLD+1 farbling seed** (Brave model) over canvas/webgl/webgpu/audio.
+   2. **Per-eTLD+1 farbling seed** (Brave model) over canvas/webgl/webgpu/audio. *(Built for canvas and WebGL readback; audio samples were left out by design.)*
    3. **QUIC/STUN over SOCKS5** + DNS-through-proxy.
    4. Timing, device-sensors, media-devices, speech (close adryfish gaps).
    5. **Full de-Google** — kill component updater + GCM :5228 (beat ChromiumFish's audited weakness).

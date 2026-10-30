@@ -489,8 +489,8 @@ def fingerprint_args(opts):
     # identity (linkable) — best for single-identity/per-host use.
     if opts.get("disable_gpu_fingerprint"):
         args.append("--disable-gpu-fingerprint")
-    # fingerprint_noise=False turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/
-    # client-rects) so those surfaces return natural, unperturbed values — useful when a site's
+    # fingerprint_noise=False turns OFF the per-eTLD+1 farbling noise (canvas and WebGL
+    # readback) so those surfaces return natural, unperturbed values — useful when a site's
     # anti-bot ML scores the noise pattern as "tampered". Identity spoofs
     # (UA/screen/GPU/persona) stay on. Default (unset/True) keeps the noise.
     if opts.get("fingerprint_noise") is False:

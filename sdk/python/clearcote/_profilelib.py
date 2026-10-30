@@ -7,7 +7,7 @@ or a customer switching languages silently changes identity.
 The persona path this serves is ``--fingerprint-profile`` **without** ``--fingerprint``. That
 distinction is load-bearing: measured against a strict anti-bot device check, a seed persona failed
 13/13 while a profile-only persona passed. With no seed the farbling machinery never engages, so
-canvas/WebGL/audio readbacks come back byte-identical to an unmodified browser — the profile is
+canvas/WebGL readbacks come back byte-identical to an unmodified browser — the profile is
 static value substitution over a real capture rather than perturbation of this machine's.
 
 SELECTION IS ABOUT COHERENCE WITH *THIS HOST*, NOT ABOUT MATCHING AN OS STRING. A profile

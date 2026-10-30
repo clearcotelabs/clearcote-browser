@@ -14,7 +14,7 @@ namespace Clearcote;
 /// The persona path this serves is <c>--fingerprint-profile</c> WITHOUT <c>--fingerprint</c>.
 /// That distinction is load-bearing: measured against a strict anti-bot device check, a seed persona
 /// failed 13/13 while a profile-only persona passed. With no seed the farbling machinery never
-/// engages, so canvas/WebGL/audio readbacks come back byte-identical to an unmodified browser.
+/// engages, so canvas/WebGL readbacks come back byte-identical to an unmodified browser.
 ///
 /// SELECTION IS ABOUT COHERENCE WITH *THIS HOST*, NOT ABOUT MATCHING AN OS STRING. A profile
 /// claiming an RTX 3080 on an Intel UHD host says NVIDIA in the strings and paints Intel pixels

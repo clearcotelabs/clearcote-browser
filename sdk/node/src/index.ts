@@ -211,7 +211,7 @@ interface GeoipOption {
  * `"auto"` is special: instead of a saved option-set, it resolves a REAL CAPTURED FINGERPRINT
  * for this machine — the licensed profile service first, a local imported directory as backup —
  * and applies it as `fingerprintProfile` with NO seed. That distinction matters: with no
- * `--fingerprint`, the farbling machinery never engages and canvas/WebGL/audio readbacks are
+ * `--fingerprint`, the farbling machinery never engages and canvas/WebGL readbacks are
  * byte-identical to an unmodified browser, which is why the profile path survives strict
  * anti-bot scoring where a synthetic seed does not.
  *

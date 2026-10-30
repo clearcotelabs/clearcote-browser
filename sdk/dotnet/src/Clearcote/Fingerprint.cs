@@ -99,7 +99,8 @@ public class FingerprintOptions
     public string? WebrtcMdns { get; set; }
     /// Present the machine's real GPU instead of a spoofed one (most coherent vs strict classifiers).
     public bool? DisableGpuFingerprint { get; set; }
-    /// Set false to turn OFF per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects).
+    /// Set false to turn OFF per-eTLD+1 farbling noise (canvas and WebGL readback). Audio samples
+    /// and client rects never get noise.
     public bool? FingerprintNoise { get; set; }
 
     /// <summary>

@@ -1014,7 +1014,7 @@ runs up to 250 browsers at once and adds email support.
 | Capability | Open source | Free with GitHub | PRO |
 |---|:---:|:---:|:---:|
 | Seeded personas (`fingerprint`), per-site farbling | ✅ | ✅ | ✅ |
-| Canvas / WebGL / audio / font identity controls | ✅ | ✅ | ✅ |
+| Canvas / WebGL noise, audio and font persona values | ✅ | ✅ | ✅ |
 | All 18 metadata overrides (`screen_width`, `device_memory`, `gpu_vendor`, …) | ✅ | ✅ | ✅ |
 | `light_stealth` preset | ✅ | ✅ | ✅ |
 | TLS ClientHello profile (`tls_profile`) | ✅ | ✅ | ✅ |

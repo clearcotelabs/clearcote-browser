@@ -35,7 +35,7 @@
       }
     },
     "001-farble-seed-core.patch": {
-      "surface": "Deterministic per-eTLD+1 farbling seed core: derives a per-site 64-bit seed from the global --fingerprint value mixed with the registrable domain (PersistentHash), and exposes a global noise on/off gate (--disable-fingerprint-noise) that all downstream farblers (canvas/WebGL/audio/client-rects) cons",
+      "surface": "Deterministic per-eTLD+1 farbling seed core: derives a per-site 64-bit seed from the global --fingerprint value mixed with the registrable domain (PersistentHash), and exposes a global noise on/off gate (--disable-fingerprint-noise) that all downstream farblers (canvas and WebGL readback) cons",
       "windows_only": false,
       "markers": [
         "GeForce RTX 5090 Laptop GPU",
@@ -80,13 +80,13 @@
       }
     },
     "020-audio.patch": {
-      "surface": "WebAudio fingerprint spoofing: per-eTLD+1 uniform audio-sample farbling in AudioBuffer.getChannelData()/copyFromChannel(), plus Windows-persona-coherent AudioContext sampleRate / baseLatency / outputLatency (so the Linux build host's audio backend cannot leak).",
+      "surface": "WebAudio persona: Windows-persona-coherent AudioContext sampleRate / baseLatency / outputLatency (so the Linux build host's audio backend cannot leak). Audio samples get no noise: the inherited adryfish frame-count noise is switched off, so getChannelData()/copyFromChannel() and offline rendering match stock Chrome.",
       "windows_only": false,
       "markers": [],
       "runtime": {
-        "surface": "AudioContext.sampleRate / baseLatency / outputLatency (WebAudio timing fingerprint) and per-origin audio-sample farbling",
+        "surface": "AudioContext.sampleRate / baseLatency / outputLatency (WebAudio timing fingerprint)",
         "probe": "(() => { const c = new AudioContext(); const out = c.outputLatency; return { sampleRate: c.sampleRate, baseLatency: c.baseLatency, outputLatency: out, on8msGrid: Math.abs(out/0.008 - Math.round(out/0.008)) < 1e-9 }; })()",
-        "expect": "On a correctly-patched build launched with --fingerprint-platform=windows the values come from the fixed Windows-WASAPI persona, not the Linux build host's audio backend: outputLatency is a nonzero exact multiple of 0.008s (on8msGrid === true, the no-mic-permission 8ms grid the patch quantizes to), and sampleRate + baseLatency are stable persona constants identical across reloads and independent of the host (sampleRate pinned to the persona rate, typically 48000 WASAPI, rather than the host's 44100). Corroborating farbling check: render an OfflineAudioContext oscillator->DynamicsCompressor, sum abs(getChannelData(0)); the sum is deterministic/idempotent across repeated renders on one origin but shifts across different registrable domains and differs from vanilla Chrome's canonical constant. On an unpatched build baseLatency/outputLatency/sampleRate are derived from the actual host audio service and the compressor fingerprint equals the fixed vanilla value on every origin."
+        "expect": "On a correctly-patched build launched with --fingerprint-platform=windows the values come from the fixed Windows-WASAPI persona, not the Linux build host's audio backend: outputLatency is a nonzero exact multiple of 0.008s (on8msGrid === true, the no-mic-permission 8ms grid the patch quantizes to), and sampleRate + baseLatency are stable persona constants identical across reloads and independent of the host (sampleRate pinned to the persona rate, typically 48000 WASAPI, rather than the host's 44100). Audio samples are NOT farbled: render an OfflineAudioContext oscillator->DynamicsCompressor and sum abs(getChannelData(0)); the sum is identical on every origin and every seed and equals stock Chrome of the same version. On an unpatched build baseLatency/outputLatency/sampleRate are derived from the actual host audio service."
       }
     },
     "030-hardware-concurrency.patch": {

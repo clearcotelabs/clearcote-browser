@@ -387,7 +387,7 @@ Finally, update the project's private build notes (not in this repo) with the ta
 Drop the `-pre.N` suffix and `--prerelease` only when **all** hold:
 
 - [ ] Built + signed + verified per §§4–8.
-- [ ] **Validated on real Windows** against CreepJS / BrowserScan / Pixelscan: same seed ⇒ stable fingerprint, different seeds differ, `navigator.webdriver=false`, canvas/WebGL/audio shift with the seed.
+- [ ] **Validated on real Windows** against CreepJS / BrowserScan / Pixelscan: same seed ⇒ stable fingerprint, different seeds differ, `navigator.webdriver=false`, canvas/WebGL shift with the seed (audio samples and client rects do not, by design).
 - [ ] **Stealth-coherence gate passes** (`scripts/stealth_coherence.py`, or the "Stealth coherence" workflow): no REQUIRED check regressed, and any `KNOWN_GAP` that now passes has been promoted into `REQUIRED`. See [docs/STEALTH-COHERENCE.md](STEALTH-COHERENCE.md).
 - [ ] `config/args.gn` / `config/args.linux.gn` match the shipped binaries (§4).
 - [ ] Signing key rotated to a `clearcote`-named UID (§6) so verification output is on-brand.

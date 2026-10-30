@@ -149,8 +149,9 @@ export interface FingerprintOptions {
    */
   realGpuHost?: boolean;
   /**
-   * Set `false` to turn OFF the per-eTLD+1 farbling NOISE (canvas/WebGL/audio/client-rects), so
-   * those surfaces return their natural, unperturbed values. Use when a site's anti-bot ML scores
+   * Set `false` to turn OFF the per-eTLD+1 farbling NOISE (canvas and WebGL readback), so
+   * those surfaces return their natural, unperturbed values. Audio samples and client rects never
+   * get noise, with or without this flag. Use when a site's anti-bot ML scores
    * the noise pattern as "tampered". Identity spoofs (UA/screen/GPU/persona)
    * stay on. Default (unset/`true`) keeps the noise.
    */
@@ -628,7 +629,7 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // as <uuid>.local. mergeFeatureFlags folds this into any other --disable-features value.
   if (o.webrtcMdns === "off") args.push("--disable-features=WebRtcHideLocalIpsWithMdns");
   if (o.disableGpuFingerprint) args.push("--disable-gpu-fingerprint");
-  // fingerprintNoise=false turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects)
+  // fingerprintNoise=false turns OFF the per-eTLD+1 farbling noise (canvas and WebGL readback)
   // so those surfaces return natural values — for sites whose ML flags the noise as "tampered".
   // Identity spoofs (UA/screen/GPU/persona) stay on. Default keeps the noise.
   if (o.fingerprintNoise === false) args.push("--disable-fingerprint-noise");
