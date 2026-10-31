@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -211,7 +212,8 @@ def test_the_image_ships_the_profile_and_the_probe():
     assert "COPY seccomp.json /etc/clearcote/seccomp.json" in dockerfile
     copy = next(ln for ln in dockerfile.splitlines() if ln.startswith("COPY serve.py"))
     assert "sandbox_check.py" in copy.split()
-    assert 'LABEL com.clearcotelabs.serve-protocol="3"' in dockerfile
+    label = re.search(r'LABEL com\.clearcotelabs\.serve-protocol="(\d+)"', dockerfile)
+    assert label and int(label.group(1)) >= 3  # 3 runs the sandbox; later protocols keep it
 
 
 def test_serve_py_asks_the_probe_and_passes_no_sandbox_only_when_it_says_no():
@@ -223,4 +225,5 @@ def test_serve_py_asks_the_probe_and_passes_no_sandbox_only_when_it_says_no():
     # window; it is not the browser the probe decides for), and nowhere else.
     assert serve.count('"--no-sandbox"') == 3
     assert '"--headless=new", "--no-sandbox"] + persona_switches' in serve
-    assert '"sandbox": sandbox,' in serve and "SERVE_PROTOCOL = 3" in serve
+    protocol = re.search(r"^SERVE_PROTOCOL = (\d+)$", serve, re.M)
+    assert '"sandbox": sandbox,' in serve and protocol and int(protocol.group(1)) >= 3

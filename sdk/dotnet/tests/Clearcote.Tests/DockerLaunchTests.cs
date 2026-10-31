@@ -967,6 +967,56 @@ public sealed class DockerLaunchTests : IDisposable
         Assert.Empty(DockerLaunch.ContainerEnv(new LaunchOptions { Geoip = false }));
     }
 
+    // An image of serve protocol 4 fills an unset CC_WEBRTC_IP from the egress itself; Geoip = false tells it not to.
+    [Theory]
+    [InlineData("4", "off")]
+    [InlineData("3", null)]
+    [InlineData("2", null)]
+    public async Task Geoip_off_tells_an_image_that_fills_the_WebRTC_IP_itself_to_leave_it_unset(string label, string? sent)
+    {
+        var asked = GeoAnswers(Berlin);
+        _docker.Marks = new() { ServeState("open", null) };
+        _docker.Labels = new() { ["com.clearcotelabs.serve-protocol"] = label };
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        await Clearcote.LaunchAsync(new LaunchOptions { Geoip = false, Quiet = true });
+        var (_, env, _) = _docker.Call("create");
+        Assert.Equal(sent, env.TryGetValue("CC_WEBRTC_IP", out var v) ? v : null);   // an older image would read "off" as an address
+        Assert.Empty(asked);
+    }
+
+    [Fact]
+    public async Task Geoip_off_keeps_a_WebRTC_IP_the_caller_set()
+    {
+        GeoAnswers(Berlin);
+        _docker.Marks = new() { ServeState("open", null) };
+        _docker.Labels = new() { ["com.clearcotelabs.serve-protocol"] = "4" };
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        await Clearcote.LaunchAsync(new LaunchOptions { Geoip = false, WebrtcIp = "198.51.100.9", Quiet = true });
+        Assert.Equal("198.51.100.9", _docker.Call("create").Env["CC_WEBRTC_IP"]);
+    }
+
+    [Fact]
+    public async Task Geoip_on_never_sends_off()
+    {
+        GeoAnswers(Berlin);
+        _docker.Labels = new() { ["com.clearcotelabs.serve-protocol"] = "4" };
+        using var stub = new CdpStub();
+        _docker.CdpPort = stub.Port;
+        await Clearcote.LaunchAsync(new LaunchOptions { Geoip = true, Proxy = GeoProxy, Quiet = true });
+        Assert.Equal("203.0.113.7", _docker.Call("create").Env["CC_WEBRTC_IP"]);
+    }
+
+    [Fact]
+    public void WebrtcIpOffEnv_only_for_protocol_4_with_geoip_off_and_no_value()
+    {
+        Assert.Equal("off", DockerLaunch.WebrtcIpOffEnv(4, true, new Dictionary<string, string>())["CC_WEBRTC_IP"]);
+        Assert.Empty(DockerLaunch.WebrtcIpOffEnv(4, false, new Dictionary<string, string>()));
+        Assert.Empty(DockerLaunch.WebrtcIpOffEnv(3, true, new Dictionary<string, string>()));
+        Assert.Empty(DockerLaunch.WebrtcIpOffEnv(4, true, new Dictionary<string, string> { ["CC_WEBRTC_IP"] = "198.51.100.9" }));
+    }
+
     [Fact]
     public async Task Geoip_default_fills_the_container_but_the_open_image_through_a_proxy_gets_no_WebRTC_IP()
     {

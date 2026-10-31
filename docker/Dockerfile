@@ -74,14 +74,15 @@ RUN mkdir -p /opt/xdg-cache \
 # ~180 MB download happens once rather than per container.
 VOLUME ["/opt/xdg-cache"]
 
-COPY serve.py idle_exit.py proxy_relay.py sandbox_check.py /
+COPY serve.py idle_exit.py proxy_relay.py sandbox_check.py webrtc_ip.py /
 COPY seccomp.json /etc/clearcote/seccomp.json
 # What the entrypoint does with the settings the SDKs pass (see SERVE_PROTOCOL in serve.py): 2 = takes
 # CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS, logs in to a proxy that needs a password, and reports what it
 # applied in a "serve-state" line; 3 = also runs Chrome's sandbox when the container allows it, so the SDKs
-# pass the seccomp profile above. The SDKs read this label before they start a container; an image without
-# it gets plain variables.
-LABEL com.clearcotelabs.serve-protocol="3"
+# pass the seccomp profile above; 4 = also fills an unset CC_WEBRTC_IP from the egress and takes
+# CC_WEBRTC_IP=off. The SDKs read this label before they start a container; an image without it gets plain
+# variables.
+LABEL com.clearcotelabs.serve-protocol="4"
 
 USER cc
 EXPOSE 9222

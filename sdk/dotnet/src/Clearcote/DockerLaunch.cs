@@ -91,6 +91,18 @@ internal static class DockerLaunch
     // An image of this serve protocol runs Chrome's sandbox when the container allows it, so it is started with this
     // seccomp profile: Docker's default plus the namespace calls the sandbox makes (docker/seccomp.json).
     internal const int SandboxProtocol = 3;
+    // An image of this serve protocol fills an unset CC_WEBRTC_IP from the egress itself (docker/webrtc_ip.py), as geoip
+    // does here, and takes CC_WEBRTC_IP=off to leave it unset: what this side passes when its own geoip is off. An older
+    // image would put "off" on chrome's line as an address, so it never gets it.
+    internal const int WebrtcIpProtocol = 4;
+
+    /// `CC_WEBRTC_IP=off` when geoip is off and no WebRTC IP was given, for an image that would otherwise fill it from
+    /// the egress itself (WebrtcIpProtocol): Geoip = false means no lookup and no filled-in WebRTC IP, in the container
+    /// as in a launch here. Else nothing.
+    internal static Dictionary<string, string> WebrtcIpOffEnv(int protocol, bool geoipOff, IReadOnlyDictionary<string, string> env) =>
+        protocol >= WebrtcIpProtocol && geoipOff && !env.ContainsKey("CC_WEBRTC_IP")
+            ? new Dictionary<string, string>(StringComparer.Ordinal) { ["CC_WEBRTC_IP"] = "off" }
+            : new Dictionary<string, string>(StringComparer.Ordinal);
     internal const string SeccompResource = "Clearcote.docker-seccomp.json";
     private static readonly System.Text.RegularExpressions.Regex SeccompRefused = new("seccomp", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     private static readonly string[] X86_64 = { "x86_64", "amd64" };   // the daemon architectures that run the linux/amd64 image natively
@@ -1006,6 +1018,7 @@ internal static class DockerLaunch
         await SweepStaleAsync(exe).ConfigureAwait(false);
         var image = string.IsNullOrEmpty(o.DockerImage) ? DefaultImage() : o.DockerImage;
         var protocol = await ImageProtocolAsync(exe, image, o.Quiet).ConfigureAwait(false);
+        foreach (var kv in WebrtcIpOffEnv(protocol, geoMode == GeoipMode.Off, env)) env[kv.Key] = kv.Value;
         var secrets = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var k in SecretEnv)
             if (env.Remove(k, out var v)) secrets[k] = v;

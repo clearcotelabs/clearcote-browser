@@ -204,7 +204,7 @@ _ENV_TO_OPT = {
     "CC_GPU_VENDOR": "gpu_vendor", "CC_GPU_RENDERER": "gpu_renderer",
     "CC_TLS_PROFILE": "tls_profile",
     "CC_LOCATION": "location",        # "<lat>,<lon>" — keep it in the CC_TIMEZONE's country
-    "CC_WEBRTC_IP": "webrtc_ip",      # srflx candidate the engine fabricates (set it to the egress IP)
+    # CC_WEBRTC_IP is not here: unset, it is filled from the egress below (webrtc_ip.py), and "off" keeps it unset.
     "CC_WEBRTC_MDNS": "webrtc_mdns",  # only "off" does anything: concealment on is Chrome's default
     # A real captured fingerprint (tools/fingerprint-collect) — mount the .json and point at it, or
     # pass the JSON itself. Its fields beat the seed-derived persona; absent fields fall back to it.
@@ -260,6 +260,29 @@ for _map, _cast, _what in ((_ENV_TO_OPT, str, "string"),
         except (TypeError, ValueError):
             print("[clearcote] WARNING: %s=%r is not a %s; ignoring it." % (env_key, raw, _what),
                   flush=True)
+
+# WebRTC IP (CC_WEBRTC_IP): the srflx address the engine reports. Unset, the engine gathers no ICE candidates at all
+# (measured with and without a proxy, bridge and host networking), which a regular Chrome never shows. So, as the
+# SDKs' geoip does for a launch of their own, an unset value is filled with the egress IP: the proxy's exit when
+# CC_PROXY is set, else this container's public address, through the SDK's own lookup; licensed engine only (the
+# open one has no WebRTC UDP block behind a proxy, and never finishes ICE gathering with a WebRTC IP without one).
+# CC_WEBRTC_IP=off (or set but empty) keeps it unset. A failed lookup warns and starts without it. See webrtc_ip.py.
+_webrtc_ip_source = None
+try:
+    import webrtc_ip as _webrtc_ip_mod
+except ImportError:  # a custom image that copied serve.py without it: an explicit value only, as before
+    _webrtc_ip_mod = None
+if _webrtc_ip_mod is not None:
+    _wip, _webrtc_ip_source, _wip_line = _webrtc_ip_mod.resolve(
+        os.environ.get("CC_WEBRTC_IP"), os.environ.get("CC_PROXY", "").strip() or None,
+        "/pro-" in exe.replace(os.sep, "/"))
+    print(_wip_line, flush=True)
+elif (os.environ.get("CC_WEBRTC_IP") or "").strip().lower() not in ("", "off", "0", "false", "no", "none"):
+    _wip, _webrtc_ip_source = os.environ["CC_WEBRTC_IP"].strip(), "env"
+else:
+    _wip = None
+if _wip:
+    opts["webrtc_ip"] = _wip
 
 # ---------------------------------------------------------------------------------------------
 # Screen coherence. Three things claim a display and they used to disagree: Xvfb is created at a
@@ -792,12 +815,14 @@ if _personaenv is not None:
 # com.clearcotelabs.serve-protocol, so the SDK knows before it starts a container whether the image takes
 # CC_SECRETS_FILE and CC_IDLE_EXIT_SECONDS (2), or only plain variables (no label: older images), and whether
 # it runs Chrome's sandbox when the container allows it (3: the SDK then passes the seccomp profile; it is not
-# given to an older image, whose Chrome runs with --no-sandbox anyway). The serve-state line says what was
+# given to an older image, whose Chrome runs with --no-sandbox anyway), and whether it fills an unset
+# CC_WEBRTC_IP from the egress (4: the SDK then passes CC_WEBRTC_IP=off when its own geoip is off, which an older
+# image would have put on chrome's line as an address). The serve-state line says what was
 # actually applied -- the engine tier that resolved, the proxy, the idle exit, how a proxy's password is
 # answered, the sandbox -- so the SDK can refuse a container that did not do what it was asked instead of
 # handing back a browser on the free engine, one that goes direct when a proxy was asked for, or one whose
 # every request a proxy turns away.
-SERVE_PROTOCOL = 3
+SERVE_PROTOCOL = 4
 _applied = {
     "protocol": SERVE_PROTOCOL,
     "engine": "licensed" if "/pro-" in exe.replace(os.sep, "/") else "open",
@@ -809,6 +834,7 @@ _applied = {
     "persona_env": _persona_env,  # 1021: the persona travels in the environment, not on chrome's command line
     "stock_runtime": _stock_runtime,  # r32: --disable-runtime-suppression is on chrome's command line
     "runtime_bindings": _RUNTIME_BINDINGS in extra,  # r54: --enable-runtime-bindings is on chrome's command line
+    "webrtc_ip": _webrtc_ip_source,  # 4: where the WebRTC IP came from: "env", "proxy exit", "own address", "off", ...
 }
 print("[clearcote] serve-state %s" % json.dumps(_applied, sort_keys=True), flush=True)
 

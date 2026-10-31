@@ -87,6 +87,10 @@ IMAGE_UID = 10001  # the image's user (cc)
 # An image of this serve protocol runs Chrome's sandbox when the container allows it, so it is started with this
 # seccomp profile: Docker's default plus the namespace calls the sandbox makes (docker/seccomp.json).
 SANDBOX_PROTOCOL = 3
+# An image of this serve protocol fills an unset CC_WEBRTC_IP from the egress itself (docker/webrtc_ip.py), as geoip
+# does here, and takes CC_WEBRTC_IP=off to leave it unset: what this side passes when its own geoip is off. An older
+# image would put "off" on chrome's line as an address, so it never gets it.
+WEBRTC_IP_PROTOCOL = 4
 SECCOMP_PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker-seccomp.json")
 _SECCOMP_REFUSED = re.compile(r"seccomp", re.I)
 _X86_64 = ("x86_64", "amd64")  # the daemon architectures that run the linux/amd64 image natively
@@ -218,6 +222,15 @@ def apply_geoip_before_start(kwargs: dict, quiet=False) -> dict:
     drop_auto_webrtc_ip(fp, applied, kwargs.get("proxy"), bool(resolve_license_key(kwargs.get("license_key"))))
     kwargs.update(fp)
     return kwargs
+
+
+def webrtc_ip_off_env(protocol: int, geoip_off: bool, env: dict) -> dict:
+    """``{"CC_WEBRTC_IP": "off"}`` when geoip is off and no WebRTC IP was given, for an image that would otherwise
+    fill it from the egress itself (WEBRTC_IP_PROTOCOL): geoip=False means no lookup and no filled-in WebRTC IP, in
+    the container as in a launch here. Else nothing."""
+    if protocol >= WEBRTC_IP_PROTOCOL and geoip_off and "CC_WEBRTC_IP" not in env:
+        return {"CC_WEBRTC_IP": "off"}
+    return {}
 
 
 def container_env(kwargs: dict) -> dict:
@@ -935,6 +948,8 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     raises: a browser on the open engine, one sending traffic direct, or one whose every request the proxy
     turns away is never handed back in their place. The container
     carries this process's owner token for sweep_stale()."""
+    from .geoip import geoip_mode
+    geoip_off = geoip_mode(kwargs.get("geoip")) == "off"
     apply_geoip_before_start(kwargs, quiet)  # geoip (default on): the region first; GeoipError starts nothing
     env = container_env(kwargs)
     idle = idle_exit_seconds()
@@ -942,6 +957,7 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     sweep_stale(exe)
     image = kwargs.get("docker_image") or default_image()
     protocol = image_protocol(exe, image, quiet)
+    env.update(webrtc_ip_off_env(protocol, geoip_off, env))
     secrets = {k: env.pop(k) for k in SECRET_ENV if k in env}
     expect = {"licensed": "CLEARCOTE_LICENSE_KEY" in secrets, "proxy": secrets.get("CC_PROXY")}
     if protocol >= SERVE_PROTOCOL:

@@ -84,6 +84,10 @@ const IMAGE_UID = 10001; // the image's user (cc)
 // An image of this serve protocol runs Chrome's sandbox when the container allows it, so it is started with this
 // seccomp profile: Docker's default plus the namespace calls the sandbox makes (docker/seccomp.json).
 export const SANDBOX_PROTOCOL = 3;
+// An image of this serve protocol fills an unset CC_WEBRTC_IP from the egress itself (docker/webrtc_ip.py), as geoip
+// does here, and takes CC_WEBRTC_IP=off to leave it unset: what this side passes when its own geoip is off. An older
+// image would put "off" on chrome's line as an address, so it never gets it.
+export const WEBRTC_IP_PROTOCOL = 4;
 export const SECCOMP_PROFILE = fileURLToPath(new URL("../docker-seccomp.json", import.meta.url));
 const SECCOMP_REFUSED = /seccomp/i;
 const X86_64 = ["x86_64", "amd64"]; // the daemon architectures that run the linux/amd64 image natively
@@ -195,6 +199,15 @@ function proxyUrl(proxy: unknown): string {
 
 /** The CC_* (and licence) variables the image is started with. Throws naming the first option the
  * image cannot take. */
+/**
+ * `{ CC_WEBRTC_IP: "off" }` when geoip is off and no WebRTC IP was given, for an image that would otherwise fill it
+ * from the egress itself (WEBRTC_IP_PROTOCOL): geoip: false means no lookup and no filled-in WebRTC IP, in the
+ * container as in a launch here. Else nothing.
+ */
+export function webrtcIpOffEnv(protocol: number, geoipOff: boolean, env: Record<string, string>): Record<string, string> {
+  return protocol >= WEBRTC_IP_PROTOCOL && geoipOff && env.CC_WEBRTC_IP === undefined ? { CC_WEBRTC_IP: "off" } : {};
+}
+
 export function containerEnv(options: Record<string, unknown>): Record<string, string> {
   // widevine: false: the opt-out of the licensed LOCAL default; the container has no default to turn off, so it is
   // accepted and dropped (widevine: true is still refused).
@@ -829,6 +842,7 @@ export async function applyGeoipBeforeStart(options: Record<string, unknown>): P
 }
 
 export async function startContainer(options: Record<string, unknown>): Promise<DockerContainer & { exe: string }> {
+  const geoipOff = geoipMode(options.geoip as boolean | undefined) === "off";
   await applyGeoipBeforeStart(options);  // geoip: true -> the region first; GeoipError starts nothing
   const env = containerEnv(options);
   const idle = idleExitSeconds();
@@ -836,6 +850,7 @@ export async function startContainer(options: Record<string, unknown>): Promise<
   await sweepStale(exe);
   const image = (options.dockerImage as string | undefined) || defaultImage();
   const protocol = await imageProtocol(exe, image, !!options.quiet);
+  Object.assign(env, webrtcIpOffEnv(protocol, geoipOff, env));
   const secrets: Record<string, string> = {};
   for (const k of SECRET_ENV) if (env[k] !== undefined) { secrets[k] = env[k]; delete env[k]; }
   const expect = { licensed: secrets.CLEARCOTE_LICENSE_KEY !== undefined, proxy: secrets.CC_PROXY ?? null };

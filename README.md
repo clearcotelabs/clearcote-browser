@@ -308,7 +308,8 @@ docker run -d --rm -v clearcote-cache:/opt/xdg-cache --shm-size=1g -p 127.0.0.1:
 
 The CDP port gives full control of the browser. Publish it on `127.0.0.1` or a trusted network only.
 The image bakes in the signed Linux binary and the fonts a Windows persona needs.
-What WebRTC shows with and without a proxy: [Networking and WebRTC](docker/README.md#networking-and-webrtc).
+WebRTC reports the proxy's exit (or, without a proxy, the container's own public address), looked up at start: see
+[Networking and WebRTC](docker/README.md#networking-and-webrtc).
 Details: [`docker/README.md`](docker/README.md) · [deployment guide](https://www.clearcotelabs.com/docs/deployment?utm_source=github&utm_medium=readme&utm_content=run-it-in-docker).
 
 ---

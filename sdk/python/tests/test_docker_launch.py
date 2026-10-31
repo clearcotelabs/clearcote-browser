@@ -1123,3 +1123,34 @@ def test_async_geoip_launch(mac, docker, cdp, connected, geo):
 def test_geoip_is_an_option_the_image_takes(mac):
     assert "geoip" in _docker.ACCEPTED
     assert _docker.container_env({"geoip": False}) == {}  # false: nothing to resolve, nothing refused
+
+
+# ── an image that fills an unset CC_WEBRTC_IP itself (serve protocol 4) gets "off" when geoip is off ───────────────
+
+@pytest.mark.parametrize("label, sent", [("4", "off"), ("3", None), ("2", None)])
+def test_geoip_off_tells_an_image_that_fills_the_webrtc_ip_itself_to_leave_it_unset(mac, docker, cdp, connected,
+                                                                                      label, sent):
+    docker.labels = {"com.clearcotelabs.serve-protocol": label}
+    browser = clearcote.launch(geoip=False, quiet=True)
+    env = docker.call("create")["env"]
+    assert env.get("CC_WEBRTC_IP") == sent  # an older image would read "off" as an address: it never gets it
+    browser.close()
+
+
+def test_geoip_off_keeps_a_webrtc_ip_the_caller_set(mac, docker, cdp, connected):
+    docker.labels = {"com.clearcotelabs.serve-protocol": "4"}
+    clearcote.launch(geoip=False, webrtc_ip="198.51.100.9", quiet=True)
+    assert docker.call("create")["env"]["CC_WEBRTC_IP"] == "198.51.100.9"
+
+
+def test_geoip_on_never_sends_off(mac, docker, cdp, connected, geo):
+    docker.labels = {"com.clearcotelabs.serve-protocol": "4"}
+    clearcote.launch(geoip=True, proxy=PROXY, quiet=True)
+    assert docker.call("create")["env"]["CC_WEBRTC_IP"] == "203.0.113.7"
+
+
+def test_webrtc_ip_off_env():
+    assert _docker.webrtc_ip_off_env(4, True, {}) == {"CC_WEBRTC_IP": "off"}
+    assert _docker.webrtc_ip_off_env(4, False, {}) == {}
+    assert _docker.webrtc_ip_off_env(3, True, {}) == {}
+    assert _docker.webrtc_ip_off_env(4, True, {"CC_WEBRTC_IP": "198.51.100.9"}) == {}
