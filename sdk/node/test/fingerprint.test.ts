@@ -5,6 +5,7 @@ import {
   cleanAcceptLanguage,
   splitFingerprintOptions,
   encodeProfile,
+  profileHardware,
   resolveTlsProfile,
   defaultTimezone,
 } from "../src/fingerprint.js";
@@ -242,5 +243,38 @@ describe("android persona (best-effort mobile)", () => {
     for (const plat of ["windows", "linux", "macos"] as const) {
       expect(fingerprintArgs({ platform: plat }).some((a) => a.startsWith("--window-size"))).toBe(false);
     }
+  });
+});
+
+// The engine applies a persona's hardware_concurrency / device_memory only with a --fingerprint seed, so a profile
+// on its own sends them as switches (measured 2026-10-31 with r54: without them the real machine's values showed).
+describe("a profile without a seed sends its own threads and memory", () => {
+  const device = { hardware_concurrency: 24, device_memory: 8, screen: { width: 1920, height: 1080 } };
+  const hw = (args: string[]) => args.filter((a) => /^--fingerprint-(hardware-concurrency|device-memory)=/.test(a));
+
+  it("on its own: both go out", () => {
+    expect(hw(fingerprintArgs({ fingerprintProfile: device }))).toEqual(["--fingerprint-hardware-concurrency=24", "--fingerprint-device-memory=8"]);
+    expect(hw(fingerprintArgs({ fingerprintProfile: JSON.stringify(device) }))).toHaveLength(2);
+  });
+  it("with a seed: nothing extra, the persona applies them", () => {
+    expect(hw(fingerprintArgs({ fingerprint: "user-1", fingerprintProfile: device }))).toEqual([]);
+  });
+  it("a caller's own value wins", () => {
+    expect(hw(fingerprintArgs({ fingerprintProfile: device, hardwareConcurrency: 4 }))).toEqual([
+      "--fingerprint-hardware-concurrency=4",
+      "--fingerprint-device-memory=8",
+    ]);
+  });
+  it("with lightStealth the device's values win over the seed's preset", () => {
+    expect(hw(fingerprintArgs({ fingerprint: "user-1", lightStealth: true, fingerprintProfile: device }))).toEqual([
+      "--fingerprint-hardware-concurrency=24",
+      "--fingerprint-device-memory=8",
+    ]);
+  });
+  it("a profile without them, or with nonsense, adds nothing; 0.5 GB stays", () => {
+    expect(hw(fingerprintArgs({ fingerprintProfile: { screen: {} } }))).toEqual([]);
+    expect(hw(fingerprintArgs({ fingerprintProfile: { hardware_concurrency: "8", device_memory: -1 } }))).toEqual([]);
+    expect(profileHardware({ hardware_concurrency: 2, device_memory: 0.5 })).toEqual({ hardwareConcurrency: 2, deviceMemory: 0.5 });
+    expect(profileHardware("not json")).toEqual({});
   });
 });

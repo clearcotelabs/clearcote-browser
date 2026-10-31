@@ -271,6 +271,32 @@ public static class Fingerprint
         return Convert.ToBase64String(ms.ToArray());
     }
 
+    /// An imported profile's own thread count and memory (top-level hardware_concurrency / device_memory), when it
+    /// has them. A profile applied WITHOUT a Fingerprint seed (Profile = "auto", a profile on its own, LightStealth)
+    /// needs them as explicit switches: the persona service puts them in the persona, but the engine applies a
+    /// persona's hardware_concurrency / device_memory only when the launch has a --fingerprint seed, so a profile-only
+    /// launch reported the REAL machine's values (measured 2026-10-31 with r54). DeviceMemory is whole GB here, so a
+    /// fractional value (0.5) is left to the persona.
+    public static (int? HardwareConcurrency, int? DeviceMemory) ProfileHardware(object value)
+    {
+        try
+        {
+            string json = value switch
+            {
+                string s when File.Exists(s) => File.ReadAllText(s),
+                string s => s,
+                _ => JsonSerializer.Serialize(value),
+            };
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return (null, null);
+            int? Whole(string name) =>
+                doc.RootElement.TryGetProperty(name, out var e) && e.ValueKind == JsonValueKind.Number
+                && e.TryGetDouble(out var d) && d > 0 && d == Math.Floor(d) && d <= int.MaxValue ? (int)d : null;
+            return (Whole("hardware_concurrency"), Whole("device_memory"));
+        }
+        catch { return (null, null); }
+    }
+
     /// Best-effort: derive an Accept-Language from an imported profile's navigator.languages.
     public static string? ProfileAcceptLanguage(object value)
     {
@@ -403,6 +429,19 @@ public static class Fingerprint
             }
             if (!string.IsNullOrEmpty(o.WebrtcIp)) pt.Add($"--webrtc-ip={o.WebrtcIp}");
             return pt;
+        }
+
+        // A profile with no seed: its own threads and memory go out as switches (see ProfileHardware), before the
+        // LightStealth preset so a captured device's values win over the seed's preset. A caller's own value wins.
+        if (o.FingerprintProfile is not null && (string.IsNullOrEmpty(o.Fingerprint) || o.LightStealth == true))
+        {
+            var (hc, mem) = ProfileHardware(o.FingerprintProfile);
+            if (hc is not null || mem is not null)
+            {
+                o = o.Clone();
+                o.HardwareConcurrency ??= hc;
+                o.DeviceMemory ??= mem;
+            }
         }
 
         // Apply the LightStealth preset first, on a copy (explicit fields win; never emit --fingerprint).

@@ -289,6 +289,29 @@ export function encodeProfile(value: string | Record<string, unknown>): string {
   return gzipSync(raw, { level: 9 }).toString("base64");
 }
 
+/** An imported profile's own thread count and memory (top-level `hardware_concurrency` / `device_memory`), when it
+ * has them (path / object / JSON string). A profile applied WITHOUT a `fingerprint` seed (`profile: "auto"`, a
+ * profile on its own, lightStealth) needs them as explicit switches: the persona service puts them in the persona,
+ * but the engine applies a persona's hardware_concurrency / device_memory only when the launch has a --fingerprint
+ * seed, so a profile-only launch reported the REAL machine's values (measured 2026-10-31 with r54: a 24-thread 8 GB
+ * profile showed 16 / 16 on a 16-thread 16 GB PC and 32 / 32 on a 32-thread server). */
+export function profileHardware(value: string | Record<string, unknown>): { hardwareConcurrency?: number; deviceMemory?: number } {
+  let obj: Record<string, unknown> | undefined;
+  try {
+    if (typeof value === "object") obj = value;
+    else if (existsSync(value)) obj = JSON.parse(readFileSync(value, "utf8"));
+    else obj = JSON.parse(value);
+  } catch {
+    return {};
+  }
+  const pos = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
+  const hc = pos(obj?.hardware_concurrency);
+  return {
+    hardwareConcurrency: hc !== undefined && Number.isInteger(hc) ? hc : undefined,
+    deviceMemory: pos(obj?.device_memory),
+  };
+}
+
 /** Best-effort: derive an Accept-Language from an imported profile's navigator.languages
  * (path / object / JSON string), so an imported identity keeps the donor's language order. */
 export function profileAcceptLanguage(value: string | Record<string, unknown>): string | undefined {
@@ -536,6 +559,13 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
     }
     if (o.webrtcIp) args.push(`--webrtc-ip=${o.webrtcIp}`);
     return args;
+  }
+  if (o.fingerprintProfile && (!o.fingerprint || o.lightStealth)) {
+    // A profile with no seed: its own threads and memory go out as switches (see profileHardware), before the
+    // lightStealth preset so a captured device's values win over the seed's preset. A caller's own value wins.
+    const hw = profileHardware(o.fingerprintProfile);
+    if (o.hardwareConcurrency === undefined || o.hardwareConcurrency === null) o.hardwareConcurrency = hw.hardwareConcurrency;
+    if (o.deviceMemory === undefined || o.deviceMemory === null) o.deviceMemory = hw.deviceMemory;
   }
   if (o.lightStealth) {
     // Fill in the coherent metadata bundle via native override switches. An explicit caller field

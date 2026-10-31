@@ -207,4 +207,39 @@ public class FingerprintTests
     [InlineData("macos")]
     public void No_auto_window_size_for_desktop(string platform)
         => Assert.DoesNotContain(Fingerprint.Args(new FingerprintOptions { Platform = platform }), a => a.StartsWith("--window-size"));
+
+    // The engine applies a persona's hardware_concurrency / device_memory only with a --fingerprint seed, so a profile
+    // on its own sends them as switches (measured 2026-10-31 with r54: without them the real machine's values showed).
+    private static readonly object Device = new Dictionary<string, object> { ["hardware_concurrency"] = 24, ["device_memory"] = 8 };
+    private static string[] Hw(IEnumerable<string> args)
+        => args.Where(a => a.StartsWith("--fingerprint-hardware-concurrency=") || a.StartsWith("--fingerprint-device-memory=")).ToArray();
+
+    [Fact]
+    public void Profile_without_seed_sends_its_threads_and_memory()
+    {
+        Assert.Equal(new[] { "--fingerprint-hardware-concurrency=24", "--fingerprint-device-memory=8" },
+            Hw(Fingerprint.Args(new FingerprintOptions { FingerprintProfile = Device })));
+        Assert.Equal(2, Hw(Fingerprint.Args(new FingerprintOptions { FingerprintProfile = "{\"hardware_concurrency\":24,\"device_memory\":8}" })).Length);
+    }
+
+    [Fact]
+    public void Profile_with_seed_leaves_them_to_the_persona()
+        => Assert.Empty(Hw(Fingerprint.Args(new FingerprintOptions { Fingerprint = "user-1", FingerprintProfile = Device })));
+
+    [Fact]
+    public void Profile_hardware_caller_wins_and_light_stealth_takes_the_device()
+    {
+        Assert.Equal(new[] { "--fingerprint-hardware-concurrency=4", "--fingerprint-device-memory=8" },
+            Hw(Fingerprint.Args(new FingerprintOptions { FingerprintProfile = Device, HardwareConcurrency = 4 })));
+        Assert.Equal(new[] { "--fingerprint-hardware-concurrency=24", "--fingerprint-device-memory=8" },
+            Hw(Fingerprint.Args(new FingerprintOptions { Fingerprint = "user-1", LightStealth = true, FingerprintProfile = Device })));
+    }
+
+    [Fact]
+    public void Profile_hardware_reads_only_whole_sensible_values()
+    {
+        Assert.Equal((2, (int?)null), Fingerprint.ProfileHardware("{\"hardware_concurrency\":2,\"device_memory\":0.5}"));
+        Assert.Equal(((int?)null, (int?)null), Fingerprint.ProfileHardware("{\"hardware_concurrency\":\"8\",\"device_memory\":-1}"));
+        Assert.Equal(((int?)null, (int?)null), Fingerprint.ProfileHardware("not json"));
+    }
 }

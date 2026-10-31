@@ -141,6 +141,38 @@ def encode_profile(value):
     return base64.b64encode(gzip.compress(raw, 9)).decode("ascii")
 
 
+def profile_hardware(value):
+    """An imported profile's own thread count and memory (top-level ``hardware_concurrency`` /
+    ``device_memory``) as ``{"hardware_concurrency": int, "device_memory": number}``, keys present only when the
+    profile has them (path / dict / JSON string). A profile applied WITHOUT a ``fingerprint`` seed
+    (``profile="auto"``, a profile on its own, light_stealth) needs them as explicit switches: the persona service
+    puts them in the persona, but the engine applies a persona's hardware_concurrency / device_memory only when the
+    launch has a --fingerprint seed, so a profile-only launch reported the REAL machine's values (measured
+    2026-10-31 with r54: a 24-thread 8 GB profile showed 16 / 16 on a 16-thread 16 GB PC)."""
+    try:
+        if isinstance(value, dict):
+            obj = value
+        elif isinstance(value, (bytes, bytearray)):
+            obj = json.loads(value)
+        elif isinstance(value, str) and os.path.isfile(value):
+            with open(value, encoding="utf-8") as handle:
+                obj = json.load(handle)
+        else:
+            obj = json.loads(value)
+    except (ValueError, OSError):
+        return {}
+    if not isinstance(obj, dict):
+        return {}
+    out = {}
+    hc = obj.get("hardware_concurrency")
+    if isinstance(hc, int) and not isinstance(hc, bool) and hc > 0:
+        out["hardware_concurrency"] = hc
+    dm = obj.get("device_memory")
+    if isinstance(dm, (int, float)) and not isinstance(dm, bool) and dm > 0:
+        out["device_memory"] = dm
+    return out
+
+
 def _profile_accept_language(value):
     """Best-effort: derive an Accept-Language from an imported profile's navigator.languages
     (path / dict / JSON string), so an imported identity keeps the donor's language order."""
@@ -407,6 +439,12 @@ def fingerprint_args(opts):
         if opts.get("webrtc_ip"):
             args.append(f"--webrtc-ip={opts['webrtc_ip']}")
         return args
+    if opts.get("fingerprint_profile") and (not opts.get("fingerprint") or opts.get("light_stealth")):
+        # A profile with no seed: its own threads and memory go out as switches (see profile_hardware), before
+        # the light_stealth preset so a captured device's values win over the seed's preset. A caller's own wins.
+        for _k, _v in profile_hardware(opts["fingerprint_profile"]).items():
+            if opts.get(_k) in (None, ""):
+                opts[_k] = _v
     if opts.get("light_stealth"):
         # Fill in a coherent metadata bundle via native override switches. setdefault
         # semantics: an explicit caller kwarg (e.g. device_memory=16) wins over the preset.

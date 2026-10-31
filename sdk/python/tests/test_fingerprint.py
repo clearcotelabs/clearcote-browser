@@ -230,3 +230,37 @@ def test_persona_schema_is_opt_in_and_real_gpu_host_is_a_flag():
     assert "--fingerprint-gpu-backend-real" not in fingerprint_args({"persona_schema": 2, "real_gpu_host": False})
     assert "--fingerprint-schema=5" in fingerprint_args({"persona_schema": 5})
     assert "--fingerprint-schema=7" in fingerprint_args({"persona_schema": 7})
+
+
+# The engine applies a persona's hardware_concurrency / device_memory only with a --fingerprint seed, so a profile
+# on its own sends them as switches (measured 2026-10-31 with r54: without them the real machine's values showed).
+_DEVICE = {"hardware_concurrency": 24, "device_memory": 8, "screen": {"width": 1920, "height": 1080}}
+
+
+def _hw(args):
+    return [a for a in args if a.startswith(("--fingerprint-hardware-concurrency=", "--fingerprint-device-memory="))]
+
+
+def test_profile_without_seed_sends_its_threads_and_memory():
+    assert _hw(fingerprint_args({"fingerprint_profile": _DEVICE})) == [
+        "--fingerprint-hardware-concurrency=24", "--fingerprint-device-memory=8"]
+    assert len(_hw(fingerprint_args({"fingerprint_profile": json.dumps(_DEVICE)}))) == 2
+
+
+def test_profile_with_seed_leaves_them_to_the_persona():
+    assert _hw(fingerprint_args({"fingerprint": "user-1", "fingerprint_profile": _DEVICE})) == []
+
+
+def test_profile_hardware_caller_wins_and_light_stealth_takes_the_device():
+    assert _hw(fingerprint_args({"fingerprint_profile": _DEVICE, "hardware_concurrency": 4})) == [
+        "--fingerprint-hardware-concurrency=4", "--fingerprint-device-memory=8"]
+    assert _hw(fingerprint_args({"fingerprint": "user-1", "light_stealth": True, "fingerprint_profile": _DEVICE})) == [
+        "--fingerprint-hardware-concurrency=24", "--fingerprint-device-memory=8"]
+
+
+def test_profile_hardware_reads_only_sensible_values():
+    assert _hw(fingerprint_args({"fingerprint_profile": {"screen": {}}})) == []
+    assert _fingerprint.profile_hardware({"hardware_concurrency": "8", "device_memory": -1}) == {}
+    assert _fingerprint.profile_hardware({"hardware_concurrency": 2, "device_memory": 0.5}) == {
+        "hardware_concurrency": 2, "device_memory": 0.5}
+    assert _fingerprint.profile_hardware("not json") == {}
