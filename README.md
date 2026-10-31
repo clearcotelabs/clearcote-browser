@@ -275,8 +275,13 @@ The official image is a Clearcote browser exposed as a CDP endpoint on port 9222
 ```bash
 # the seccomp profile that lets Chrome keep its sandbox (it ships in the image)
 docker run --rm --tmpfs /opt/xdg-cache --entrypoint cat teamflatearth/clearcote /etc/clearcote/seccomp.json > clearcote-seccomp.json
-docker run -d --rm --shm-size=1g -p 127.0.0.1:9222:9222 --security-opt seccomp=clearcote-seccomp.json teamflatearth/clearcote
+docker run -d --rm -v clearcote-cache:/opt/xdg-cache --shm-size=1g -p 127.0.0.1:9222:9222 \
+  --security-opt seccomp=clearcote-seccomp.json teamflatearth/clearcote
 ```
+
+`-v clearcote-cache:/opt/xdg-cache` keeps the engine in a named volume. Keep it on every run: with a licence key,
+a container started without it downloads the licensed engine (about 164 MB) again, and each of those downloads
+counts against your key's download limit.
 
 Without `--security-opt` it still runs, with Chrome's sandbox off. In Windows PowerShell, copy the profile out
 with `docker cp` instead of `>`: see [Pull & run](docker/README.md#pull--run) and [Chrome's sandbox](docker/README.md#chromes-sandbox).
@@ -296,12 +301,14 @@ Set the persona with environment variables: `CC_PLATFORM` (`windows`, `linux`, `
 `CC_ACCEPT_LANGUAGE`, `CC_TLS_PROFILE`.
 
 ```bash
-docker run -d --rm --shm-size=1g -p 127.0.0.1:9222:9222 --security-opt seccomp=clearcote-seccomp.json \
+docker run -d --rm -v clearcote-cache:/opt/xdg-cache --shm-size=1g -p 127.0.0.1:9222:9222 \
+  --security-opt seccomp=clearcote-seccomp.json \
   -e CC_PLATFORM=windows -e CC_FINGERPRINT=user-7423 teamflatearth/clearcote
 ```
 
 The CDP port gives full control of the browser. Publish it on `127.0.0.1` or a trusted network only.
 The image bakes in the signed Linux binary and the fonts a Windows persona needs.
+What WebRTC shows with and without a proxy: [Networking and WebRTC](docker/README.md#networking-and-webrtc).
 Details: [`docker/README.md`](docker/README.md) · [deployment guide](https://www.clearcotelabs.com/docs/deployment?utm_source=github&utm_medium=readme&utm_content=run-it-in-docker).
 
 ---

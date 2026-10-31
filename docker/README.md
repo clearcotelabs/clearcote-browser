@@ -10,9 +10,14 @@ the browser.
 # the seccomp profile that lets Chrome run with its sandbox (it ships in the image; --tmpfs keeps
 # docker from first copying the ~0.5 GB engine into a volume just to read this one file)
 docker run --rm --tmpfs /opt/xdg-cache --entrypoint cat teamflatearth/clearcote /etc/clearcote/seccomp.json > clearcote-seccomp.json
-docker run -d --rm --shm-size=1g -p 127.0.0.1:9222:9222 --security-opt seccomp=clearcote-seccomp.json teamflatearth/clearcote
+docker run -d --rm -v clearcote-cache:/opt/xdg-cache --shm-size=1g -p 127.0.0.1:9222:9222 \
+  --security-opt seccomp=clearcote-seccomp.json teamflatearth/clearcote
 # CDP on http://localhost:9222
 ```
+
+`-v clearcote-cache:/opt/xdg-cache` keeps the engine in a named volume. Keep it on every run: with a licence key,
+a container started without it downloads the licensed engine (about 164 MB) again, and each of those downloads
+counts against your key's download limit.
 
 Without `--security-opt` the container still runs, with Chrome's sandbox off; see
 [Chrome's sandbox](#chromes-sandbox).
@@ -68,7 +73,8 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | `CC_PLATFORM_VERSION`, `CC_LOCATION`, `CC_WEBRTC_IP`, `CC_WEBRTC_MDNS`, `CC_FINGERPRINT_PROFILE`, `CC_DEVICE_MEMORY`, `CC_COLOR_DEPTH`, `CC_MAX_TOUCH_POINTS`, `CC_STORAGE_QUOTA`, `CC_DEVICE_PIXEL_RATIO`, `CC_LIGHT_STEALTH`, `CC_DISABLE_GPU_FINGERPRINT`, `CC_FINGERPRINT_NOISE`, `CC_CANVAS_NOISE`, `CC_GPU_STRING_SPOOF` | `CC_DEVICE_MEMORY=8` | the SDK `launch()` option of the same name in lower case (`CC_DEVICE_MEMORY=8` is `device_memory=8`); on/off options take `1` or `0`. See [Fingerprint options](../sdk/python/README.md#fingerprint-options) |
 
 ```bash
-docker run -d --rm --shm-size=1g -p 127.0.0.1:9222:9222 --security-opt seccomp=clearcote-seccomp.json \
+docker run -d --rm -v clearcote-cache:/opt/xdg-cache --shm-size=1g -p 127.0.0.1:9222:9222 \
+  --security-opt seccomp=clearcote-seccomp.json \
   -e CC_PLATFORM=windows -e CC_FINGERPRINT=user-7423 -e CC_BRAND=Edge \
   teamflatearth/clearcote
 ```
@@ -109,7 +115,8 @@ never change the widths a Windows persona reports.
   licensed to use.
 
 ```bash
-docker run -d --rm --shm-size=1g -p 127.0.0.1:9222:9222 --security-opt seccomp=clearcote-seccomp.json \
+docker run -d --rm -v clearcote-cache:/opt/xdg-cache --shm-size=1g -p 127.0.0.1:9222:9222 \
+  --security-opt seccomp=clearcote-seccomp.json \
   -v /srv/windows-fonts:/fonts:ro -e CLEARCOTE_FONT_DIRS=/fonts \
   -e CC_PLATFORM=windows teamflatearth/clearcote
 docker exec <container> clearcote info --quick   # which scripts render, which families are genuine
@@ -121,9 +128,9 @@ The image bakes in the **open** engine. Set `CLEARCOTE_LICENSE_KEY` and the cont
 **licensed** engine instead (the newest build your key allows), downloading it once into the cache volume:
 
 ```bash
-docker run -d --rm --shm-size=1g -p 127.0.0.1:9222:9222 --security-opt seccomp=clearcote-seccomp.json \
+docker run -d --rm -v clearcote-cache:/opt/xdg-cache --shm-size=1g -p 127.0.0.1:9222:9222 \
+  --security-opt seccomp=clearcote-seccomp.json \
   -e CLEARCOTE_LICENSE_KEY=cc_lic_... \
-  -v clearcote-cache:/opt/xdg-cache \
   teamflatearth/clearcote
 ```
 
@@ -142,6 +149,48 @@ docker run -d --rm --shm-size=1g -p 127.0.0.1:9222:9222 --security-opt seccomp=c
   minutes if the key is revoked, checked in elsewhere, or over its limit.
 - **Pro keys** have no cap on containers during the beta.
 - The container needs outbound HTTPS to `clearcotelabs.com` for the licence.
+
+## Networking and WebRTC
+
+What a page in this container gets from WebRTC: the ICE candidates gathered against two public STUN servers
+(Google's and Cloudflare's), compared with the address the same page's HTTP requests came from. Measured on
+Docker Desktop (Windows, WSL 2) with the licensed engine and a residential proxy (http and socks5):
+
+| `CC_PROXY` | `CC_WEBRTC_IP` | candidates the page gets |
+|---|---|---|
+| unset | unset | none |
+| unset | this machine's public IP | one server-reflexive candidate with that IP, and a `.local` host candidate |
+| http or socks5 | unset | none |
+| http or socks5 | the proxy's exit IP | one server-reflexive candidate with the exit IP, the same address the page's HTTP requests came from, and a `.local` host candidate |
+| socks5, with `--socks5-udp`, through a proxy that refuses UDP | unset | none |
+
+- **Nothing leaked in any of these.** No candidate carried the container's own address (`172.17.x.x` on the
+  default bridge) or, with a proxy, the real public IP of the machine running Docker. Local addresses only
+  appear as `.local` names.
+- **Bridge or host networking: the same results.** With `--network host` there were two `.local` host
+  candidates instead of one (one per network interface the browser saw). On Docker Desktop, `--network host`
+  is the network of Docker's own virtual machine, not of your computer, unless host networking is turned on in
+  Docker Desktop's settings; while it is off, `-p` does not apply and the CDP port cannot be reached from your
+  computer.
+- **With a proxy**, the entrypoint sets Chrome's `disable_non_proxied_udp` WebRTC policy and turns QUIC off,
+  so no UDP leaves around the proxy. Without `CC_WEBRTC_IP` the browser then reports no candidates at all,
+  where a regular Chrome always reports at least a `.local` host candidate, and a page can notice that. With
+  the licensed engine, set `CC_WEBRTC_IP` to the proxy's exit IP (look it up through the proxy, for example
+  `curl -x "$CC_PROXY" https://api.ipify.org`). The browser reports that address as given, without checking
+  it, so look it up again when the proxy changes its exit (rotating residential plans do). With the open
+  engine (no licence key), leave `CC_WEBRTC_IP` unset behind a proxy: that engine has no WebRTC UDP block of
+  its own, so a WebRTC IP there can let a page's TURN server see the real address.
+- **Without a proxy**, `CC_WEBRTC_IP` set to the address the container's traffic leaves from (your public IP)
+  gives the same candidate set as above; unset, there are no candidates.
+- **The SDKs' Docker launch** (`launch()` on macOS, or `docker=True`) looks up the exit before the container
+  starts, through the proxy when there is one, and passes it as `CC_WEBRTC_IP` together with the matching
+  timezone, language and location (geoip, on by default). Behind a proxy without a licence key it passes the
+  timezone, language and location but not the WebRTC IP, for the reason above.
+- **SOCKS5 UDP relay.** The image has no variable of its own for it: `CC_EXTRA_ARGS=--socks5-udp` turns it on
+  for a `socks5://` proxy. UDP is only relayed through a proxy given as an IP address, and only by a proxy
+  that accepts UDP associations (many residential SOCKS5 plans refuse them). The entrypoint does not check
+  either, and keeps HTTP/3 off. Through a proxy that refused, the page got no candidates and loaded normally
+  over the proxy. The SDKs' Docker launch does not take the `socks5_udp` option.
 
 ## Security
 
@@ -194,7 +243,8 @@ runs in the container (`docker exec` included) does not. On balance it is still 
 without the sandbox, a compromised renderer has everything the container's user has.
 
 ```bash
-docker run -d --rm --shm-size=1g -p 127.0.0.1:9222:9222 --security-opt seccomp=clearcote-seccomp.json teamflatearth/clearcote
+docker run -d --rm -v clearcote-cache:/opt/xdg-cache --shm-size=1g -p 127.0.0.1:9222:9222 \
+  --security-opt seccomp=clearcote-seccomp.json teamflatearth/clearcote
 ```
 
 ```yaml
@@ -204,7 +254,10 @@ services:
     image: teamflatearth/clearcote
     ports: ["127.0.0.1:9222:9222"]
     shm_size: "1gb"
+    volumes: ["clearcote-cache:/opt/xdg-cache"]
     security_opt: ["seccomp=./clearcote-seccomp.json"]
+volumes:
+  clearcote-cache:
 ```
 
 The SDKs' Docker launch (`launch()` on macOS, or `docker=True` / `CLEARCOTE_DOCKER=1` on any OS) passes the profile itself to an image that uses it (serve protocol 3), on a
