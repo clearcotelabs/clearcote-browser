@@ -90,8 +90,9 @@ def test_darwin_maps_to_the_macos_pro_key(monkeypatch):
     assert release.pro_platform_key("win32", "amd64") == "windows"
     assert release.pro_platform_key("linux", "x86_64") == "linux"
     assert release.pro_platform_key("freebsd13", "amd64") is None
-    # still no FREE pinned release for macOS: the native build is PRO-only
-    assert release.platform_release("darwin") is None
+    # the open macOS pin is Apple Silicon only, like the PRO build
+    assert release.platform_release("darwin", "arm64") is release.PLATFORMS["darwin"]
+    assert release.platform_release("darwin", "x86_64") is None
 
 
 def test_intel_mac_is_told_the_build_is_apple_silicon_only(monkeypatch):
@@ -134,11 +135,27 @@ def test_pro_download_asks_for_macos_and_expects_the_bundle(monkeypatch, tmp_pat
     assert seen["rel"]["binary"] == "Chromium"  # no "binary" in the reply: the macOS default
 
 
-def test_free_build_fails_on_a_mac_before_downloading_anything(monkeypatch, tmp_path):
-    _on(monkeypatch, "darwin", "arm64")
-    monkeypatch.setattr(dl, "_download", lambda *a, **k: pytest.fail("downloaded a build for another OS"))
-    with pytest.raises(RuntimeError, match="license key"):
+def test_free_build_fails_on_an_intel_mac_before_downloading_anything(monkeypatch, tmp_path):
+    _on(monkeypatch, "darwin", "x86_64")
+    monkeypatch.setattr(dl, "_download", lambda *a, **k: pytest.fail("downloaded a build for another CPU"))
+    with pytest.raises(RuntimeError, match="Apple Silicon only"):
         dl.ensure_binary(cache_dir=str(tmp_path), quiet=True)
+
+
+def test_free_build_on_apple_silicon_downloads_the_macos_pin(monkeypatch, tmp_path):
+    _on(monkeypatch, "darwin", "arm64")
+    monkeypatch.setattr(dl, "RELEASE", release.PLATFORMS["darwin"])  # RELEASE was bound on the test host's OS
+    seen = {}
+
+    def fake_download(url, dest, expected_size, quiet):
+        seen.update(url=url, size=expected_size)
+        raise RuntimeError("stop after choosing the asset")
+
+    monkeypatch.setattr(dl, "_download", fake_download)
+    with pytest.raises(RuntimeError, match="stop after choosing the asset"):
+        dl.ensure_binary(cache_dir=str(tmp_path), quiet=True)
+    assert seen["url"] == release.PLATFORMS["darwin"]["url"]
+    assert seen["size"] == release.PLATFORMS["darwin"]["size"]
 
 
 # ── finding the binary in the bundle ─────────────────────────────────────────
@@ -295,11 +312,10 @@ def test_docker_decision_on_a_mac(monkeypatch, no_key):
         return _docker.docker_requested(docker, kw)
 
     assert on("arm64", key="cc_lic_x") is False          # licensed Apple Silicon: native PRO build
-    assert on("arm64") is True                           # no key: the free build has no Mac binary
-    assert on("x86_64", key="cc_lic_x") is True          # Intel Mac: the PRO build is arm64 only
+    assert on("arm64") is False                          # no key: the open macOS pin, also native
+    assert on("x86_64", key="cc_lic_x") is True          # Intel Mac: both builds are arm64 only
+    assert on("x86_64") is True
     assert on("arm64", docker=True, key="cc_lic_x") is True   # Docker stays reachable
-    monkeypatch.setenv("CLEARCOTE_LICENSE_KEY", "cc_lic_env")
-    assert on("arm64") is False                          # the key from the environment counts too
     # the test-only "assume macOS" switch exists to exercise the Docker path: it stays Docker
     _on(monkeypatch, "linux", "aarch64")
     monkeypatch.setenv(_docker.TEST_ONLY_ASSUME_MACOS, "1")
@@ -321,9 +337,33 @@ def test_launch_runs_the_native_build_when_licensed_on_apple_silicon(monkeypatch
     assert seen["kwargs"]["license_key"] == "cc_lic_mac"
 
 
-def test_launch_without_a_key_on_a_mac_still_uses_docker(monkeypatch, no_key):
+def test_launch_without_a_key_on_apple_silicon_runs_the_open_macos_pin(monkeypatch, no_key):
     _on(monkeypatch, "darwin", "arm64")
+    monkeypatch.setattr(clearcote, "launch_docker", lambda *a, **k: pytest.fail("started Docker"))
+    seen = {}
+
+    def native(prefix, kwargs):
+        seen["kwargs"] = kwargs
+        return "context"
+
+    monkeypatch.setattr(clearcote, "_launch_on_throwaway_profile", native)
+    monkeypatch.setattr(clearcote, "_install_persistent_as_browser", lambda ctx: ("browser", ctx))
+    assert clearcote.launch(platform="macos") == ("browser", "context")
+    assert not seen["kwargs"].get("license_key")
+
+
+def test_launch_on_an_intel_mac_still_uses_docker(monkeypatch, no_key):
+    _on(monkeypatch, "darwin", "x86_64")
     monkeypatch.setattr(clearcote, "launch_docker", lambda kw: "docker-browser")
     monkeypatch.setattr(clearcote, "_launch_on_throwaway_profile",
-                        lambda *a, **k: pytest.fail("no native build without a key"))
+                        lambda *a, **k: pytest.fail("no native build on an Intel Mac"))
     assert clearcote.launch(platform="macos") == "docker-browser"
+
+
+def test_open_macos_pin_is_the_pre24_arm64_bundle():
+    rel = release.PLATFORMS["darwin"]
+    assert rel["tag"] == "v0.1.0-pre.24"
+    assert rel["asset"] == "clearcote-150.0.7871.114-macos-arm64.zip"
+    assert rel["url"].endswith(f"/{rel['tag']}/{rel['asset']}")
+    assert rel["binary"] == "Chromium" and rel["archive"] == "zip" and rel["os"] == "darwin"
+    assert len(rel["sha256"]) == 64 and len(rel["exe_sha256"]) == 64

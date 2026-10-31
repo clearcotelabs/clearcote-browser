@@ -22,7 +22,7 @@ public class ReleaseTests
     [Fact]
     public void All_pins_are_well_formed()
     {
-        Assert.Equal(new HashSet<string> { "windows", "linux" }, Release.Platforms.Keys.ToHashSet());
+        Assert.Equal(new HashSet<string> { "windows", "linux", "macos" }, Release.Platforms.Keys.ToHashSet());
         foreach (var p in Release.Platforms.Values) CheckPin(p);
     }
 
@@ -33,6 +33,15 @@ public class ReleaseTests
         Assert.Equal("zip", Release.Windows.Archive);
         Assert.Equal("chrome.exe", Release.Windows.Binary);
         Assert.EndsWith("-windows-x64.zip", Release.Windows.Asset);
+    }
+
+    [Fact]
+    public void Macos_pin_shape()
+    {
+        Assert.Equal("macos", Release.Macos.Os);
+        Assert.Equal("zip", Release.Macos.Archive);
+        Assert.Equal("Chromium", Release.Macos.Binary);
+        Assert.EndsWith("-macos-arm64.zip", Release.Macos.Asset);
     }
 
     [Fact]
@@ -50,6 +59,8 @@ public class ReleaseTests
         Assert.Same(Release.Windows, Release.PlatformRelease("windows"));
         Assert.Same(Release.Linux, Release.PlatformRelease("linux"));
         Assert.Null(Release.PlatformRelease("darwin"));
+        Assert.Same(Release.Macos, Release.PlatformRelease("macos", "arm64"));
+        Assert.Null(Release.PlatformRelease("macos", "x64"));
         Assert.Same(Release.PlatformRelease() ?? Release.Windows, Release.Current);
     }
 

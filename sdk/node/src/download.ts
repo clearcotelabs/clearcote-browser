@@ -1803,8 +1803,8 @@ export function ensureRunnableHere(exe: string): void {
   }
   if (platformRelease() === undefined && pro === null) {
     throw new Error(
-      `Clearcote ${RELEASE.version} ships Windows x64 and Linux x64 binaries — there is no build for '${process.platform}'.\n` +
-        `Run on Windows or Linux, or pass executablePath to a compatible binary.\n` +
+      `Clearcote ships Windows x64, Linux x64 and macOS arm64 binaries — there is no build for this '${process.platform}' machine.\n` +
+        `Run on Windows, Linux or an Apple Silicon Mac (an Intel Mac can use docker: true), or pass executablePath to a compatible binary.\n` +
         `(The binary downloaded and verified fine; it is cached at: ${exe})`
     );
   }
@@ -1820,25 +1820,26 @@ export async function ensureBinary(opts: DownloadOptions = {}): Promise<string> 
     // Fail before downloading a build that cannot run here (this used to fetch the ~245 MB Windows
     // zip on a Mac, then refuse it).
     const hint = process.platform === "darwin"
-      ? "On an Apple Silicon Mac, set a license key (CLEARCOTE_LICENSE_KEY) for the native PRO build, or use the Docker image (docker: true). "
+      ? "The macOS builds are Apple Silicon only: on an Intel Mac use the Docker image (docker: true). "
       : "";
     throw new Error(
-      `The free Clearcote build ships Windows x64 and Linux x64 binaries — there is none for '${process.platform}'. ` +
+      `The free Clearcote build ships Windows x64, Linux x64 and macOS arm64 binaries — there is none for this '${process.platform}' machine. ` +
         `${hint}Or pass executablePath to a compatible binary.`,
     );
   }
+  const pin = platformRelease()!; // RELEASE, unless a test fakes the OS after import
 
   let rel: ResolvedRelease;
   if (autoUpdateRequested(opts.autoUpdate)) {
     const latest = await resolveLatest(opts.quiet);
-    if (latest && latest.tag === RELEASE.tag) {
+    if (latest && latest.tag === pin.tag) {
       // newest release IS the pinned one — prefer the baked-in hashes (the audited trust anchor).
-      rel = { ...RELEASE, unpinned: false };
+      rel = { ...pin, unpinned: false };
     } else {
-      rel = latest ?? { ...RELEASE, unpinned: false };
+      rel = latest ?? { ...pin, unpinned: false };
     }
   } else {
-    rel = { ...RELEASE, unpinned: false };
+    rel = { ...pin, unpinned: false };
   }
 
   const base = path.join(cacheRoot, rel.tag);

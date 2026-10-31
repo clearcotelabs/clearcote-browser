@@ -1,4 +1,4 @@
-"""launch() on macOS runs the Clearcote Docker image (there is no native macOS build).
+"""launch() on an Intel Mac runs the Clearcote Docker image (the native macOS builds are Apple Silicon only).
 
 The host platform is mocked (the module's view of ``sys.platform``) and the docker CLI is replaced by a
 recorder that answers like Docker would; the "container's" CDP endpoint is a real local Chromium, or a

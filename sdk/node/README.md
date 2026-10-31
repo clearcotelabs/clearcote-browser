@@ -13,12 +13,13 @@ you don't manage zips or paths. Or run the same code on a hosted Clearcote brows
 > **Platform:** Clearcote ships **Windows x64** and **Linux x64** binaries, plus a **macOS arm64** (Apple
 > Silicon) PRO build; `launch()` runs on all of them and the SDK auto-downloads the right one for your OS. On Linux the persona is Linux-native (Linux
 > GPU/voices/audio-device values) and DRM uses the Linux CDM. On an Apple Silicon Mac
-> with a licence key, `launch()` runs the native macOS PRO build (a `Chromium.app`, unsigned: the SDK clears its
-> quarantine flag and passes `--use-mock-keychain`). Its fonts and canvas text metrics stay the Mac's own, so keep
+> `launch()` runs a native macOS build: the PRO build with a licence key, and without one the open macOS build
+> (Chromium 150 from v0.1.0-pre.24, a major behind Windows and Linux). Both are a `Chromium.app`, unsigned: the SDK
+> clears its quarantine flag and passes `--use-mock-keychain`. Its fonts and canvas text metrics stay the Mac's own, so keep
 > `platform: "macos"` (the default there); another platform warns unless a `fingerprint_profile` captured on that OS
-> supplies them. Without a licence key (the free build has no macOS binary) or on an Intel Mac, `launch()` runs the
+> supplies them. On an Intel Mac, `launch()` runs the
 > [Docker image](../../docker/README.md) through Docker Desktop instead (SDK 0.40.0+; `docker: true` or
-> `CLEARCOTE_DOCKER=1` does the same on any OS, a licensed Mac included). On a minimal Linux host, install `xz-utils` (the Node SDK unpacks the
+> `CLEARCOTE_DOCKER=1` does the same on any OS, an Apple Silicon Mac included). On a minimal Linux host, install `xz-utils` (the Node SDK unpacks the
 > `.tar.xz` with the system `tar`) plus the browser's runtime libs (e.g.
 > `apt-get install -y xz-utils libnss3 libnspr4 libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 libcups2
 > libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libxfixes3 libxext6 libpango-1.0-0

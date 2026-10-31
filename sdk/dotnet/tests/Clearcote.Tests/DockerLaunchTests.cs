@@ -5,7 +5,7 @@ using Xunit;
 
 namespace Clearcote.Tests;
 
-/// LaunchAsync on macOS runs the Clearcote Docker image (there is no native macOS build).
+/// LaunchAsync on an Intel Mac runs the Clearcote Docker image (the native macOS builds are Apple Silicon only).
 ///
 /// The host platform is mocked (Native.OsTagOverride) and the docker CLI is replaced by a recorder that
 /// answers like Docker would; the "container's" CDP endpoint is a real local Chromium when one is found

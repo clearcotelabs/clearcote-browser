@@ -62,23 +62,45 @@ const LINUX: ReleaseInfo = {
   assetGlob: "linux-x64",
 };
 
-/** process.platform -> pinned release. Add an entry to support another OS. */
-export const PLATFORMS: Record<string, ReleaseInfo> = { win32: WINDOWS, linux: LINUX };
+// macOS (Apple Silicon) pins its own tag: the open 151 release (pre.25) has no macOS asset, so a Mac
+// without a licence key runs the 150 macOS build from v0.1.0-pre.24, one major behind Windows and Linux.
+// It is a Chromium.app bundle, unsigned and not notarized (download.ts unpacks it with ditto and clears
+// the quarantine flag). exeSha256 is the bundle's launcher, Contents/MacOS/Chromium; the release's
+// SHA256SUMS.txt lists the framework ("Chromium Framework") instead.
+const MACOS: ReleaseInfo = {
+  tag: "v0.1.0-pre.24",
+  version: "150.0.7871.114",
+  asset: "clearcote-150.0.7871.114-macos-arm64.zip",
+  url: "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.24/clearcote-150.0.7871.114-macos-arm64.zip",
+  sha256: "04493686efd16015c383cba7b1e8625e2297c1861944e050d9a2435cd26bb75c",
+  exeSha256: "71d58dcef6b0a7706954a27c8b82dbdbeb76610beef56ff971c2585328b5b751",
+  size: 228975134,
+  os: "darwin",
+  archive: "zip",
+  binary: "Chromium",
+  assetGlob: "macos-arm64",
+};
 
-/** The pinned release for the given platform (default: this OS), or undefined if unsupported. */
-export function platformRelease(plat: NodeJS.Platform | string = process.platform): ReleaseInfo | undefined {
+/** process.platform -> pinned release. Add an entry to support another OS. */
+export const PLATFORMS: Record<string, ReleaseInfo> = { win32: WINDOWS, linux: LINUX, darwin: MACOS };
+
+/**
+ * The pinned release for the given platform (default: this OS), or undefined if unsupported. The macOS
+ * pin is arm64 only, so an Intel Mac (or a Node under Rosetta) gets undefined and keeps the Docker image.
+ */
+export function platformRelease(plat: NodeJS.Platform | string = process.platform, arch: string = hostArch.get()): ReleaseInfo | undefined {
+  if (plat === "darwin" && !nativeMacosSupported(plat, arch)) return undefined;
   return PLATFORMS[plat];
 }
 
 /**
- * process.platform -> the PRO catalog / /download/pro `platform` key. Wider than PLATFORMS: macOS has
- * a native PRO build (Apple Silicon, a Chromium.app bundle) but no free pinned release, so it is here
- * and not there. The PRO build is resolved by the site at run time, so there is nothing to pin for it.
+ * process.platform -> the PRO catalog / /download/pro `platform` key. The PRO build is resolved by the
+ * site at run time, so there is nothing to pin for it. macOS is Apple Silicon only, for PRO and the open pin.
  */
 export const PRO_PLATFORMS: Record<string, "windows" | "linux" | "macos"> = { win32: "windows", linux: "linux", darwin: "macos" };
 
-/** CPU architectures the native macOS PRO build runs on. arm64 only: an Intel Mac (or a Node running
- * under Rosetta, which reports x64) uses the Docker image instead. */
+/** CPU architectures the native macOS builds (PRO and the open pin) run on. arm64 only: an Intel Mac (or
+ * a Node running under Rosetta, which reports x64) uses the Docker image instead. */
 export const MACOS_ARCHES: readonly string[] = ["arm64"];
 
 /** Indirection so tests can fake the CPU (process.arch is read-only). */
@@ -100,7 +122,7 @@ export function proPlatformKey(plat: string = process.platform, arch: string = h
   return key;
 }
 
-/** True on an Apple Silicon Mac, where the native PRO build runs. */
+/** True on an Apple Silicon Mac, where the native macOS builds (PRO and the open pin) run. */
 export function nativeMacosSupported(plat: string = process.platform, arch: string = hostArch.get()): boolean {
   return plat === "darwin" && MACOS_ARCHES.includes(arch);
 }

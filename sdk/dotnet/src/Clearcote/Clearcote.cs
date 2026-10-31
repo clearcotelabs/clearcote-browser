@@ -144,11 +144,12 @@ public static partial class Clearcote
     /// anything is created. See <see cref="Cloud"/> for the rest of the hosted API.
     /// </para>
     /// <para>
-    /// MACOS. With a licence key on an Apple Silicon Mac, this runs the native macOS PRO build (a
-    /// <c>Chromium.app</c> bundle, downloaded and verified like the other platforms). Its fonts and canvas
-    /// text metrics stay host-native, so only Platform = "macos" (the default there) is coherent; another
-    /// platform without a FingerprintProfile captured on that OS warns. Without a licence key (the free build
-    /// has no macOS binary), or on an Intel Mac, this starts the Clearcote Docker image instead
+    /// MACOS. On an Apple Silicon Mac, this runs a native macOS build (a <c>Chromium.app</c> bundle,
+    /// downloaded and verified like the other platforms): the PRO build with a licence key, and without one
+    /// the open macOS build this SDK pins (Chromium 150, v0.1.0-pre.24, a major behind the open Windows and
+    /// Linux builds). Its fonts and canvas text metrics stay host-native, so only Platform = "macos" (the
+    /// default there) is coherent; another platform without a FingerprintProfile captured on that OS warns.
+    /// On an Intel Mac, this starts the Clearcote Docker image instead
     /// (teamflatearth/clearcote:sdk-&lt;version&gt;; <see cref="LaunchOptions.DockerImage"/> or
     /// CLEARCOTE_DOCKER_IMAGE picks another) and returns the same Playwright <see cref="IBrowser"/>, connected
     /// to it over CDP; CloseAsync stops the container. The persona options, Headless, Proxy, Args, Version and
@@ -817,8 +818,8 @@ public static partial class Clearcote
         catch (PlatformNotSupportedException) { pro = null; }   // an Intel Mac: no build for this CPU
         if (Release.PlatformRelease() is null && pro is null)
             throw new PlatformNotSupportedException(
-                $"Clearcote {Release.Current.Version} ships Windows x64 and Linux x64 binaries — there is no build for '{Native.OsTag}'.\n" +
-                "Run on Windows or Linux, or set ExecutablePath to a compatible binary.\n" +
+                $"Clearcote ships Windows x64, Linux x64 and macOS arm64 binaries — there is no build for this '{Native.OsTag}' machine.\n" +
+                "Run on Windows, Linux or an Apple Silicon Mac (an Intel Mac can use Docker = true), or set ExecutablePath to a compatible binary.\n" +
                 $"(The binary downloaded and verified fine; it is cached at: {exe})");
         throw new FileNotFoundException($"Clearcote binary not found at '{exe}'. Set ExecutablePath / CLEARCOTE_BINARY, or let the SDK auto-download it.", exe);
     }

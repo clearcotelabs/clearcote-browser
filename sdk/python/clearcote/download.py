@@ -117,7 +117,7 @@ MANIFEST = ".manifest.json"
 CRITICAL_FILES = {
     "win32": ["chrome.exe", "chrome.dll", "chrome_elf.dll", "icudtl.dat",
               "snapshot_blob.bin", "resources.pak"],
-    # The macOS PRO build is a Chromium.app bundle: the payload sits inside the framework, reached
+    # The macOS builds (PRO and the open pin) are a Chromium.app bundle: the payload sits inside the framework, reached
     # through its Versions/Current symlink (which the ditto extraction keeps).
     "darwin": ["Chromium.app/Contents/MacOS/Chromium", "Chromium.app/Contents/Info.plist",
                "Chromium.app/Contents/Frameworks/Chromium Framework.framework/Versions/Current/"
@@ -1327,12 +1327,12 @@ def ensure_binary(cache_dir=None, quiet=False, auto_update=None):
     if platform_release() is None:
         # Fail before downloading a build that cannot run here (this used to fetch the ~245 MB
         # Windows zip on a Mac, then refuse it).
-        hint = ("On an Apple Silicon Mac, set a license key (CLEARCOTE_LICENSE_KEY) for the native PRO "
-                "build, or use the Docker image (docker=True). "
-                if sys.platform == "darwin" else "")
+        hint = ("The macOS builds are Apple Silicon only: on an Intel Mac use the Docker image "
+                "(docker=True). " if sys.platform == "darwin" else "")
         raise RuntimeError(
-            f"The free Clearcote build ships Windows x64 and Linux x64 binaries — there is none for "
-            f"{sys.platform!r}. {hint}Or pass executable_path=... to a compatible binary.")
+            f"The free Clearcote build ships Windows x64, Linux x64 and macOS arm64 binaries — there is "
+            f"none for this {sys.platform!r} machine. {hint}Or pass executable_path=... to a "
+            f"compatible binary.")
 
     rel = None
     if _auto_update_requested(auto_update):

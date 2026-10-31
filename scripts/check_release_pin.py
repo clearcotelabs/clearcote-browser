@@ -39,9 +39,14 @@ PY_RELEASE = ROOT / "sdk" / "python" / "clearcote" / "release.py"
 TS_RELEASE = ROOT / "sdk" / "node" / "src" / "release.ts"
 CS_RELEASE = ROOT / "sdk" / "dotnet" / "src" / "Clearcote" / "Release.cs"
 
-# The .NET SDK names platforms "windows"/"linux" (its Platforms keys and ReleaseInfo.Os); the other two
-# use Node/Python platform ids. Normalised here so all three compare field by field.
-DOTNET_OS = {"windows": "win32", "linux": "linux"}
+# The .NET SDK names platforms "windows"/"linux"/"macos" (its Platforms keys and ReleaseInfo.Os); the other
+# two use Node/Python platform ids. Normalised here so all three compare field by field.
+DOTNET_OS = {"windows": "win32", "linux": "linux", "macos": "darwin"}
+
+# Platforms whose release SHA256SUMS.txt has no line for the pinned inner binary. The macOS release lists the
+# framework ("Chromium Framework"), not the bundle's launcher (Contents/MacOS/Chromium) the SDKs pin, so for
+# them check 4 verifies the archive hash only; the SDKs still check the launcher hash after extraction.
+INNER_HASH_NOT_PUBLISHED = {"darwin"}
 
 FIELDS = ("tag", "version", "asset", "url", "sha256", "exeSha256", "size", "os", "archive", "binary",
           "assetGlob", "repo", "fpr")
@@ -117,7 +122,7 @@ def load_python() -> dict:
 
 
 def load_node() -> dict:
-    """Parse the per-OS pin objects (WINDOWS + LINUX) out of release.ts. Returns {os_key: pin}."""
+    """Parse the per-OS pin objects (WINDOWS + LINUX + MACOS) out of release.ts. Returns {os_key: pin}."""
     t = strip_comments(TS_RELEASE.read_text(encoding="utf-8"))
 
     def mod(name: str) -> "str | None":
@@ -130,7 +135,7 @@ def load_node() -> dict:
 
     repo, fpr = mod("REPO"), mod("SIGNING_KEY_FPR")
     out = {}
-    for tsname, oskey in (("WINDOWS", "win32"), ("LINUX", "linux")):
+    for tsname, oskey in (("WINDOWS", "win32"), ("LINUX", "linux"), ("MACOS", "darwin")):
         b = block(tsname)
 
         def s(key: str, blk: str = b) -> "str | None":
@@ -305,9 +310,14 @@ def main() -> "None":
                 by_name[parts[1].strip()] = parts[0].strip().lower()
         if by_name.get(r["asset"]) != r["sha256"]:
             fail(f"[{oskey}] archive sha256 mismatch: pinned={r['sha256']} published={by_name.get(r['asset'])}")
-        if by_name.get(r["binary"]) != r["exeSha256"]:
-            fail(f"[{oskey}] {r['binary']} sha256 mismatch: pinned={r['exeSha256']} published={by_name.get(r['binary'])}")
-        print(f"[{oskey}] OK: release exists; archive + {r['binary']} checksums match SHA256SUMS.txt")
+        if oskey in INNER_HASH_NOT_PUBLISHED and r["binary"] not in by_name:
+            print(f"[{oskey}] OK: release exists; archive checksum matches SHA256SUMS.txt "
+                  f"({r['binary']} is not listed there; the SDKs check it after extraction)")
+        else:
+            if by_name.get(r["binary"]) != r["exeSha256"]:
+                fail(f"[{oskey}] {r['binary']} sha256 mismatch: pinned={r['exeSha256']} "
+                     f"published={by_name.get(r['binary'])}")
+            print(f"[{oskey}] OK: release exists; archive + {r['binary']} checksums match SHA256SUMS.txt")
 
         # 5) GitHub's own digest of the archive, where the API exposes one
         check_asset_digest(oskey, r, assets[r["asset"]])

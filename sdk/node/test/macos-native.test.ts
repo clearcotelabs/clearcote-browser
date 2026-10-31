@@ -93,7 +93,8 @@ describe("platform key", () => {
     expect(proPlatformKey("win32", "x64")).toBe("windows");
     expect(proPlatformKey("linux", "x64")).toBe("linux");
     expect(proPlatformKey("freebsd", "x64")).toBeNull();
-    expect(platformRelease("darwin")).toBeUndefined(); // still no FREE pinned macOS release
+    expect(platformRelease("darwin", "arm64")?.assetGlob).toBe("macos-arm64"); // the open macOS pin
+    expect(platformRelease("darwin", "x64")).toBeUndefined(); // arm64 only, like the PRO build
     on("darwin", "arm64");
     // the catalog lookup uses the macos key (no PRO 155 in the bundled snapshot, so it names the key)
     await expect(resolveVersion("155", true, true, { schema: 1, builds: [] })).rejects.toThrow(/for macos/);
@@ -105,11 +106,18 @@ describe("platform key", () => {
     await expect(proEnsureBinary("cc_lic_x", { quiet: true })).rejects.toThrow(/Apple Silicon/);
   });
 
-  it("fails the free build on a Mac before downloading anything", async () => {
-    on("darwin", "arm64");
+  it("fails the free build on an Intel Mac before downloading anything", async () => {
+    on("darwin", "x64");
     const fetchSpy = vi.spyOn(globalThis, "fetch");
-    await expect(ensureBinary({ cacheDir: tmp, quiet: true })).rejects.toThrow(/license key/);
+    await expect(ensureBinary({ cacheDir: tmp, quiet: true })).rejects.toThrow(/Apple Silicon only/);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("downloads the open macOS pin on Apple Silicon without a key", async () => {
+    on("darwin", "arm64");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("stop after choosing the asset"));
+    await expect(ensureBinary({ cacheDir: tmp, quiet: true })).rejects.toThrow(/stop after choosing the asset/);
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(platformRelease("darwin", "arm64")!.url);
   });
 });
 
@@ -203,17 +211,16 @@ describe("persona on the macOS build", () => {
 });
 
 describe("launch default on a Mac", () => {
-  it("runs the native build when licensed on Apple Silicon, Docker otherwise", () => {
+  it("runs a native build on Apple Silicon (PRO or the open pin), Docker on an Intel Mac", () => {
     const decide = (arch: string, docker?: unknown, opts: Record<string, unknown> = {}) => {
       on("darwin", arch);
       return dockerRequested(docker, opts);
     };
     expect(decide("arm64", undefined, { licenseKey: "cc_lic_x" })).toBe(false); // native PRO build
-    expect(decide("arm64")).toBe(true); // no key: the free build has no Mac binary
-    expect(decide("x64", undefined, { licenseKey: "cc_lic_x" })).toBe(true); // Intel: PRO is arm64 only
+    expect(decide("arm64")).toBe(false); // no key: the open macOS pin, also native
+    expect(decide("x64", undefined, { licenseKey: "cc_lic_x" })).toBe(true); // Intel: both builds are arm64 only
+    expect(decide("x64")).toBe(true);
     expect(decide("arm64", true, { licenseKey: "cc_lic_x" })).toBe(true); // Docker stays reachable
-    process.env.CLEARCOTE_LICENSE_KEY = "cc_lic_env";
-    expect(decide("arm64")).toBe(false); // the key from the environment counts too
     // the test-only "assume macOS" switch exists to exercise the Docker path: it stays Docker
     on("linux", "arm64");
     process.env[TEST_ONLY_ASSUME_MACOS] = "1";

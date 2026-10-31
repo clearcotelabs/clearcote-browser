@@ -276,7 +276,7 @@ async def launch(cloud=None, **kwargs):
         return await launch_cloud_async(cloud, kwargs)
     _drop_cloud_credentials(kwargs)
     docker, docker_image = kwargs.pop("docker", None), kwargs.pop("docker_image", None)
-    if docker_requested(docker, kwargs):  # macOS without the native PRO build: the Docker image
+    if docker_requested(docker, kwargs):  # an Intel Mac (no native macOS build): the Docker image
         return await launch_docker_async({**kwargs, "docker_image": docker_image})
     # this launch is incognito: no profile to seed a CRLSet into (launch_persistent_context has one)
     if kwargs.pop("crlset", None) not in (None, False):

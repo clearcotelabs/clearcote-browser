@@ -20,7 +20,7 @@ def _check_pin(rel):
 
 
 def test_all_platform_pins_wellformed():
-    assert set(PLATFORMS) == {"win32", "linux"}
+    assert set(PLATFORMS) == {"win32", "linux", "darwin"}
     for rel in PLATFORMS.values():
         _check_pin(rel)
 
@@ -37,10 +37,17 @@ def test_linux_pin():
     assert ln["asset"].endswith("-linux-x64.tar.xz")
 
 
+def test_macos_pin():
+    m = PLATFORMS["darwin"]
+    assert m["os"] == "darwin" and m["archive"] == "zip" and m["binary"] == "Chromium"
+    assert m["asset"].endswith("-macos-arm64.zip")
+
+
 def test_platform_release_selects_by_os():
     assert platform_release("win32") is PLATFORMS["win32"]
     assert platform_release("linux") is PLATFORMS["linux"]
-    assert platform_release("darwin") is None
+    assert platform_release("darwin", "arm64") is PLATFORMS["darwin"]
+    assert platform_release("darwin", "x86_64") is None
     # RELEASE is the current platform's pin (Windows fallback on an unsupported OS).
     assert RELEASE is (platform_release(sys.platform) or PLATFORMS["win32"])
 
