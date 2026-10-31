@@ -357,6 +357,9 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     from ._widevine import apply_widevine_launch, widevine_mode
     if widevine_mode(kwargs.get("widevine"), licensed=False) == "explicit":
         await asyncio.to_thread(apply_widevine_launch, user_data_dir, kwargs, kwargs.get("quiet", False))
+    # Autofill on where the profile never set it (as the sync path; _autofillpref)
+    from ._autofillpref import apply_autofill_prefs
+    apply_autofill_prefs(user_data_dir, quiet=kwargs.get("quiet", False))
     # CRLSet (opt-in, see the sync path): seed + un-suppress off the event loop (it may fetch); wait below
     from ._crlset import apply_crlset_launch
     crlset_plan = await asyncio.to_thread(apply_crlset_launch, user_data_dir, kwargs, kwargs.get("quiet", False))

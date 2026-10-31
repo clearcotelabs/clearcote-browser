@@ -371,6 +371,8 @@ public static partial class Clearcote
                 if (!options.Quiet) Console.Error.WriteLine($"[clearcote] [widevine] setup failed (continuing without DRM): {e.Message}");
             }
         }
+        // Autofill on where the profile never set it, as Chrome has it (the engine's defaults are off; AutofillPrefs).
+        AutofillPrefs.Apply(userDataDir, options.Quiet);
         // CRLSet (opt-in): Chrome's revocation list, which the engine never downloads. Seeded into this profile with the
         // component updater un-suppressed; the launch then waits until it is live (see Crlset). Never throws.
         var (crlsetPlan, crlsetIgnore) = await Crlset.ApplyLaunchAsync(userDataDir, options, ignoreDefaultArgs).ConfigureAwait(false);
@@ -530,6 +532,7 @@ public static partial class Clearcote
         var port = options.Port ?? FreePort();
         var ownUdd = string.IsNullOrEmpty(options.UserDataDir);
         var userDataDir = ownUdd ? Directory.CreateTempSubdirectory("clearcote-serve-").FullName : options.UserDataDir!;
+        AutofillPrefs.Apply(userDataDir, options.Quiet);   // autofill on where the profile never set it (AutofillPrefs)
         var origins = options.AllowOrigins ?? $"http://{host}:{port},http://localhost:{port}";
         // A non-loopback bind or a "*" origin list hands the browser to whoever can reach the port.
         EmitCoherenceWarnings(options, exe, engineArgs, options.Headless != false, devtools: false, userAgent: null);

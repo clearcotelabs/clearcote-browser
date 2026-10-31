@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
 import { createServer, type Server as HttpServer } from "node:http";
 import type { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
@@ -438,6 +438,62 @@ describe("throwaway profiles are never left behind", () => {
     const before = process.listenerCount("exit");
     for (let i = 0; i < 3; i++) await (await launch(base())).close();
     expect(process.listenerCount("exit")).toBe(before);
+  });
+});
+
+describe("autofill is seeded on, as in Chrome, on every launch with a profile directory", () => {
+  const autofill = (udd: string) => JSON.parse(readFileSync(join(udd, "Default", "Preferences"), "utf8")).autofill;
+  const ON = { profile_enabled: true, credit_card_enabled: true };
+
+  it("launchPersistentContext(): before the browser starts", async () => {
+    const udd = join(root, "profile");
+    let seen: unknown;
+    stub.browser.onLaunch = (d) => { seen = autofill(d); };
+    const context = await launchPersistentContext(udd, base());
+    expect(seen).toEqual(ON);
+    await context.close();
+  });
+
+  it("launchPersistentContext(): an explicit off and the other prefs are kept", async () => {
+    const udd = join(root, "profile");
+    mkdirSync(join(udd, "Default"), { recursive: true });
+    writeFileSync(join(udd, "Default", "Preferences"), JSON.stringify({ autofill: { profile_enabled: false }, browser: { x: 1 } }));
+    const context = await launchPersistentContext(udd, base());
+    await context.close();
+    const prefs = JSON.parse(readFileSync(join(udd, "Default", "Preferences"), "utf8"));
+    expect(prefs).toEqual({ autofill: { profile_enabled: false, credit_card_enabled: true }, browser: { x: 1 } });
+  });
+
+  it("launch(): the throwaway profile", async () => {
+    let seen: unknown;
+    stub.browser.onLaunch = (d) => { seen = autofill(d); };
+    const browser = await launch(base());
+    expect(seen).toEqual(ON);
+    await browser.close();
+  });
+
+  it("serve(): on the caller's directory and on its own", async () => {
+    const { port, close } = await fakeCdpEndpoint();
+    try {
+      const udd = join(root, "served");
+      const srv = await serve({ ...base(), port, userDataDir: udd });
+      expect(autofill(udd)).toEqual(ON);
+      await srv.close();
+      const own = await serve({ ...base(), port });
+      const dir = stub.spawns.at(-1)!.find((a) => a.startsWith("--user-data-dir="))!.slice("--user-data-dir=".length);
+      expect(autofill(dir)).toEqual(ON);
+      await own.close();
+    } finally {
+      await close();
+    }
+  });
+
+  it("launch({ ephemeralProfile: false }): no profile directory, nothing written", async () => {
+    const browser = await launch({ ...base(), ephemeralProfile: false });
+    expect(stub.launches.at(-1)!.kind).toBe("incognito");
+    await browser.close();
+    expect(readdirSync(temp)).toEqual([]);
+    expect(readdirSync(root).sort()).toEqual(["engine", "home", "temp"]);
   });
 });
 

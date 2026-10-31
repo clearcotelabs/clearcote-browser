@@ -103,6 +103,7 @@ from ._widevine import (  # noqa: F401  (widevine_cdm_args re-exported for tests
     apply_widevine_launch, fetch_widevine, seed_widevine, widevine_cdm_args, widevine_launch_args, widevine_mode,
 )
 from ._crlset import apply_crlset_launch, fetch_crlset, install_crlset
+from ._autofillpref import apply_autofill_prefs
 from . import _offline
 from ._offline import OfflineKeyError
 from ._license import (
@@ -1454,6 +1455,8 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
     # uses that switch, which _prepare adds (with the explicit case's) once the engine is known.
     if widevine_mode(kwargs.get("widevine"), licensed=False) == "explicit":
         apply_widevine_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))
+    # Autofill on where the profile never set it, as Chrome has it (the engine's defaults are off; _autofillpref).
+    apply_autofill_prefs(user_data_dir, quiet=kwargs.get("quiet", False))
     # CRLSet: Chrome's revocation list, which the engine never downloads (see _crlset). Seeded into the
     # profile with the component updater un-suppressed; the launch then waits until it is live.
     crlset_plan = apply_crlset_launch(user_data_dir, kwargs, quiet=kwargs.get("quiet", False))

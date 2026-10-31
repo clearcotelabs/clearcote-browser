@@ -77,6 +77,7 @@ import {
 import { RELEASE } from "./release.js";
 import { fetchWidevine, seedWidevine, widevineArgs, widevineLaunchArgs, widevineMode } from "./widevine.js";
 import { applyCrlsetLaunch, fetchCrlset, installCrlset, type CrlsetOption } from "./crlset.js";
+import { applyAutofillPrefs } from "./autofillpref.js";
 import { emitCoherenceWarnings, emitWarnings, serveExposureWarnings } from "./warnings.js";
 import { checkFontDirs, fontLaunchEnv } from "./fonts.js";
 import { withShaderDialect, type ShaderDialect } from "./shaderdialect.js";
@@ -1326,6 +1327,8 @@ async function launchLocalPersistentContext(
       if (!quiet) process.stderr.write(`[clearcote] [widevine] setup failed (continuing without DRM): ${String(e)}\n`);
     }
   }
+  // Autofill on where the profile never set it, as Chrome has it (the engine's defaults are off; ./autofillpref.ts).
+  applyAutofillPrefs(userDataDir, quiet);
   // CRLSet: Chrome's revocation list, which the engine never downloads (see ./crlset.ts). Seeded into the
   // profile with the component updater un-suppressed; the launch then waits until it is live.
   const crlsetLaunch = { crlset, crlsetTimeout, ignoreDefaultArgs };
@@ -1650,6 +1653,7 @@ export async function serve(options: ServeOptions = {}): Promise<Server> {
   const resolvedPort = port ?? (await freePort());
   const ownUdd = !uddOption;
   const userDataDir = uddOption ?? mkdtempSync(join(tmpdir(), "clearcote-serve-"));
+  applyAutofillPrefs(userDataDir, quiet);  // autofill on where the profile never set it (./autofillpref.ts)
   const origins = allowOrigins ?? `http://${host}:${resolvedPort},http://localhost:${resolvedPort}`;
   // A non-loopback bind or a "*" origin list hands the browser to whoever can reach the port.
   emitWarnings(serveExposureWarnings(host, origins), quiet);

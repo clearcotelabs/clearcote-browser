@@ -500,7 +500,7 @@ def test_prepare_passthrough_skips_auto_profile(prepared, monkeypatch):
     assert called == []
 
 
-def test_launch_persistent_context_default_ignore_args(monkeypatch):
+def test_launch_persistent_context_default_ignore_args(monkeypatch, tmp_path):
     captured = {}
 
     class Ctx:
@@ -522,11 +522,11 @@ def test_launch_persistent_context_default_ignore_args(monkeypatch):
     monkeypatch.setattr(clearcote, "_prepare",
                         lambda kw: ("chrome", [], dict(kw), False, False, None))
     monkeypatch.setattr(clearcote, "apply_headless_geometry", lambda *a, **k: None)
-    clearcote.launch_persistent_context("udd", quiet=True)
+    clearcote.launch_persistent_context(str(tmp_path / "udd"), quiet=True)  # it seeds the profile: not the cwd
     assert captured["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking"]
 
 
-async def test_async_launch_persistent_context_default_ignore_args(monkeypatch):
+async def test_async_launch_persistent_context_default_ignore_args(monkeypatch, tmp_path):
     from clearcote import async_api
     seen = {}
 
@@ -536,7 +536,7 @@ async def test_async_launch_persistent_context_default_ignore_args(monkeypatch):
 
     monkeypatch.setattr(async_api, "_prepare", fake_prepare)
     with pytest.raises(RuntimeError, match="stop here"):
-        await async_api.launch_persistent_context("udd", quiet=True)
+        await async_api.launch_persistent_context(str(tmp_path / "udd"), quiet=True)
     assert seen["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking"]
 
 

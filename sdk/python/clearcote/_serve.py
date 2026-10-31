@@ -33,6 +33,7 @@ import shutil
 import socket
 import subprocess
 
+from ._autofillpref import apply_autofill_prefs
 from . import _persona  # r51+: server-side personas (the signed persona token)
 from . import _personaenv
 import sys
@@ -202,6 +203,7 @@ def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
     own_udd = user_data_dir is None
     if own_udd:
         user_data_dir = tempfile.mkdtemp(prefix="clearcote-serve-")
+    apply_autofill_prefs(user_data_dir, quiet=quiet)  # autofill on where the profile never set it (_autofillpref)
     origins = allow_origins if allow_origins is not None else \
         "http://%s:%d,http://localhost:%d" % (host, port, port)
     # A non-loopback bind or a "*" origin list hands the browser to whoever can reach the port.
