@@ -39,9 +39,10 @@ from ._isolated import (
     CSS_BOX as ISO_CSS_BOX, DESCRIBE as ISO_DESCRIBE, FORM_CONTROL, HIT_IN_BOX as ISO_HIT_IN_BOX,
     FRAMES as ISO_FRAMES, LABEL_BY_SEL as ISO_LABEL_BY_SEL, LABEL_OF as ISO_LABEL_OF,
     LISTBOX_ROW as ISO_LISTBOX_ROW, SCROLL_BY as ISO_SCROLL_BY,
-    PLATFORM as ISO_PLATFORM, VIEWPORT as ISO_VIEWPORT, async_world_for,
+    MOVE_OFF_SAFE as ISO_MOVE_OFF_SAFE, PLATFORM as ISO_PLATFORM, VIEWPORT as ISO_VIEWPORT, async_world_for,
 )
 from ._motion import (
+    hop_cap_px,
     WHEEL_NOTCH_PX, make_persona, plan_move, drag_dwell, click_hold, key_dwell, click_point, plan_ambient,
     dblclick_gap, pause_ms, timing_traits,
     platform_from_navigator, rollover_rate, wheel_notches,
@@ -53,7 +54,8 @@ from ._scroll import (
     in_view as _box_in, input_device as _input_device, paced_wheel_async, plan_trackpad, trackpad_traits, wheel_drift,
 )
 from ._attention import (
-    IDLE_DRIFT_MAX_MS, TEXT_LENGTH as ISO_TEXT_LENGTH, ambient_mode, explore_notches, idle_drifts, read_pause_ms,
+    IDLE_DRIFT_MAX_MS, TEXT_LENGTH as ISO_TEXT_LENGTH, ambient_mode, attention_enabled, explore_notches, idle_drifts,
+    read_pause_ms,
 )
 from ._hold import press_and_hold_async
 from ._hzoptions import (
@@ -64,8 +66,8 @@ from . import _frames as _fr
 from . import _trace
 from ._keys import (
     BLANK_POINT, FOCUSABLE, SEARCH_SLIP_RATE, SELECTION_STATE, TAB_DISTANCE, WORD_FIX_RATE, flight_ms,
-    modifier_lag_ms, modifier_lead_ms, plan_gap, plan_repeat, split_chord, submit_pause_ms, tab_pause_ms,
-    typing_traits,
+    modifier_lag_ms, modifier_lead_ms, plan_gap, plan_repeat, rollover_pair_rate, split_chord, submit_pause_ms,
+    tab_pause_ms, typing_traits,
 )
 from ._pacing import keep_in_view as _keep_in_view, trim_to as _trim_ambient, walk_async as _paced_walk
 
@@ -282,7 +284,8 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         vp = await _view_bounds()
         if tempo != 1.0:
             steps = [(sx, sy, sl * tempo) for sx, sy, sl in steps]
-        await _paced_walk(_keep_in_view(steps, *vp) if vp else steps, mv, kind=kind, buttons=buttons)
+        await _paced_walk(_keep_in_view(steps, *vp) if vp else steps, mv, kind=kind, buttons=buttons,
+                          max_jump=hop_cap_px(persona))
 
     async def _view_bounds():
         """The viewport (innerWidth, innerHeight) a planned path is kept inside (_pacing.keep_in_view),
@@ -627,7 +630,7 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
             await _press_at(x, y, o)
         # Not after an engine click (returned above): a glide the engine does not see would take the
         # next coordinate click off the engine path (_engine_in_sync).
-        _schedule_move_off()
+        await _schedule_move_off()
 
     async def hdblclick_xy(x, y, **kw):
         kw = dict(kw)
@@ -685,14 +688,14 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
     # a seeded per-action sequence would replay identically in every session of an identity.
     arng = random.random
     st.update({"depth": 0, "last_end": None, "load_at": None, "mo": None, "mo_hits": 0, "mo_n": 0})
-    # Hidden switch for the attention model until lane A's `ambient="idle"` / `attention` option lands.
-    page._clearcote_attention = False
+    # The attention model is on unless the `attention` option is False (SC 299); the page flag
+    # `page._clearcote_attention` (True / False), when set, overrides it (_attention.attention_enabled).
     # Test seam: what the after-action model did, newest last (bounded).
     trace = collections.deque(maxlen=256)
     page._clearcote_after_trace = trace
 
     def _attention_on():
-        return getattr(page, "_clearcote_attention", False) is True or ambient_mode(page) == "idle"
+        return attention_enabled(page)
 
     async def _dwell(x, y, box, dwell):
         """Rest on a hover target: OU drift + tremor within 3 px of the arrival point and inside ``box``,
@@ -715,15 +718,30 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         if steps:
             st["pos"] = (steps[-1][0], steps[-1][1])
 
-    def _schedule_move_off():
-        """After a press: in the persona's 60-85 % of clicks a move-off comes due 200-700 ms after the
-        release (see the sync file)."""
+    async def _move_off_safe():
+        """May the hand drift off the point it just clicked at once (see the sync file)? False when the page
+        cannot answer."""
+        try:
+            return (await async_world_for(page).evaluate(ISO_MOVE_OFF_SAFE, [float(st["pos"][0]), float(st["pos"][1])])) is True
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _schedule_move_off():
+        """After a press: in the persona's 60-85 % of clicks the hand drifts off 200-700 ms after the release --
+        EAGER, before the click returns, unless typing follows or the control opens something (then lazy, at the
+        next action). See the sync file (SC 299)."""
         hit = move_off_roll(persona, arng, st["mo_hits"], st["mo_n"])
         st["mo_n"] += 1
         st["mo"] = None
         if hit:
             st["mo_hits"] += 1
             st["mo"] = {"due": time.monotonic() + move_off_delay_ms(persona, arng) / 1000.0, "pos": st["pos"]}
+            if await _move_off_safe():
+                trace.append(("move_off_eager",))
+                try:
+                    await _run_move_off(True)
+                except Exception:  # noqa: BLE001 - the click already landed: a failed drift is not its error
+                    pass
 
     async def _run_move_off(wait):
         mo, st["mo"] = st["mo"], None
@@ -1220,7 +1238,8 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
         roll_rate = rollover_rate(persona)
         rolls = frozenset(i for i in range(n - 1)
                           if floor <= 0 and native_kb_down and native_kb_up and text[i] in _ROLL_KEYS
-                          and text[i + 1] in _ROLL_KEYS and text[i] != text[i + 1] and random.random() < roll_rate)
+                          and text[i + 1] in _ROLL_KEYS and text[i] != text[i + 1]
+                          and random.random() < rollover_pair_rate(roll_rate, text[i], text[i + 1]))
         # r43 engine (SC 232 lane H): a run with no slip to plan, no caller-held Shift and NO ROLLOVER goes out as
         # ONE dispatchKeySequence (see the sync file: the command cannot overlap keys, R3b); never with engine "off" (R3a).
         if (not allow and n > 1 and not ext_shift and not rolls and _hz_engine_mode(page, _engine_clicks_mode) != "off"
@@ -2845,7 +2864,7 @@ async def attach_humanize(browser, page, humanize=False, show_cursor=False, seed
                 else:
                     await _press_at(x, y, o)
                 if move_off:
-                    _schedule_move_off()
+                    await _schedule_move_off()
             return None
         except _Native as e:
             why = str(e)

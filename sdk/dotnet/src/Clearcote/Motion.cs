@@ -399,6 +399,16 @@ public static class Motion
         return null;
     }
 
+    // Salt for the pacer's hop cap (SC 299): own stream.
+    private const uint PaceSalt = 0x5BD1E995;
+    /// <summary>The longest hop this hand makes between two dispatched pointer points, 55..110 px (the first draw of
+    /// its salted pace stream): what a quick reach covers in about one 60 Hz frame at a 3.5-7 px/ms peak. The
+    /// wall-clock pacer (<see cref="Pacing.WalkAsync"/>) never hops further; a late walk stretches in time instead.
+    /// Measured on r54 / SDK 0.67.1 (SC 298): a fixed 40 px cap put a wall at 40 px under every persona (0 of 4,462
+    /// page-visible steps above 40.5 px), the same for every identity. Same value as Python <c>hop_cap_px</c> and
+    /// Node <c>hopCapPx</c>.</summary>
+    public static double HopCapPx(Persona p) => Lerp(55.0, 110.0, Mulberry32(p.Seed ^ PaceSalt)());
+
     // Salt for the aim traits (ClickPoint): the persona's landing dispersion, undershoot and handedness.
     private const uint AimSalt = 0x27D4EB2F;
     /// <summary>The persona's aiming traits from a salted stream of its seed: dispersion (sd 0.10–0.20 of the box),
@@ -511,9 +521,17 @@ public static class Motion
         double c1x = a.X + dx * 0.3 + nx * c * 1.15, c1y = a.Y + dy * 0.3 + ny * c * 1.15;
         double c2x = a.X + dx * 0.7 + nx * c * 0.85, c2y = a.Y + dy * 0.7 + ny * c * 0.85;
         double t = t0;
+        // Each sample's POSITION is taken at its own report time (SC 299): the report intervals jitter
+        // (stepMs x 0.88-1.12, drawn at the end of each iteration as before), and a position sampled at the
+        // nominal i/n while its time jittered made the speed a page computes swing +-12 % sample to sample --
+        // 5 smoothed velocity peaks per planned glide (SC 298). `el` is the time of sample i since the
+        // submovement started; the hand has arrived once el reaches the nominal duration. Same as Python
+        // _sample_submove and Node sampleSubmove.
+        double total = n * stepMs;
+        double el = stepMs;
         for (int i = 1; i <= n; i++)
         {
-            double tau = (double)i / n;
+            double tau = i == n ? 1.0 : Math.Min(1.0, el / total);
             double e = MinJerk(Skewed(tau, skew));
             double px = Bez(a.X, c1x, c2x, b.X, e);
             double py = Bez(a.Y, c1y, c2y, b.Y, e);
@@ -540,6 +558,7 @@ public static class Motion
             double sleepMs = stepMs * Lerp(0.88, 1.12, rng());
             outSteps.Add(new Step(px, py, sleepMs));
             t += sleepMs;
+            el += sleepMs;
         }
         return t;
     }
@@ -566,7 +585,11 @@ public static class Motion
         if (D < 1.5) { outSteps.Add(new Step(to.X, to.Y, 1000 / p.DeviceHz)); return outSteps; }
 
         double id = Log2(D / W + 1);
-        double mtLo = Math.Min(1700, Math.Max(70, 40 + D * 0.6));
+        // A distance floor (an average-speed bound) capped at the 1700 ms ceiling so a very long move can't invert
+        // the clamp (lo > hi). 0.4 ms/px (was 0.6, SC 299): at 0.6 the floor overrode Fitts' law whenever a far
+        // target was also wide, so planned time tracked DISTANCE instead of difficulty (planned MT/ID correlation
+        // -0.14 median over 8 personas on SC 298's six targets; 0.58 at 0.4). Same as Python plan_move.
+        double mtLo = Math.Min(1700, Math.Max(70, 40 + D * 0.4));
         double mt = Clamp((p.FittsA + p.FittsB * id) * (0.85 + 0.3 * rng()), mtLo, 1700);
         var tr = ShapeTraitsOf(p);
         double ux = (to.X - from.X) / D, uy = (to.Y - from.Y) / D;

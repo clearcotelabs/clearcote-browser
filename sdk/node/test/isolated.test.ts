@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import {
   IsolatedWorld, worldFor, nodeAtParams, ISO_ACTIVE_FIELD, ISO_ACTIVE_VALUE, ISO_DESCRIBE, ISO_FORM_CONTROL, ISO_PLATFORM,
-  ISO_SCROLL, ISO_VIEWPORT, ISO_HIT_IN_BOX, ISO_LABEL_OF, ISO_LISTBOX_ROW, ISO_CSS_BOX, ISO_SCROLL_BY, topChildFrame,
+  ISO_SCROLL, ISO_VIEWPORT, ISO_HIT_IN_BOX, ISO_LABEL_OF, ISO_LISTBOX_ROW, ISO_CSS_BOX, ISO_SCROLL_BY, ISO_MOVE_OFF_SAFE, topChildFrame,
 } from "../src/isolated.js";
 
 // A read that takes an argument (the CSS-only ISO_IS_FOCUSED this used went with the hit-test port).
@@ -254,6 +254,7 @@ describe("IsolatedWorld hit test and node calls", () => {
     expect(ISO_LISTBOX_ROW).toBe(py("LISTBOX_ROW"));
     expect(ISO_CSS_BOX).toBe(py("CSS_BOX"));
     expect(ISO_SCROLL_BY).toBe(py("SCROLL_BY"));
+    expect(ISO_MOVE_OFF_SAFE).toBe(py("MOVE_OFF_SAFE"));   // SC 299 eager move-off
     // LABEL_OF holds a regex: the Python source escapes its backslashes the way the template literal does
     expect(ISO_LABEL_OF).toBe(py("LABEL_OF").replace(/\\\\/g, "\\"));
   });

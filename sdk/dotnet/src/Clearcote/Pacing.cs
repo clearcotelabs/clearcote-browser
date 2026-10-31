@@ -17,20 +17,26 @@ namespace Clearcote;
 /// 6-8 ms gap up to the ~15.6 ms timer tick, which stretched the same glide on its own.
 ///
 /// <see cref="WalkAsync"/> schedules each sample at its planned offset from the start and keeps that
-/// clock: on time it sleeps until the sample's planned time; behind, it skips the samples whose time has
-/// passed and dispatches the most recent due one. Never skipped: the final sample and a sample marked as
-/// changing button state. Never a teleport: a skip may not hop further than <see cref="MaxJumpPx"/>, nor
-/// further than <see cref="IdleHopPx"/> after <see cref="IdleMs"/> with nothing sent; a longer hop dispatches
-/// the in-between sample instead, so a late walk stretches in time rather than jumping (SC 210 lab v2: the
+/// clock: on time it sleeps until the sample's planned time; behind, it sends the point ON the planned path at
+/// the time that has passed (linear between the two planned samples around it), so the move keeps the plan's
+/// shape, its duration and its SPEED profile. Never skipped: the final sample and a sample marked as changing
+/// button state -- both go out as planned. Never a teleport: no hop longer than the persona's cap
+/// (<see cref="Motion.HopCapPx"/>, 55-110 px; <see cref="MaxJumpPx"/> without a persona), nor further than
+/// <see cref="IdleHopPx"/> after <see cref="IdleMs"/> with nothing sent; a longer hop goes to the farthest point
+/// along the path within the cap, so a late walk stretches in time rather than jumping (SC 210 lab v2: the
 /// old cap, 3 px/ms x the time since the last dispatch, turned slow dispatches under load into hops of
-/// 60-103 px a few ms apart; an r40 engine walks any hop &gt;= 24 px after &gt;= 40 ms idle). A stall is a pause: a single
-/// dispatch slower than <see cref="StallMs"/> shifts the schedule by the excess instead of being caught up
-/// by skipping,. Sleeps are local timers,
-/// never a protocol round trip. Nothing here changes what the planner returns.
+/// 60-103 px a few ms apart; an r40 engine walks any hop &gt;= 24 px after &gt;= 40 ms idle). SC 298 (r54, SDK
+/// 0.67.1, Windows): the old walk skipped to whole planned samples under a FIXED 40 px cap; with an ~18 ms round
+/// trip it hopped 2 or 3 samples at a time (a sawtooth of 7-8 velocity peaks per glide) and no page-visible step
+/// exceeded 40 px under any persona. A stall is a pause: a single dispatch slower than <see cref="StallMs"/>
+/// shifts the schedule by the excess instead of being caught up by skipping. Sleeps are local timers, never a
+/// protocol round trip. Nothing here changes what the planner returns.
 /// </summary>
 internal static class Pacing
 {
-    public const double MaxJumpPx = 40;
+    /// <summary>The hop cap when the caller names no persona (the humanizer passes the persona's
+    /// <see cref="Motion.HopCapPx"/>). Same as Python MAX_JUMP_PX.</summary>
+    public const double MaxJumpPx = 72;
 
     /// <summary>A single dispatch slower than this is a stall (the page or the box was busy), not latency:
     /// nothing reached the page while it lasted, so the plan pauses with it instead of skipping ahead.</summary>
@@ -41,7 +47,7 @@ internal static class Pacing
     /// speed bound the tests check.</summary>
     public const double FastPxPerMs = 3;
 
-    /// <summary>After this long with nothing dispatched, a skip may hop at most <see cref="IdleHopPx"/>.</summary>
+    /// <summary>After this long with nothing dispatched, a hop may be at most <see cref="IdleHopPx"/>.</summary>
     public const double IdleMs = 40;
 
     /// <summary>What a hand at a moderate 2.5 px/ms covers in one 125 Hz report (8 ms), below the 24 px an r40
@@ -57,7 +63,9 @@ internal static class Pacing
         return (due, t);
     }
 
-    /// <summary>The step to dispatch next: step <paramref name="i"/> is the first not yet sent.</summary>
+    /// <summary>Legacy helper (the pre-SC 299 walk): the planned sample to dispatch next when only whole samples
+    /// may go out; step <paramref name="i"/> is the first not yet sent. <see cref="WalkAsync"/> itself sends points
+    /// between samples (<see cref="Target"/>).</summary>
     public static int NextIndex(IReadOnlyList<Step> steps, double[] due, int i, (double X, double Y)? last,
         double elapsedMs, double maxJump = MaxJumpPx, Func<int, bool>? pinned = null)
     {
@@ -70,6 +78,68 @@ internal static class Pacing
 
     private static double Sq(double v) => v * v;
 
+    /// <summary>The first index k with due[k] &gt; t (Python bisect.bisect_right).</summary>
+    private static int BisectRight(double[] due, double t)
+    {
+        int lo = 0, hi = due.Length;
+        while (lo < hi)
+        {
+            int mid = (lo + hi) >> 1;
+            if (t < due[mid]) hi = mid; else lo = mid + 1;
+        }
+        return lo;
+    }
+
+    /// <summary>The point of the planned path at plan time <paramref name="t"/> (ms): linear between the two
+    /// samples around it. Port of _pacing._pos_at.</summary>
+    internal static (double X, double Y) PosAt(IReadOnlyList<Step> steps, double[] due, double t)
+    {
+        if (t <= due[0]) return (steps[0].X, steps[0].Y);
+        if (t >= due[^1]) return (steps[^1].X, steps[^1].Y);
+        int k = BisectRight(due, t);   // due[k-1] <= t < due[k]
+        var a = steps[k - 1];
+        var b = steps[k];
+        double span = due[k] - due[k - 1];
+        double f = span > 0 ? (t - due[k - 1]) / span : 1.0;
+        return (a.X + (b.X - a.X) * f, a.Y + (b.Y - a.Y) * f);
+    }
+
+    /// <summary>What goes out next when step <paramref name="i"/> is the first planned sample not yet passed and
+    /// <paramref name="elapsedMs"/> of the plan have gone by: (x, y, plan time, next i). On time: step i itself.
+    /// Behind: the point of the path at <paramref name="elapsedMs"/> -- or, when one is due, the first pinned step or
+    /// the final step, exactly -- pulled back along the path until it lies within <paramref name="cap"/> of the last
+    /// dispatched point (the walk then stretches in time). Port of _pacing._target.</summary>
+    internal static (double X, double Y, double PlanT, int Next) Target(IReadOnlyList<Step> steps, double[] due, int i,
+        double? tPlanLast, (double X, double Y)? last, double elapsedMs, double cap, Func<int, bool>? pinned)
+    {
+        int n = steps.Count;
+        if (elapsedMs <= due[i]) return (steps[i].X, steps[i].Y, due[i], i + 1);
+        int j = i;
+        while (j + 1 < n && due[j + 1] <= elapsedMs && !(pinned?.Invoke(j) ?? false)) j++;
+        bool exact = j == n - 1 || (pinned?.Invoke(j) ?? false);
+        double x, y, tp;
+        if (exact) { x = steps[j].X; y = steps[j].Y; tp = due[j]; }
+        else { (x, y) = PosAt(steps, due, elapsedMs); tp = elapsedMs; }
+        if (last is { } l && Math.Sqrt(Sq(x - l.X) + Sq(y - l.Y)) > cap)
+        {
+            double lo = tPlanLast ?? 0.0, hi = tp;
+            for (int k = 0; k < 24; k++)   // the farthest plan time whose point is within the cap
+            {
+                double mid = (lo + hi) / 2.0;
+                var (px, py) = PosAt(steps, due, mid);
+                if (Math.Sqrt(Sq(px - l.X) + Sq(py - l.Y)) <= cap) lo = mid; else hi = mid;
+            }
+            (x, y) = PosAt(steps, due, lo);
+            tp = lo;
+            exact = false;
+            // no progress within the cap (a zero-length planned gap jumps): send step i as planned
+            if (tPlanLast is { } tl && tp <= tl + 1e-9) return (steps[i].X, steps[i].Y, due[i], i + 1);
+        }
+        if (exact) return (x, y, tp, j + 1);
+        // the next planned sample still ahead of the point just sent (never one already passed)
+        return (x, y, tp, Math.Max(i, BisectRight(due, tp)));
+    }
+
     private static readonly Stopwatch Clock = Stopwatch.StartNew();
     private static double RealNow() => Clock.Elapsed.TotalMilliseconds;
     private static Task RealSleep(double ms) => ms > 0 ? Task.Delay(TimeSpan.FromMilliseconds(ms)) : Task.CompletedTask;
@@ -77,7 +147,7 @@ internal static class Pacing
     /// <summary>
     /// Dispatch <paramref name="steps"/> through <paramref name="move"/> against a wall clock. A move
     /// that throws propagates (the caller decides what a closed page means). Returns the number of
-    /// samples dispatched.
+    /// points dispatched. <paramref name="maxJump"/>: the persona's hop cap (<see cref="Motion.HopCapPx"/>).
     /// </summary>
     public static async Task<int> WalkAsync(IReadOnlyList<Step> steps, Func<double, double, Task> move,
         Func<double>? now = null, Func<double, Task>? sleep = null, double maxJump = MaxJumpPx,
@@ -94,29 +164,34 @@ internal static class Pacing
         double t0 = now(), tLast = t0, tStart = t0;
         int i = 0, sent = 0;
         (double X, double Y)? last = null;
+        double? tPlanLast = null;
         while (i < steps.Count)
         {
             double el = now() - t0;
-            if (el < due[i]) await sleep(due[i] - el).ConfigureAwait(false);
-            else i = NextIndex(steps, due, i, last, el, JumpCap(maxJump, now() - tLast), pinned);
-            var s = steps[i];
+            if (el < due[i])
+            {
+                await sleep(due[i] - el).ConfigureAwait(false);
+                el = due[i];
+            }
+            var (sx, sy, tp, nxt) = Target(steps, due, i, tPlanLast, last, el, JumpCap(maxJump, now() - tLast), pinned);
             double tb = now();
-            try { await move(s.X, s.Y).ConfigureAwait(false); }
+            try { await move(sx, sy).ConfigureAwait(false); }
             catch
             {
                 if (trace is { Count: > 0 }) HumanizeTrace.Record(kind, trace, new Dictionary<string, object?> { ["planned_n"] = steps.Count, ["sent"] = sent, ["aborted"] = true });
                 throw;
             }
             sent++;
-            trace?.Add(new MotionSample(s.X, s.Y, tb - tStart, buttons));
+            trace?.Add(new MotionSample(sx, sy, tb - tStart, buttons));
             // Measured on PRO r38 under load: one move answered after 523 ms. Catching that up by skipping
             // coarsened the rest of the glide to maximum hops, and across the fixture's iframe the page saw
             // a 110 px jump. A stall pauses the plan; only StallMs of it is caught up.
             double took = now() - tb;
             if (took > StallMs) t0 += took - StallMs;
-            last = (s.X, s.Y);
+            last = (sx, sy);
             tLast = tb;
-            i++;
+            tPlanLast = tp;
+            i = nxt;
         }
         double end = now() - t0;
         if (end < total) await sleep(total - end).ConfigureAwait(false);   // the last sample's own dwell
@@ -148,7 +223,7 @@ internal static class Pacing
         return out_;
     }
 
-    /// <summary>The largest hop a SKIP may make between two dispatched points <paramref name="dtMs"/> apart:
+    /// <summary>The largest hop between two dispatched points <paramref name="dtMs"/> apart:
     /// <paramref name="maxJump"/>, and <see cref="IdleHopPx"/> after an idle gap. Never more for a longer gap: a
     /// walk that fell behind stretches in time instead of catching up with a jump. Port of _pacing._jump_cap.</summary>
     public static double JumpCap(double maxJump, double dtMs) => dtMs < IdleMs ? maxJump : Math.Min(maxJump, IdleHopPx);

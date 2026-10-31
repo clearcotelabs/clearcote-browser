@@ -419,7 +419,10 @@ public static partial class Humanize
         var st = StateFor(page);
         await GlideAsync(page, p, st, x, y, AimW(t.Box)).ConfigureAwait(false);
         await PressAtAsync(page, p, o).ConfigureAwait(false);
-        if (moveOff) ScheduleMoveOff(page, p, st);
+        // Lazy only (eager: false): MoveOffSafe reads the top document, where a point inside a frame hits the
+        // <iframe> element itself and a field focused inside the frame is not the top document's activeElement --
+        // it could not tell a field or a menu in the frame from a plain button. (Python has no frame move-off.)
+        if (moveOff) await ScheduleMoveOffAsync(page, p, st, eager: false).ConfigureAwait(false);
     }
 
     private static async Task FrameClickIntoAsync(IPage page, FrameTarget t)

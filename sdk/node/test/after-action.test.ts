@@ -7,6 +7,9 @@
  *   hover dwell -- >= 3 samples after arrival, within 3 px of it and inside the box, 150-900 ms per seed;
  *   move-off    -- 60-85 % of clicks per seed (40 clicks), 200-700 ms after the release, <= 200 px, downward;
  *   attention   -- the first action after a load waits 0.8-4 s, longer with more text; idle drifts after > 1.5 s;
+ *                  ON unless attention: false (SC 299);
+ *   eager move-off -- (SC 299) the click itself waits the move-off delay and drifts off before it returns, unless the
+ *                  page says the point is not safe to leave (a field, a menu, a popup trigger: ISO_MOVE_OFF_SAFE);
  *   ambient     -- "load" is the per-load burst, "idle" the attention model; nothing on trial / held / hold.
  * The planners are pinned to Python's by sdk/testdata/humanize_after_vectors.json.
  */
@@ -14,11 +17,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { attachHumanize } from "../src/humanize.js";
+import * as ISO from "../src/isolated.js";
 import { ISO_CSS_BOX, ISO_FRAMES, ISO_PLATFORM, ISO_VIEWPORT } from "../src/isolated.js";
 import * as M from "../src/motion.js";
 import * as A from "../src/attention.js";
 
 const TEXT_LENGTH: string | undefined = (A as any).TEXT_LENGTH;
+const MOVE_OFF_SAFE: string | undefined = (ISO as any).ISO_MOVE_OFF_SAFE;   // 0.67.1: no eager move-off
 const SEEDS = ["ha-1", "ha-2", "ha-3", "ha-4", "ha-5", "ha-6"];
 const BOX = { x: 400, y: 300, width: 120, height: 40 };
 type Ev = { op: string; t: number; x?: number; y?: number; a?: any };
@@ -26,7 +31,8 @@ type Ev = { op: string; t: number; x?: number; y?: number; a?: any };
 const fakePage = () => {
   const log: Ev[] = [];
   const handlers: Record<string, (() => void)[]> = {};
-  const st = { textLen: 0 };
+  // moveOffSafe: what ISO_MOVE_OFF_SAFE answers (null: the page cannot answer -> the lazy rule)
+  const st: { textLen: number; moveOffSafe: boolean | null } = { textLen: 0, moveOffSafe: null };
   const ev = async (op: string, x?: number, y?: number, a?: any) => { log.push({ op, t: Date.now(), x, y, a }); };
   const noop = async () => undefined;
   const cdp = {
@@ -41,6 +47,7 @@ const fakePage = () => {
           if (e.startsWith(`(${ISO_FRAMES})`)) return { result: { value: true } };
           if (e.startsWith(`(${ISO_CSS_BOX})`)) return { result: { value: null } };
           if (TEXT_LENGTH && e.startsWith(`(${TEXT_LENGTH})`)) return { result: { value: st.textLen } };
+          if (MOVE_OFF_SAFE && e.startsWith(`(${MOVE_OFF_SAFE})`)) return { result: { value: st.moveOffSafe } };
           return { result: { value: [0, 0] } };
         }
         case "DOM.getNodeForLocation": return { backendNodeId: 7, frameId: "MAIN" };
@@ -198,6 +205,51 @@ describe("move-off after a click", () => {
   }, 120_000);
 });
 
+describe("eager move-off (SC 299)", () => {
+  it.each(SEEDS)("%s: leaves the pressed pixel before the click returns, then nothing moves through a 1.6 s rest", async (seed) => {
+    // SC 299 (r54 / 0.67.1): with the lazy rule alone the pointer stayed on the pressed pixel through every 1.6 s
+    // pause after a click (0 of 12). Now the click waits the persona's 200-700 ms and drifts off before it
+    // returns, in its 60-85 % of clicks, when the page says the point may be left.
+    const f = await setup(seed);
+    f.st.moveOffSafe = true;
+    let off = 0;
+    const n = 40;
+    for (let i = 0; i < n; i++) {
+      const x = 200 + (i * 137) % 800, y = 150 + (i * 89) % 450;
+      await drive(f.page.mouse.click(x, y));   // returns after any eager move-off
+      const ups = f.log.filter((e) => e.op === "up");
+      const tUp = ups[ups.length - 1].t;
+      const mv = moves(f, tUp);
+      if (mv.length) {
+        off++;
+        const lag = mv[0].t - tUp;
+        expect(lag).toBeGreaterThanOrEqual(200);
+        expect(lag).toBeLessThanOrEqual(705);
+        const last = mv[mv.length - 1];
+        const d = Math.hypot(last.x! - x, last.y! - y);
+        expect(d).toBeGreaterThanOrEqual(12);
+        expect(d).toBeLessThanOrEqual(200 + 1e-6);
+      }
+      await vi.advanceTimersByTimeAsync(1600);   // the script rests: nothing more may move
+      expect(moves(f, Date.now() - 1500)).toEqual([]);
+    }
+    expect(off / n).toBeGreaterThanOrEqual(0.6);
+    expect(off / n).toBeLessThanOrEqual(0.85);
+    expect(trace(f).some((e) => e[0] === "move_off_eager")).toBe(true);
+  }, 120_000);
+
+  it("stays lazy where the page says no", async () => {
+    const f = await setup("ha-2");
+    f.st.moveOffSafe = false;   // a field, a menu, a popup trigger
+    for (let i = 0; i < 12; i++) {
+      await drive(f.page.mouse.click(300 + i * 20, 300));
+      const ups = f.log.filter((e) => e.op === "up");
+      expect(moves(f, ups[ups.length - 1].t), "no drift inside the click").toEqual([]);
+    }
+    expect(trace(f).some((e) => e[0] === "move_off_eager")).toBe(false);
+  }, 60_000);
+});
+
 describe("never on trial / held / hold", () => {
   it("a trial moves nothing and runs nothing after-action", async () => {
     const f = await setup("ha-1");
@@ -253,14 +305,34 @@ describe("attention", () => {
     expect(trace(l.f).some((e) => e[0] === "drift")).toBe(true);
   }, 120_000);
 
-  it("is off by default", async () => {
+  it("is on by default; attention: false turns it off; the page flag overrides both ways", async () => {
+    // SC 299: measured on r54 / 0.67.1 with the model off, the first input came 0.21-0.31 s after the load.
     const f = await setup("ha-1");
     f.st.textLen = 20000;
     f.fire("load");
-    const t = Date.now();
+    let t = Date.now();
     await drive(f.page.click("#t"));
+    expect(trace(f).some((e) => e[0] === "read"), "on by default").toBe(true);
+    expect(Date.now() - t).toBeGreaterThanOrEqual(800);
+    const f2 = await setup("ha-1", { attention: false });
+    f2.st.textLen = 20000;
+    f2.fire("load");
+    t = Date.now();
+    await drive(f2.page.click("#t"));
     expect(Date.now() - t).toBeLessThan(3000);
-    expect(trace(f).filter((e) => e[0] === "read" || e[0] === "drift")).toEqual([]);
+    expect(trace(f2).filter((e) => e[0] === "read" || e[0] === "drift")).toEqual([]);
+    const f3 = await setup("ha-1");
+    f3.page._clearcoteAttention = false;   // the page flag overrides both ways
+    f3.st.textLen = 20000;
+    f3.fire("load");
+    await drive(f3.page.click("#t"));
+    expect(trace(f3).filter((e) => e[0] === "read" || e[0] === "drift")).toEqual([]);
+    const f4 = await setup("ha-1", { attention: false });
+    f4.page._clearcoteAttention = true;
+    f4.st.textLen = 20000;
+    f4.fire("load");
+    await drive(f4.page.click("#t"));
+    expect(trace(f4).some((e) => e[0] === "read")).toBe(true);
   }, 60_000);
 
   it("idle drifts after a gap > 1.5 s only", async () => {

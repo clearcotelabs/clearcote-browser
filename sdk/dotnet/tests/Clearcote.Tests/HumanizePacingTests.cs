@@ -41,6 +41,9 @@ public class HumanizePacingTests
         }
     }
 
+    /// <summary>The largest persona hop cap (Motion.HopCapPx draws 55-110 px; SC 299, was a fixed 40 px).</summary>
+    private const double HopCapMax = 110;
+
     private static readonly MethodInfo Glide = typeof(Humanize).GetMethod("GlideAsync", BindingFlags.NonPublic | BindingFlags.Static)!;
     private static readonly Type StateType = typeof(Humanize).GetNestedType("PointerState", BindingFlags.NonPublic)!;
 
@@ -96,13 +99,14 @@ public class HumanizePacingTests
             var leg = m.Log.Skip(n0).ToList();
             Assert.All(leg, e => Assert.Equal("move", e.Op));
             Assert.Equal(((float)tx, (float)ty), (leg[^1].X, leg[^1].Y));
-            // No hop longer than a fast hand covers between the two events (3 px/ms, >= 40 px or the plan's own).
+            // No hop longer than a fast hand covers between the two events (3 px/ms, >= the persona hop cap or the
+            // plan's own).
             double first = Math.Sqrt((leg[0].X - fx) * (leg[0].X - fx) + (leg[0].Y - fy) * (leg[0].Y - fy));
-            Assert.True(first <= Math.Max(40, ownGap) + 0.01, $"the first sample hopped {first:F1} px");
+            Assert.True(first <= Math.Max(HopCapMax, ownGap) + 0.01, $"the first sample hopped {first:F1} px");
             for (int k = 1; k < leg.Count; k++)
             {
                 double d = Math.Sqrt(Math.Pow(leg[k].X - leg[k - 1].X, 2) + Math.Pow(leg[k].Y - leg[k - 1].Y, 2));
-                double cap = Math.Max(Math.Max(40, ownGap), Pacing.FastPxPerMs * (leg[k].T - leg[k - 1].T));
+                double cap = Math.Max(Math.Max(HopCapMax, ownGap), Pacing.FastPxPerMs * (leg[k].T - leg[k - 1].T));
                 Assert.True(d <= cap + 0.01, $"a skipped stretch hopped {d:F1} px in {leg[k].T - leg[k - 1].T:F0} ms");
             }
         }
@@ -146,15 +150,15 @@ public class HumanizePacingTests
     public async Task Pacer_after_a_long_stall_stretches_instead_of_jumping(double stall)
     {
         // SC 210 lab v2: 35 hops of 60-103 px a few ms apart on r38 under load. The old cap (3 px/ms x the time
-        // since the last dispatch) let a slow dispatch turn into one big catch-up hop. Now <= 40 px, and
-        // <= 20 px right after an idle gap: the walk takes longer instead.
+        // since the last dispatch) let a slow dispatch turn into one big catch-up hop. Now no hop is longer than the
+        // hop cap (Pacing.MaxJumpPx without a persona), and <= 20 px right after an idle gap: the walk takes longer.
         var steps = Enumerable.Range(0, 300).Select(i => new Step(i * 3, 0, 2)).ToList();
         var c = new FakeClock();
         var stalls = new HashSet<int> { 3, 9, 15 };
         await Pacing.WalkAsync(steps, (x, y) => { c.T += stalls.Contains(c.Sent.Count) ? stall : 25; c.Sent.Add((x, y, c.T)); return Task.CompletedTask; },
             () => c.T, c.Sleep);
         var hops = c.Sent.Zip(c.Sent.Skip(1), (a, b) => b.X - a.X).ToList();
-        Assert.True(hops.Max() <= 40 + 1e-6, $"a hop of {hops.Max()} px");
+        Assert.True(hops.Max() <= Pacing.MaxJumpPx + 1e-6, $"a hop of {hops.Max()} px");
         foreach (var k in stalls) Assert.True(hops[k] <= 20 + 1e-6, $"the hop after stall {k}: {hops[k]} px");
         Assert.Equal(299 * 3.0, c.Sent[^1].X);
     }
@@ -185,6 +189,128 @@ public class HumanizePacingTests
         Assert.True(gap <= Pacing.FastPxPerMs * 25 + 1e-6, $"hop {gap}");
         Assert.True(c.Sent.Count > 10);
         Assert.Equal(39 * 30.0, c.Sent[^1].X);
+    }
+
+    // ---------------------------------------------------------- SC 299: interpolated points, persona hop cap
+
+    /// <summary>Local maxima (above 40 % of the peak) of the 5-sample moving average of hop / dt (Python _velocity_peaks).</summary>
+    private static int VelocityPeaks(List<(double X, double Y, double T)> sent, int smooth = 5)
+    {
+        var v = new List<double>();
+        for (int k = 1; k < sent.Count; k++)
+        {
+            double dt = sent[k].T - sent[k - 1].T;
+            if (dt > 0) v.Add(Math.Sqrt(Math.Pow(sent[k].X - sent[k - 1].X, 2) + Math.Pow(sent[k].Y - sent[k - 1].Y, 2)) / dt);
+        }
+        if (smooth > 1)
+        {
+            var sm = new List<double>(v.Count);
+            for (int i = 0; i < v.Count; i++)
+            {
+                int lo = Math.Max(0, i - smooth / 2), hi = Math.Min(v.Count, i + smooth / 2 + 1);
+                sm.Add(v.Skip(lo).Take(hi - lo).Average());
+            }
+            v = sm;
+        }
+        double top = v.Count > 0 ? v.Max() : 0;
+        int n = 0;
+        for (int i = 1; i < v.Count - 1; i++) if (v[i] >= v[i - 1] && v[i] > v[i + 1] && v[i] > 0.4 * top) n++;
+        return n;
+    }
+
+    /// <summary>A fake mouse whose round trip is lat +- spread ms (uniform), stamped when it ends (Python _jittery).</summary>
+    private static (FakeClock C, Func<double, double, Task> Move) Jittery(double latMs, double spreadMs, int seed = 7)
+    {
+        var rr = new Random(seed);
+        var c = new FakeClock();
+        return (c, (x, y) =>
+        {
+            c.T += Math.Max(1.0, latMs - spreadMs + rr.NextDouble() * 2 * spreadMs);
+            c.Sent.Add((x, y, c.T));
+            return Task.CompletedTask;
+        });
+    }
+
+    private static double Median(List<int> xs)
+    {
+        var s = xs.OrderBy(v => v).ToList();
+        return s.Count % 2 == 1 ? s[s.Count / 2] : (s[s.Count / 2 - 1] + s[s.Count / 2]) / 2.0;
+    }
+
+    [Fact]
+    public async Task Pacer_sends_the_point_on_the_path_when_late_and_keeps_its_speed()
+    {
+        // SC 298 on Windows: an ~18 ms round trip against ~7 ms planned samples. Skipping to whole samples hopped
+        // 2 or 3 at a time (a sawtooth of 7-8 velocity peaks per glide). Sending the path's point at the elapsed
+        // time keeps one smooth speed profile: over 20 personas the median stays at <= 3.5 smoothed peaks (the old
+        // walk: 6-7) and none exceeds 8.
+        var pk = new List<int>();
+        for (int seed = 0; seed < 20; seed++)
+        {
+            var p = Motion.MakePersona(seed.ToString());
+            var plan = Motion.PlanMove(new Point(120, 140), new Point(1020, 480), p, 40, rng: Motion.Mulberry32((uint)seed + 1));
+            var (c, move) = Jittery(18.0, 6.0, seed);
+            await Pacing.WalkAsync(plan, move, () => c.T, c.Sleep, maxJump: 200);
+            Assert.Equal((plan[^1].X, plan[^1].Y), (c.Sent[^1].X, c.Sent[^1].Y));
+            pk.Add(VelocityPeaks(c.Sent));
+        }
+        Assert.True(Median(pk) <= 3.5, string.Join(",", pk));
+        Assert.True(pk.Max() <= 8, string.Join(",", pk));
+    }
+
+    [Fact]
+    public async Task Planned_glide_speed_follows_its_report_times()
+    {
+        // SC 299: a planned sample's position was taken at the nominal i/n while its report interval jittered
+        // +-12 %, so the speed a page computes swung sample to sample (5 smoothed velocity peaks per planned glide,
+        // SC 298). Walked on time, a single-submovement plan now shows one smooth speed bell.
+        var pk = new List<int>();
+        for (int seed = 0; seed < 30; seed++)
+        {
+            var plan = Motion.PlanMove(new Point(120, 140), new Point(1020, 480), Motion.MakePersona(seed.ToString()), 40,
+                rng: Motion.Mulberry32((uint)seed + 1));
+            var c = new FakeClock();
+            await Pacing.WalkAsync(plan, c.Move(0), () => c.T, c.Sleep, maxJump: 200);
+            pk.Add(VelocityPeaks(c.Sent));
+        }
+        Assert.True(Median(pk) <= 1.5, string.Join(",", pk));
+        Assert.True(pk.Max() <= 3, string.Join(",", pk));
+    }
+
+    [Fact]
+    public async Task Pacer_hops_beyond_40_px_when_the_plan_is_that_fast()
+    {
+        // The old fixed 40 px cap was a wall every persona shared (SC 298: 0 of 4,462 page steps above 40.5 px).
+        // A fast reach at ~3 px/ms with an 18-25 ms round trip covers 55-75 px between two dispatches.
+        var p = Motion.MakePersona("3");
+        double cap = Motion.HopCapPx(p);
+        var plan = Motion.PlanMove(new Point(60, 100), new Point(1900, 900), p, 60, rng: Motion.Mulberry32(3));
+        var (c, move) = Jittery(22.0, 3.0);
+        await Pacing.WalkAsync(plan, move, () => c.T, c.Sleep, maxJump: cap);
+        var hops = c.Sent.Zip(c.Sent.Skip(1), (a, b) => Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2))).ToList();
+        Assert.True(hops.Max() > 45.0, $"{hops.Max()}");
+        Assert.True(hops.Max() <= cap + 1e-6, $"{hops.Max()} > {cap}");
+    }
+
+    [Fact]
+    public void Hop_cap_is_a_persona_trait()
+    {
+        var caps = Enumerable.Range(0, 200).Select(s => Motion.HopCapPx(Motion.MakePersona(s.ToString()))).ToList();
+        Assert.All(caps, c => Assert.InRange(c, 55.0, 110.0));
+        Assert.True(caps.Max() - caps.Min() > 40.0);
+        Assert.Equal(Motion.HopCapPx(Motion.MakePersona("same")), Motion.HopCapPx(Motion.MakePersona("same")));
+    }
+
+    [Fact]
+    public async Task Pacer_never_sends_a_point_behind_one_already_sent()
+    {
+        // Interpolated points move forward along the plan: the plan time of every dispatched point grows.
+        var steps = Enumerable.Range(0, 160).Select(i => new Step(i * 4.0, (i % 7) * 1.5, 6.5)).ToList();
+        var (c, move) = Jittery(20.0, 8.0, 3);
+        await Pacing.WalkAsync(steps, move, () => c.T, c.Sleep);
+        var xs = c.Sent.Select(s => s.X).ToList();
+        Assert.Equal(xs.OrderBy(v => v), xs);
+        Assert.Equal(steps[^1].X, xs[^1]);
     }
 
     private static readonly MethodInfo Drift = typeof(Humanize).GetMethod("IdleDriftAsync", BindingFlags.NonPublic | BindingFlags.Static)!;

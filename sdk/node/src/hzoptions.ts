@@ -37,6 +37,9 @@ export interface HumanizeOptions {
   /** "load": a short ambient burst on every page load (the old `page._clearcoteAutoAmbient`); "idle":
    * idle drifts between actions; "off" (default). */
   ambient?: HumanizeAmbient;
+  /** The reading pause after a page load (0.8-4 s, longer on a page with more text) and the idle drifts between
+   * actions (SC 232 lane C). On unless `false` (unset = on, since 0.68.0); `ambient: "idle"` turns it on as well. */
+  attention?: boolean;
   /** Per-character slip rate 0..1; unset = CLEARCOTE_HUMANIZE_TYPO_RATE, else 0.02. */
   typoRate?: number;
   /** "left" | "right"; unset = the persona's. */
@@ -61,6 +64,7 @@ export interface ResolvedHumanize {
   strict: boolean;
   engine: HumanizeEngine;
   ambient?: HumanizeAmbient;
+  attention?: boolean;
   typoRate?: number;
   handedness?: "left" | "right";
   deviceHz?: number;
@@ -69,7 +73,7 @@ export interface ResolvedHumanize {
   tempo: number;
 }
 
-const KEYS = ["preset", "strict", "engine", "ambient", "typoRate", "handedness", "deviceHz", "inputDevice", "onFallback"];
+const KEYS = ["preset", "strict", "engine", "ambient", "attention", "typoRate", "handedness", "deviceHz", "inputDevice", "onFallback"];
 // snake_case spellings accepted too, so one options object works in every SDK and in the cloud API
 const ALIASES: Record<string, string> = { typo_rate: "typoRate", device_hz: "deviceHz", input_device: "inputDevice", on_fallback: "onFallback" };
 const RESOLVED = Symbol.for("clearcote.humanizeResolved");
@@ -125,6 +129,10 @@ export function resolveHumanize(value: unknown): ResolvedHumanize | null {
   };
   const ambient = oneOf("ambient", o.ambient, ["off", "load", "idle"] as const);
   if (ambient) r.ambient = ambient;
+  if (o.attention !== undefined && o.attention !== null) {
+    if (typeof o.attention !== "boolean") throw new TypeError("humanize attention must be true, false or unset");
+    r.attention = o.attention;
+  }
   if (o.typoRate !== undefined && o.typoRate !== null) {
     const t = o.typoRate;
     if (typeof t !== "number" || !(t >= 0 && t <= 1)) throw new TypeError("humanize typoRate must be a number from 0 to 1");
@@ -150,7 +158,7 @@ export function resolveHumanize(value: unknown): ResolvedHumanize | null {
 /** The JSON-able options (no callback, unset values left out): what a cloud launch sends as humanizeOptions. */
 export function humanizePayload(r: ResolvedHumanize): Record<string, unknown> {
   const out: Record<string, unknown> = { preset: r.preset, strict: r.strict, engine: r.engine };
-  for (const k of ["ambient", "typoRate", "handedness", "deviceHz", "inputDevice"] as const) if (r[k] !== undefined) out[k] = r[k];
+  for (const k of ["ambient", "attention", "typoRate", "handedness", "deviceHz", "inputDevice"] as const) if (r[k] !== undefined) out[k] = r[k];
   return out;
 }
 

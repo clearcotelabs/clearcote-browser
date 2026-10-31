@@ -11,6 +11,9 @@ namespace Clearcote.Tests;
 /// the glide's last one), the pointer never left a clicked element, .NET had no ambient motion at all (PlanAmbient
 /// was not ported). Planners pinned to Python/Node by sdk/testdata/humanize_after_vectors.json; behaviour on a
 /// DispatchProxy page (real time: the glides walk on the wall clock).
+/// SC 299: attention is ON unless HumanizeOptions.Attention = false; the eager move-off -- the click itself waits the
+/// move-off delay and drifts off before it returns, unless the page says the point is not safe to leave
+/// (IsolatedWorld.MoveOffSafe: a field, a menu, a popup trigger).
 public class AfterActionTests
 {
     private static readonly string[] Seeds = { "ha-1", "ha-2", "ha-3", "ha-4", "ha-5", "ha-6" };
@@ -20,6 +23,8 @@ public class AfterActionTests
     public class Cdp : DispatchProxy
     {
         public int TextLen { get; set; }
+        /// <summary>What IsolatedWorld.MoveOffSafe answers: null = the page cannot answer (the lazy rule).</summary>
+        public bool? MoveOffSafe { get; set; }
         protected override object? Invoke(MethodInfo? method, object?[]? args)
         {
             if (method?.Name != "SendAsync") return Task.CompletedTask;
@@ -46,6 +51,8 @@ public class AfterActionTests
             if (e.StartsWith($"({IsolatedWorld.Platform})", StringComparison.Ordinal)) return V("\"Win32\"");
             if (e.StartsWith($"({IsolatedWorld.Scroll})", StringComparison.Ordinal)) return V("[0,0]");
             if (e.StartsWith($"({Attention.TextLength})", StringComparison.Ordinal)) return V(TextLen.ToString());
+            if (e.StartsWith($"({IsolatedWorld.MoveOffSafe})", StringComparison.Ordinal))
+                return V(MoveOffSafe is { } safe ? (safe ? "true" : "false") : "null");
             return V("null");
         }
     }
@@ -54,9 +61,13 @@ public class AfterActionTests
     {
         public readonly Stopwatch Clock = Stopwatch.StartNew();
         public List<(string Op, double T, float X, float Y)> Log { get; } = new();
+        /// <summary>Every move after a release throws (the page navigated / closed under the move-off).</summary>
+        public bool FailMovesAfterUp { get; set; }
         protected override object? Invoke(MethodInfo? method, object?[]? args)
         {
             double t = Clock.Elapsed.TotalMilliseconds;
+            if (FailMovesAfterUp && method?.Name == "MoveAsync" && Log.Any(e => e.Op == "up"))
+                return Task.FromException(new PlaywrightException("Target page, context or browser has been closed"));
             switch (method?.Name)
             {
                 case "MoveAsync": lock (Log) Log.Add(("move", t, (float)args![0]!, (float)args[1]!)); break;
@@ -192,9 +203,9 @@ public class AfterActionTests
 
     // ---------------------------------------------------------------------------------- move-off
     [Fact]
-    public void Move_off_is_scheduled_in_60_to_85_percent_of_40_clicks_per_seed()
+    public async Task Move_off_is_scheduled_in_60_to_85_percent_of_40_clicks_per_seed()
     {
-        var schedule = typeof(Humanize).GetMethod("ScheduleMoveOff", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var schedule = typeof(Humanize).GetMethod("ScheduleMoveOffAsync", BindingFlags.NonPublic | BindingFlags.Static)!;
         var stateFor = typeof(Humanize).GetMethod("StateFor", BindingFlags.NonPublic | BindingFlags.Static)!;
         foreach (var seed in Seeds)
         {
@@ -204,7 +215,7 @@ public class AfterActionTests
             int hits = 0;
             for (int i = 0; i < 40; i++)
             {
-                schedule.Invoke(null, new[] { f.Page, p, st });
+                await (Task)schedule.Invoke(null, new object[] { f.Page, p, st, false })!;   // lazy: schedule only
                 var af = typeof(Humanize).GetMethod("AfterOf", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, new object[] { f.Page })!;
                 if (af.GetType().GetField("MoveOff")!.GetValue(af) is not null) hits++;
             }
@@ -294,13 +305,32 @@ public class AfterActionTests
     }
 
     [Fact]
-    public async Task Attention_is_off_by_default_and_idle_drifts_follow_a_long_gap()
+    public async Task Attention_is_on_by_default_off_with_false_and_idle_drifts_follow_a_long_gap()
     {
+        // SC 299: measured on r54 / 0.67.1 with the model off, the first input came 0.21-0.31 s after the load.
         var f = Make("ha-4");
         f.Cdp.TextLen = 20000;
         f.FireLoad();
+        double t = f.Now;
         await f.Loc.HumanClickAsync();
-        Assert.DoesNotContain(Trace(f.Page), e => (string)e[0] is "read" or "drift");
+        Assert.Contains(Trace(f.Page), e => (string)e[0] == "read");
+        double down;
+        lock (f.Log) down = f.Log.First(e => e.Op == "down").T;
+        Assert.True(down - t >= 790, $"first press {down - t:F0} ms after the load");
+        var o = Make("ha-4", attach: false);
+        Humanize.Attach(o.Page, new HumanizeOptions { Attention = false }, "ha-4");
+        o.Cdp.TextLen = 20000;
+        o.FireLoad();
+        t = o.Now;
+        await o.Loc.HumanClickAsync();
+        Assert.True(o.Now - t < 3000);
+        Assert.DoesNotContain(Trace(o.Page), e => (string)e[0] is "read" or "drift");
+        var q = Make("ha-4");
+        Humanize.AttentionFlag.AddOrUpdate(q.Page, new System.Runtime.CompilerServices.StrongBox<bool>(false));   // overrides both ways
+        q.Cdp.TextLen = 20000;
+        q.FireLoad();
+        await q.Loc.HumanClickAsync();
+        Assert.DoesNotContain(Trace(q.Page), e => (string)e[0] is "read" or "drift");
         var g = Make("ha-4");
         AttentionOn(g.Page);
         await g.Loc.HumanClickAsync();
@@ -345,6 +375,86 @@ public class AfterActionTests
         h.FireLoad();
         await Task.Delay(800);
         Assert.Empty(h.Moves());
+    }
+
+    [Fact]
+    public void Attention_option_validates_and_goes_into_the_payload()
+    {
+        Assert.Null(new HumanizeOptions().Attention);
+        Assert.False(new HumanizeOptions().ToPayload().ContainsKey("attention"));
+        Assert.False((bool)new HumanizeOptions { Attention = false }.ToPayload()["attention"]!);
+        Assert.True((bool)new HumanizeOptions { Attention = true }.ToPayload()["attention"]!);
+    }
+
+    // ---------------------------------------------------------------------- SC 299: eager move-off
+    [Fact]
+    public async Task Eager_move_off_leaves_the_pressed_pixel_before_the_click_returns()
+    {
+        // SC 299 (r54 / 0.67.1): with the lazy rule alone the pointer stayed on the pressed pixel through every 1.6 s
+        // pause after a click (0 of 12). Now the click waits the persona's 200-700 ms and drifts off before it returns,
+        // in its 60-85 % of clicks, when the page says the point may be left. Real time, so one seed and a 1.6 s rest
+        // after every 8th click (Python: 6 seeds, a rest after each click, on a fake clock).
+        var f = Make("ha-3", attach: false);
+        Humanize.Attach(f.Page, new HumanizeOptions { Engine = "off" }, "ha-3");
+        f.Cdp.MoveOffSafe = true;
+        int off = 0, n = 40;
+        for (int i = 0; i < n; i++)
+        {
+            double x = 200 + (i * 137) % 800, y = 150 + (i * 89) % 450;
+            await f.Page.HumanClickAsync(x, y);   // returns after any eager move-off
+            double tUp;
+            lock (f.Log) tUp = f.Log.Last(e => e.Op == "up").T;
+            var mv = f.Moves(tUp);
+            if (mv.Count > 0)
+            {
+                off++;
+                double lag = mv[0].T - tUp;
+                Assert.True(lag >= 190 && lag <= 760, $"move-off {lag:F0} ms after the release");
+                var last = mv[^1];
+                double d = Math.Sqrt((last.X - x) * (last.X - x) + (last.Y - y) * (last.Y - y));
+                Assert.InRange(d, 12, 200.5);
+            }
+            if (i % 8 == 7)
+            {
+                await Task.Delay(1600);   // the script rests: nothing more may move
+                Assert.Empty(f.Moves(f.Now - 1500));
+            }
+        }
+        Assert.InRange(off / (double)n, 0.60, 0.85);
+        Assert.Contains(Trace(f.Page), e => (string)e[0] == "move_off_eager");
+    }
+
+    [Fact]
+    public async Task Eager_move_off_is_best_effort_a_failed_drift_never_fails_the_click()
+    {
+        // The click already landed: a move-off that fails because the page navigated or closed is swallowed.
+        int eager = 0;
+        for (int k = 0; k < 12 && eager < 2; k++)
+        {
+            var f = Make("ha-" + (k % 6 + 1), attach: false);
+            Humanize.Attach(f.Page, new HumanizeOptions { Engine = "off" }, "ha-" + (k % 6 + 1));
+            f.Cdp.MoveOffSafe = true;
+            f.Mouse.FailMovesAfterUp = true;
+            await f.Page.HumanClickAsync(400, 300);   // must not throw
+            if (Trace(f.Page).Any(e => (string)e[0] == "move_off_eager")) eager++;
+        }
+        Assert.True(eager >= 1, "no eager move-off was rolled in 12 clicks");
+    }
+
+    [Fact]
+    public async Task Eager_move_off_stays_lazy_where_the_page_says_no()
+    {
+        var f = Make("ha-2", attach: false);
+        Humanize.Attach(f.Page, new HumanizeOptions { Engine = "off" }, "ha-2");
+        f.Cdp.MoveOffSafe = false;   // a field, a menu, a popup trigger
+        for (int i = 0; i < 12; i++)
+        {
+            await f.Page.HumanClickAsync(300 + i * 20, 300);
+            double tUp;
+            lock (f.Log) tUp = f.Log.Last(e => e.Op == "up").T;
+            Assert.Empty(f.Moves(tUp));   // no drift inside the click
+        }
+        Assert.DoesNotContain(Trace(f.Page), e => (string)e[0] == "move_off_eager");
     }
 
     [Fact]

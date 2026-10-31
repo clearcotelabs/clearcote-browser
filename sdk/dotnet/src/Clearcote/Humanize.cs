@@ -485,14 +485,15 @@ public static partial class Humanize
         // Native moves carry button state, so a button held via Mouse.DownAsync stays pressed
         // across the whole path — that is what makes a drag a drag rather than a teleport.
         //
-        // Paced against a WALL CLOCK (Pacing): each sample goes out at its planned time and late ones
-        // are skipped (never the last, and no skip hops more than 40 px, or 20 px once nothing has been
-        // dispatched for 40 ms: Pacing.MaxJumpPx / IdleHopPx). "Move, then sleep the planned gap" added
+        // Paced against a WALL CLOCK (Pacing): each sample goes out at its planned time; a late walk sends the
+        // point on the path at the elapsed plan time (never skipping the last, and no hop longer than the
+        // persona's Motion.HopCapPx, 55-110 px, or 20 px once nothing has been dispatched for 40 ms:
+        // Pacing.IdleHopPx). "Move, then sleep the planned gap" added
         // the ~27 ms move round trip to every 6-8 ms sample: a 1.05 s planned glide took 3.5-5.4 s on
         // PRO r38 (SC 209).
         await Pacing.WalkAsync(vp is { } v ? Pacing.KeepInView(steps, v.W, v.H) : steps,
-            (x, y) => page.Mouse.MoveAsync((float)x, (float)y), kind: held ? "drag" : "glide", buttons: held ? 1 : 0)
-            .ConfigureAwait(false);
+            (x, y) => page.Mouse.MoveAsync((float)x, (float)y), maxJump: Motion.HopCapPx(p),
+            kind: held ? "drag" : "glide", buttons: held ? 1 : 0).ConfigureAwait(false);
         st.X = toX;
         st.Y = toY;
         st.Known = true;
@@ -897,7 +898,7 @@ public static partial class Humanize
                     else
                     {
                         await PressAtAsync(page, p, o).ConfigureAwait(false);
-                        if (moveOff) ScheduleMoveOff(page, p, st);
+                        if (moveOff) await ScheduleMoveOffAsync(page, p, st).ConfigureAwait(false);
                     }
                     return;
                 }
@@ -1377,7 +1378,8 @@ public static partial class Humanize
         if (t != 1.0) steps = steps.Select(s => s with { SleepMs = s.SleepMs * t }).ToList();
         // scored as a drag by the hook (HumanizeTrace): the held button on every sample
         await Pacing.WalkAsync(vp is { } v ? Pacing.KeepInView(steps, v.W, v.H) : steps,
-            (x, y) => page.Mouse.MoveAsync((float)x, (float)y), kind: "drag", buttons: 1).ConfigureAwait(false);
+            (x, y) => page.Mouse.MoveAsync((float)x, (float)y), maxJump: Motion.HopCapPx(PersonaFor(page)), kind: "drag",
+            buttons: 1).ConfigureAwait(false);
         if (steps.Count > 0) { st.X = steps[^1].X; st.Y = steps[^1].Y; }
     }
 
@@ -1959,13 +1961,15 @@ public static partial class Humanize
         double floor = Math.Max(0, floorMs);
         bool extShift = ks.Held.ContainsKey("Shift");
         // ROLLOVER, decided up front: the pairs this run overlaps (index of the first key), one unseeded draw per
-        // eligible pair at the persona's rollover rate. Eligible: two different plain keys, never under a caller's
-        // delay floor. Drawn before the route is chosen so the engine run below is taken exactly for the runs that
+        // eligible pair at the persona's rollover rate x the pair's bigram class factor (Keys.RolloverPairRate, SC 299:
+        // a same-finger pair never rolls). Eligible: two different plain keys, never under a caller's delay floor.
+        // Drawn before the route is chosen so the engine run below is taken exactly for the runs that
         // would have had no rollover, and the per-key path realises the persona's share on the others.
         var rolls = new HashSet<int>();
         if (floor <= 0)
             for (int i = 0; i + 1 < chars.Length; i++)
-                if (CanRoll(chars[i]) && CanRoll(chars[i + 1]) && chars[i] != chars[i + 1] && Rnd.NextDouble() < rollover) rolls.Add(i);
+                if (CanRoll(chars[i]) && CanRoll(chars[i + 1]) && chars[i] != chars[i + 1]
+                    && Rnd.NextDouble() < Keys.RolloverPairRate(rollover, chars[i], chars[i + 1])) rolls.Add(i);
         // r43 engine (SC 232 lane H, EngineRoute.cs): a run with no slip to plan (typos off, or a field where a slip is
         // a failure), no caller-held Shift and NO ROLLOVER goes out as ONE Browser.dispatchKeySequence -- the same
         // dwell and flight draws, paced in the browser, so the rhythm carries no CDP round trips. A run the persona
@@ -4093,7 +4097,9 @@ public static partial class Humanize
             await GlideAsync(page, p, st, x, y, 24).ConfigureAwait(false);
             st.Known = true;
             await PressAtAsync(page, p, o).ConfigureAwait(false);
-            ScheduleMoveOff(page, p, st);   // the hand drifts off afterwards, as after a targeted click (Node mouse.click)
+            // the hand drifts off afterwards, as after a targeted click (Node mouse.click); eager where the page says
+            // the point may be left (SC 299)
+            await ScheduleMoveOffAsync(page, p, st).ConfigureAwait(false);
         }, coords: true).ConfigureAwait(false);
     }
 

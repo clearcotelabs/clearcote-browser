@@ -6,7 +6,9 @@ a hovered element for a few hundred ms and drift off a clicked one. Bands (EVAL.
   hover dwell -- >= 3 samples after arrival, within 3 px of it and inside the box, 150-900 ms per seed;
   move-off    -- 60-85 % of clicks per seed (40 clicks), 200-700 ms after the release, 40-200 px, downward;
   attention   -- after a load the first action waits 0.8-4 s, longer on a page with more text; idle drifts
-                 when > 1.5 s pass between two actions; OFF unless asked for;
+                 when > 1.5 s pass between two actions; ON unless attention=False (SC 299);
+  eager move-off -- (SC 299) the click itself waits the move-off delay and drifts off before it returns, unless the
+                 page says the point is not safe to leave (a field, a menu, a popup trigger: MOVE_OFF_SAFE);
   ambient     -- ambient="load" is the per-load burst, "idle" is the attention model;
   never on trial, with a button held, or around press-and-hold.
 """
@@ -22,6 +24,10 @@ try:
 except ImportError:   # 0.51.0 (the run that must fail): no attention model
     TEXT_LENGTH = None
 from clearcote._isolated import CSS_BOX, FRAMES, PLATFORM, VIEWPORT
+try:
+    from clearcote._isolated import MOVE_OFF_SAFE
+except ImportError:   # 0.67.1 (the run that must fail): no eager move-off
+    MOVE_OFF_SAFE = None
 
 SEEDS = ["ha-1", "ha-2", "ha-3", "ha-4", "ha-5", "ha-6"]
 BOX = {"x": 400.0, "y": 300.0, "width": 120.0, "height": 40.0}
@@ -57,6 +63,8 @@ class World:
             return True
         if fn == CSS_BOX:
             return None
+        if MOVE_OFF_SAFE is not None and fn == MOVE_OFF_SAFE:
+            return self.page.move_off_safe   # None (the page cannot answer): the lazy rule
         return None
 
     def node_at(self, x, y, scroll=None):
@@ -137,6 +145,7 @@ class Page:
         self.log = []
         self.handlers = {}
         self.text_len = 0
+        self.move_off_safe = None
         self.mouse = Mouse(self)
         self.keyboard = Keyboard()
         self.main_frame = object()
@@ -374,14 +383,29 @@ def test_attention_read_pause_scales_with_text(clock, seed):
     assert [e for e in trace(p_long) if e[0] == "drift"], "the hand drifts while reading"
 
 
-def test_attention_is_off_by_default(clock):
+def test_attention_is_on_by_default_and_attention_false_turns_it_off(clock):
+    # SC 299: measured on r54 / 0.67.1 with the model off, the first input came 0.21-0.31 s after the load.
     p = attach(clock, "ha-1")
     p.text_len = 20000
     p.fire("load")
     t = clock.now
     p.click("#t")
+    assert [e for e in trace(p) if e[0] == "read"], "on by default"
+    assert (clock.now - t) >= 0.8
+    p2 = Page(clock)
+    H.attach_humanize(None, p2, humanize=H.HumanizeOptions(attention=False), seed="ha-1")
+    p2.text_len = 20000
+    p2.fire("load")
+    t = clock.now
+    p2.click("#t")
     assert (clock.now - t) < 3.0
-    assert not [e for e in trace(p) if e[0] in ("read", "drift")]
+    assert not [e for e in trace(p2) if e[0] in ("read", "drift")]
+    p3 = attach(clock, "ha-1")
+    p3._clearcote_attention = False      # the page flag overrides both ways
+    p3.text_len = 20000
+    p3.fire("load")
+    p3.click("#t")
+    assert not [e for e in trace(p3) if e[0] in ("read", "drift")]
 
 
 def test_attention_idle_drifts_after_a_long_gap_only(clock):
@@ -490,3 +514,40 @@ def test_per_call_humanize_false_skips_the_after_action_step(clock):
     assert not [e for e in trace(p) if e[0] in ("read", "drift", "move_off")]
     p.click("#t")
     assert [e for e in trace(p) if e[0] == "read"]
+
+
+# --------------------------------------------------------------------------------- SC 299: eager move-off
+@pytest.mark.parametrize("seed", SEEDS)
+def test_eager_move_off_leaves_the_pressed_pixel_before_the_click_returns(clock, seed):
+    """SC 299 (r54 / 0.67.1): with the lazy rule alone the pointer stayed on the pressed pixel through every 1.6 s
+    pause after a click (0 of 12). Now the click waits the persona's 200-700 ms and drifts off before it returns,
+    in its 60-85 % of clicks, when the page says the point may be left."""
+    p = attach(clock, seed)
+    p.move_off_safe = True
+    off = 0
+    n = 40
+    for i in range(n):
+        x, y = 200.0 + (i * 137) % 800, 150.0 + (i * 89) % 450
+        p.mouse.click(x, y)                         # returns after any eager move-off
+        t_up = [e for e in p.log if e[0] == "up"][-1][1]
+        mv = moves(p, t_up)
+        if mv:
+            off += 1
+            lag = (mv[0][1] - t_up) * 1000.0
+            assert 200.0 <= lag <= 700.0 + 5, lag
+            ex, ey = mv[-1][2], mv[-1][3]
+            assert 12.0 <= math.hypot(ex - x, ey - y) <= 200.0 + 1e-6
+        clock.sleep(1.6)                            # the script rests: nothing more may move
+        assert moves(p, clock.now - 1.5) == []
+    assert 0.60 <= off / n <= 0.85, off / n
+    assert [e for e in trace(p) if e[0] == "move_off_eager"]
+
+
+def test_eager_move_off_stays_lazy_where_the_page_says_no(clock):
+    p = attach(clock, "ha-2")
+    p.move_off_safe = False                         # a field, a menu, a popup trigger
+    for i in range(12):
+        p.mouse.click(300.0 + i * 20, 300.0)
+        t_up = [e for e in p.log if e[0] == "up"][-1][1]
+        assert moves(p, t_up) == [], "no drift inside the click"
+    assert not [e for e in trace(p) if e[0] == "move_off_eager"]

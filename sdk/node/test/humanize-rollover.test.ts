@@ -10,6 +10,7 @@ vi.mock("../src/motion.js", async (importOriginal) => {
 });
 
 import { attachHumanize } from "../src/humanize.js";
+import { ROLLOVER_CLASS_FACTOR, bigramClass, rolloverPairRate } from "../src/keys.js";
 
 type Ev = [string, string];
 
@@ -127,6 +128,30 @@ describe("humanized typing: key rollover", () => {
       ["down", "Shift"], ["press", "!"], ["up", "Shift"],
     ]);
   }, 20_000);
+
+  it("never rolls a same-finger pair, even at rate 1 (SC 299)", async () => {
+    // e/d, d/e, j/u, k/i: one finger types both keys, so it has to lift before the next goes down.
+    for (const text of ["deded", "jujuju", "kikik", "ftftf"]) {
+      for (let k = 0; k < 4; k++) {
+        const events = await typeWith(1, text);
+        expect(overlaps(events), text).toBe(0);
+        expect(typedValue(events)).toBe(text);
+      }
+    }
+  }, 60_000);
+
+  it("rolloverPairRate scales the persona's rate by the pair's bigram class, capped at 1", () => {
+    expect(ROLLOVER_CLASS_FACTOR).toEqual({ same_finger: 0, same_hand: 0.65, alternate: 1.35, none: 1 });
+    expect(bigramClass("d", "e")[0]).toBe("same_finger");
+    expect(rolloverPairRate(0.3, "d", "e")).toBe(0);
+    expect(bigramClass("a", "s")[0]).toBe("same_hand");
+    expect(rolloverPairRate(0.3, "a", "s")).toBeCloseTo(0.3 * 0.65, 12);
+    expect(bigramClass("a", "j")[0]).toBe("alternate");
+    expect(rolloverPairRate(0.3, "a", "j")).toBeCloseTo(0.3 * 1.35, 12);
+    expect(rolloverPairRate(0.9, "a", "j")).toBe(1);
+    const cls = bigramClass("f", " ")[0];
+    expect(rolloverPairRate(0.3, "f", " ")).toBeCloseTo(0.3 * ROLLOVER_CLASS_FACTOR[cls], 12);
+  });
 
   it("a failure inside a roll releases both keys and stops typing", async () => {
     const text = "asdf";

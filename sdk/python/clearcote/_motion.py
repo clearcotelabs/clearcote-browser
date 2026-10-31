@@ -226,8 +226,15 @@ def _sample_submove(out, a, b, dur_ms, p: Persona, rng: Rng, t0, drift, jit, tre
     c1x, c1y = ax + dx * 0.3 + nx * c * 1.15, ay + dy * 0.3 + ny * c * 1.15
     c2x, c2y = ax + dx * 0.7 + nx * c * 0.85, ay + dy * 0.7 + ny * c * 0.85
     t = t0
+    # Each sample's POSITION is taken at its own report time (SC 299): the report intervals jitter
+    # (step_ms x 0.88-1.12, drawn at the end of each iteration as before), and a position sampled at the
+    # nominal i/n while its time jittered made the speed a page computes swing +-12 % sample to sample --
+    # 5 smoothed velocity peaks per planned glide (SC 298). `el` is the time of sample i since the
+    # submovement started; the hand has arrived once el reaches the nominal duration.
+    total = n * step_ms
+    el = step_ms
     for i in range(1, n + 1):
-        tau = i / n
+        tau = 1.0 if i == n else min(1.0, el / total)
         e = min_jerk(_skewed(tau, skew))
         px = _bez(ax, c1x, c2x, bx, e)
         py = _bez(ay, c1y, c2y, by, e)
@@ -255,6 +262,7 @@ def _sample_submove(out, a, b, dur_ms, p: Persona, rng: Rng, t0, drift, jit, tre
         sleep_ms = step_ms * _lerp(0.88, 1.12, rng())
         out.append((px, py, sleep_ms))
         t += sleep_ms
+        el += sleep_ms
     return t
 
 
@@ -285,8 +293,12 @@ def plan_move(frm, to, p: Persona, target_w: float = 24.0, settle: bool = False,
         return out
 
     idv = _log2(d / w + 1)
-    # floor capped at the 1700ms ceiling so a very long move can't invert the clamp (lo > hi).
-    mt_lo = min(1700.0, max(70.0, 40.0 + d * 0.6))
+    # A distance floor (an average-speed bound) capped at the 1700 ms ceiling so a very long move can't invert
+    # the clamp (lo > hi). 0.4 ms/px (was 0.6, SC 299): at 0.6 the floor overrode Fitts' law whenever a far
+    # target was also wide, so planned time tracked DISTANCE instead of difficulty -- on SC 298's six targets
+    # (ID 2.5-4.6) the planned MT/ID correlation was -0.14 median over 8 personas; 0.58 at 0.4, with the
+    # fastest far reach (3300 px) still under 8.3 px/ms at its peak.
+    mt_lo = min(1700.0, max(70.0, 40.0 + d * 0.4))
     mt = _clamp((p.fitts_a + p.fitts_b * idv) * (0.85 + 0.3 * rng()), mt_lo, 1700.0)
     tr = shape_traits(p)
     ux, uy = (tx - fx) / d, (ty - fy) / d
@@ -668,6 +680,21 @@ def platform_from_navigator(value: Optional[str]) -> Optional[str]:
 
 
 # Salt for the aim traits (click_point): the persona's landing dispersion, undershoot and handedness.
+_PACE_SALT = 0x5BD1E995   # own stream: the pacer's hop cap (SC 299)
+
+
+def hop_cap_px(p: Persona) -> float:
+    """The longest hop this hand makes between two dispatched pointer points, 55..110 px (the first draw of its
+    salted pace stream): what a quick reach covers in about one 60 Hz frame at a 3.5-7 px/ms peak. The wall-clock
+    pacer (_pacing.walk) never hops further; a late walk stretches in time instead.
+
+    Measured on r54 / SDK 0.67.1 (SC 298): a fixed 40 px cap put a wall at 40 px under every persona (0 of 4,462
+    page-visible steps above 40.5 px), the same for every identity. Same value in motion.ts hopCapPx and
+    Motion.HopCapPx."""
+    r = mulberry32((p.seed ^ _PACE_SALT) & _MASK)
+    return _lerp(55.0, 110.0, r())
+
+
 _AIM_SALT = 0x27D4EB2F
 
 

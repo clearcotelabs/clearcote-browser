@@ -351,8 +351,15 @@ function sampleSubmove(
   const c1x = a.x + dx * 0.3 + nx * c * 1.15, c1y = a.y + dy * 0.3 + ny * c * 1.15;
   const c2x = a.x + dx * 0.7 + nx * c * 0.85, c2y = a.y + dy * 0.7 + ny * c * 0.85;
   let t = t0;
+  // Each sample's POSITION is taken at its own report time (SC 299): the report intervals jitter
+  // (stepMs x 0.88-1.12, drawn at the end of each iteration as before), and a position sampled at the
+  // nominal i/n while its time jittered made the speed a page computes swing +-12 % sample to sample --
+  // 5 smoothed velocity peaks per planned glide (SC 298). `el` is the time of sample i since the
+  // submovement started; the hand has arrived once el reaches the nominal duration.
+  const total = n * stepMs;
+  let el = stepMs;
   for (let i = 1; i <= n; i++) {
-    const tau = i / n;
+    const tau = i === n ? 1 : Math.min(1, el / total);
     const e = minJerk(skewed(tau, skew));
     let px = bez(a.x, c1x, c2x, b.x, e);
     let py = bez(a.y, c1y, c2y, b.y, e);
@@ -385,6 +392,7 @@ function sampleSubmove(
     const sleepMs = stepMs * lerp(0.88, 1.12, rng());
     out.push({ x: px, y: py, sleepMs });
     t += sleepMs;
+    el += sleepMs;
   }
   return t;
 }
@@ -411,10 +419,13 @@ export function planMove(from: Point, to: Point, p: Persona, opts: PlanOpts = {}
   if (D < 1.5) { out.push({ x: to.x, y: to.y, sleepMs: 1000 / p.deviceHz }); return out; }
 
   // Fitts movement time (ms) + a little log-normal-ish noise; short hops get a small floor. The floor
-  // is itself capped at the 1700 ms ceiling so a very long move can't invert the clamp (lo > hi) and
-  // silently blow past the cap.
+  // (an average-speed bound) is itself capped at the 1700 ms ceiling so a very long move can't invert the
+  // clamp (lo > hi) and silently blow past the cap. 0.4 ms/px (was 0.6, SC 299): at 0.6 the floor overrode
+  // Fitts' law whenever a far target was also wide, so planned time tracked DISTANCE instead of difficulty --
+  // on SC 298's six targets (ID 2.5-4.6) the planned MT/ID correlation was -0.14 median over 8 personas;
+  // 0.58 at 0.4, with the fastest far reach (3300 px) still under 8.3 px/ms at its peak.
   const id = log2(D / W + 1);
-  const mtLo = Math.min(1700, Math.max(70, 40 + D * 0.6));
+  const mtLo = Math.min(1700, Math.max(70, 40 + D * 0.4));
   const mt = clamp((p.fittsA + p.fittsB * id) * (0.85 + 0.3 * rng()), mtLo, 1700);
   const tr = shapeTraits(p);
   const ux = (to.x - from.x) / D, uy = (to.y - from.y) / D;
@@ -638,6 +649,20 @@ export function dragDwell(p: Persona, rng: Rng = Math.random): { grabMs: number;
 }
 
 export interface Box { x: number; y: number; width: number; height: number; }
+
+const PACE_SALT = 0x5bd1e995; // own stream: the pacer's hop cap (SC 299)
+
+/** The longest hop this hand makes between two dispatched pointer points, 55..110 px (the first draw of its
+ *  salted pace stream): what a quick reach covers in about one 60 Hz frame at a 3.5-7 px/ms peak. The
+ *  wall-clock pacer (pacing.ts walk) never hops further; a late walk stretches in time instead.
+ *
+ *  Measured on r54 / SDK 0.67.1 (SC 298): a fixed 40 px cap put a wall at 40 px under every persona (0 of
+ *  4,462 page-visible steps above 40.5 px), the same for every identity. Same value in _motion.py hop_cap_px
+ *  and Motion.HopCapPx. */
+export function hopCapPx(p: Persona): number {
+  const r = mulberry32((p.seed ^ PACE_SALT) >>> 0);
+  return lerp(55, 110, r());
+}
 
 // Salt for the aim traits (clickPoint): the persona's landing dispersion, undershoot and handedness.
 const AIM_SALT = 0x27d4eb2f;

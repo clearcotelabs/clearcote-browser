@@ -8,7 +8,9 @@
  *    shows (measured in the isolated world, capped at READ_CAP_CHARS), and in EXPLORE_RATE of loads rolls
  *    the wheel 1–3 notches first.
  *  - When more than IDLE_GAP_S pass between two actions, the hand idles: 1–2 ambient drifts of 300–900 ms.
- * OFF by default: on with lane A's `ambient: "idle"` / `attention: true`, or `page._clearcoteAttention = true`.
+ * ON by default since 0.68.0 (SC 299). Measured on r54 / SDK 0.67.1 (SC 298/299): with the model off, the first
+ * input came 0.21-0.31 s after the load on every persona, as fast as a stock Playwright script. Off with the
+ * option `attention: false`; the page flag `page._clearcoteAttention` (true / false) overrides both ways.
  */
 import { optionsOf } from "./hzoptions.js";
 import { afterTraits, tempoOf, type Persona, type Rng } from "./motion.js";
@@ -64,6 +66,17 @@ export function option(page: any, name: string, dflt: unknown = undefined): unkn
     if (o === null || o === undefined || typeof o !== "object") return dflt;
     return name in o ? o[name] : dflt;
   } catch { return dflt; }
+}
+
+/** Is the attention model on for this page: the page flag `_clearcoteAttention` when it is true or false, else
+ * on unless the `attention` option is false -- or when `ambient: "idle"` asks for it. Port of
+ * _attention.attention_enabled. */
+export function attentionEnabled(page: any): boolean {
+  let flag: unknown;
+  try { flag = page?._clearcoteAttention; } catch { flag = undefined; }
+  if (flag === true || flag === false) return flag;
+  if (ambientMode(page) === "idle") return true;
+  return option(page, "attention", undefined) !== false;
 }
 
 /** The page's ambient mode: lane A's `ambient` option ("off" | "load" | "idle"), else "off". A truthy

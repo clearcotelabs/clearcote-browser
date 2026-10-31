@@ -8,26 +8,32 @@
 // walk() schedules each sample at its planned offset from the start (the cumulative sum of the sleeps
 // before it) and keeps that clock:
 //   on time -> sleep until the sample's planned time, then dispatch it;
-//   behind  -> skip the samples whose time has passed and dispatch the most recent due one, so the
-//              path keeps the plan's shape and the move keeps the plan's duration;
+//   behind  -> send the point on the planned path at the time that has passed (between the two planned
+//              samples around it), so the move keeps the plan's shape, its duration and its SPEED profile:
+//              each hop is the plan's speed x the real time since the last dispatch, whatever the round trip;
 //   never skipped: the final sample (the move lands exactly where it was aimed) and a sample marked
-//              as changing button state (`pinned`);
-//   never a teleport: a skip may not put more than maxJump (40 px) between two dispatched points, and
-//              no more than IDLE_HOP_PX (20 px) after IDLE_MS (40 ms) with nothing sent; a longer hop
-//              dispatches the in-between sample instead, so a late walk stretches in time rather than
-//              jumping (SC 210 lab v2: the old cap, 3 px/ms x the time since the last dispatch, turned
-//              slow dispatches under load into hops of 60-103 px a few ms apart; an r40 engine walks
-//              any hop >= 24 px after >= 40 ms idle);
+//              as changing button state (`pinned`) -- both go out as planned;
+//   never a teleport: no hop longer than the persona's maxJump (motion.ts hopCapPx, 55-110 px: what a
+//              quick reach covers in about one 60 Hz frame), and no more than IDLE_HOP_PX (20 px) after
+//              IDLE_MS (40 ms) with nothing sent; a longer hop goes to the farthest point along the path
+//              within the cap, so a late walk stretches in time rather than jumping (SC 210 lab v2: the
+//              old cap, 3 px/ms x the time since the last dispatch, turned slow dispatches under load into
+//              hops of 60-103 px a few ms apart; an r40 engine walks any hop >= 24 px after >= 40 ms idle).
+//              SC 298 (r54, SDK 0.67.1, Windows): the old walk skipped to whole planned samples under a
+//              FIXED 40 px cap. With an ~18 ms round trip it hopped 2 or 3 samples at a time -- a sawtooth
+//              of 7-8 velocity peaks per glide -- and no page-visible step exceeded 40 px under any persona
+//              (0 of 4,462), a wall shared by every identity;
 //   a stall is a pause: a single dispatch slower than STALL_MS shifts the schedule by the excess
 //              instead of being caught up by skipping.
 //
 // Sleeps are local timers, never page.waitForTimeout (a CDP round trip a detector can score).
-// Nothing here changes what the planner returns; only WHEN each sample goes out and which late ones
-// are dropped.
+// Nothing here changes what the planner returns; only WHEN each sample goes out, and when it runs late,
+// which point between two of them goes out instead.
 
 import { record as traceRecord, traceEnabled } from "./trace.js";
 
-export const MAX_JUMP_PX = 40;
+// The hop cap when the caller names no persona (the humanizer passes the persona's motion.ts hopCapPx).
+export const MAX_JUMP_PX = 72;
 // A single dispatch slower than this is a STALL (the page or the box was busy), not latency: nothing
 // reached the page while it lasted, so the plan pauses with it instead of skipping ahead afterwards.
 export const STALL_MS = 60;
@@ -44,6 +50,7 @@ export interface PacedStep { x: number; y: number; sleepMs: number; }
 export interface WalkOpts<S extends PacedStep> {
   now?: () => number;                       // ms, monotonic
   sleep?: (ms: number) => Promise<unknown>;
+  /** The persona's hop cap (motion.ts hopCapPx); MAX_JUMP_PX when omitted. */
   maxJump?: number;
   pinned?: (s: S, i: number) => boolean;    // a step that changes button state: never skipped
   /** The action kind for the score hook (trace.ts: glide | drag | ambient | hover). With CLEARCOTE_HUMANIZE_SCORE
@@ -64,7 +71,9 @@ export function schedule(steps: readonly PacedStep[]): { due: number[]; total: n
   return { due, total: t };
 }
 
-/** The step to dispatch next: step i is the first not yet sent, `elapsed` ms have passed. */
+/** Legacy helper (the pre-SC 299 walk): the planned sample to dispatch next when only whole samples may go
+ *  out (step i is the first not yet sent, `elapsed` ms have passed). walk() itself sends points between
+ *  samples (target); kept for callers outside it. */
 export function nextIndex<S extends PacedStep>(
   steps: readonly S[], due: readonly number[], i: number, last: { x: number; y: number } | null,
   elapsed: number, maxJump = MAX_JUMP_PX, pinned: (s: S, i: number) => boolean = () => false,
@@ -78,8 +87,79 @@ export function nextIndex<S extends PacedStep>(
   return j;
 }
 
-/** Dispatch `steps` through `move` against a wall clock. Stops at the first move that throws.
- *  Resolves to the number of samples dispatched. */
+/** The first index whose value is > t (Python's bisect.bisect_right on a sorted array). */
+function bisectRight(a: readonly number[], t: number): number {
+  let lo = 0, hi = a.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (t < a[mid]) hi = mid; else lo = mid + 1;
+  }
+  return lo;
+}
+
+/** The point of the planned path at plan time `t` (ms): linear between the two samples around it. Port of
+ *  _pacing._pos_at. */
+export function posAt(steps: readonly PacedStep[], due: readonly number[], t: number): { x: number; y: number } {
+  const n = steps.length;
+  if (t <= due[0]) return { x: steps[0].x, y: steps[0].y };
+  if (t >= due[n - 1]) return { x: steps[n - 1].x, y: steps[n - 1].y };
+  const k = bisectRight(due, t);        // due[k-1] <= t < due[k]
+  const a = steps[k - 1], b = steps[k];
+  const span = due[k] - due[k - 1];
+  const f = span > 0 ? (t - due[k - 1]) / span : 1;
+  return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
+}
+
+/** One dispatch: the point, its plan time and the index of the next planned sample not yet passed. */
+export interface Target { x: number; y: number; tp: number; next: number; }
+
+/** What goes out next when step `i` is the first planned sample not yet passed and `elapsed` ms of the plan
+ *  have gone by: the point, its plan time `tp` and the next `i`.
+ *
+ *  On time: step i itself. Behind: the point of the path at `elapsed` -- or, when one is due, the first
+ *  pinned step or the final step, exactly -- pulled back along the path until it lies within `cap` of the
+ *  last dispatched point (the walk then stretches in time). Port of _pacing._target. */
+export function target<S extends PacedStep>(
+  steps: readonly S[], due: readonly number[], i: number, tPlanLast: number | null,
+  last: { x: number; y: number } | null, elapsed: number, cap: number,
+  pinned: (s: S, i: number) => boolean = () => false,
+): Target {
+  const n = steps.length;
+  if (elapsed <= due[i]) return { x: steps[i].x, y: steps[i].y, tp: due[i], next: i + 1 };
+  let j = i;
+  while (j + 1 < n && due[j + 1] <= elapsed && !pinned(steps[j], j)) j++;
+  let exact = j === n - 1 || pinned(steps[j], j);
+  let x: number, y: number, tp: number;
+  if (exact) {
+    x = steps[j].x; y = steps[j].y; tp = due[j];
+  } else {
+    ({ x, y } = posAt(steps, due, elapsed));
+    tp = elapsed;
+  }
+  if (last && Math.hypot(x - last.x, y - last.y) > cap) {
+    let lo = tPlanLast ?? 0;
+    let hi = tp;
+    for (let k = 0; k < 24; k++) {   // the farthest plan time whose point is within the cap
+      const mid = (lo + hi) / 2;
+      const q = posAt(steps, due, mid);
+      if (Math.hypot(q.x - last.x, q.y - last.y) <= cap) lo = mid; else hi = mid;
+    }
+    ({ x, y } = posAt(steps, due, lo));
+    tp = lo;
+    exact = false;
+    if (tPlanLast !== null && tp <= tPlanLast + 1e-9) {
+      // no progress within the cap (a zero-length planned gap jumps): send step i as planned
+      return { x: steps[i].x, y: steps[i].y, tp: due[i], next: i + 1 };
+    }
+  }
+  if (exact) return { x, y, tp, next: j + 1 };
+  // the next planned sample still ahead of the point just sent (never one already passed)
+  return { x, y, tp, next: Math.max(i, bisectRight(due, tp)) };
+}
+
+/** Dispatch `steps` through `move` against a wall clock (see the file header). Stops at the first move that
+ *  throws. Resolves to the number of points dispatched. `o.maxJump`: the persona's hop cap (motion.ts
+ *  hopCapPx). */
 export async function walk<S extends PacedStep>(
   steps: readonly S[], move: (x: number, y: number) => Promise<unknown>, o: WalkOpts<S> = {},
 ): Promise<number> {
@@ -97,22 +177,23 @@ export async function walk<S extends PacedStep>(
   let tLast = t0;
   let i = 0, sent = 0;
   let last: { x: number; y: number } | null = null;
+  let tPlanLast: number | null = null;
   while (i < steps.length) {
-    const el = now() - t0;
-    if (el < due[i]) await sleep(due[i] - el);
-    else i = nextIndex(steps, due, i, last, el, jumpCap(maxJump, now() - tLast), pinned);
-    const s = steps[i];
+    let el = now() - t0;
+    if (el < due[i]) { await sleep(due[i] - el); el = due[i]; }
+    const g: Target = target(steps, due, i, tPlanLast, last, el, jumpCap(maxJump, now() - tLast), pinned);
     const tb = now();
-    try { await move(s.x, s.y); } catch {
+    try { await move(g.x, g.y); } catch {
       if (trace?.length) traceRecord(kind, trace, { planned_n: steps.length, sent, aborted: true });
       return sent;
     }
     sent++;
-    trace?.push(buttons ? { x: s.x, y: s.y, t: tb - tStart, buttons } : { x: s.x, y: s.y, t: tb - tStart });
+    trace?.push(buttons ? { x: g.x, y: g.y, t: tb - tStart, buttons } : { x: g.x, y: g.y, t: tb - tStart });
     t0 += stallMs(now() - tb);
-    last = { x: s.x, y: s.y };
+    last = { x: g.x, y: g.y };
     tLast = tb;
-    i++;
+    tPlanLast = g.tp;
+    i = g.next;
   }
   const el = now() - t0;
   if (el < total) await sleep(total - el);   // the last sample's own dwell (a settle hold, a frame)
@@ -140,7 +221,7 @@ export function keepInView<S extends PacedStep>(steps: S[], vw: number, vh: numb
   });
 }
 
-/** The largest hop a SKIP may make between two dispatched points `dtMs` apart: maxJump, and IDLE_HOP_PX
+/** The largest hop between two dispatched points `dtMs` apart: maxJump, and IDLE_HOP_PX
  *  after an idle gap. Never more for a longer gap: a walk that fell behind stretches in time instead of
  *  catching up with a jump (the planner's own consecutive samples always go out). Port of
  *  _pacing._jump_cap. */

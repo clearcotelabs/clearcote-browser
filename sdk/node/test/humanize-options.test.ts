@@ -45,6 +45,11 @@ describe("the options object", () => {
     }
     expect(humanizePayload(resolveHumanize({ preset: "quick", onFallback: () => {} })!))
       .toEqual({ preset: "quick", strict: false, engine: "auto" });
+    // attention (SC 299): unset = on; false turns it off; anything but a boolean throws
+    expect(resolveHumanize({})!.attention).toBeUndefined();
+    expect(resolveHumanize({ attention: false })!.attention).toBe(false);
+    expect(humanizePayload(resolveHumanize({ attention: false })!)).toEqual({ preset: "default", strict: false, engine: "auto", attention: false });
+    expect(() => resolveHumanize({ attention: "no" } as never)).toThrow(TypeError);
   });
 
   it("ClearcoteStrictError is a Playwright-style Error with api, reason and selector", () => {

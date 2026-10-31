@@ -9,6 +9,10 @@ import pytest
 import clearcote._humanize_async as H
 import clearcote._pacing as PACING
 from clearcote._isolated import CSS_BOX, FRAMES, PLATFORM, VIEWPORT
+try:
+    from clearcote._isolated import MOVE_OFF_SAFE
+except ImportError:   # 0.67.1: no eager move-off
+    MOVE_OFF_SAFE = None
 
 try:
     from clearcote._attention import TEXT_LENGTH
@@ -62,6 +66,8 @@ class World:
             return True
         if fn == CSS_BOX:
             return None
+        if MOVE_OFF_SAFE is not None and fn == MOVE_OFF_SAFE:
+            return self.page.move_off_safe
         return None
 
     async def node_at(self, x, y, scroll=None):
@@ -144,6 +150,7 @@ class Page:
         self.log = []
         self.handlers = {}
         self.text_len = 0
+        self.move_off_safe = None
         self.mouse = Mouse(self)
         self.keyboard = Keyboard()
         self.main_frame = object()
@@ -273,4 +280,47 @@ def test_async_ambient_option_load(clock):
         for _ in range(50):
             await _real_sleep(0)
         assert len(moves(p)) > 20
+    asyncio.run(go())
+
+
+# --------------------------------------------------------------------------------- SC 299
+@pytest.mark.parametrize("seed", SEEDS[:3])
+def test_async_eager_move_off_before_the_click_returns(clock, seed):
+    async def go():
+        p = await attach(clock, seed)
+        p.move_off_safe = True
+        off = 0
+        for i in range(40):
+            x, y = 200.0 + (i * 137) % 800, 150.0 + (i * 89) % 450
+            await p.mouse.click(x, y)
+            t_up = [e for e in p.log if e[0] == "up"][-1][1]
+            mv = moves(p, t_up)
+            if mv:
+                off += 1
+                assert 200.0 <= (mv[0][1] - t_up) * 1000.0 <= 705.0
+            clock.sleep(1.6)
+        assert 0.60 <= off / 40 <= 0.85, off / 40
+    asyncio.run(go())
+
+
+def test_async_eager_move_off_stays_lazy_where_the_page_says_no(clock):
+    async def go():
+        p = await attach(clock, "ha-2")
+        p.move_off_safe = False
+        for i in range(12):
+            await p.mouse.click(300.0 + i * 20, 300.0)
+            t_up = [e for e in p.log if e[0] == "up"][-1][1]
+            assert moves(p, t_up) == []
+    asyncio.run(go())
+
+
+def test_async_attention_is_on_by_default(clock):
+    async def go():
+        p = await attach(clock, "ha-1")
+        p.text_len = 20000
+        p.fire("load")
+        t = clock.now
+        await p.click("#t")
+        assert [e for e in trace(p) if e[0] == "read"]
+        assert clock.now - t >= 0.8
     asyncio.run(go())

@@ -10,15 +10,20 @@ gap" adds the dispatch round trip to EVERY sample: measured on PRO r38, one ``mo
 sleeps before it) and keeps that clock:
 
 * on time   -> sleep until the sample's planned time, then dispatch it;
-* behind    -> skip the samples whose time has already passed and dispatch the most recent due
-               one, so the path keeps the plan's shape and the move keeps the plan's duration;
+* behind    -> send the point on the planned path at the time that has passed (between the two planned
+               samples around it), so the move keeps the plan's shape, its duration and its SPEED profile:
+               each hop is the plan's speed x the real time since the last dispatch, whatever the round trip;
 * never skipped: the final sample (the move must land exactly where it was aimed), and a sample
-  marked as changing button state;
-* never a teleport: a skip may not put more than ``max_jump`` (40 px) between two dispatched points,
-  and no more than IDLE_HOP_PX (20 px) after IDLE_MS (40 ms) with nothing sent; a longer hop dispatches
-  the in-between sample instead, so a late walk stretches in time rather than jumping (SC 210 lab v2:
-  the old cap, 3 px/ms x the time since the last dispatch, let a slow dispatch under load turn into
-  35 hops of 60-103 px a few ms apart -- and an r40 engine walks any hop >= 24 px after >= 40 ms idle);
+  marked as changing button state -- both go out as planned;
+* never a teleport: no hop longer than the persona's ``max_jump`` (``_motion.hop_cap_px``, 55-110 px: what a
+  quick reach covers in about one 60 Hz frame), and no more than IDLE_HOP_PX (20 px) after IDLE_MS (40 ms)
+  with nothing sent; a longer hop goes to the farthest point along the path within the cap, so a late walk
+  stretches in time rather than jumping (SC 210 lab v2: the old cap, 3 px/ms x the time since the last
+  dispatch, let a slow dispatch under load turn into 35 hops of 60-103 px a few ms apart -- and an r40 engine
+  walks any hop >= 24 px after >= 40 ms idle).
+  SC 298 (r54, SDK 0.67.1, Windows): the old walk skipped to whole planned samples under a FIXED 40 px cap.
+  With an ~18 ms round trip it hopped 2 or 3 samples at a time -- a sawtooth of 7-8 velocity peaks per glide
+  -- and no page-visible step exceeded 40 px under any persona (0 of 4,462), a wall shared by every identity;
 * a stall is a pause: a single dispatch slower than ``STALL_MS`` shifts the schedule by the excess
   instead of being caught up by skipping.
 
@@ -26,15 +31,18 @@ Sleeps are local (``time.sleep`` / ``asyncio.sleep``), never ``page.wait_for_tim
 CDP round trip per call, protocol traffic a detector can score inside the humanize path.
 
 Nothing here changes what the planner returns: the samples, their coordinates and their timing are
-the planner's; this module only decides WHEN each one goes out and which late ones are dropped.
+the planner's; this module only decides WHEN each one goes out, and when it runs late, which point between
+two of them goes out instead.
 """
 import asyncio
+import bisect
 import math
 import time
 
 from . import _trace
 
-MAX_JUMP_PX = 40.0
+# The hop cap when the caller names no persona (the humanizers pass the persona's _motion.hop_cap_px).
+MAX_JUMP_PX = 72.0
 # A single dispatch slower than this is a STALL (the page or the box was busy), not latency: nothing
 # reached the page while it lasted, so the plan pauses with it instead of skipping ahead afterwards.
 STALL_MS = 60.0
@@ -63,11 +71,10 @@ def _default_pinned(step):
 
 
 def next_index(steps, due, i, last, elapsed_ms, max_jump=MAX_JUMP_PX, pinned=_default_pinned):
-    """The step to dispatch next, given step ``i`` is the first not yet sent and ``elapsed_ms`` have
-    passed since the start. ``last`` is the last dispatched (x, y), or None."""
+    """Legacy helper (the pre-SC 299 walk): the planned sample to dispatch next when only whole samples may
+    go out. ``walk`` itself sends points between samples (_target); kept for callers outside it."""
     n = len(steps)
     j = i
-    # Behind: advance to the most recent due step, but never past a pinned one.
     while j + 1 < n and due[j + 1] <= elapsed_ms and not pinned(steps[j]):
         j += 1
     if last is not None:
@@ -77,41 +84,102 @@ def next_index(steps, due, i, last, elapsed_ms, max_jump=MAX_JUMP_PX, pinned=_de
 
 
 def _jump_cap(max_jump, dt_ms):
-    """The largest hop a SKIP may make between two dispatched points ``dt_ms`` apart: ``max_jump``, and
-    IDLE_HOP_PX after an idle gap. Never more for a longer gap: a walk that fell behind stretches in time
-    instead of catching up with a jump (the planner's own consecutive samples always go out)."""
+    """The largest hop between two dispatched points ``dt_ms`` apart: ``max_jump``, and IDLE_HOP_PX after
+    an idle gap. Never more for a longer gap: a walk that fell behind stretches in time instead of catching
+    up with a jump (the planner's own consecutive samples always go out)."""
     return max_jump if dt_ms < IDLE_MS else min(max_jump, IDLE_HOP_PX)
+
+
+def _pos_at(steps, due, t):
+    """The point of the planned path at plan time ``t`` (ms): linear between the two samples around it."""
+    if t <= due[0]:
+        return steps[0][0], steps[0][1]
+    if t >= due[-1]:
+        return steps[-1][0], steps[-1][1]
+    k = bisect.bisect_right(due, t)        # due[k-1] <= t < due[k]
+    a, b = steps[k - 1], steps[k]
+    span = due[k] - due[k - 1]
+    f = (t - due[k - 1]) / span if span > 0 else 1.0
+    return a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f
+
+
+def _target(steps, due, i, t_plan_last, last, elapsed_ms, cap, pinned):
+    """What goes out next when step ``i`` is the first planned sample not yet passed and ``elapsed_ms`` of
+    the plan have gone by. Returns (x, y, plan_time, next_i).
+
+    On time: step i itself. Behind: the point of the path at ``elapsed_ms`` -- or, when one is due, the
+    first pinned step or the final step, exactly -- pulled back along the path until it lies within ``cap``
+    of the last dispatched point (the walk then stretches in time)."""
+    n = len(steps)
+    if elapsed_ms <= due[i]:
+        return steps[i][0], steps[i][1], due[i], i + 1
+    j = i
+    while j + 1 < n and due[j + 1] <= elapsed_ms and not pinned(steps[j]):
+        j += 1
+    exact = j == n - 1 or pinned(steps[j])
+    if exact:
+        x, y, tp = steps[j][0], steps[j][1], due[j]
+    else:
+        x, y = _pos_at(steps, due, elapsed_ms)
+        tp = elapsed_ms
+    if last is not None and math.hypot(x - last[0], y - last[1]) > cap:
+        lo = t_plan_last if t_plan_last is not None else 0.0
+        hi = tp
+        for _ in range(24):   # the farthest plan time whose point is within the cap
+            mid = (lo + hi) / 2.0
+            px, py = _pos_at(steps, due, mid)
+            if math.hypot(px - last[0], py - last[1]) <= cap:
+                lo = mid
+            else:
+                hi = mid
+        x, y = _pos_at(steps, due, lo)
+        tp = lo
+        exact = False
+        if t_plan_last is not None and tp <= t_plan_last + 1e-9:
+            # no progress within the cap (a zero-length planned gap jumps): send step i as planned
+            return steps[i][0], steps[i][1], due[i], i + 1
+    if exact:
+        return x, y, tp, j + 1
+    # the next planned sample still ahead of the point just sent (never one already passed)
+    return x, y, tp, max(i, bisect.bisect_right(due, tp))
+
+
+def _walk_state(steps):
+    due, total = schedule(steps)
+    return due, total
 
 
 def walk(steps, move, clock=None, sleep=None, max_jump=MAX_JUMP_PX, pinned=_default_pinned, kind="glide",
          buttons=0):
     """Dispatch ``steps`` through ``move(x, y)`` against a wall clock (see module doc). Stops at the
-    first ``move`` that raises. Returns the number of samples dispatched.
+    first ``move`` that raises. Returns the number of points dispatched.
 
-    ``kind`` names the action for the score hook (``_trace``: ``glide`` | ``drag`` | ``ambient`` | ``hover``);
-    with ``CLEARCOTE_HUMANIZE_SCORE`` set, the dispatched samples and their actual dispatch times are scored
-    and appended to the score file after the walk. ``buttons`` (a drag leg: 1) is carried on every recorded
-    sample. Read-only: it changes nothing about the walk."""
+    ``max_jump``: the persona's hop cap (``_motion.hop_cap_px``). ``kind`` names the action for the score
+    hook (``_trace``: ``glide`` | ``drag`` | ``ambient`` | ``hover``); with ``CLEARCOTE_HUMANIZE_SCORE`` set, the
+    dispatched points and their actual dispatch times are scored and appended to the score file after the
+    walk. ``buttons`` (a drag leg: 1) is carried on every recorded sample. Read-only: it changes nothing
+    about the walk."""
     clock = clock or time.perf_counter
     sleep = sleep or time.sleep
     if not steps:
         return 0
     trace = [] if _trace.enabled() else None
-    due, total = schedule(steps)
+    due, total = _walk_state(steps)
     t0 = clock()
     t_start = t0
     n = len(steps)
     i = 0
     last = None
+    t_plan_last = None
     t_last = t0
     sent = 0
     while i < n:
         el = (clock() - t0) * 1000.0
         if el < due[i]:
             sleep((due[i] - el) / 1000.0)
-        else:
-            i = next_index(steps, due, i, last, el, _jump_cap(max_jump, (clock() - t_last) * 1000.0), pinned)
-        x, y = steps[i][0], steps[i][1]
+            el = due[i]
+        x, y, tp, nxt = _target(steps, due, i, t_plan_last, last, el,
+                                _jump_cap(max_jump, (clock() - t_last) * 1000.0), pinned)
         tb = clock()
         try:
             move(x, y)
@@ -123,8 +191,8 @@ def walk(steps, move, clock=None, sleep=None, max_jump=MAX_JUMP_PX, pinned=_defa
             trace.append({"x": x, "y": y, "t": (tb - t_start) * 1000.0, "buttons": buttons} if buttons
                          else {"x": x, "y": y, "t": (tb - t_start) * 1000.0})
         t0 += _stall_s(tb, clock())
-        last, t_last = (x, y), tb
-        i += 1
+        last, t_last, t_plan_last = (x, y), tb, tp
+        i = nxt
     el = (clock() - t0) * 1000.0
     if el < total:
         sleep((total - el) / 1000.0)   # the last sample's own dwell (a settle hold, a frame)
@@ -141,21 +209,22 @@ async def walk_async(steps, move, clock=None, sleep=None, max_jump=MAX_JUMP_PX, 
     if not steps:
         return 0
     trace = [] if _trace.enabled() else None
-    due, total = schedule(steps)
+    due, total = _walk_state(steps)
     t0 = clock()
     t_start = t0
     n = len(steps)
     i = 0
     last = None
+    t_plan_last = None
     t_last = t0
     sent = 0
     while i < n:
         el = (clock() - t0) * 1000.0
         if el < due[i]:
             await sleep((due[i] - el) / 1000.0)
-        else:
-            i = next_index(steps, due, i, last, el, _jump_cap(max_jump, (clock() - t_last) * 1000.0), pinned)
-        x, y = steps[i][0], steps[i][1]
+            el = due[i]
+        x, y, tp, nxt = _target(steps, due, i, t_plan_last, last, el,
+                                _jump_cap(max_jump, (clock() - t_last) * 1000.0), pinned)
         tb = clock()
         try:
             await move(x, y)
@@ -167,8 +236,8 @@ async def walk_async(steps, move, clock=None, sleep=None, max_jump=MAX_JUMP_PX, 
             trace.append({"x": x, "y": y, "t": (tb - t_start) * 1000.0, "buttons": buttons} if buttons
                          else {"x": x, "y": y, "t": (tb - t_start) * 1000.0})
         t0 += _stall_s(tb, clock())
-        last, t_last = (x, y), tb
-        i += 1
+        last, t_last, t_plan_last = (x, y), tb, tp
+        i = nxt
     el = (clock() - t0) * 1000.0
     if el < total:
         await sleep((total - el) / 1000.0)

@@ -150,7 +150,11 @@ def _max_gap(pts):
     return max((math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:])), default=0.0)
 
 
-def _hops_ok(moves, floor=40.0):
+# The largest persona hop cap (_motion.hop_cap_px draws 55-110 px).
+HOP_CAP_MAX = 110.0
+
+
+def _hops_ok(moves, floor=HOP_CAP_MAX):
     """No dispatched hop longer than a fast hand covers between the two events (3 px/ms, >= floor)."""
     for a, b in zip(moves, moves[1:]):
         d = math.hypot(b[2] - a[2], b[3] - a[3])
@@ -165,8 +169,8 @@ def _check_walk(plan, moves, dur_ms, start):
     assert (moves[-1][2], moves[-1][3]) == (plan[-1][0], plan[-1][1]), "the final sample must land exactly"
     pts = [start] + [(m[2], m[3]) for m in moves]
     own = _max_gap([start] + [(s[0], s[1]) for s in plan])
-    assert math.hypot(pts[1][0] - start[0], pts[1][1] - start[1]) <= max(40.0, own) + 1e-6
-    assert _hops_ok(moves, max(40.0, own)), "a skipped stretch teleported the cursor"
+    assert math.hypot(pts[1][0] - start[0], pts[1][1] - start[1]) <= max(HOP_CAP_MAX, own) + 1e-6
+    assert _hops_ok(moves, max(HOP_CAP_MAX, own)), "a skipped stretch teleported the cursor"
 
 
 @pytest.mark.parametrize("lat", LATENCIES)
@@ -373,8 +377,8 @@ def test_trim_to_a_short_ask_does_not_stop_the_pointer_mid_flight():
 @pytest.mark.parametrize("stall_ms", (200, 350, 500))
 def test_pacer_after_a_long_stall_stretches_instead_of_jumping(stall_ms):
     """SC 210 lab v2 on r38 under load: 35 hops of 60-103 px between samples a few ms apart. A stall of
-    200-500 ms used to let the next skip hop 3 px/ms x the stall; now no skip hops more than 40 px, nor
-    more than 20 px right after an idle gap: the walk takes longer instead."""
+    200-500 ms used to let the next skip hop 3 px/ms x the stall; now no hop is longer than the hop cap
+    (MAX_JUMP_PX without a persona), nor more than 20 px right after an idle gap: the walk takes longer."""
     from clearcote._motion import plan_move, make_persona
     steps = plan_move((100.0, 500.0), (1150.0, 140.0), make_persona("stall-1"), target_w=24)
     own = _max_gap([(s[0], s[1]) for s in steps])
@@ -386,7 +390,7 @@ def test_pacer_after_a_long_stall_stretches_instead_of_jumping(stall_ms):
         sent.append((x, y, c.t))
     _pacing.walk(steps, move, clock=c.now, sleep=c.sleep)
     hops = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(sent, sent[1:])]
-    assert max(hops) <= max(40.0, own) + 1e-6, "a hop of %.0f px (planned spacing %.0f px)" % (max(hops), own)
+    assert max(hops) <= max(_pacing.MAX_JUMP_PX, own) + 1e-6, "a hop of %.0f px (planned spacing %.0f px)" % (max(hops), own)
     after = [hops[k] for k in (3, 9, 15) if k < len(hops)]
     assert max(after) <= max(20.0, own) + 1e-6, "the hop after a stall: %s" % [round(h) for h in after]
     assert (sent[-1][0], sent[-1][1]) == (steps[-1][0], steps[-1][1])
@@ -398,3 +402,99 @@ def test_keep_in_view_moves_samples_inside_but_never_the_target():
     assert out == [(10.0, 5.0, 8.0), (2.0, 2.0, 8.0), (1279.0, 400.0, 8.0, True), (1279.0, 799.0, 8.0)]  # the target widens the box
     aimed_out = [(10.0, 5.0, 8.0), (1300.0, 900.0, 8.0)]   # the caller aims outside: left as it is
     assert _pacing.keep_in_view(aimed_out, 1280, 800) == aimed_out
+
+
+# ---------------------------------------------------------------- SC 299: interpolated points, persona hop cap
+
+def _velocity_peaks(sent, smooth=5):
+    """Local maxima (above 40 % of the peak) of the 5-sample moving average of hop / dt."""
+    v = []
+    for a, b in zip(sent, sent[1:]):
+        dt = (b[2] - a[2]) * 1000.0
+        if dt > 0:
+            v.append(math.hypot(b[0] - a[0], b[1] - a[1]) / dt)
+    if smooth > 1:
+        v = [sum(v[max(0, i - smooth // 2):i + smooth // 2 + 1]) / len(v[max(0, i - smooth // 2):i + smooth // 2 + 1])
+             for i in range(len(v))]
+    top = max(v) if v else 0.0
+    return sum(1 for i in range(1, len(v) - 1) if v[i] >= v[i - 1] and v[i] > v[i + 1] and v[i] > 0.4 * top)
+
+
+def _jittery(lat_ms, spread_ms, seed=7):
+    import random as _r
+    rr = _r.Random(seed)
+    c = Clock()
+    sent = []
+
+    def move(x, y):
+        c.t += max(1.0, rr.uniform(lat_ms - spread_ms, lat_ms + spread_ms)) / 1000.0
+        sent.append((x, y, c.t))
+    return c, sent, move
+
+
+def test_pacer_sends_the_point_on_the_path_when_late_and_keeps_its_speed():
+    # SC 298 on Windows: an ~18 ms round trip against ~7 ms planned samples. Skipping to whole samples hopped
+    # 2 or 3 at a time (a sawtooth of 7-8 velocity peaks per glide). Sending the path's point at the elapsed
+    # time keeps one smooth speed profile: the smoothed velocity has at most 3 peaks, as the plan does.
+    # The fake stamps each point when its round trip ends, so the jitter itself adds some wobble; over 20
+    # personas the median stays at <= 3.5 smoothed peaks (the old walk: 6-7) and none exceeds 8.
+    import statistics
+    from clearcote._motion import plan_move, make_persona
+    pk = []
+    for seed in range(20):
+        p = make_persona(str(seed))
+        plan = plan_move((120.0, 140.0), (1020.0, 480.0), p, target_w=40)
+        c, sent, move = _jittery(18.0, 6.0, seed=seed)
+        _pacing.walk(plan, move, clock=c.now, sleep=c.sleep, max_jump=200.0)
+        assert (sent[-1][0], sent[-1][1]) == (plan[-1][0], plan[-1][1])
+        pk.append(_velocity_peaks(sent))
+    assert statistics.median(pk) <= 3.5, pk
+    assert max(pk) <= 8, pk
+
+
+def test_planned_glide_speed_follows_its_report_times():
+    # SC 299: a planned sample's position was taken at the nominal i/n while its report interval jittered
+    # +-12 %, so the speed a page computes swung sample to sample (5 smoothed velocity peaks per planned glide,
+    # SC 298). Walked on time, a single-submovement plan now shows one smooth speed bell.
+    import statistics
+    from clearcote._motion import plan_move, make_persona
+    pk = []
+    for seed in range(30):
+        plan = plan_move((120.0, 140.0), (1020.0, 480.0), make_persona(str(seed)), target_w=40)
+        c, sent, move = _fake(0.0)
+        _pacing.walk(plan, move, clock=c.now, sleep=c.sleep, max_jump=200.0)
+        pk.append(_velocity_peaks(sent))
+    assert statistics.median(pk) <= 1.5, pk
+    assert max(pk) <= 3, pk
+
+
+def test_pacer_hops_beyond_40_px_when_the_plan_is_that_fast():
+    # The old fixed 40 px cap was a wall every persona shared (SC 298: 0 of 4,462 page steps above 40.5 px).
+    # A fast reach at ~3 px/ms with an 18-25 ms round trip covers 55-75 px between two dispatches.
+    from clearcote._motion import plan_move, make_persona, hop_cap_px
+    p = make_persona("3")
+    cap = hop_cap_px(p)
+    plan = plan_move((60.0, 100.0), (1900.0, 900.0), p, target_w=60)
+    c, sent, move = _jittery(22.0, 3.0)
+    _pacing.walk(plan, move, clock=c.now, sleep=c.sleep, max_jump=cap)
+    hops = [math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(sent, sent[1:])]
+    assert max(hops) > 45.0, max(hops)
+    assert max(hops) <= cap + 1e-6
+
+
+def test_hop_cap_is_a_persona_trait():
+    from clearcote._motion import make_persona, hop_cap_px
+    caps = [hop_cap_px(make_persona(str(s))) for s in range(200)]
+    assert all(55.0 <= c <= 110.0 for c in caps)
+    assert max(caps) - min(caps) > 40.0
+    assert hop_cap_px(make_persona("same")) == hop_cap_px(make_persona("same"))
+
+
+def test_pacer_never_sends_a_point_behind_one_already_sent():
+    # Interpolated points move forward along the plan: the plan time of every dispatched point grows.
+    steps = [(i * 4.0, (i % 7) * 1.5, 6.5) for i in range(160)]
+    c, sent, move = _jittery(20.0, 8.0, seed=3)
+    _pacing.walk(steps, move, clock=c.now, sleep=c.sleep)
+    xs = [s[0] for s in sent]
+    assert xs == sorted(xs)
+    assert xs[-1] == steps[-1][0]

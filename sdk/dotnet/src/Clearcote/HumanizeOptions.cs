@@ -28,6 +28,12 @@ public sealed record HumanizeOptions
     /// <summary>"off" | "load" | "idle" (null = "off"): pointer activity without a target, read by the ambient code.</summary>
     public string? Ambient { get; init; }
 
+    /// <summary>The attention model (SC 232 lane C): the reading pause after a page load (0.8-4 s, longer on a page with
+    /// more text) and the idle drifts between actions. On unless false (null = on, since 0.68.0, SC 299: with the model
+    /// off the first input came 0.21-0.31 s after the load on r54 / SDK 0.67.1, as fast as a stock Playwright script);
+    /// <see cref="Ambient"/> = "idle" turns it on as well. Python <c>attention</c>, Node <c>attention</c>.</summary>
+    public bool? Attention { get; init; }
+
     /// <summary>Per-character slip rate 0..1; null = <see cref="Humanize.TypoRateEnv"/>, else 0.02.</summary>
     public double? TypoRate { get; init; }
 
@@ -56,6 +62,7 @@ public sealed record HumanizeOptions
     {
         var o = new System.Text.Json.Nodes.JsonObject { ["preset"] = Preset, ["strict"] = Strict, ["engine"] = Engine };
         if (Ambient is not null) o["ambient"] = Ambient;
+        if (Attention is { } a) o["attention"] = a;
         if (TypoRate is { } t) o["typoRate"] = t;
         if (Handedness is not null) o["handedness"] = Handedness;
         if (DeviceHz is { } h) o["deviceHz"] = h;

@@ -105,6 +105,27 @@ public static class Keys
 
     private static bool IsWs(string? c) => c is " " or "\t" or "\n";
 
+    /// <summary>ROLLOVER by bigram class (SC 299): the next key goes down before this one comes up only when another
+    /// finger is free to press it. The same finger cannot (it has to lift first), a finger of the same hand rolls less
+    /// often than the other hand, and the thumb's space rolls as before. The factors keep the persona's overall share on
+    /// English text (0.34 x 1.35 + 0.21 x 0.65 + 0.39 x 1.0 + 0.06 x 0 = 0.99 of the class-free rate). Measured on r54 /
+    /// SDK 0.67.1 (SC 298/299): the class-free 12-38 % rollover typed same-finger pairs as overlaps, which pulled
+    /// same-finger and same-hand pairs down to the alternating level. Same values as Python ROLLOVER_CLASS_FACTOR.</summary>
+    public static double RolloverClassFactor(string cls) => cls switch
+    {
+        "same_finger" => 0.0, "same_hand" => 0.65, "alternate" => 1.35, _ => 1.0,
+    };
+
+    /// <summary>The largest per-pair rollover chance.</summary>
+    public const double RolloverPairCap = 1.0;
+
+    /// <summary>The chance that the pair <paramref name="prev"/> -> <paramref name="ch"/> is typed with rollover, for a
+    /// persona whose class-free rollover share is <paramref name="rate"/> (<see cref="Motion.RolloverRate"/>):
+    /// <paramref name="rate"/> x the pair's class factor, at most <see cref="RolloverPairCap"/>. Python
+    /// <c>rollover_pair_rate</c>.</summary>
+    public static double RolloverPairRate(double rate, string? prev, string? ch)
+        => Math.Min(RolloverPairCap, rate * RolloverClassFactor(BigramClass(prev, ch).Class));
+
     /// <summary>How much this persona's finger factors and the flight noise stretch a neutral flight on English text
     /// (_keys.english_inflation).</summary>
     public static double EnglishInflation(TypingTraits t)

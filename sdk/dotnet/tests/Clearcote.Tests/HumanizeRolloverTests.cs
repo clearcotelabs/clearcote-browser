@@ -7,7 +7,9 @@ namespace Clearcote.Tests;
 
 // Key rollover in the human type loop (mirrors the Python and Node tests): on some pairs of plain keys
 // the next key goes down before the previous one comes up. r32/r33 typed 0 overlapping keydowns in 32
-// keys, because every character was one press.
+// keys, because every character was one press. SC 299: the chance per pair is the rate x the pair's bigram class
+// factor (Keys.RolloverPairRate: same finger 0, same hand 0.65, alternating hands 1.35, a space 1.0, at most 1), so
+// with the rate forced to 1 only alternating-hand pairs and pairs with a space roll every time.
 public class HumanizeRolloverTests
 {
     // A keyboard whose DownAsync fails for one key, for the failure path.
@@ -68,15 +70,19 @@ public class HumanizeRolloverTests
     public async Task Rolls_pairs_of_plain_keys_and_types_the_exact_text()
     {
         var (page, kb) = FakePage(1.0);
-        await page.HumanTypeAsync("asdf jkl");
+        await page.HumanTypeAsync("asdf jkl");   // same-hand pairs roll at 0.65; " j" (a space) always
         Assert.True(Overlaps(kb.Log) >= 1, "no keydown while the previous key was still held");
         Assert.Equal("asdf jkl", Typed(kb.Log));
+        // alternating hands and a space: every pair rolls at rate 1
+        (page, kb) = FakePage(1.0);
+        await page.HumanTypeAsync("aksl djf");
+        Assert.Equal("aksl djf", Typed(kb.Log));
         Assert.Equal(new (string, string)[]
         {
-            ("down", "a"), ("down", "s"), ("up", "a"), ("up", "s"),
-            ("down", "d"), ("down", "f"), ("up", "d"), ("up", "f"),
-            ("down", " "), ("down", "j"), ("up", " "), ("up", "j"),
-            ("down", "k"), ("down", "l"), ("up", "k"), ("up", "l"),
+            ("down", "a"), ("down", "k"), ("up", "a"), ("up", "k"),
+            ("down", "s"), ("down", "l"), ("up", "s"), ("up", "l"),
+            ("down", " "), ("down", "d"), ("up", " "), ("up", "d"),
+            ("down", "j"), ("down", "f"), ("up", "j"), ("up", "f"),
         }, kb.Log.ToArray());
     }
 
@@ -85,13 +91,46 @@ public class HumanizeRolloverTests
     {
         var (page, kb) = FakePage(1.0);
         await page.HumanTypeAsync("hello");
+        // h-e alternates (rolls); l-l is one key; l-o is the same finger (SC 299: never rolls)
         Assert.Equal(new (string, string)[]
         {
             ("down", "h"), ("down", "e"), ("up", "h"), ("up", "e"),
             ("press", "l"),
-            ("down", "l"), ("down", "o"), ("up", "l"), ("up", "o"),
+            ("press", "l"),
+            ("press", "o"),
         }, kb.Log.ToArray());
         Assert.Equal("hello", Typed(kb.Log));
+    }
+
+    [Fact]
+    public async Task Same_finger_pairs_never_roll()
+    {
+        // SC 299 (r54 / 0.67.1): the class-free rollover typed same-finger pairs as overlaps, a keydown interval of one
+        // dwell less the overlap -- a same finger cannot press the next key before it lifts.
+        for (int k = 0; k < 20; k++)
+        {
+            var (page, kb) = FakePage(1.0);
+            await page.HumanTypeAsync("dedede lolo");   // d-e, e-d, l-o, o-l: same finger; e-' ', ' '-l: a space
+            var log = kb.Log.ToList();
+            var held = new HashSet<string>();
+            foreach (var (op, key) in log)
+            {
+                if (op == "down")
+                {
+                    if (held.Count > 0)
+                        Assert.True(held.Contains(" ") || key == " ", $"run {k}: '{key}' went down while {string.Join(",", held)} was held");
+                    held.Add(key);
+                }
+                else if (op == "up") held.Remove(key);
+            }
+            Assert.Equal("dedede lolo", Typed(log));
+        }
+        Assert.Equal(0.0, Keys.RolloverPairRate(1.0, "d", "e"));
+        Assert.Equal(0.0, Keys.RolloverPairRate(0.38, "l", "o"));
+        Assert.Equal(0.38 * 0.65, Keys.RolloverPairRate(0.38, "a", "s"), 12);
+        Assert.Equal(0.30 * 1.35, Keys.RolloverPairRate(0.30, "a", "k"), 12);
+        Assert.Equal(1.0, Keys.RolloverPairRate(0.9, "a", "k"));   // capped
+        Assert.Equal(0.25, Keys.RolloverPairRate(0.25, "a", " "), 12);
     }
 
     [Fact]
@@ -120,8 +159,8 @@ public class HumanizeRolloverTests
     public async Task A_failure_inside_a_roll_releases_both_keys_and_stops_typing()
     {
         var (page, kb) = FakePage<FailingKeyboard>(1.0);
-        ((FailingKeyboard)kb).FailDown = "s";
-        await Assert.ThrowsAsync<PlaywrightException>(() => page.HumanTypeAsync("asdf"));
-        Assert.Equal(new (string, string)[] { ("down", "a"), ("up", "a"), ("up", "s") }, kb.Log.ToArray());
+        ((FailingKeyboard)kb).FailDown = "k";
+        await Assert.ThrowsAsync<PlaywrightException>(() => page.HumanTypeAsync("akdl"));   // a-k alternates: always rolls
+        Assert.Equal(new (string, string)[] { ("down", "a"), ("up", "a"), ("up", "k") }, kb.Log.ToArray());
     }
 }

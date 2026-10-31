@@ -10,8 +10,9 @@ input lock -- and sleep / dispatch what they return. Same values in ``attention.
 * When more than IDLE_GAP_S pass between two actions, the hand idles: 1-2 ambient drifts of 300-900 ms
   (``plan_ambient`` trimmed by ``_pacing.trim_to``) before the next action.
 
-OFF by default. On when the launch option ``ambient="idle"`` / ``attention=True`` (lane A) is set, or the
-hidden page flag ``page._clearcote_attention = True``.
+ON by default since 0.68.0 (SC 299). Measured on r54 / SDK 0.67.1 (SC 298/299): with the model off, the first
+input came 0.21-0.31 s after the load on every persona, as fast as a stock Playwright script. Off with the
+option ``attention=False``; the page flag ``page._clearcote_attention`` (True / False) overrides both ways.
 """
 from __future__ import annotations
 
@@ -91,6 +92,17 @@ def option(page, name, default=None):
         return getattr(opts, name, default)
     except Exception:  # noqa: BLE001
         return default
+
+
+def attention_enabled(page) -> bool:
+    """Is the attention model on for this page: the page flag ``_clearcote_attention`` when it is True or False,
+    else on unless the ``attention`` option is False -- or when ``ambient="idle"`` asks for it."""
+    flag = page.__dict__.get("_clearcote_attention") if hasattr(page, "__dict__") else None
+    if flag is True or flag is False:
+        return flag
+    if ambient_mode(page) == "idle":
+        return True
+    return option(page, "attention", None) is not False
 
 
 def ambient_mode(page) -> str:

@@ -273,6 +273,22 @@ export const ISO_FRAMES = `(ms) => window.__ccFramed ? true : new Promise((done)
 })`;
 // The platform the page believes (the persona's), for the wheel notch size.
 export const ISO_PLATFORM = "() => { const d = navigator.userAgentData; return (d && d.platform) || navigator.platform || ''; }";
+// May the hand drift off the point it just clicked AT ONCE (the eager move-off, SC 299)? Not when typing follows
+// (focus in a field), nor off a control that opens something the next action may use (a menu, a listbox, a
+// combobox, anything with aria-haspopup or aria-expanded=true): a drift off those can close them. False then,
+// and when the page cannot answer: the move-off waits for the next action instead (the lazy rule). Same script
+// as _isolated.py MOVE_OFF_SAFE.
+export const ISO_MOVE_OFF_SAFE = `(p) => { try {
+  const typing = (e) => !!e && (e.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.tagName || ''));
+  if (typing(document.activeElement)) return false;
+  let e = document.elementFromPoint(p[0], p[1]);
+  for (let k = 0; e && k < 6; k++, e = e.parentElement) {
+    if (typing(e)) return false;
+    if (e.hasAttribute && (e.hasAttribute('aria-haspopup') || e.getAttribute('aria-expanded') === 'true')) return false;
+    const r = ((e.getAttribute && e.getAttribute('role')) || '').toLowerCase();
+    if (/^(menu|menubar|menuitem|menuitemcheckbox|menuitemradio|listbox|option|combobox|tooltip|tab)$/.test(r)) return false;
+  }
+  return true; } catch (x) { return false; } }`;
 // The main frame's scroll offset: DOM.getNodeForLocation wants document coordinates.
 export const ISO_SCROLL = "() => [scrollX, scrollY]";
 

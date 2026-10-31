@@ -97,6 +97,25 @@ export function bigramClass(prev: string | null | undefined, ch: string | null |
   return ["alternate", false];
 }
 
+// ROLLOVER by bigram class (SC 299): the next key goes down before this one comes up only when another finger is
+// free to press it. The same finger cannot (it has to lift first), a finger of the same hand rolls less often than
+// the other hand, and the thumb's space rolls as before. The factors keep the persona's overall share on English
+// text (0.34 x 1.35 + 0.21 x 0.65 + 0.39 x 1.0 + 0.06 x 0 = 0.99 of the class-free rate).
+// Measured on r54 / SDK 0.67.1 (SC 298/299): the class-free 12-38 % rollover typed same-finger pairs as overlaps,
+// a keydown interval of one dwell less the overlap, which pulled same-finger and same-hand pairs down to the
+// alternating level (same-hand / alternate 0.98-1.09 against the model's 1.1-1.3 flight factors).
+// Same values in _keys.py ROLLOVER_CLASS_FACTOR.
+export const ROLLOVER_CLASS_FACTOR: Readonly<Record<BigramClass, number>> = { same_finger: 0, same_hand: 0.65, alternate: 1.35, none: 1 };
+export const ROLLOVER_PAIR_CAP = 1;
+
+/** The chance that the pair `prev` -> `ch` is typed with rollover, for a persona whose class-free rollover share
+ *  is `rate` (motion.ts rolloverRate): `rate` x the pair's class factor, at most ROLLOVER_PAIR_CAP. Port of
+ *  _keys.rollover_pair_rate. */
+export function rolloverPairRate(rate: number, prev: string | null | undefined, ch: string | null | undefined): number {
+  const [cls] = bigramClass(prev, ch);
+  return Math.min(ROLLOVER_PAIR_CAP, rate * (ROLLOVER_CLASS_FACTOR[cls] ?? 1));
+}
+
 const PUNCT = ".,;:!?";
 const isWs = (c: string | null | undefined) => c === " " || c === "\t" || c === "\n";
 

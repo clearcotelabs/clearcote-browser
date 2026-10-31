@@ -16,7 +16,10 @@ namespace Clearcote;
 /// <item>When more than <see cref="IdleGapS"/> pass between two actions, the hand idles: 1–2 ambient drifts of
 /// 300–900 ms before the next action.</item>
 /// </list>
-/// OFF by default.
+/// ON by default since 0.68.0 (SC 299; measured on r54 / SDK 0.67.1 with the model off, the first input came
+/// 0.21-0.31 s after the load on every persona, as fast as a stock Playwright script). Off with
+/// <c>HumanizeOptions.Attention = false</c>; the page flag (<c>Humanize.AttentionFlag</c>, true / false) overrides both
+/// ways. Same rule as Python <c>attention_enabled</c>.
 /// </summary>
 public static class Attention
 {
@@ -90,7 +93,8 @@ public static partial class Humanize
     private static readonly ConditionalWeakTable<IPage, AfterState> Afters = new();
     private static AfterState AfterOf(IPage page) => Afters.GetValue(page, _ => new AfterState());
 
-    /// <summary>Hidden switch for the attention model (test seam; the public switch is <c>HumanizeOptions.Ambient = "idle"</c>).</summary>
+    /// <summary>Page flag for the attention model (test seam, Python's <c>page._clearcote_attention</c>): when set, true / false
+    /// overrides <see cref="HumanizeOptions.Attention"/> both ways (<see cref="AttentionOn"/>).</summary>
     internal static readonly ConditionalWeakTable<IPage, StrongBox<bool>> AttentionFlag = new();
 
     /// <summary>Test seam for the page's ambient mode, "off" | "load" | "idle", consulted when the page has no
@@ -106,14 +110,23 @@ public static partial class Humanize
     private static string AmbientMode(IPage page)
     {
         // The page's HumanizeOptions.Ambient (Attach(page, options)) wins; the internal table is the test seam.
-        var m = OptionsFor(page)?.Ambient;
+        var o = OptionsFor(page);
+        var m = o?.Ambient;
+        if (m is null && o?.Attention == true) return "idle";   // as Python ambient_mode: attention=True maps to "idle"
         if (m is null && (!AmbientModes.TryGetValue(page, out m) || m is null)) return "off";
         m = m.Trim().ToLowerInvariant();
         return m is "load" or "idle" ? m : "off";
     }
 
+    /// <summary>Is the attention model on for this page (SC 299: on by default): the page flag when set, else on when
+    /// the ambient mode is "idle", else on unless <see cref="HumanizeOptions.Attention"/> is false. Python
+    /// <c>_attention.attention_enabled</c>.</summary>
     private static bool AttentionOn(IPage page)
-        => (AttentionFlag.TryGetValue(page, out var f) && f.Value) || AmbientMode(page) == "idle";
+    {
+        if (AttentionFlag.TryGetValue(page, out var f)) return f.Value;
+        if (AmbientMode(page) == "idle") return true;
+        return OptionsFor(page)?.Attention != false;
+    }
 
     // Per-action draws are UNSEEDED, as in PlanMove: the seed fixes the persona's traits only (Motion.AfterTraitsOf);
     // a seeded per-action sequence would replay identically in every session of an identity.
@@ -211,7 +224,8 @@ public static partial class Humanize
         double t = Tempo(page);   // HumanizeOptions.Preset: every planned duration x1.4 / x1.0 / x0.7 (as GlideAsync)
         if (t != 1.0) steps = steps.Select(s => s with { SleepMs = s.SleepMs * t }).ToList();
         await Pacing.WalkAsync(vp is { } v ? Pacing.KeepInView(steps, v.W, v.H) : steps,
-            (x, y) => page.Mouse.MoveAsync((float)x, (float)y), kind: kind).ConfigureAwait(false);
+            (x, y) => page.Mouse.MoveAsync((float)x, (float)y), maxJump: Motion.HopCapPx(PersonaFor(page)), kind: kind)
+            .ConfigureAwait(false);
         st.X = steps[^1].X;
         st.Y = steps[^1].Y;
         st.Known = true;
@@ -235,10 +249,28 @@ public static partial class Humanize
         await WalkStepsAsync(page, st, steps, kind: "hover").ConfigureAwait(false);
     }
 
-    /// <summary>After a press: in the persona's 60–85 % of clicks a move-off comes due 200–700 ms after the release.
-    /// It runs at the start of the next action (or in HumanSettleAsync) if it is due by then and nothing has moved the
-    /// pointer since; otherwise it is dropped -- the next glide is the move-off.</summary>
-    private static void ScheduleMoveOff(IPage page, Persona p, PointerState st)
+    /// <summary>May the hand drift off the point it just clicked at once (<see cref="IsolatedWorld.MoveOffSafe"/>)? False
+    /// when the page cannot answer (a navigation took the document away): the move-off then waits for the next action.
+    /// Python <c>_move_off_safe</c>.</summary>
+    private static async Task<bool> MoveOffSafeAsync(IPage page, PointerState st)
+    {
+        try
+        {
+            var r = await IsolatedWorld.For(page).EvaluateAsync(IsolatedWorld.MoveOffSafe, new[] { st.X, st.Y }).ConfigureAwait(false);
+            return r is { ValueKind: JsonValueKind.True };
+        }
+        catch (Exception) { return false; }
+    }
+
+    /// <summary>After a press: in the persona's 60–85 % of clicks the hand drifts off 200–700 ms after the release.
+    /// <para>EAGER (SC 299): the click waits that long and makes the move-off before it returns, so the pointer leaves
+    /// the pressed pixel while the script itself sleeps. Measured on r54 / SDK 0.67.1 (SC 299): with the lazy rule alone
+    /// the pointer stayed on the pressed pixel through every 1.6 s pause after a click (0 of 12), and a move-off only
+    /// appeared when the next action started. Not where typing follows or off a control that opens something
+    /// (<see cref="MoveOffSafeAsync"/>), nor with <paramref name="eager"/> false: there it stays lazy -- it runs at the
+    /// start of the next action (or in HumanSettleAsync) if it is due by then and nothing has moved the pointer since;
+    /// otherwise it is dropped -- the next glide is the move-off. Python <c>_schedule_move_off</c>.</para></summary>
+    private static async Task ScheduleMoveOffAsync(IPage page, Persona p, PointerState st, bool eager = true)
     {
         var af = AfterOf(page);
         var rng = AfterRngOf(page, p);
@@ -249,6 +281,14 @@ public static partial class Humanize
         {
             af.MoHits++;
             af.MoveOff = (NowMs() + (long)Math.Round(Motion.MoveOffDelayMs(p, rng)), st.X, st.Y);
+            if (eager && await MoveOffSafeAsync(page, st).ConfigureAwait(false))
+            {
+                Trace(af, "move_off_eager");
+                // Best effort: the click already landed; a drift that fails because the page navigated or closed must
+                // never make the click throw (Python / Node swallow it the same way).
+                try { await RunMoveOffAsync(page, p, st, wait: true).ConfigureAwait(false); }
+                catch (Exception) { /* best effort */ }
+            }
         }
     }
 

@@ -32,8 +32,8 @@ vi.mock("../src/motion.js", async (importOriginal) => {
 
 import { attachHumanize } from "../src/humanize.js";
 import { ISO_PLATFORM, ISO_VIEWPORT } from "../src/isolated.js";
-import { walk, trimTo, schedule, speedAt, STALL_MS, FAST_PX_PER_MS } from "../src/pacing.js";
-import { makePersona, planAmbient } from "../src/motion.js";
+import { walk, trimTo, schedule, speedAt, STALL_MS, FAST_PX_PER_MS, MAX_JUMP_PX, jumpCap, nextIndex } from "../src/pacing.js";
+import { hopCapPx, makePersona, mulberry32, planAmbient, planMove } from "../src/motion.js";
 
 type Ev = { op: string; t: number; x?: number; y?: number };
 
@@ -92,8 +92,11 @@ const maxGap = (pts: { x: number; y: number }[]) => {
   return m;
 };
 
+// The largest persona hop cap (motion.ts hopCapPx draws 55-110 px).
+const HOP_CAP_MAX = 110;
+
 // No dispatched hop longer than a fast hand covers between the two events (3 px/ms, >= floor).
-const hopsOk = (moves: Ev[], floor = 40): boolean => {
+const hopsOk = (moves: Ev[], floor = HOP_CAP_MAX): boolean => {
   for (let i = 1; i < moves.length; i++) {
     const d = Math.hypot(moves[i].x! - moves[i - 1].x!, moves[i].y! - moves[i - 1].y!);
     if (d > Math.max(floor, FAST_PX_PER_MS * (moves[i].t - moves[i - 1].t)) + 1e-6) return false;
@@ -108,8 +111,8 @@ const checkWalk = (from: { x: number; y: number }, plan: any[], moves: Ev[], dur
   const lastM = moves[moves.length - 1], lastP = plan[plan.length - 1];
   expect([lastM.x, lastM.y]).toEqual([lastP.x, lastP.y]);
   const own = maxGap([from, ...plan]);
-  expect(Math.hypot(moves[0].x! - from.x, moves[0].y! - from.y)).toBeLessThanOrEqual(Math.max(40, own) + 1e-6);
-  expect(hopsOk(moves, Math.max(40, own)), "a skipped stretch teleported the cursor").toBe(true);
+  expect(Math.hypot(moves[0].x! - from.x, moves[0].y! - from.y)).toBeLessThanOrEqual(Math.max(HOP_CAP_MAX, own) + 1e-6);
+  expect(hopsOk(moves, Math.max(HOP_CAP_MAX, own)), "a skipped stretch teleported the cursor").toBe(true);
 };
 
 const setup = async (lat: number, seed: string) => {
@@ -170,7 +173,7 @@ describe("humanize pacing: planned paths keep their planned duration", () => {
         expect(mv[0].y).toBeGreaterThanOrEqual(0); expect(mv[0].y).toBeLessThanOrEqual(4);
         expect(took, `ambientMotion(${ms}) took ${took.toFixed(0)} ms`).toBeGreaterThanOrEqual(0.8 * ms);
         // With 25 ms latency a late walk stretches instead of catching up with jumps (SC 210 fix 2, no hop
-        // over 40 px): ambient's fast flicks run long (Python, 30 plans: worst 1.67x at 600 ms).
+        // over the persona's hop cap): ambient's fast flicks run long (Python, 30 plans: worst 1.67x at 600 ms).
         expect(took, `ambientMotion(${ms}) took ${took.toFixed(0)} ms`).toBeLessThanOrEqual((lat === 0 ? 1.2 : 1.8) * ms);
         expect(hopsOk(mv)).toBe(true);
       }, 60_000);
@@ -221,14 +224,15 @@ describe("pacing.walk", () => {
   for (const stall of [200, 350, 500]) {
     it(`after a ${stall} ms stall it stretches instead of jumping (SC 210 lab v2)`, async () => {
       // 35 hops of 60-103 px a few ms apart on r38 under load: the old cap (3 px/ms x the time since the
-      // last dispatch) let a slow dispatch turn into one big catch-up hop. Now <= 40 px, <= 20 px after it.
+      // last dispatch) let a slow dispatch turn into one big catch-up hop. Now no hop is longer than the hop
+      // cap (MAX_JUMP_PX without a persona), nor more than 20 px right after it: the walk takes longer.
       const steps = Array.from({ length: 300 }, (_, i) => ({ x: i * 3, y: 0, sleepMs: 2 }));
       let t = 0;
       const sent: { x: number; t: number }[] = [];
       await walk(steps, async (x) => { t += [3, 9, 15].includes(sent.length) ? stall : 25; sent.push({ x, t }); },
         { now: () => t, sleep: async (ms) => { t += Math.max(0, ms); } });
       const hops = sent.slice(1).map((s, k) => s.x - sent[k].x);
-      expect(Math.max(...hops)).toBeLessThanOrEqual(40 + 1e-6);
+      expect(Math.max(...hops)).toBeLessThanOrEqual(MAX_JUMP_PX + 1e-6);
       for (const k of [3, 9, 15]) expect(hops[k], `the hop after stall ${k}`).toBeLessThanOrEqual(20 + 1e-6);
       expect(sent[sent.length - 1].x).toBe(299 * 3);
     });
@@ -286,6 +290,148 @@ describe("pacing.walk", () => {
       expect(total).toBeLessThanOrEqual(600 + 1e-6);
       if (total > 1.1 * 300) expect(speedAt(plan, cut.length - 1)).toBeLessThanOrEqual(0.3 * peak);
     }
+  });
+});
+
+// ---------------------------------------------------------------- SC 299: interpolated points, persona hop cap
+describe("pacing.walk: interpolated points and the persona hop cap (SC 299)", () => {
+  type Sent = { x: number; y: number; t: number };
+  /** Local maxima (above 40 % of the peak) of the 5-sample moving average of hop / dt. */
+  const velocityPeaks = (sent: Sent[], smooth = 5): number => {
+    let v: number[] = [];
+    for (let k = 1; k < sent.length; k++) {
+      const dt = sent[k].t - sent[k - 1].t;
+      if (dt > 0) v.push(Math.hypot(sent[k].x - sent[k - 1].x, sent[k].y - sent[k - 1].y) / dt);
+    }
+    if (smooth > 1) {
+      const h = Math.floor(smooth / 2);
+      v = v.map((_, i) => { const w = v.slice(Math.max(0, i - h), i + h + 1); return w.reduce((a, b) => a + b, 0) / w.length; });
+    }
+    const top = v.length ? Math.max(...v) : 0;
+    let n = 0;
+    for (let i = 1; i < v.length - 1; i++) if (v[i] >= v[i - 1] && v[i] > v[i + 1] && v[i] > 0.4 * top) n++;
+    return n;
+  };
+  /** A fake clock whose move costs lat +- spread ms (seeded), stamped when its round trip ends. */
+  const jittery = (lat: number, spread: number, seed = 7) => {
+    const r = mulberry32(seed);
+    let t = 0;
+    const sent: Sent[] = [];
+    return {
+      now: () => t,
+      sleep: async (ms: number) => { t += Math.max(0, ms); },
+      move: async (x: number, y: number) => { t += Math.max(1, lat - spread + 2 * spread * r()); sent.push({ x, y, t }); },
+      sent,
+    };
+  };
+  const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const hops = (sent: Sent[]) => sent.slice(1).map((s, k) => Math.hypot(s.x - sent[k].x, s.y - sent[k].y));
+
+  /** The pre-SC 299 walk (whole planned samples only, nextIndex), on the same fake clock: the reference. */
+  const legacyWalk = async (steps: { x: number; y: number; sleepMs: number }[], c: ReturnType<typeof jittery>, maxJump: number) => {
+    const { due } = schedule(steps);
+    let t0 = c.now(), tLast = t0, i = 0;
+    let last: { x: number; y: number } | null = null;
+    while (i < steps.length) {
+      const el = c.now() - t0;
+      if (el < due[i]) await c.sleep(due[i] - el);
+      else i = nextIndex(steps, due, i, last, el, jumpCap(maxJump, c.now() - tLast));
+      const tb = c.now();
+      await c.move(steps[i].x, steps[i].y);
+      const took = c.now() - tb;
+      if (took > STALL_MS) t0 += took - STALL_MS;
+      last = steps[i]; tLast = tb; i++;
+    }
+  };
+
+  it("sends the point on the path when late and keeps its speed", async () => {
+    // SC 298 on Windows: an ~18 ms round trip against ~7 ms planned samples. Skipping to whole samples hopped
+    // 2 or 3 at a time (a sawtooth of 7-8 velocity peaks per glide). Sending the path's point at the elapsed
+    // time keeps one smooth speed profile. The fake stamps each point when its round trip ends, so the jitter
+    // itself adds some wobble. Python's version (random.Random latencies, unseeded plans) holds a median of
+    // <= 3.5 smoothed peaks over 20 personas; the stream here is seeded (plans AND latencies: the same lists
+    // come out of Python's walk for these inputs), median 3.0-4.0 across plan streams, so the band is <= 4, with
+    // fewer peaks in all than the old walk makes on the very same plans and round trips.
+    for (const planSalt of [0, 100, 200]) {
+      const pk: number[] = [], old: number[] = [];
+      for (let seed = 0; seed < 20; seed++) {
+        const plan = planMove({ x: 120, y: 140 }, { x: 1020, y: 480 }, makePersona(String(seed)), { targetW: 40, rng: mulberry32(planSalt + seed) });
+        const c = jittery(18, 6, seed + 50);
+        await walk(plan, c.move, { now: c.now, sleep: c.sleep, maxJump: 200 });
+        expect([c.sent[c.sent.length - 1].x, c.sent[c.sent.length - 1].y]).toEqual([plan[plan.length - 1].x, plan[plan.length - 1].y]);
+        pk.push(velocityPeaks(c.sent));
+        const c2 = jittery(18, 6, seed + 50);
+        await legacyWalk(plan, c2, 200);
+        old.push(velocityPeaks(c2.sent));
+      }
+      expect(median(pk), `${pk} (old walk ${old})`).toBeLessThanOrEqual(4);
+      expect(Math.max(...pk), String(pk)).toBeLessThanOrEqual(8);
+      const sum = (a: number[]) => a.reduce((x, y) => x + y, 0);
+      expect(sum(pk), `${pk} (old walk ${old})`).toBeLessThan(sum(old));
+    }
+  });
+
+  it("a late point lies on the planned path between the two samples around it", async () => {
+    const steps = Array.from({ length: 60 }, (_, i) => ({ x: i * 5, y: (i % 2) * 3, sleepMs: 7 }));
+    const c = jittery(18, 0);
+    await walk(steps, c.move, { now: c.now, sleep: c.sleep });
+    let between = 0;
+    for (const s of c.sent) {
+      const k = Math.floor(s.x / 5);
+      if (s.x === k * 5) continue;   // a planned sample itself
+      between++;
+      const a = steps[k], b = steps[k + 1];
+      const f = (s.x - a.x) / (b.x - a.x);
+      expect(s.y).toBeCloseTo(a.y + (b.y - a.y) * f, 9);
+    }
+    expect(between, "points between planned samples").toBeGreaterThan(5);
+    expect(c.sent[c.sent.length - 1].x).toBe(59 * 5);
+  });
+
+  it("planned glide speed follows its report times", async () => {
+    // SC 299: a planned sample's position was taken at the nominal i/n while its report interval jittered
+    // +-12 %, so the speed a page computes swung sample to sample (5 smoothed velocity peaks per planned glide,
+    // SC 298). Walked on time, a single-submovement plan now shows one smooth speed bell. (Seeded plans here, so
+    // the run is the same every time; Python's version draws them unseeded.)
+    const pk: number[] = [];
+    for (let seed = 0; seed < 30; seed++) {
+      const plan = planMove({ x: 120, y: 140 }, { x: 1020, y: 480 }, makePersona(String(seed)), { targetW: 40, rng: mulberry32(seed) });
+      const c = jittery(0, 0);
+      await walk(plan, c.move, { now: c.now, sleep: c.sleep, maxJump: 200 });
+      pk.push(velocityPeaks(c.sent));
+    }
+    expect(median(pk), String(pk)).toBeLessThanOrEqual(1.5);
+    expect(Math.max(...pk), String(pk)).toBeLessThanOrEqual(3);
+  });
+
+  it("hops beyond 40 px when the plan is that fast", async () => {
+    // The old fixed 40 px cap was a wall every persona shared (SC 298: 0 of 4,462 page steps above 40.5 px).
+    // A fast reach at ~3 px/ms with an 18-25 ms round trip covers 55-75 px between two dispatches.
+    const p = makePersona("3");
+    const cap = hopCapPx(p);
+    const plan = planMove({ x: 60, y: 100 }, { x: 1900, y: 900 }, p, { targetW: 60, rng: mulberry32(3) });
+    const c = jittery(22, 3);
+    await walk(plan, c.move, { now: c.now, sleep: c.sleep, maxJump: cap });
+    const h = hops(c.sent);
+    expect(Math.max(...h)).toBeGreaterThan(45);
+    expect(Math.max(...h)).toBeLessThanOrEqual(cap + 1e-6);
+  });
+
+  it("the hop cap is a persona trait", () => {
+    const caps = Array.from({ length: 200 }, (_, s) => hopCapPx(makePersona(String(s))));
+    expect(caps.every((c) => c >= 55 && c <= 110)).toBe(true);
+    expect(Math.max(...caps) - Math.min(...caps)).toBeGreaterThan(40);
+    expect(hopCapPx(makePersona("same"))).toBe(hopCapPx(makePersona("same")));
+  });
+
+  it("never sends a point behind one already sent", async () => {
+    // Interpolated points move forward along the plan: the plan time of every dispatched point grows.
+    const steps = Array.from({ length: 160 }, (_, i) => ({ x: i * 4, y: (i % 7) * 1.5, sleepMs: 6.5 }));
+    const c = jittery(20, 8, 3);
+    await walk(steps, c.move, { now: c.now, sleep: c.sleep });
+    const xs = c.sent.map((s) => s.x);
+    expect([...xs].sort((a, b) => a - b)).toEqual(xs);
+    expect(xs[xs.length - 1]).toBe(steps[steps.length - 1].x);
   });
 });
 

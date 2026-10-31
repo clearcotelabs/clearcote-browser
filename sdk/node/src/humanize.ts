@@ -31,7 +31,7 @@ import type { Browser, BrowserContext, Locator, Page } from "playwright-core";
 import { errors as pwErrors } from "playwright-core";
 import {
   makePersona, planMove, entryPoint, enterFromTop, ENTRY_LEAD_MS, aimTraits, dragDwell, dragHesitation, hesitateThenDrag, clickHold, keyDwell, clickPoint, planAmbient, gaussFrom, rolloverRate,
-  dblclickGap, pauseMs, timingTraits,
+  hopCapPx, dblclickGap, pauseMs, timingTraits,
   wheelNotches, platformFromNavigator, WHEEL_NOTCH_PX, type Box, type Persona, type Point, type Step, type WheelPlatform,
 } from "./motion.js";
 import {
@@ -41,17 +41,17 @@ import {
 import {
   dwellMs, moveOffDelayMs, moveOffRoll, planDwell, planMoveOff,
 } from "./motion.js";
-import { ambientMode, exploreNotches, idleDrifts, readPauseMs, IDLE_DRIFT_MAX_MS, TEXT_LENGTH as ISO_TEXT_LENGTH } from "./attention.js";
+import { ambientMode, attentionEnabled, exploreNotches, idleDrifts, readPauseMs, IDLE_DRIFT_MAX_MS, TEXT_LENGTH as ISO_TEXT_LENGTH } from "./attention.js";
 import { keepInView, trimTo, walk } from "./pacing.js";
 import { record as traceRecord, traceEnabled } from "./trace.js";
 import { pressAndHold, type PressAndHoldOptions } from "./hold.js";
 import {
   BLANK_POINT, FOCUSABLE, SEARCH_SLIP_RATE, SELECTION_STATE, TAB_DISTANCE, WORD_FIX_RATE, flightMs, modifierLagMs,
-  modifierLeadMs, planGap, planRepeat, splitChord, submitPauseMs, tabPauseMs, typingTraits, type TabInfo,
+  modifierLeadMs, planGap, planRepeat, rolloverPairRate, splitChord, submitPauseMs, tabPauseMs, typingTraits, type TabInfo,
 } from "./keys.js";
 import {
   COVER_CHECK_MS, COVER_RETRY_MS, SETTLE_MS, SETTLE_TRIES, ISO_COVER, ISO_ACTIVE_FIELD, ISO_ACTIVE_VALUE, ISO_CSS_BOX, ISO_DESCRIBE, ISO_FORM_CONTROL,
-  ISO_FRAMES, ISO_HIT_IN_BOX, ISO_LABEL_BY_SEL, ISO_LABEL_OF, ISO_LISTBOX_ROW, ISO_PLATFORM, ISO_SCROLL_BY, ISO_VIEWPORT,
+  ISO_FRAMES, ISO_HIT_IN_BOX, ISO_LABEL_BY_SEL, ISO_LABEL_OF, ISO_LISTBOX_ROW, ISO_MOVE_OFF_SAFE, ISO_PLATFORM, ISO_SCROLL_BY, ISO_VIEWPORT,
   roundHalfEven, worldFor, type DescribedElement,
 } from "./isolated.js";
 import { NATIVE, frameLocatorOf, frameRoute, handleAsLocator, humanized as frameHumanized, strictMode } from "./frames.js";
@@ -533,9 +533,10 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
   // Native input carries the button state, so a button pressed via mouse.down() stays held across
   // the whole path — the same code powers a free move AND a held-button drag.
   //
-  // Paced against a WALL CLOCK (pacing.ts): each sample goes out at its planned time and late ones
-  // are skipped (never the last, and no skip hops more than 40 px, or 20 px once nothing has been
-  // dispatched for 40 ms: MAX_JUMP_PX / IDLE_HOP_PX). "Move, then sleep the planned gap" added the
+  // Paced against a WALL CLOCK (pacing.ts): each sample goes out at its planned time, and a late walk
+  // sends the point on the planned path at the elapsed time instead (never past the last sample or a
+  // pinned one, and no hop longer than the persona's hop cap, hopCapPx 55-110 px, or 20 px once nothing
+  // has been dispatched for 40 ms: IDLE_HOP_PX). "Move, then sleep the planned gap" added the
   // ~27 ms mouse.move round trip to every 6-8 ms sample: a 1.05 s planned glide took 3.5-5.4 s on
   // PRO r38 (SC 209), ambient motion 5.7x as long.
   // `kind` / `buttons` name the walk for the score hook (trace.ts, lane G): glide | drag (buttons 1) | ambient | hover.
@@ -543,7 +544,7 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
     const vp = await viewBounds();
     if (tempo !== 1) steps = steps.map((s) => ({ ...s, sleepMs: s.sleepMs * tempo }));
     await walk(vp ? keepInView(steps, vp.width, vp.height) : steps, async (x, y) => { await nativeMove(x, y); st.placed = true; },
-      { kind, buttons });
+      { kind, buttons, maxJump: hopCapPx(persona) });
   };
   // The viewport a planned path is kept inside (keepInView: the planner's overshoot arcs left the window
   // near its edges, verifier B), read in the isolated world at most every 2 s; null when it cannot be read.
@@ -853,7 +854,7 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
     }
     // Not after an engine click (returned above): a glide the engine does not see would take the next
     // coordinate click off the engine path (engineInSync).
-    scheduleMoveOff();
+    await scheduleMoveOff();
   };
   mouse.click = (x: number, y: number, options: any = {}) => locked(() => hclick(x, y, options));
   // Stock dblclick teleported and pressed for ~0 ms: route it through the humanized click.
@@ -1318,7 +1319,8 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
     const rolls = new Set<number>();
     if (floor <= 0 && nativeKbDown && nativeKbUp) {
       for (let i = 0; i < n - 1; i++) {
-        if (ROLL_KEYS.has(chars[i]) && ROLL_KEYS.has(chars[i + 1]) && chars[i] !== chars[i + 1] && Math.random() < rollRate) rolls.add(i);
+        if (ROLL_KEYS.has(chars[i]) && ROLL_KEYS.has(chars[i + 1]) && chars[i] !== chars[i + 1]
+            && Math.random() < rolloverPairRate(rollRate, chars[i], chars[i + 1])) rolls.add(i);
       }
     }
     // r43 engine (SC 232 lane H): a run with no slip to plan (typos off, or a field where a slip is a failure), no
@@ -2899,7 +2901,7 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
         await dwellOn(x, y, box, dwell); // the hand rests on what it hovered (SC 232 lane C)
       } else {
         await pressAt(o);
-        if (moveOff) scheduleMoveOff();
+        if (moveOff) await scheduleMoveOff();
       }
       return;
     } catch (e) {
@@ -3152,8 +3154,8 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
   // (afterRun), or by page.settle(), never from a timer. The seed fixes the persona's traits (motion.afterTraits,
   // a salted stream: every existing draw keeps its order); every per-action draw is unseeded.
   // (Function declarations: hoisted, so locked()/targetedClick above can call them.)
-  // Hidden switch for the attention model until lane A's `ambient: "idle"` / `attention` option lands.
-  (page as any)._clearcoteAttention = false;
+  // The attention model is on unless the `attention` option is false (SC 299); the page flag
+  // `page._clearcoteAttention` (true / false), when set, overrides it (attention.ts attentionEnabled).
   // Test seam: what the after-action model did, newest last (bounded).
   (page as any)._clearcoteAfterTrace = af.trace;
   const wheelInner = mouse.wheel;   // the humanized wheel, before the after-action wrapper below
@@ -3198,7 +3200,7 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
   }
 
   function attentionOn(): boolean {
-    return (page as any)._clearcoteAttention === true || ambientMode(page) === "idle";
+    return attentionEnabled(page);
   }
 
   async function dwellOn(x: number, y: number, box: Box | null, dwell: unknown): Promise<void> {
@@ -3218,13 +3220,37 @@ export async function attachHumanize(browser: Browser | null, page: Page, opts: 
     if (steps.length) { st.x = steps[steps.length - 1].x; st.y = steps[steps.length - 1].y; }
   }
 
-  function scheduleMoveOff(): void {
+  /** May the hand drift off the point it just clicked at once (isolated.ts ISO_MOVE_OFF_SAFE)? False when the
+   *  page cannot answer (a navigation took the document away): the move-off then waits for the next action. */
+  async function moveOffSafe(): Promise<boolean> {
+    try {
+      return (await worldFor(page).evaluate(ISO_MOVE_OFF_SAFE, [st.x, st.y])) === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** After a press: in the persona's 60-85 % of clicks the hand drifts off 200-700 ms after the release.
+   *
+   *  EAGER (SC 299): the click waits that long and makes the move-off before it returns, so the pointer leaves the
+   *  pressed pixel while the script itself sleeps. Measured on r54 / SDK 0.67.1 (SC 299): with the lazy rule alone
+   *  the pointer stayed on the pressed pixel through every 1.6 s pause after a click (0 of 12), and a move-off only
+   *  appeared when the next action started. Not where typing follows or off a control that opens something
+   *  (moveOffSafe): there it stays lazy -- it runs at the start of the next action (or in page.settle()) if due by
+   *  then and nothing has moved the pointer since, else the next glide is the move-off. */
+  async function scheduleMoveOff(): Promise<void> {
     const hit = moveOffRoll(persona, af.rng, af.moHits, af.moN);
     af.moN++;
     af.mo = null;
     if (hit) {
       af.moHits++;
       af.mo = { due: Date.now() + moveOffDelayMs(persona, af.rng), x: st.x, y: st.y };
+      if (await moveOffSafe()) {
+        af.trace.push(["move_off_eager"]);
+        trimTrace();
+        // The click already landed: a drift that fails (the page navigated or closed) never turns it into an error.
+        try { await runMoveOff(true); } catch { /* best effort */ }
+      }
     }
   }
 

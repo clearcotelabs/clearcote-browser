@@ -57,6 +57,9 @@ class HumanizeOptions:
     * ``ambient`` -- "off" | "load" | "idle": pointer activity without a target ("load": a short ambient
       burst on every page load, the old ``page._clearcote_auto_ambient``; "idle": idle drifts between
       actions). ``None`` = "off".
+    * ``attention`` -- the reading pause after a page load (0.8-4 s, longer on a page with more text) and the
+      idle drifts between actions (SC 232 lane C). On unless ``False`` (``None`` = on, since 0.68.0);
+      ``ambient="idle"`` turns it on as well.
     * ``typo_rate`` -- per-character slip rate 0..1; ``None`` = CLEARCOTE_HUMANIZE_TYPO_RATE, else 0.02.
     * ``handedness`` -- "left" | "right" | ``None`` (the persona's).
     * ``device_hz`` -- the pointer's report rate (Hz) in place of the persona's; ``None`` = the persona's.
@@ -69,6 +72,7 @@ class HumanizeOptions:
     strict: bool = False
     engine: str = "auto"
     ambient: Optional[str] = None
+    attention: Optional[bool] = None
     typo_rate: Optional[float] = None
     handedness: Optional[str] = None
     device_hz: Optional[int] = None
@@ -84,6 +88,8 @@ class HumanizeOptions:
             raise ValueError("humanize engine must be 'auto', 'all', 'coords' or 'off', not %r" % (self.engine,))
         if self.ambient is not None and self.ambient not in AMBIENT_MODES:
             raise ValueError("humanize ambient must be 'off', 'load' or 'idle', not %r" % (self.ambient,))
+        if self.attention is not None and not isinstance(self.attention, bool):
+            raise TypeError("humanize attention must be True, False or None")
         if self.typo_rate is not None:
             if isinstance(self.typo_rate, bool) or not isinstance(self.typo_rate, (int, float)) \
                     or self.typo_rate != self.typo_rate or not 0.0 <= float(self.typo_rate) <= 1.0:
