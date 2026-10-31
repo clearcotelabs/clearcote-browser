@@ -1,0 +1,193 @@
+{
+  "manifest_version": "0.4",
+  "name": "clearcote-mcp",
+  "display_name": "Clearcote",
+  "version": "0.3.0",
+  "description": "Drive the Clearcote Chromium browser from any MCP client: read pages, click, fill, screenshot.",
+  "long_description": "Runs the open-source Clearcote Chromium browser locally and gives your agent about 20 tools to navigate, read pages as Markdown, extract, click, fill, screenshot and keep sessions. `get_cdp_endpoint` hands the same browser to Playwright, Puppeteer, browser-use or Crawl4AI. The fingerprint is set in Chromium's C++, so no JavaScript stealth plugins are needed. The first run downloads the browser and verifies its SHA-256.",
+  "author": {
+    "name": "Clearcote Labs",
+    "url": "https://clearcotelabs.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/clearcotelabs/clearcote-browser"
+  },
+  "homepage": "https://clearcotelabs.com",
+  "documentation": "https://github.com/clearcotelabs/clearcote-browser/tree/main/mcp",
+  "support": "https://github.com/clearcotelabs/clearcote-browser/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "src/server.py"
+      ],
+      "env": {
+        "CLEARCOTE_FINGERPRINT": "${user_config.fingerprint}",
+        "CLEARCOTE_PLATFORM": "${user_config.platform}",
+        "CLEARCOTE_PROXY": "${user_config.proxy}",
+        "CLEARCOTE_GEOIP": "${user_config.geoip}",
+        "CLEARCOTE_CLOUD": "${user_config.cloud}",
+        "CLEARCOTE_API_KEY": "${user_config.api_key}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "navigate",
+      "description": "Navigate the current tab to a URL. Returns the resolved url, title, http_status and page_state (see read_page)."
+    },
+    {
+      "name": "read_page",
+      "description": "Read the current page (or navigate to `url` first) as Markdown (default), its visible \"text\", or \"both\". Also returns http_status (the shown document's; null if unknown) and page_state: \"blocked\" (HTTP 401, 403, 429 or 503), \"empty\" (under 20 characters of visible text) or \"ok\". Long fields are cut; markdown_truncated / text_truncated say so."
+    },
+    {
+      "name": "get_page_html",
+      "description": "Get the HTML of the current page (or navigate to `url` first), inside the untrusted-content fence."
+    },
+    {
+      "name": "page_elements",
+      "description": "List the interactive elements (links, buttons, inputs) on the page, one JSON object per line, each with a selector."
+    },
+    {
+      "name": "click",
+      "description": "Click an element by CSS selector or by visible text (navigate to `url` first if given)."
+    },
+    {
+      "name": "fill_field",
+      "description": "Fill an input matched by selector, label, placeholder, or name."
+    },
+    {
+      "name": "press_key",
+      "description": "Press a key on the current page, e.g. 'Enter', 'Tab', 'Control+A'."
+    },
+    {
+      "name": "evaluate_js",
+      "description": "Evaluate a JavaScript expression in the page and return its (JSON-serializable) result, as JSON text inside the untrusted-content fence."
+    },
+    {
+      "name": "wait_for",
+      "description": "Wait until a selector appears (up to timeout_ms)."
+    },
+    {
+      "name": "current_page",
+      "description": "Return the current tab's url + title."
+    },
+    {
+      "name": "screenshot_page",
+      "description": "Screenshot the current page (or navigate to `url` first), saved under the sandbox dir. Up to 200 KB it is also returned as an image; a bigger one only as its file path (inline: false)."
+    },
+    {
+      "name": "save_page_pdf",
+      "description": "Save the current page as a PDF (headless only). Saved under the sandbox dir."
+    },
+    {
+      "name": "get_cookies",
+      "description": "Get cookies for the current context (optionally filtered to `url`). Each cookie's name, value, domain and path are the site's, each between untrusted-content tags on one line."
+    },
+    {
+      "name": "list_tabs",
+      "description": "List open tabs (index, url, title, which is current)."
+    },
+    {
+      "name": "new_tab",
+      "description": "Open a new tab (optionally navigate it) and make it current."
+    },
+    {
+      "name": "close_tab",
+      "description": "Close the tab at `index` (from list_tabs)."
+    },
+    {
+      "name": "save_profile",
+      "description": "Save cookies + storage state to a named profile under the sandbox dir."
+    },
+    {
+      "name": "load_profile",
+      "description": "Restore cookies + storage from a named profile (see save_profile)."
+    },
+    {
+      "name": "get_egress_info",
+      "description": "Report the browser's public egress IP (through any configured proxy) + the active persona."
+    },
+    {
+      "name": "get_cdp_endpoint",
+      "description": "Return the stealth browser's raw CDP endpoint so ANY other client (Playwright / Puppeteer / browser-use / Crawl4AI / Stagehand) can attach to the SAME browser with `connect_over_cdp`, keeping the stealth persona. This is the whole point of the drop-in model."
+    }
+  ],
+  "keywords": [
+    "browser",
+    "chromium",
+    "playwright",
+    "puppeteer",
+    "scraping",
+    "automation",
+    "fingerprint",
+    "cdp"
+  ],
+  "license": "BSD-3-Clause",
+  "privacy_policies": [
+    "https://www.clearcotelabs.com/privacy"
+  ],
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  },
+  "user_config": {
+    "fingerprint": {
+      "type": "string",
+      "title": "Fingerprint seed",
+      "description": "Seed for one stable identity (the same seed is the same device on every run). Empty: a new identity each run.",
+      "required": false,
+      "default": ""
+    },
+    "platform": {
+      "type": "string",
+      "title": "Platform persona",
+      "description": "windows, linux, macos or android. Empty: this machine's platform.",
+      "required": false,
+      "default": ""
+    },
+    "proxy": {
+      "type": "string",
+      "title": "Proxy",
+      "description": "Proxy for all traffic, http://user:pass@host:port",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    },
+    "geoip": {
+      "type": "string",
+      "title": "GeoIP",
+      "description": "1: timezone, locale and WebRTC IP follow the proxy's exit IP. 0: off.",
+      "required": false,
+      "default": ""
+    },
+    "cloud": {
+      "type": "string",
+      "title": "Cloud mode",
+      "description": "1: the browser is a hosted Clearcote session (needs an API key).",
+      "required": false,
+      "default": ""
+    },
+    "api_key": {
+      "type": "string",
+      "title": "Clearcote API key",
+      "description": "For cloud mode and the run_task tool. Not needed for the local browser.",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    }
+  }
+}
