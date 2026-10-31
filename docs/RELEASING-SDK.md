@@ -127,19 +127,28 @@ separately (starts at `0.1.0`). One `mcp-v*` tag publishes **both** the Python p
 packages). The registry stores only this metadata and checks that each package names the entry: `mcpName` in
 `mcp/npm/package.json` and the `mcp-name:` comment at the top of `mcp/README.md` (the PyPI description). Both
 reach the registries only with a release, so publish the entry **after** the `mcp-v*` release that contains them
-is live on PyPI and npm, with `server.json` at that version. The `io.github.clearcotelabs/` namespace needs a
-GitHub login that is an **owner** of the `clearcotelabs` organisation.
+is live on PyPI and npm, with `server.json` at that version. The `io.github.clearcotelabs/` namespace needs proof of
+the `clearcotelabs` organisation, which the interactive `mcp-publisher login github` cannot give (it only reaches
+the personal `io.github.<user>/` namespace). Publish with the manual
+[`mcp-registry.yml`](../.github/workflows/mcp-registry.yml) workflow instead: it logs in with the workflow's GitHub
+OIDC token, so nothing is stored.
+
+```bash
+gh workflow run mcp-registry.yml -R clearcotelabs/clearcote-browser
+```
+
+To run it locally anyway (an owner's classic PAT with the `read:org` scope):
 
 ```bash
 # mcp-publisher: `brew install mcp-publisher`, or the binary from
 # https://github.com/modelcontextprotocol/registry/releases
 cd mcp
 mcp-publisher validate            # checks server.json without publishing
-mcp-publisher login github        # device-code login in the browser
+mcp-publisher login github --token <classic PAT with read:org>
 mcp-publisher publish
 curl "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.clearcotelabs/clearcote-mcp"
 ```
-Every later release: bump `server.json` with the other three version fields, then `mcp-publisher publish` again.
+Every later release: bump `server.json` with the other three version fields, then run the workflow again.
 
 ## Auth fallback (only if OIDC is unavailable)
 If you ever must publish before OIDC is configured: `npm publish --access public` from a logged-in

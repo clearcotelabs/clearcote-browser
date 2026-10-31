@@ -1,0 +1,56 @@
+# Lists the Clearcote MCP server in the official MCP Registry (registry.modelcontextprotocol.io) from
+# mcp/server.json, as io.github.clearcotelabs/clearcote-mcp.
+#
+# The io.github.clearcotelabs/ namespace needs proof of the clearcotelabs organisation. The interactive
+# `mcp-publisher login github` cannot read organisation roles (it gets the personal namespace only), so
+# this logs in with the workflow's own GitHub OIDC token instead: no stored secret.
+#
+# Run it by hand AFTER the mcp-v* release that server.json names is live on PyPI and npm (the registry
+# checks the mcp-name / mcpName markers in the published packages). See docs/RELEASING-SDK.md.
+name: Publish MCP registry entry
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: publish-mcp-registry
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # the OIDC token mcp-publisher exchanges for a registry login
+
+env:
+  MCP_PUBLISHER_VERSION: '1.8.7'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install mcp-publisher (checksum verified)
+        run: |
+          base="https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}"
+          cd "$RUNNER_TEMP"
+          curl -sSfLO "$base/mcp-publisher_linux_amd64.tar.gz"
+          curl -sSfLO "$base/registry_${MCP_PUBLISHER_VERSION}_checksums.txt"
+          grep " mcp-publisher_linux_amd64.tar.gz$" "registry_${MCP_PUBLISHER_VERSION}_checksums.txt" | sha256sum -c -
+          tar xzf mcp-publisher_linux_amd64.tar.gz mcp-publisher
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Validate server.json
+        working-directory: mcp
+        run: mcp-publisher validate
+
+      - name: Log in with GitHub OIDC
+        run: mcp-publisher login github-oidc
+
+      - name: Publish
+        working-directory: mcp
+        run: mcp-publisher publish
+
+      - name: Check the listing
+        run: |
+          curl -sSf "https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.clearcotelabs/clearcote-mcp" \
+            | python3 -c "import json,sys; s=json.load(sys.stdin)['servers']; print([x['server']['version'] for x in s]); sys.exit(0 if s else 1)"
