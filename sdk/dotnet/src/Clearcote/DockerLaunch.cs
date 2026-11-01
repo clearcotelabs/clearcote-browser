@@ -26,19 +26,19 @@ public sealed class DockerUnavailableException : Exception
 /// image older than sdk-0.40.0 (plain variables, no idle exit).</param>
 public sealed record DockerContainer(string Id, string Image, string Endpoint, int ServeProtocol);
 
-/// LaunchAsync on macOS: run the Clearcote Docker image and connect to it.
+/// LaunchAsync on an Intel Mac: run the Clearcote Docker image and connect to it.
 ///
-/// The free Clearcote build has no macOS binary (the native macOS build is PRO-only and Apple Silicon only).
-/// Rather than fail there, LaunchAsync starts the published
+/// The native macOS builds (the PRO build and the open macOS pin) are Apple Silicon only. Rather than fail
+/// on an Intel Mac, LaunchAsync starts the published
 /// Clearcote image (teamflatearth/clearcote:sdk-&lt;this SDK's version&gt;, a linux/amd64 image Docker Desktop
 /// runs on Intel and Apple silicon alike), waits for its CDP endpoint, connects with Playwright and
 /// returns the same Playwright IBrowser a local launch does. CloseAsync disconnects and stops the
 /// container; nothing is left running.
 ///
 /// When it applies: <see cref="LaunchOptions.Docker"/> false (or CLEARCOTE_DOCKER=0) turns it off; true
-/// (or CLEARCOTE_DOCKER=1) turns it on on any OS with Docker; unset means macOS only, unless the caller
-/// named a binary (ExecutablePath / CLEARCOTE_BINARY) or holds a licence key on an Apple Silicon Mac --
-/// that runs the native macOS PRO build instead. CLEARCOTE_TEST_ONLY_ASSUME_MACOS=1 treats the host
+/// (or CLEARCOTE_DOCKER=1) turns it on on any OS with Docker; unset means an Intel Mac only, unless the
+/// caller named a binary (ExecutablePath / CLEARCOTE_BINARY). An Apple Silicon Mac runs a native build
+/// instead: PRO with a licence key, the open macOS pin (Chromium 150, v0.1.0-pre.24) without. CLEARCOTE_TEST_ONLY_ASSUME_MACOS=1 treats the host
 /// as macOS so the real Docker path can be exercised end to end elsewhere; it is not an option.
 ///
 /// The container is configured through the image's own CC_* variables (docker/serve.py), so only the
@@ -173,15 +173,14 @@ internal static class DockerLaunch
         if (Truthy.Contains(env)) return true;
         if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLEARCOTE_BINARY"))) return false;
         if (!HostIsMacos()) return false;
-        // An Apple Silicon Mac with a licence key runs the native PRO build; the free build has no macOS
-        // binary, and the PRO one no Intel build, so every other Mac keeps the image.
-        return !NativeMacosLicensed(o);
+        // An Apple Silicon Mac runs a native build: the PRO one with a licence key, the open macOS pin
+        // (Release.Macos) without. Neither has an Intel build, so an Intel Mac keeps the image.
+        return !NativeMacosHost();
     }
 
-    /// Whether this host runs the native macOS PRO build: an Apple Silicon Mac (not the test-only
-    /// assume-macOS switch, which exists to exercise the Docker path) with a licence key.
-    internal static bool NativeMacosLicensed(LaunchOptions? o)
-        => Release.NativeMacosSupported() && License.ResolveLicenseKey(o?.LicenseKey) is not null;
+    /// Whether this host runs a native macOS build: an Apple Silicon Mac (not the test-only assume-macOS
+    /// switch, which exists to exercise the Docker path).
+    internal static bool NativeMacosHost() => Release.NativeMacosSupported();
 
     internal static string DefaultImage() =>
         Environment.GetEnvironmentVariable("CLEARCOTE_DOCKER_IMAGE") is { Length: > 0 } img ? img : $"{DefaultRepository}:sdk-{Clearcote.Version}";

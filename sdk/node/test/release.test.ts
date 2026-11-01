@@ -19,8 +19,8 @@ function checkPin(rel: ReleaseInfo): void {
 }
 
 describe("per-platform pins (static shape — the live drift check runs in CI)", () => {
-  it("exposes exactly win32 + linux, both well-formed", () => {
-    expect(new Set(Object.keys(PLATFORMS))).toEqual(new Set(["win32", "linux"]));
+  it("exposes exactly win32 + linux + darwin, all well-formed", () => {
+    expect(new Set(Object.keys(PLATFORMS))).toEqual(new Set(["win32", "linux", "darwin"]));
     for (const rel of Object.values(PLATFORMS)) checkPin(rel);
   });
 
@@ -43,7 +43,8 @@ describe("per-platform pins (static shape — the live drift check runs in CI)",
   it("selects the pin by OS (and RELEASE is the current platform's pin)", () => {
     expect(platformRelease("win32")).toBe(PLATFORMS.win32);
     expect(platformRelease("linux")).toBe(PLATFORMS.linux);
-    expect(platformRelease("darwin")).toBeUndefined();
+    expect(platformRelease("darwin", "arm64")).toBe(PLATFORMS.darwin);
+    expect(platformRelease("darwin", "x64")).toBeUndefined();
     // RELEASE is the current platform's pin (Windows fallback on an unsupported OS).
     expect(RELEASE).toBe(platformRelease(process.platform) ?? PLATFORMS.win32);
   });

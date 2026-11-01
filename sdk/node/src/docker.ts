@@ -1,7 +1,7 @@
-// launch() on macOS: run the Clearcote Docker image and connect to it.
+// launch() on an Intel Mac: run the Clearcote Docker image and connect to it.
 //
-// The free Clearcote build has no macOS binary (the native macOS build is PRO-only and Apple Silicon
-// only). Rather than fail there, launch() starts the published
+// The native macOS builds (the PRO build and the open macOS pin) are Apple Silicon only. Rather than
+// fail on an Intel Mac, launch() starts the published
 // Clearcote image (teamflatearth/clearcote:sdk-<this SDK's version>, a linux/amd64 image Docker Desktop
 // runs on Intel and Apple silicon alike), waits for its CDP endpoint, connects with Playwright and
 // resolves to the same Playwright Browser a local launch does. close() disconnects and stops the
@@ -9,10 +9,11 @@
 //
 // When it applies:
 //   - `docker: false` (or CLEARCOTE_DOCKER=0) turns it off: launch() runs a local binary, which on macOS
-//     means the native PRO build (a licence key, Apple Silicon) or `executablePath`.
+//     means the native build (Apple Silicon: PRO with a licence key, the open pin without) or `executablePath`.
 //   - `docker: true` (or CLEARCOTE_DOCKER=1) turns it on on any OS that has Docker.
-//   - Unset: on for macOS, unless the caller named a binary (executablePath / CLEARCOTE_BINARY) or holds
-//     a licence key on an Apple Silicon Mac -- that runs the native macOS PRO build instead.
+//   - Unset: on for an Intel Mac, unless the caller named a binary (executablePath / CLEARCOTE_BINARY). An
+//     Apple Silicon Mac runs a native build instead: PRO with a licence key, the open macOS pin (Chromium
+//     150, v0.1.0-pre.24) without.
 //   - CLEARCOTE_TEST_ONLY_ASSUME_MACOS=1 makes this module treat the host as macOS, so the real Docker
 //     path can be exercised end to end on a Linux or Windows machine. It is not an option.
 //
@@ -164,18 +165,17 @@ export function dockerRequested(docker: unknown, options: Record<string, unknown
   if (TRUTHY.includes(env)) return true;
   if (process.env.CLEARCOTE_BINARY) return false;
   if (!hostIsMacos()) return false;
-  // An Apple Silicon Mac with a licence key runs the native PRO build; the free build has no macOS
-  // binary, and the PRO one no Intel build, so every other Mac keeps the image.
-  return !nativeMacosLicensed(options);
+  // An Apple Silicon Mac runs a native build: the PRO one with a licence key, the open macOS pin
+  // (release.ts MACOS) without. Neither has an Intel build, so an Intel Mac keeps the image.
+  return !nativeMacosHost();
 }
 
 /**
- * Whether this host runs the native macOS PRO build: a real Apple Silicon Mac (not the test-only
- * assume-macOS switch, which exists to exercise the Docker path) with a licence key.
+ * Whether this host runs a native macOS build: a real Apple Silicon Mac (not the test-only assume-macOS
+ * switch, which exists to exercise the Docker path).
  */
-export function nativeMacosLicensed(options: Record<string, unknown> = {}): boolean {
-  if (!nativeMacosSupported(process.platform)) return false;
-  return !!resolveLicenseKey(options.licenseKey as string | undefined);
+export function nativeMacosHost(): boolean {
+  return nativeMacosSupported(process.platform);
 }
 
 export function defaultImage(): string {

@@ -1742,24 +1742,25 @@ public static class Download
             // Fail before downloading a build that cannot run here (this used to fetch the ~245 MB Windows
             // zip on a Mac).
             var hint = Native.OsTag == "macos"
-                ? "On an Apple Silicon Mac, set a license key (CLEARCOTE_LICENSE_KEY) for the native PRO build, or use the Docker image (Docker = true). "
+                ? "The macOS builds are Apple Silicon only: on an Intel Mac use the Docker image (Docker = true). "
                 : "";
             throw new PlatformNotSupportedException(
-                $"The free Clearcote build ships Windows x64 and Linux x64 binaries — there is none for '{Native.OsTag}'. " +
+                $"The free Clearcote build ships Windows x64, Linux x64 and macOS arm64 binaries — there is none for this '{Native.OsTag}' machine. " +
                 $"{hint}Or set ExecutablePath to a compatible binary.");
         }
+        var pin = Release.PlatformRelease()!;   // Release.Current, unless a test fakes the OS after start-up
 
         ReleaseInfo rel;
         if (AutoUpdateRequested(opts.AutoUpdate))
         {
             var latest = await ResolveLatestAsync(opts.Quiet).ConfigureAwait(false);
-            rel = latest is not null && latest.Tag == Release.Current.Tag
-                ? Release.Current with { Unpinned = false }  // newest IS pinned — use the audited hashes
-                : latest ?? Release.Current with { Unpinned = false };
+            rel = latest is not null && latest.Tag == pin.Tag
+                ? pin with { Unpinned = false }  // newest IS pinned — use the audited hashes
+                : latest ?? pin with { Unpinned = false };
         }
         else
         {
-            rel = Release.Current with { Unpinned = false };
+            rel = pin with { Unpinned = false };
         }
 
         var @base = Path.Combine(cacheRoot, rel.Tag);

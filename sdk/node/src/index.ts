@@ -1068,17 +1068,18 @@ export async function retryOnStaleRunToken<T>(lease: LeaseSession | null, start:
  * cannot take (executablePath, args, userDataDir, ...) throws naming it. `close()` disconnects and
  * ends the session.
  *
- * MACOS. With a licence key on an Apple Silicon Mac, launch() runs the native macOS PRO build (a
- * `Chromium.app` bundle, downloaded and verified like the other platforms). Its fonts and canvas text
- * metrics stay host-native, so only `platform: "macos"` (the default there) is coherent; another
- * platform without a `fingerprintProfile` captured on that OS warns. Without a licence key (the free
- * build has no macOS binary), or on an Intel Mac, launch() starts the Clearcote Docker image instead
+ * MACOS. On an Apple Silicon Mac, launch() runs a native macOS build (a `Chromium.app` bundle,
+ * downloaded and verified like the other platforms): the PRO build with a licence key, and without one the
+ * open macOS build this SDK pins (Chromium 150, v0.1.0-pre.24, a major behind the open Windows and Linux
+ * builds). Its fonts and canvas text metrics stay host-native, so only `platform: "macos"` (the default
+ * there) is coherent; another platform without a `fingerprintProfile` captured on that OS warns. On an
+ * Intel Mac, launch() starts the Clearcote Docker image instead
  * (teamflatearth/clearcote:sdk-<version>; `dockerImage` or CLEARCOTE_DOCKER_IMAGE picks another) and
  * resolves to the same Playwright `Browser`, connected to it over CDP; `close()` stops the container.
  * The persona options, `headless`, `proxy`, `args`, `version` and the licence key go to the container;
  * an option it cannot take throws naming it. Docker must be installed and running
  * ({@link DockerUnavailableError} says so otherwise). `docker: true` (or CLEARCOTE_DOCKER=1) uses the
- * container on any OS, a licensed Mac included; `docker: false` (or CLEARCOTE_DOCKER=0) never does.
+ * container on any OS, an Apple Silicon Mac included; `docker: false` (or CLEARCOTE_DOCKER=0) never does.
  */
 export async function launch(options: LaunchOptions | CloudLaunchOptions = {}): Promise<Browser> {
   if (cloudRequested((options as CloudSwitchOption).cloud)) {

@@ -46,22 +46,49 @@ _LINUX = {
     "asset_glob": "linux-x64",
 }
 
+# macOS (Apple Silicon) pins its own tag: the open 151 release (pre.25) has no macOS asset, so a Mac
+# without a licence key runs the 150 macOS build from v0.1.0-pre.24, one major behind Windows and
+# Linux. It is a Chromium.app bundle, unsigned and not notarized (download.py unpacks it with ditto
+# and clears the quarantine flag). exe_sha256 is the bundle's launcher, Contents/MacOS/Chromium; the
+# release's SHA256SUMS.txt lists the framework ("Chromium Framework") instead.
+_MACOS = {
+    "tag": "v0.1.0-pre.24",
+    "version": "150.0.7871.114",
+    "asset": "clearcote-150.0.7871.114-macos-arm64.zip",
+    "url": (
+        "https://github.com/clearcotelabs/clearcote-browser/releases/download/"
+        "v0.1.0-pre.24/clearcote-150.0.7871.114-macos-arm64.zip"
+    ),
+    "sha256": "04493686efd16015c383cba7b1e8625e2297c1861944e050d9a2435cd26bb75c",
+    "exe_sha256": "71d58dcef6b0a7706954a27c8b82dbdbeb76610beef56ff971c2585328b5b751",
+    "size": 228975134,
+    "os": "darwin",
+    "archive": "zip",
+    "binary": "Chromium",
+    "asset_glob": "macos-arm64",
+}
+
 # sys.platform -> pinned release. Add an entry to support another OS.
-PLATFORMS = {"win32": _WINDOWS, "linux": _LINUX}
+PLATFORMS = {"win32": _WINDOWS, "linux": _LINUX, "darwin": _MACOS}
 
 
-def platform_release(plat=None):
-    """The pinned release for the given platform (default: this OS), or None if unsupported."""
-    return PLATFORMS.get(plat or sys.platform)
+def platform_release(plat=None, machine=None):
+    """The pinned release for the given platform (default: this OS), or None if unsupported.
+
+    The macOS pin is arm64 only, so an Intel Mac (or a Python under Rosetta) gets None, like an
+    unsupported OS, and keeps the Docker image."""
+    plat = plat or sys.platform
+    if plat == "darwin" and not native_macos_supported(plat, machine):
+        return None
+    return PLATFORMS.get(plat)
 
 
-# sys.platform -> the PRO catalog / /download/pro `platform` key. Wider than PLATFORMS: macOS has a
-# native PRO build (Apple Silicon, a Chromium.app bundle) but no free pinned release, so it is here and
-# not there. The PRO build is resolved by the site at run time, so there is nothing to pin for it.
+# sys.platform -> the PRO catalog / /download/pro `platform` key. The PRO build is resolved by the site
+# at run time, so there is nothing to pin for it. macOS is Apple Silicon only, for PRO and the open pin.
 PRO_PLATFORMS = {"win32": "windows", "linux": "linux", "darwin": "macos"}
 
-# CPU architectures the native macOS PRO build runs on. It is arm64 only; an Intel Mac (or a Python
-# running under Rosetta, which reports x86_64) uses the Docker image instead.
+# CPU architectures the native macOS builds (PRO and the open pin) run on. They are arm64 only; an
+# Intel Mac (or a Python running under Rosetta, which reports x86_64) uses the Docker image instead.
 MACOS_ARCHES = ("arm64", "aarch64")
 
 
@@ -87,7 +114,7 @@ def pro_platform_key(plat=None, machine=None):
 
 
 def native_macos_supported(plat=None, machine=None):
-    """True on an Apple Silicon Mac, where the native PRO build runs."""
+    """True on an Apple Silicon Mac, where the native macOS builds (PRO and the open pin) run."""
     plat = plat or sys.platform
     return plat == "darwin" and (machine if machine is not None else host_machine()) in MACOS_ARCHES
 
@@ -116,7 +143,7 @@ SIGNING_KEY_FPR = "CA96F185F96A693AEDB3AC1FCB00D851B7A86B0F"
 # later promoted to public, flip its `tier` to "free" and add the GitHub url — no SDK change needed.
 #
 # platform keys are "windows"/"linux"/"macos" (matching the /download/pro `platform` param; macOS is
-# PRO-only, Apple Silicon).
+# Apple Silicon only; the open macOS build is the _MACOS pin, not listed here).
 CATALOG_URL = "https://www.clearcotelabs.com/api/v1/versions"
 
 # Offline fallback snapshot — keep in sync with published releases. Lets the SDK still VALIDATE a

@@ -200,7 +200,7 @@ class CommentedOutCodeTest(GateCase):
         self.assertIn("platform sets differ", out)
 
     def test_dotnet_platform_in_a_line_comment_is_not_pinned(self):
-        self.edit(self.cs, ', ["linux"] = Linux };', ', // ["linux"] = Linux\n        };')
+        self.edit(self.cs, ', ["macos"] = Macos };', ', // ["macos"] = Macos\n        };')
         code, out = self.run_gate()
         self.assertEqual(code, 1, out)
         self.assertIn("platform sets differ", out)

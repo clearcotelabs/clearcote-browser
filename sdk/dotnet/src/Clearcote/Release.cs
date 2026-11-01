@@ -20,11 +20,11 @@ public sealed record ReleaseInfo
     public string ChromeDllSha256 { get; init; } = "";
     /// Expected archive size in bytes (for progress display only).
     public required long Size { get; init; }
-    /// Platform tag the binary runs on ("windows" | "linux").
+    /// Platform tag the binary runs on ("windows" | "linux" | "macos").
     public required string Os { get; init; }
     /// Archive format of the asset ("zip" | "tar.xz").
     public required string Archive { get; init; }
-    /// Inner browser-binary file name (chrome.exe on Windows, chrome on Linux).
+    /// Inner browser-binary file name (chrome.exe on Windows, chrome on Linux, Chromium on macOS).
     public required string Binary { get; init; }
     /// The "-&lt;glob&gt;" marker that identifies this platform's asset (e.g. "windows-x64").
     public required string AssetGlob { get; init; }
@@ -70,22 +70,46 @@ public static class Release
         AssetGlob = "linux-x64",
     };
 
+    // macOS (Apple Silicon) pins its own tag: the open 151 release (pre.25) has no macOS asset, so a Mac
+    // without a licence key runs the 150 macOS build from v0.1.0-pre.24, one major behind Windows and
+    // Linux. It is a Chromium.app bundle, unsigned and not notarized (Download.cs unpacks it with ditto and
+    // clears the quarantine flag). ExeSha256 is the bundle's launcher, Contents/MacOS/Chromium; the
+    // release's SHA256SUMS.txt lists the framework ("Chromium Framework") instead.
+    public static readonly ReleaseInfo Macos = new()
+    {
+        Tag = "v0.1.0-pre.24",
+        Version = "150.0.7871.114",
+        Asset = "clearcote-150.0.7871.114-macos-arm64.zip",
+        Url = "https://github.com/clearcotelabs/clearcote-browser/releases/download/v0.1.0-pre.24/clearcote-150.0.7871.114-macos-arm64.zip",
+        Sha256 = "04493686efd16015c383cba7b1e8625e2297c1861944e050d9a2435cd26bb75c",
+        ExeSha256 = "71d58dcef6b0a7706954a27c8b82dbdbeb76610beef56ff971c2585328b5b751",
+        Size = 228975134,
+        Os = "macos",
+        Archive = "zip",
+        Binary = "Chromium",
+        AssetGlob = "macos-arm64",
+    };
+
     /// OS tag -> pinned release.
     public static readonly IReadOnlyDictionary<string, ReleaseInfo> Platforms =
-        new Dictionary<string, ReleaseInfo> { ["windows"] = Windows, ["linux"] = Linux };
+        new Dictionary<string, ReleaseInfo> { ["windows"] = Windows, ["linux"] = Linux, ["macos"] = Macos };
 
-    /// The pinned release for the given platform (default: this OS), or null if unsupported.
-    public static ReleaseInfo? PlatformRelease(string? os = null)
-        => Platforms.TryGetValue(os ?? Native.OsTag, out var r) ? r : null;
+    /// The pinned release for the given platform (default: this OS), or null if unsupported. The macOS pin
+    /// is arm64 only, so an Intel Mac gets null, like an unsupported OS, and keeps the Docker image.
+    public static ReleaseInfo? PlatformRelease(string? os = null, string? arch = null)
+    {
+        var tag = os ?? Native.OsTag;
+        if (tag == "macos" && !NativeMacosSupported(tag, arch)) return null;
+        return Platforms.TryGetValue(tag, out var r) ? r : null;
+    }
 
-    /// OS tag -> the PRO catalog / /download/pro <c>platform</c> key. Wider than <see cref="Platforms"/>:
-    /// macOS has a native PRO build (Apple Silicon, a Chromium.app bundle) but no free pinned release, so it
-    /// is here and not there. The PRO build is resolved by the site at run time; there is nothing to pin.
+    /// OS tag -> the PRO catalog / /download/pro <c>platform</c> key. The PRO build is resolved by the site
+    /// at run time; there is nothing to pin. macOS is Apple Silicon only, for PRO and the open pin.
     public static readonly IReadOnlyDictionary<string, string> ProPlatforms =
         new Dictionary<string, string> { ["windows"] = "windows", ["linux"] = "linux", ["macos"] = "macos" };
 
-    /// CPU architectures the native macOS PRO build runs on: Apple Silicon only. An Intel Mac uses the
-    /// Docker image instead.
+    /// CPU architectures the native macOS builds (PRO and the open pin) run on: Apple Silicon only. An Intel
+    /// Mac uses the Docker image instead.
     public static readonly IReadOnlyList<string> MacosArches = new[] { "arm64" };
 
     /// The PRO download platform key for an OS ("windows" / "linux" / "macos"; default: this machine), or
@@ -102,7 +126,7 @@ public static class Release
         return key;
     }
 
-    /// True on an Apple Silicon Mac, where the native PRO build runs.
+    /// True on an Apple Silicon Mac, where the native macOS builds (PRO and the open pin) run.
     public static bool NativeMacosSupported(string? os = null, string? arch = null)
         => (os ?? Native.OsTag) == "macos" && MacosArches.Contains(arch ?? Native.Arch);
 

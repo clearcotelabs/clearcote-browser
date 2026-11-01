@@ -89,7 +89,8 @@ public class MacosNativeTests : IDisposable
         Assert.Equal("windows", Release.ProPlatformKey("windows", "x64"));
         Assert.Equal("linux", Release.ProPlatformKey("linux", "x64"));
         Assert.Null(Release.ProPlatformKey("unknown", "x64"));
-        Assert.Null(Release.PlatformRelease("macos"));   // still no FREE pinned macOS release
+        Assert.Same(Release.Macos, Release.PlatformRelease("macos", "arm64"));   // the open macOS pin
+        Assert.Null(Release.PlatformRelease("macos", "x64"));                    // arm64 only, like PRO
         var e = Assert.Throws<PlatformNotSupportedException>(() => Release.ProPlatformKey("macos", "x64"));
         Assert.Contains("Apple Silicon", e.Message);
         // the catalog lookup uses the macos key (no build listed for it, so the error names the key)
@@ -99,15 +100,26 @@ public class MacosNativeTests : IDisposable
     }
 
     [Fact]
-    public async Task The_free_build_fails_on_a_Mac_before_downloading_anything()
+    public async Task The_free_build_fails_on_an_Intel_Mac_before_downloading_anything()
     {
-        On("macos", "arm64");
+        On("macos", "x64");
         var handler = FakeHandler.Json(HttpStatusCode.OK, "{}");
         _sb.Http(handler);
         var e = await Assert.ThrowsAsync<PlatformNotSupportedException>(() =>
             Download.EnsureBinaryAsync(new DownloadOptions { CacheDir = _tmp, Quiet = true }));
-        Assert.Contains("license key", e.Message);
+        Assert.Contains("Apple Silicon only", e.Message);
         Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task The_free_build_on_Apple_Silicon_downloads_the_open_macOS_pin()
+    {
+        On("macos", "arm64");
+        var handler = FakeHandler.Json(HttpStatusCode.NotFound, "{}");
+        _sb.Http(handler);
+        await Assert.ThrowsAnyAsync<Exception>(() =>
+            Download.EnsureBinaryAsync(new DownloadOptions { CacheDir = _tmp, Quiet = true }));
+        Assert.Contains(handler.Requests, r => r.RequestUri?.ToString() == Release.Macos.Url);
     }
 
     [Fact]
@@ -153,7 +165,7 @@ public class MacosNativeTests : IDisposable
     }
 
     [Fact]
-    public void Launch_runs_the_native_build_when_licensed_on_Apple_Silicon_and_Docker_otherwise()
+    public void Launch_runs_a_native_build_on_Apple_Silicon_and_Docker_on_an_Intel_Mac()
     {
         bool Decide(string arch, LaunchOptions? o = null)
         {
@@ -161,11 +173,10 @@ public class MacosNativeTests : IDisposable
             return DockerLaunch.Requested(o);
         }
         Assert.False(Decide("arm64", new LaunchOptions { LicenseKey = "cc_lic_x" }));   // native PRO build
-        Assert.True(Decide("arm64"));                                                    // no key: no free Mac binary
-        Assert.True(Decide("x64", new LaunchOptions { LicenseKey = "cc_lic_x" }));      // Intel: PRO is arm64 only
+        Assert.False(Decide("arm64"));                                                   // no key: the open macOS pin
+        Assert.True(Decide("x64", new LaunchOptions { LicenseKey = "cc_lic_x" }));      // Intel: both builds are arm64 only
+        Assert.True(Decide("x64"));
         Assert.True(Decide("arm64", new LaunchOptions { LicenseKey = "cc_lic_x", Docker = true }));   // Docker stays reachable
-        _sb.Env("CLEARCOTE_LICENSE_KEY", "cc_lic_env");
-        Assert.False(Decide("arm64"));                                                   // the key from the environment counts too
         // the test-only "assume macOS" switch exists to exercise the Docker path: it stays Docker
         On("linux", "arm64");
         _sb.Env(DockerLaunch.TestOnlyAssumeMacos, "1");

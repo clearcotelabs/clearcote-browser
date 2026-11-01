@@ -1,7 +1,7 @@
-"""launch() on macOS: run the Clearcote Docker image and connect to it.
+"""launch() on an Intel Mac: run the Clearcote Docker image and connect to it.
 
-The free Clearcote build has no macOS binary (the native macOS build is PRO-only and Apple Silicon
-only). Rather than fail there, ``launch()`` starts the
+The native macOS builds (the PRO build and the open macOS pin) are Apple Silicon only. Rather than fail
+on an Intel Mac, ``launch()`` starts the
 published Clearcote image (``teamflatearth/clearcote:sdk-<this SDK's version>``, a linux/amd64 image
 that Docker Desktop runs on Intel and Apple silicon alike), waits for its CDP endpoint, connects to it
 with Playwright and returns the same Playwright ``Browser`` a local launch returns. ``close()``
@@ -9,10 +9,12 @@ disconnects and stops the container; nothing is left running.
 
 When it applies:
   * ``docker=False`` (or ``CLEARCOTE_DOCKER=0``) turns it off: launch() runs a local binary, which on
-    macOS means the native PRO build (a licence key, Apple Silicon) or ``executable_path=``.
+    macOS means the native build (Apple Silicon: PRO with a licence key, the open pin without) or
+    ``executable_path=``.
   * ``docker=True`` (or ``CLEARCOTE_DOCKER=1``) turns it on on any OS that has Docker.
-  * Unset: on for macOS, unless the caller named a binary (``executable_path`` / CLEARCOTE_BINARY) or
-    holds a licence key on an Apple Silicon Mac -- that runs the native macOS PRO build instead.
+  * Unset: on for an Intel Mac, unless the caller named a binary (``executable_path`` /
+    CLEARCOTE_BINARY). An Apple Silicon Mac runs a native build instead: PRO with a licence key, the
+    open macOS pin (Chromium 150, v0.1.0-pre.24) without.
   * ``CLEARCOTE_TEST_ONLY_ASSUME_MACOS=1`` makes this module treat the host as macOS. It exists so the
     real Docker path can be exercised end to end on a Linux or Windows machine; it is not an option.
 
@@ -159,20 +161,17 @@ def docker_requested(docker=None, kwargs=None) -> bool:
         return False
     if not host_is_macos():
         return False
-    # An Apple Silicon Mac with a licence key runs the native PRO build; the free build has no macOS
-    # binary, and the PRO one no Intel build, so every other Mac keeps the image.
-    return not native_macos_licensed(kwargs)
+    # An Apple Silicon Mac runs a native build: the PRO one with a licence key, the open macOS pin
+    # (release._MACOS) without. Neither has an Intel build, so an Intel Mac keeps the image.
+    return not native_macos_host()
 
 
-def native_macos_licensed(kwargs=None) -> bool:
-    """Whether this host runs the native macOS PRO build: a real Apple Silicon Mac (not the test-only
-    assume-macOS switch, which exists to exercise the Docker path) with a licence key."""
-    from ._license import resolve_license_key
+def native_macos_host() -> bool:
+    """Whether this host runs a native macOS build: a real Apple Silicon Mac (not the test-only
+    assume-macOS switch, which exists to exercise the Docker path)."""
     from .release import native_macos_supported
 
-    if not native_macos_supported(sys.platform):
-        return False
-    return bool(resolve_license_key((kwargs or {}).get("license_key")))
+    return native_macos_supported(sys.platform)
 
 
 def default_image() -> str:

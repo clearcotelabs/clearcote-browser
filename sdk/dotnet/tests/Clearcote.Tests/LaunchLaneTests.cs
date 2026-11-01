@@ -456,8 +456,8 @@ public class LaunchLaneTests : IDisposable
         Assert.Throws<FileNotFoundException>(() => Clearcote.EnsureRunnableHere(missing));
         _sb.Os("macos");
         Native.ArchOverride = "x64";   // an Intel Mac: no build at all
-        Assert.Contains("there is no build for 'macos'", Assert.Throws<PlatformNotSupportedException>(() => Clearcote.EnsureRunnableHere(missing)).Message);
-        Native.ArchOverride = "arm64";   // Apple Silicon has the PRO build: just not found
+        Assert.Contains("there is no build for this 'macos' machine", Assert.Throws<PlatformNotSupportedException>(() => Clearcote.EnsureRunnableHere(missing)).Message);
+        Native.ArchOverride = "arm64";   // Apple Silicon has the open pin and the PRO build: just not found
         Assert.Throws<FileNotFoundException>(() => Clearcote.EnsureRunnableHere(missing));
     }
 

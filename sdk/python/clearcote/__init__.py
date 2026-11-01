@@ -356,8 +356,8 @@ def _guard(exe):
     """Refuse a binary this OS has no build for -- but never one the caller named.
 
     An existing ``executable_path`` / CLEARCOTE_BINARY is theirs to run on any OS (this used to
-    raise on macOS even when handed one, while telling the caller to pass executable_path). macOS
-    has a native PRO build (Apple Silicon), which the PRO download resolves itself."""
+    raise on macOS even when handed one, while telling the caller to pass executable_path). An Apple
+    Silicon Mac has native builds: the open pin, and the PRO build the PRO download resolves itself."""
     from .release import platform_release, pro_platform_key
     if exe and os.path.exists(exe):
         return
@@ -367,8 +367,9 @@ def _guard(exe):
         pro = None
     if platform_release() is None and pro is None:
         raise RuntimeError(
-            f"Clearcote {RELEASE['version']} ships Windows x64 and Linux x64 binaries — there is no "
-            f"build for {sys.platform!r}.\nRun on Windows or Linux, or pass executable_path=... to a "
+            f"Clearcote ships Windows x64, Linux x64 and macOS arm64 binaries — there is no build for "
+            f"this {sys.platform!r} machine.\nRun on Windows, Linux or an Apple Silicon Mac (an Intel "
+            f"Mac can use docker=True), or pass executable_path=... to a "
             f"compatible binary.\n(A binary downloaded and verified fine; it is cached at: {exe})"
         )
 
@@ -1304,18 +1305,19 @@ def launch(cloud=None, **kwargs):
     ``slow_mo`` go to the CDP connect; ``timeout`` defaults to 120 000 ms there, as the browser
     starts when you connect.
 
-    MACOS. With a licence key on an Apple Silicon Mac, launch() runs the native macOS PRO build
-    (a ``Chromium.app`` bundle, downloaded and verified like the other platforms). Its fonts and
-    canvas text metrics stay host-native, so only ``platform="macos"`` (the default there) is
-    coherent; another platform without a ``fingerprint_profile`` captured on that OS warns.
-    Without a licence key (the free build has no macOS binary), or on an Intel Mac, launch() starts
+    MACOS. On an Apple Silicon Mac, launch() runs a native macOS build (a ``Chromium.app`` bundle,
+    downloaded and verified like the other platforms): the PRO build with a licence key, and without
+    one the open macOS build this SDK pins (Chromium 150, v0.1.0-pre.24, a major behind the open
+    Windows and Linux builds). Its fonts and canvas text metrics stay host-native, so only
+    ``platform="macos"`` (the default there) is coherent; another platform without a
+    ``fingerprint_profile`` captured on that OS warns. On an Intel Mac, launch() starts
     the Clearcote Docker image instead (``teamflatearth/clearcote:sdk-<version>``; ``docker_image=``
     or CLEARCOTE_DOCKER_IMAGE picks another) and returns the same Playwright ``Browser``, connected
     to it over CDP; ``close()`` stops the container. The persona options, ``headless``, ``proxy``,
     ``args``, ``version`` and the licence key go to the container; an option it cannot take raises
     ValueError naming it. Docker must be installed and running (DockerUnavailableError says so
-    otherwise). ``docker=True`` (or CLEARCOTE_DOCKER=1) uses the container on any OS, a licensed
-    Mac included; ``docker=False`` (or CLEARCOTE_DOCKER=0) never does.
+    otherwise). ``docker=True`` (or CLEARCOTE_DOCKER=1) uses the container on any OS, an Apple
+    Silicon Mac included; ``docker=False`` (or CLEARCOTE_DOCKER=0) never does.
 
     Fingerprint kwargs: fingerprint, platform, platform_version, brand, brand_version,
     gpu_vendor, gpu_renderer, hardware_concurrency, location, timezone, accept_language,
@@ -1344,7 +1346,7 @@ def launch(cloud=None, **kwargs):
         return launch_cloud(cloud, kwargs)
     _drop_cloud_credentials(kwargs)
     docker, docker_image = kwargs.pop("docker", None), kwargs.pop("docker_image", None)
-    if docker_requested(docker, kwargs):  # macOS without the native PRO build: the Docker image
+    if docker_requested(docker, kwargs):  # an Intel Mac (no native macOS build): the Docker image
         return launch_docker({**kwargs, "docker_image": docker_image})
     # ephemeral_profile=False restores the pre-0.23 incognito launch. Kept because the persistent
     # path costs a directory create+delete per launch, which a caller spawning hundreds of
