@@ -2,7 +2,7 @@
   "manifest_version": "0.4",
   "name": "clearcote-mcp",
   "display_name": "Clearcote",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Drive the Clearcote Chromium browser from any MCP client: read pages, click, fill, screenshot.",
   "long_description": "Runs the open-source Clearcote Chromium browser locally and gives your agent about 20 tools to navigate, read pages as Markdown, extract, click, fill, screenshot and keep sessions. `get_cdp_endpoint` hands the same browser to Playwright, Puppeteer, browser-use or Crawl4AI. The fingerprint is set in Chromium's C++, so no JavaScript stealth plugins are needed. The first run downloads the browser and verifies its SHA-256.",
   "author": {

@@ -1,8 +1,8 @@
 [project]
 name = "clearcote-mcp-bundle"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCPB bundle for the Clearcote MCP server (runs the clearcote-mcp package from PyPI)"
 requires-python = ">=3.10"
 dependencies = [
-    "clearcote-mcp==0.3.0",
+    "clearcote-mcp==0.3.1",
 ]

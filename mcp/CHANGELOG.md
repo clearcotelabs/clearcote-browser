@@ -1,6 +1,6 @@
 # clearcote-mcp changelog
 
-## Unreleased
+## 0.3.1
 
 ### Dependencies
 
