@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Dependencies
+
+- Needs `mcp` 1.21.1 or later (was 1.19): `mcp` 1.19 to 1.21.0 fail to import with `pydantic` 2.14+, which
+  dropped a private helper they used, so a machine held at those versions could not start the server.
+
 ### Output changes
 
 - `get_cookies` fences what a site picks for its cookies: each cookie's `name`, `value`, `domain` and `path` (and

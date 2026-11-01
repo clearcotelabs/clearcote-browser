@@ -38,8 +38,9 @@ def _floor(name: str) -> str:
 
 
 def test_mcp_floor_passes_tool_images_through():
-    # mcp before 1.19 turns a CallToolResult a tool returns (screenshot_page's inline image) into one JSON text block.
-    assert tuple(int(p) for p in _floor("mcp").split(".")) >= (1, 19)
+    # mcp before 1.19 turns a CallToolResult a tool returns (screenshot_page's inline image) into one JSON text block,
+    # and before 1.21.1 it fails to import with pydantic 2.14+ (eval_type_backport is gone).
+    assert tuple(int(p) for p in _floor("mcp").split(".")) >= (1, 21, 1)
 
 
 def test_ci_floor_job_pins_the_declared_floors():
