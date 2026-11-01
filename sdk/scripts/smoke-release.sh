@@ -70,9 +70,11 @@ run_docker() {
   # --cap-add=SYS_NICE, the workaround the docs give for root containers: the open build is compiled
   # with DCHECKs, and as root without CAP_SYS_NICE Chromium's setpriority() is refused and the DCHECK
   # on it aborts the browser. The key goes in as CCKEY and is handed to the PRO legs only.
-  docker run --rm --cap-add=SYS_NICE \
+  # Git Bash on Windows hands Docker a /c/... path that mounts as an empty folder: pass the Windows path
+  # and keep MSYS from rewriting the container-side ones.
+  MSYS_NO_PATHCONV=1 docker run --rm --cap-add=SYS_NICE \
     -e "CCKEY=$KEY" -e "VERSION=$VERSION" -e "DEB_DEPS=$DEB_DEPS" \
-    -v "$HERE:/smoke:ro" \
+    -v "$(winpath "$HERE"):/smoke:ro" \
     node:20-bookworm-slim bash -c '
       set -u
       rc=0
