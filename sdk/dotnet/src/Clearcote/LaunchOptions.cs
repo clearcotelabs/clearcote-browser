@@ -191,6 +191,23 @@ public partial class LaunchOptions : FingerprintOptions
     /// <para>Applies only to a socks5:// proxy; ignored otherwise. Needs a PRO engine 151 r17+, and
     /// a proxy that actually permits the ASSOCIATE command.</para>
     public bool Socks5Udp { get; set; }
+    /// Keep the HTTP disk cache (scripts, styles, images) in this folder across runs, while the profile itself
+    /// stays fresh: cookies and storage are new every run, only cached files carry over, so a site's assets come
+    /// from disk instead of through the proxy again (measured: about 8 MB of proxy traffic per run down to about
+    /// 0.4 MB on script-heavy pages).
+    ///
+    /// <para>Browsers running at the same time each get their own slot inside the folder (<c>slot-0</c>,
+    /// <c>slot-1</c>, ...), because Chromium lets only one browser use a cache at once. Node and Python use the
+    /// same layout, so the three SDKs can share one folder.</para>
+    ///
+    /// <para>Only share a folder between runs that may look like the same visitor: a site can link two sessions
+    /// through what they have cached. Use one folder per identity (persona, proxy, account) when that matters.
+    /// Needs a profile: use <see cref="Clearcote.LaunchEphemeralProfileAsync"/> (a fresh profile per run),
+    /// <see cref="Clearcote.LaunchPersistentContextAsync(string, LaunchOptions?)"/> or <see cref="Clearcote.ServeAsync"/>;
+    /// <see cref="Clearcote.LaunchAsync"/> starts without one (its cache stays in memory) and throws.
+    /// Local launches only; a cloud or Docker launch refuses it. Combining it with your own
+    /// <c>--disk-cache-dir</c> in <see cref="Args"/> throws.</para>
+    public string? HttpCacheDir { get; set; }
     /// Keep the persona switches (the seed, every persona override, proxy credentials, the
     /// canvas-bridge token) off the browser's command line, which any local user can read, on an engine
     /// that implements <c>--persona-from-env</c> (engine patch 1021): they travel in the

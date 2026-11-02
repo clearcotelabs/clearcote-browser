@@ -165,6 +165,8 @@ public static partial class Clearcote
         if (CloudLaunch.Requested(options)) return await CloudLaunch.LaunchBrowserAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
         // macOS without the native PRO build: the Clearcote Docker image, connected over CDP.
         if (DockerLaunch.Requested(options)) return await DockerLaunch.LaunchBrowserAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
+        // Incognito keeps its HTTP cache in memory: a cache folder would do nothing (HttpCache.cs).
+        if (options?.HttpCacheDir is not null) throw new ArgumentException(HttpCache.NeedsProfile);
         var hz = HumanizeLaunch.Of(options, cloud: false);   // Humanize / ShowCursor: a bad option throws before anything starts
         CheckPlaywrightPassThrough(options);
         var prepared = await PrepareLaunchAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
@@ -342,6 +344,12 @@ public static partial class Clearcote
     {
         if (CloudLaunch.Requested(options))
             return await CloudLaunch.LaunchContextAsync(options!, persistent: true, userDataDir).ConfigureAwait(false);
+        return await HttpCache.RunAsync(options, o => LaunchLocalPersistentContextAsync(userDataDir, o),
+            (c, release) => c.Close += (_, _) => release()).ConfigureAwait(false);
+    }
+
+    private static async Task<IBrowserContext> LaunchLocalPersistentContextAsync(string userDataDir, LaunchOptions? options)
+    {
         var hz = HumanizeLaunch.Of(options, cloud: false);   // Humanize / ShowCursor: a bad option throws before anything starts
         CheckPlaywrightPassThrough(options, context: true);
         var prepared = await PrepareLaunchAsync(options ?? new LaunchOptions()).ConfigureAwait(false);
@@ -502,6 +510,10 @@ public static partial class Clearcote
     /// Launch a standing, stealthy CDP endpoint (a direct engine spawn, not through Playwright) any
     /// Playwright/Puppeteer/CDP client can attach to via ConnectOverCDP. Returns a <see cref="Server"/>.
     public static async Task<Server> ServeAsync(ServeOptions? options = null)
+        // The slot stays held until CloseAsync has stopped the browser (or the process exits).
+        => await HttpCache.RunAsync(options, ServeLocalAsync, (srv, release) => srv.OnClosed = release).ConfigureAwait(false);
+
+    private static async Task<Server> ServeLocalAsync(ServeOptions? options)
     {
         Geometry.ValidateWindowSize(options?.WindowSize);
         var prepared = await PrepareLaunchAsync(options ?? new ServeOptions()).ConfigureAwait(false);
@@ -939,5 +951,9 @@ public sealed class Server
         if (socketDir is not null) { try { Directory.Delete(socketDir, recursive: true); } catch { } }
         if (_ownUdd) ThrowawayProfile.DeleteDirectory(_userDataDir);
         AppDomain.CurrentDomain.ProcessExit -= _onProcessExit;  // one per ServeAsync would otherwise pile up
+        OnClosed?.Invoke();
     }
+
+    /// Run once CloseAsync has stopped the browser (ServeAsync's HttpCacheDir slot).
+    internal Action? OnClosed { get; set; }
 }

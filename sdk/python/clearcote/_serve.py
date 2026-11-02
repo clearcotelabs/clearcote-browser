@@ -152,6 +152,33 @@ class Server:
 
 def serve(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
           headless=True, ready_timeout=30.0, quiet=False, window_size=None, **kwargs):
+    from ._httpcache import take_http_cache
+
+    kwargs["quiet"] = quiet  # read by take_http_cache's warning, popped again below
+    release = take_http_cache(kwargs)
+    kwargs.pop("quiet")
+    if release is None:
+        return _serve_now(port, host, allow_origins, user_data_dir, headless, ready_timeout, quiet, window_size,
+                          **kwargs)
+    try:
+        srv = _serve_now(port, host, allow_origins, user_data_dir, headless, ready_timeout, quiet, window_size,
+                         **kwargs)
+    except BaseException:
+        release()
+        raise
+    close = srv.close
+
+    def _close():  # the slot stays held until close() has stopped the browser (or the interpreter exits)
+        try:
+            close()
+        finally:
+            release()
+    srv.close = _close
+    return srv
+
+
+def _serve_now(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=None,
+               headless=True, ready_timeout=30.0, quiet=False, window_size=None, **kwargs):
     """Launch clearcote and expose a raw CDP endpoint; return a :class:`Server`.
 
     ``port``          bound port (default: a free ephemeral port; pass 9222 for the conventional one).
@@ -357,3 +384,5 @@ def _cli_main(argv=None):
         srv.close()
     return 0
 
+
+serve.__doc__ = _serve_now.__doc__

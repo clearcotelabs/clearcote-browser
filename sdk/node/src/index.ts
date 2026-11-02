@@ -92,6 +92,7 @@ import { offlineKeyPath, requireOfflineBinary } from "./offline.js";
 export { OfflineKeyError, offlineLease, loadOfflineKey, OFFLINE_KEY_ENV } from "./offline.js";
 import { Cloud, cloudRequested, launchCloud, verifyWebhook, type CloudLaunchOptions, type CloudProfile } from "./cloud.js";
 import { dockerRequested, launchDocker, type DockerOption } from "./docker.js";
+import { HTTP_CACHE_NEEDS_PROFILE, withHttpCache } from "./httpcache.js";
 import { closeOnFailure, requestProxyUpstream, routeRequestApi } from "./reqproxy.js";
 export { DockerUnavailableError, type DockerContainer, type DockerOption } from "./docker.js";
 
@@ -359,6 +360,24 @@ interface CrlsetLaunchOption {
   crlsetTimeout?: number;
 }
 
+/** A shared HTTP cache for fresh profiles (see ./httpcache.ts). */
+interface HttpCacheOption {
+  /**
+   * Keep the HTTP disk cache (scripts, styles, images) in this folder across runs, while the profile itself
+   * stays fresh: cookies and storage are new every run, only cached files carry over, so a site's assets come
+   * from disk instead of through the proxy again (measured: about 8 MB of proxy traffic per run down to about
+   * 0.4 MB on script-heavy pages). Browsers running at the same time each get their own slot inside the folder
+   * (`slot-0`, `slot-1`, ...), because Chromium lets only one browser use a cache at once.
+   *
+   * Only share a folder between runs that may look like the same visitor: a site can link two sessions through
+   * what they have cached (validators such as ETags are sent back). Use one folder per identity (persona,
+   * proxy, account) when that matters. Needs a profile (launch()'s default throwaway one, `userDataDir`,
+   * launchPersistentContext(), serve()): `ephemeralProfile: false` keeps the cache in memory and throws. Local
+   * launches only; `cloud` and `docker` refuse it. Combining it with your own `--disk-cache-dir` in `args` throws.
+   */
+  httpCacheDir?: string;
+}
+
 /** Opt-in SOCKS5 UDP relaying (see {@link socks5UdpArgs}). */
 interface Socks5UdpOption {
   /** Relay WebRTC's UDP through the SOCKS5 proxy using UDP ASSOCIATE, instead of letting it egress
@@ -386,7 +405,7 @@ interface CloudSwitchOption {
 }
 
 /** Options for {@link launch}: Playwright launch options + Clearcote fingerprint + agent + download options. */
-export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeLaunchOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, PersonaEnvOption, FontDirsOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption, DockerOption, WidevineOption, CrlsetLaunchOption {}
+export interface LaunchOptions extends PlaywrightLaunchOptions, FingerprintOptions, AgentOptions, GeoipOption, ProfileOption, ExtensionsOption, EphemeralProfileOption, HumanizeLaunchOptions, DownloadOptions, LicenseOptions, ShaderDialectOption, PersonaEnvOption, FontDirsOption, Socks5UdpOption, EngineExtrasOption, CloudSwitchOption, DockerOption, WidevineOption, CrlsetLaunchOption, HttpCacheOption {}
 
 /** The account options a local launch drops (see CloudSwitchOption). */
 function withoutCloudOptions<T extends object>(options: T): T {
@@ -413,7 +432,8 @@ export interface PersistentContextOptions
     EngineExtrasOption,
     CloudSwitchOption,
     WidevineOption,
-    CrlsetLaunchOption {}
+    CrlsetLaunchOption,
+    HttpCacheOption {}
 
 
 
@@ -1109,6 +1129,7 @@ export async function launch(options: LaunchOptions | CloudLaunchOptions = {}): 
 
 /** The pre-0.23 incognito launch, reached via `ephemeralProfile: false`. */
 async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
+  if (options.httpCacheDir !== undefined && options.httpCacheDir !== null) throw new TypeError(HTTP_CACHE_NEEDS_PROFILE);
   // profile= a saved persona: its options are the base, explicit options override. ("auto" is
   // resolved later, once the executable is known.)
   const merged = mergeSavedProfile(options);
@@ -1258,6 +1279,22 @@ export async function launchPersistentContext(
 }
 
 async function launchLocalPersistentContext(
+  userDataDir: string,
+  options: PersistentContextOptions = {}
+): Promise<BrowserContext> {
+  const cache = withHttpCache(options);
+  let context: BrowserContext;
+  try {
+    context = await launchLocalPersistentContextNow(userDataDir, cache.options);
+  } catch (e) {
+    cache.release();
+    throw e;
+  }
+  context.once("close", cache.release);
+  return context;
+}
+
+async function launchLocalPersistentContextNow(
   userDataDir: string,
   options: PersistentContextOptions = {}
 ): Promise<BrowserContext> {
@@ -1581,6 +1618,23 @@ export function serveInfobarArgs(headless: boolean, args: readonly string[]): st
  * launch flags, so the served persona is preserved end to end.
  */
 export async function serve(options: ServeOptions = {}): Promise<Server> {
+  const cache = withHttpCache(options);
+  let srv: Server;
+  try {
+    srv = await serveNow(cache.options);
+  } catch (e) {
+    cache.release();
+    throw e;
+  }
+  // The slot stays held until close() has stopped the browser (or this process exits).
+  const close = srv.close.bind(srv);
+  srv.close = async () => {
+    try { await close(); } finally { cache.release(); }
+  };
+  return srv;
+}
+
+async function serveNow(options: ServeOptions = {}): Promise<Server> {
   const {
     port,
     host = "127.0.0.1",

@@ -201,7 +201,7 @@ export const LOCAL_ONLY_OPTIONS: readonly string[] = [
   ...(AGENT_KEYS as string[]),
   "executablePath", "args", "ignoreDefaultArgs", "userDataDir", "ephemeralProfile", "extensions",
   "portableProfile", "encryptionKey", "disablePrivacySandbox", "socks5Udp", "shaderDialect", "fontDirs", "widevine", "crlset", "crlsetTimeout",
-  "profileSelect", "cacheDir", "autoUpdate", "releaseChannel", "allowThirdPartyCookies", "transparentProxy",
+  "profileSelect", "cacheDir", "httpCacheDir", "autoUpdate", "releaseChannel", "allowThirdPartyCookies", "transparentProxy",
   "licenseKey", "licenseApiBase", "licenseThroughProxy", "env", "devtools", "downloadsPath", "tracesDir",
   "chromiumSandbox", "channel", "handleSIGINT", "handleSIGTERM", "handleSIGHUP", "firefoxUserPrefs",
   "artifactsDir", "logger",

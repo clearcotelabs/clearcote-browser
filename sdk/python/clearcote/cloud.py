@@ -226,7 +226,7 @@ def _local_only_options():
     persona = tuple(k for k in FINGERPRINT_KEYS if k not in SESSION_FIELDS)
     launch_side = (
         "executable_path", "args", "ignore_default_args", "user_data_dir", "ephemeral_profile",
-        "extensions", "portable_profile", "encryption_key", "disable_privacy_sandbox", "socks5_udp",
+        "extensions", "portable_profile", "encryption_key", "disable_privacy_sandbox", "socks5_udp", "http_cache_dir",
         "shader_dialect", "font_dirs", "widevine", "crlset", "crlset_timeout", "profile_select", "cache_dir", "auto_update", "release_channel",
         "allow_third_party_cookies", "transparent_proxy", "license_key", "license_api_base",
         "license_through_proxy", "env", "devtools", "downloads_path", "traces_dir",

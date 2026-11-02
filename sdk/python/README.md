@@ -509,6 +509,27 @@ context = launch_persistent_context(
 )
 ```
 
+### Save proxy traffic on fresh profiles (`http_cache_dir`)
+
+A fresh profile starts with an empty cache, so every run downloads the site's scripts and styles again through
+your proxy. `http_cache_dir` keeps only the HTTP cache in a folder that outlives the run; cookies and storage are
+still new every run.
+
+```python
+browser = launch(proxy={"server": PROXY}, http_cache_dir="/data/http-cache/acct-1")
+```
+
+Measured on two script-heavy pages: about 7.7 MB of proxy traffic per run without it, about 0.4 MB once the cache
+is warm. Browsers running at the same time each get their own slot in the folder (`slot-0`, `slot-1`, ...), since
+Chromium lets only one browser use a cache at once; each slot stays warm for the next run. Node and .NET use the
+same layout.
+
+Only share a folder between runs that may look like the same visitor: a site can link sessions through what they
+have cached. Use one folder per identity (persona, proxy, account) when that matters. It needs a profile: the sync
+`launch()` (its default throwaway profile), `user_data_dir`, `launch_persistent_context()` and `serve()` take it;
+`ephemeral_profile=False` and the async `launch()` keep the cache in memory and raise (use
+`async_api.launch_persistent_context()` with a fresh directory). Local launches only.
+
 ### Widevine / DRM (`widevine`)
 
 clearcote ships the **EME/Widevine plumbing** compiled in, but — being 100% open source — it does

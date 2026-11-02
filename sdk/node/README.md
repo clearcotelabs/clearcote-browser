@@ -342,6 +342,26 @@ const context = await launchPersistentContext("./profile-7423", {
 });
 ```
 
+### Save proxy traffic on fresh profiles (`httpCacheDir`)
+
+A fresh profile starts with an empty cache, so every run downloads the site's scripts and styles again through
+your proxy. `httpCacheDir` keeps only the HTTP cache in a folder that outlives the run; cookies and storage are
+still new every run.
+
+```ts
+const browser = await launch({ proxy: { server: PROXY }, httpCacheDir: "/data/http-cache/acct-1" });
+```
+
+Measured on two script-heavy pages: about 7.7 MB of proxy traffic per run without it, about 0.4 MB once the cache
+is warm. Browsers running at the same time each get their own slot in the folder (`slot-0`, `slot-1`, ...), since
+Chromium lets only one browser use a cache at once; each slot stays warm for the next run. Python and .NET use the
+same layout.
+
+Only share a folder between runs that may look like the same visitor: a site can link sessions through what they
+have cached. Use one folder per identity (persona, proxy, account) when that matters. It needs a profile:
+`launch()` (its default throwaway profile), `userDataDir`, `launchPersistentContext()` and `serve()` take it;
+`ephemeralProfile: false` keeps the cache in memory and throws. Local launches only.
+
 ### Widevine / DRM (`widevine`)
 
 clearcote ships the **EME/Widevine plumbing** compiled in, but — being 100% open source — it does

@@ -48,6 +48,7 @@ from ._colorscheme import (default_color_scheme, engine_decides_color_scheme,
                            install_color_scheme_default)
 from ._humanize import install_humanize, install_humanize_on_context
 from ._hzoptions import ClearcoteStrictError, HumanizeOptions, normalize as _hz_normalize
+from ._httpcache import refuse_without_profile, with_http_cache
 from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for tests)
     DEFAULT_IGNORED_ARGS,
     GATED_ENGINE_SWITCHES,
@@ -1341,6 +1342,18 @@ def launch(cloud=None, **kwargs):
     behind, and no state survives to the next launch, so the incognito-like isolation callers
     relied on is preserved. Pass ``user_data_dir=`` to keep a profile instead (or call
     ``launch_persistent_context`` directly), and ``ephemeral_profile=False`` to opt back out.
+
+    SHARED HTTP CACHE. ``http_cache_dir="<folder>"`` keeps the HTTP disk cache (scripts, styles, images)
+    there across runs while the profile itself stays fresh: cookies and storage are new every run, only
+    cached files carry over, so a site's assets come from disk instead of through the proxy again
+    (measured: about 8 MB of proxy traffic per run down to about 0.4 MB on script-heavy pages). Browsers
+    running at the same time each get their own slot in the folder (``slot-0``, ``slot-1``, ...), since
+    Chromium lets only one browser use a cache at once. Only share a folder between runs that may look like
+    the same visitor: a site can link sessions through what they have cached, so use one folder per
+    identity (persona, proxy, account) when that matters. Needs a profile: ``ephemeral_profile=False`` (and
+    the async ``launch()``, which has none) keeps the cache in memory and raises TypeError; use
+    ``launch_persistent_context`` there. Local launches only (``cloud`` and ``docker`` refuse it); combining it
+    with your own ``--disk-cache-dir`` in ``args`` raises TypeError.
     """
     if cloud_requested(cloud):
         return launch_cloud(cloud, kwargs)
@@ -1358,6 +1371,11 @@ def launch(cloud=None, **kwargs):
     if ephemeral:
         return _install_persistent_as_browser(_launch_on_throwaway_profile("clearcote-run-", kwargs))
 
+    refuse_without_profile(kwargs, "Leave ephemeral_profile on (the default), or use launch_persistent_context() or serve()")
+    return _launch_incognito(kwargs)
+
+
+def _launch_incognito(kwargs):
     # incognito has no profile to seed a CRLSet into (see _crlset): drop the options, warn if asked for
     if kwargs.pop("crlset", None) not in (None, False):
         print("clearcote: crlset: ephemeral_profile=False has no profile to seed a CRLSet into; "
@@ -1448,6 +1466,10 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
         raise TypeError("launch_persistent_context() needs a user_data_dir "
                         "(or cloud=True with profile=\"name\" for a cloud profile)")
     _drop_cloud_credentials(kwargs)
+    return with_http_cache(kwargs, lambda: _launch_persistent_context_local(user_data_dir, kwargs), "close")
+
+
+def _launch_persistent_context_local(user_data_dir, kwargs):
     # Set the default strip (DEFAULT_IGNORED_ARGS) BEFORE the Widevine helper so it appends
     # --disable-component-update to it rather than replacing it (which would lose the AutomationControlled
     # strip on Widevine launches).

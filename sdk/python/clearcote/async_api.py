@@ -38,6 +38,7 @@ from ._reqproxy import close_on_failure
 from .cloud import AsyncCloud, CloudError, CloudTimeoutError, cloud_requested, launch_cloud_async, verify_webhook
 from ._docker import docker_requested, launch_docker_async
 from ._launchopts import DEFAULT_IGNORED_ARGS
+from ._httpcache import refuse_without_profile, with_http_cache_async
 from ._geometry import apply_headless_geometry, place_window_async
 from ._license import inject_run_token
 from ._fonts import apply_font_env, check_font_dirs
@@ -278,6 +279,12 @@ async def launch(cloud=None, **kwargs):
     docker, docker_image = kwargs.pop("docker", None), kwargs.pop("docker_image", None)
     if docker_requested(docker, kwargs):  # an Intel Mac (no native macOS build): the Docker image
         return await launch_docker_async({**kwargs, "docker_image": docker_image})
+    refuse_without_profile(kwargs, "The async launch() has none: use async_api.launch_persistent_context() "
+                                   "(a fresh directory per run keeps the profile new)")
+    return await _launch_incognito(kwargs)
+
+
+async def _launch_incognito(kwargs):
     # this launch is incognito: no profile to seed a CRLSet into (launch_persistent_context has one)
     if kwargs.pop("crlset", None) not in (None, False):
         print("clearcote: crlset: the async launch() has no profile to seed a CRLSet into; use "
@@ -349,6 +356,10 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
         raise TypeError("launch_persistent_context() needs a user_data_dir "
                         "(or cloud=True with profile=\"name\" for a cloud profile)")
     _drop_cloud_credentials(kwargs)
+    return await with_http_cache_async(kwargs, lambda: _launch_persistent_context_local(user_data_dir, kwargs), "close")
+
+
+async def _launch_persistent_context_local(user_data_dir, kwargs):
     # Automation strip before the Widevine helper (it appends --disable-component-update rather than
     # clobbering ['--enable-automation']) — mirrors the sync path.
     kwargs.setdefault("ignore_default_args", list(DEFAULT_IGNORED_ARGS))

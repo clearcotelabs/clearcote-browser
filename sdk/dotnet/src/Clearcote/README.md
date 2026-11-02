@@ -111,6 +111,30 @@ var context = await Clearcote.Clearcote.LaunchPersistentContextAsync("./profile-
 });
 ```
 
+## Save proxy traffic on fresh profiles (`HttpCacheDir`)
+
+A fresh profile starts with an empty cache, so every run downloads the site's scripts and styles again through
+your proxy. `HttpCacheDir` keeps only the HTTP cache in a folder that outlives the run; cookies and storage are
+still new every run.
+
+```csharp
+var context = await Clearcote.Clearcote.LaunchEphemeralProfileAsync(new LaunchOptions
+{
+    Proxy        = new ProxyOptions { Server = proxy },
+    HttpCacheDir = "/data/http-cache/acct-1",
+});
+```
+
+Measured on two script-heavy pages: about 7.7 MB of proxy traffic per run without it, about 0.4 MB once the cache
+is warm. Browsers running at the same time each get their own slot in the folder (`slot-0`, `slot-1`, ...), since
+Chromium lets only one browser use a cache at once; each slot stays warm for the next run. Node and Python use the
+same layout.
+
+Only share a folder between runs that may look like the same visitor: a site can link sessions through what they
+have cached. Use one folder per identity (persona, proxy, account) when that matters. It needs a profile:
+`LaunchEphemeralProfileAsync`, `LaunchPersistentContextAsync` and `ServeAsync` take it; `LaunchAsync` starts
+without one (the cache stays in memory) and throws. Local launches only.
+
 ## Saved personas (`Profile`) and `LocalProfile = "auto"`
 
 A `Profile` is a named set of launch options saved as JSON in `~/.clearcote/profiles/<name>.json`
