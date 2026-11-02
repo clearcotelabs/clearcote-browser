@@ -109,6 +109,15 @@ public class FingerprintTests
     }
 
     [Fact]
+    public void R57_noise_style_options_map_and_defaults_add_nothing()
+    {
+        Assert.Contains("--fingerprint-noise-flat-areas", Fingerprint.Args(new FingerprintOptions { FlatAreaNoise = true }));
+        Assert.Contains("--fingerprint-webgl-no-read-margin", Fingerprint.Args(new FingerprintOptions { WebglReadMargin = false }));
+        Assert.Equal(Fingerprint.Args(new FingerprintOptions()),
+            Fingerprint.Args(new FingerprintOptions { FlatAreaNoise = false, WebglReadMargin = true }));
+    }
+
+    [Fact]
     public void Skips_empty_but_still_defaults_timezone()
     {
         using var _ = new Sandbox().Os("windows");

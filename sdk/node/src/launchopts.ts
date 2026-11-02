@@ -867,7 +867,12 @@ export const GATED_ENGINE_SWITCHES: Readonly<Record<string, string>> = {
  * before 152 r22 cannot allow them, and one before 154 r36 blocks by default, which is what the
  * block switch asks for anyway.
  */
-export const QUIET_GATED_ENGINE_SWITCHES: readonly string[] = ["--allow-third-party-cookies", "--block-third-party-cookies"];
+export const QUIET_GATED_ENGINE_SWITCHES: readonly string[] = [
+  "--allow-third-party-cookies", "--block-third-party-cookies",
+  // r57 noise style (flatAreaNoise / webglReadMargin): an older engine already noises flat areas and
+  // has no read margin, so dropping them keeps exactly what was asked for or what that engine does.
+  "--fingerprint-noise-flat-areas", "--fingerprint-webgl-no-read-margin",
+];
 
 /**
  * Drop any 152 r22+ switch the engine that will run does not implement, with a warning.

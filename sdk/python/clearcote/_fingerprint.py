@@ -48,6 +48,9 @@ FINGERPRINT_KEYS = (
     # The two INDEPENDENT halves of the bundles above (engine >= Chromium 150 r12).
     "gpu_string_spoof",
     "canvas_noise",
+    # r57 noise style: flat-area noise (r56 style) and the WebGL partial-read margin.
+    "flat_area_noise",
+    "webgl_read_margin",
     "fingerprint_profile",
     "storage_quota",
     "canvas_bridge",
@@ -552,6 +555,16 @@ def fingerprint_args(opts):
     # Requires engine >= 150 r12; inert on older builds.
     if opts.get("canvas_noise") is False:
         args.append("--disable-canvas-noise")
+    # flat_area_noise=True restores the r56 noise style: flat areas inside a canvas/WebGL read are
+    # noised too. From engine r57 the default leaves a pixel alone when one of its four neighbours
+    # has the same colour, so a solid shape reads back exactly as drawn (checkers that hash one,
+    # such as PixelScan, otherwise report masking). One switch for every exit, so reads still agree.
+    if opts.get("flat_area_noise") is True:
+        args.append("--fingerprint-noise-flat-areas")
+    # webgl_read_margin=False skips the extra one-pixel margin read-back of a partial WebGL
+    # readPixels (r57+), so 1-2 edge pixels of a partial read can differ from a full read.
+    if opts.get("webgl_read_margin") is False:
+        args.append("--fingerprint-webgl-no-read-margin")
     # fingerprint_voices=False keeps the host's own speech voices under a persona (engine 152 r22+).
     if opts.get("fingerprint_voices") is False:
         args.append("--disable-fingerprint-voices")

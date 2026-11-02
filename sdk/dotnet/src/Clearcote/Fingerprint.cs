@@ -134,6 +134,24 @@ public class FingerprintOptions
     /// Requires engine &gt;= Chromium 150 r12; inert on older builds.
     /// </summary>
     public bool? CanvasNoise { get; set; }
+
+    /// <summary>
+    /// Noise style for canvas and WebGL readback. From engine r57 a pixel that equals one of its four
+    /// neighbours is never changed, so flat areas read back exactly as drawn and noise lands on edges,
+    /// text and gradients only. <c>true</c> restores the r56 style, where flat areas are noised too
+    /// (checkers that hash a solid shape, such as PixelScan's, then report masking). One switch for
+    /// every exit, so two reads of one canvas still agree. Default <c>false</c>; dropped on engines
+    /// before r57, which always noise flat areas.
+    /// </summary>
+    public bool? FlatAreaNoise { get; set; }
+
+    /// <summary>
+    /// A partial WebGL readPixels of the canvas reads a one-pixel margin around it (one extra GPU
+    /// read-back) so its edge pixels get exactly the noise a full read gives them. <c>false</c> skips
+    /// that read: 1-2 edge pixels per partial read can then differ from a full read. Default
+    /// <c>true</c>. No effect with FlatAreaNoise = true or the noise off. Needs engine r57.
+    /// </summary>
+    public bool? WebglReadMargin { get; set; }
     /// Import a real captured fingerprint: a path to a .json profile, a JSON string, or an object.
     public object? FingerprintProfile { get; set; }
     /// navigator.storage.estimate().quota in MEGABYTES.
@@ -526,6 +544,9 @@ public static class Fingerprint
         // The two INDEPENDENT halves of the bundles above (engine >= Chromium 150 r12).
         if (o.GpuStringSpoof == false) args.Add("--disable-gpu-string-spoof");
         if (o.CanvasNoise == false) args.Add("--disable-canvas-noise");
+        // r57 noise style; dropped without a warning on older engines by GateEngineSwitches.
+        if (o.FlatAreaNoise == true) args.Add("--fingerprint-noise-flat-areas");
+        if (o.WebglReadMargin == false) args.Add("--fingerprint-webgl-no-read-margin");
         // FingerprintVoices=false keeps the host's own speech voices under a persona (engine 152 r22+).
         if (o.FingerprintVoices == false) args.Add("--disable-fingerprint-voices");
         // Persona schema (see PersonaSchema); the real-GPU declaration gates a schema-2 persona's discrete-GPU

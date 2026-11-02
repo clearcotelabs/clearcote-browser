@@ -170,6 +170,17 @@ describe("gateEngineSwitches", () => {
     expect(r36.args).toEqual(["--block-third-party-cookies"]);
   });
 
+  it("drops the r57 noise style switches on an older engine WITHOUT a warning, keeps them on r57", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const both = ["--fingerprint-noise-flat-areas", "--fingerprint-webgl-no-read-margin"];
+    const r56 = gateEngineSwitches(fakeEngine(["proxy-auth"]), ["--foo", ...both], false);
+    expect(r56.args).toEqual(["--foo"]);
+    expect(r56.warnings).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+    const r57 = gateEngineSwitches(fakeEngine(["fingerprint-noise-flat-areas", "fingerprint-webgl-no-read-margin"]), both, false);
+    expect(r57.args).toEqual(both);
+  });
+
   it("is silent under quiet but still reports the warnings", () => {
     const exe = fakeEngine([]);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

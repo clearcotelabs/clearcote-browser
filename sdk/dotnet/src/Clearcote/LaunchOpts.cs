@@ -826,7 +826,12 @@ public static class LaunchOpts
     /// warning would fire on every launch of an older build, and dropping them keeps that build's
     /// own behaviour: an engine before 152 r22 cannot allow them, and one before 154 r36 blocks by
     /// default, which is what the block switch asks for anyway.
-    public static readonly IReadOnlyList<string> QuietGatedEngineSwitches = new[] { "--allow-third-party-cookies", "--block-third-party-cookies" };
+    public static readonly IReadOnlyList<string> QuietGatedEngineSwitches = new[]
+    {
+        "--allow-third-party-cookies", "--block-third-party-cookies",
+        // r57 noise style: an older engine already noises flat areas and has no read margin.
+        "--fingerprint-noise-flat-areas", "--fingerprint-webgl-no-read-margin",
+    };
 
     /// Drop any 152 r22+ switch the engine that will run does not implement, with a warning.
     /// Chromium ignores unknown switches silently, so an older engine would otherwise launch without

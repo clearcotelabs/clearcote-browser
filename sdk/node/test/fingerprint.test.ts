@@ -137,6 +137,14 @@ describe("fingerprintArgs", () => {
     expect(fingerprintArgs({ gpuStringSpoof: true, canvasNoise: true })).toEqual(fingerprintArgs({}));
   });
 
+  it("maps the r57 noise style options, and their defaults add nothing", () => {
+    expect(fingerprintArgs({ flatAreaNoise: true })).toContain("--fingerprint-noise-flat-areas");
+    expect(fingerprintArgs({ webglReadMargin: false })).toContain("--fingerprint-webgl-no-read-margin");
+    expect(fingerprintArgs({ flatAreaNoise: false, webglReadMargin: true })).toEqual(fingerprintArgs({}));
+    expect(fingerprintArgs({})).not.toContain("--fingerprint-noise-flat-areas");
+    expect(fingerprintArgs({})).not.toContain("--fingerprint-webgl-no-read-margin");
+  });
+
   it("skips empty / undefined / null values", () => {
     const args = fingerprintArgs({ fingerprint: "", timezone: undefined, gpuVendor: null as unknown as string });
     expect(args.some((a) => a.startsWith("--fingerprint="))).toBe(false);

@@ -172,6 +172,24 @@ export interface FingerprintOptions {
    */
   canvasNoise?: boolean;
   /**
+   * Noise style for canvas and WebGL readback. From engine r57 a pixel that equals one of its four
+   * neighbours is never changed, so flat areas (a solid shape, a filled block) read back exactly as
+   * drawn, as on real hardware; noise lands on edges, text and gradients only. `true` restores the
+   * r56 style, where flat areas inside a read are noised too (checkers that hash a solid shape, such as
+   * PixelScan's, then report masking). Applies to every exit at once (getImageData, toDataURL/toBlob,
+   * WebGL readPixels), so two reads of one canvas still agree. Default `false`. Engines before r57
+   * always noise flat areas; the option is dropped there.
+   */
+  flatAreaNoise?: boolean;
+  /**
+   * A partial WebGL `readPixels` of the canvas (a rectangle smaller than the canvas) reads a one-pixel
+   * margin around it, one extra GPU read-back, so its edge pixels get exactly the noise a full read
+   * gives them. `false` skips that extra read: partial reads are slightly cheaper, but 1-2 edge pixels
+   * per read can then differ from a full read of the same canvas. Default `true`. Has no effect with
+   * `flatAreaNoise: true` or with the noise off. Needs engine r57; dropped on older engines.
+   */
+  webglReadMargin?: boolean;
+  /**
    * Import a real captured fingerprint so the browser presents *that machine's* identity instead
    * of the synthetic seed-derived one. Accepts a path to a `.json` profile, a profile object, or a
    * JSON string (capture one with `tools/fingerprint-collect`). Fields present in the profile
@@ -241,6 +259,8 @@ export const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "fingerprintNoise",
   "gpuStringSpoof",
   "canvasNoise",
+  "flatAreaNoise",
+  "webglReadMargin",
   "fingerprintProfile",
   "storageQuota",
   "canvasBridge",
@@ -665,6 +685,10 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // The two INDEPENDENT halves of the bundles above (engine >= Chromium 150 r12).
   if (o.gpuStringSpoof === false) args.push("--disable-gpu-string-spoof");
   if (o.canvasNoise === false) args.push("--disable-canvas-noise");
+  // r57+: dropped without a warning on older engines by gateEngineSwitches (they already noise flat
+  // areas and have no read margin to turn off).
+  if (o.flatAreaNoise === true) args.push("--fingerprint-noise-flat-areas");
+  if (o.webglReadMargin === false) args.push("--fingerprint-webgl-no-read-margin");
   // fingerprintVoices=false keeps the host's own speech voices under a persona (engine 152 r22+).
   if (o.fingerprintVoices === false) args.push("--disable-fingerprint-voices");
   // Persona schema (see FingerprintOptions.personaSchema); the real-GPU declaration gates a

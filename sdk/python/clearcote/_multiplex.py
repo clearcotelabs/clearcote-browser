@@ -69,7 +69,7 @@ _NUMERIC = (
 )
 _BOOLEAN = (
     "light_stealth", "real_gpu_host", "disable_gpu_fingerprint", "fingerprint_noise",
-    "gpu_string_spoof", "canvas_noise", "fingerprint_voices", "allow_third_party_cookies",
+    "gpu_string_spoof", "canvas_noise", "flat_area_noise", "webgl_read_margin", "fingerprint_voices", "allow_third_party_cookies",
     "transparent_proxy", "socks5_udp",
 )
 _STRING = (

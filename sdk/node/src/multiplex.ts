@@ -115,7 +115,7 @@ const NUMERIC = new Set([
   "colorDepth", "devicePixelRatio", "maxTouchPoints", "storageQuota", "personaSchema",
 ]);
 const BOOLEAN = new Set([
-  "lightStealth", "realGpuHost", "disableGpuFingerprint", "fingerprintNoise", "gpuStringSpoof", "canvasNoise",
+  "lightStealth", "realGpuHost", "disableGpuFingerprint", "fingerprintNoise", "gpuStringSpoof", "canvasNoise", "flatAreaNoise", "webglReadMargin",
   "fingerprintVoices", "allowThirdPartyCookies", "transparentProxy", "socks5Udp",
 ]);
 const STRING = new Set([

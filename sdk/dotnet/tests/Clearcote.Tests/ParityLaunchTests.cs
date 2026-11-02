@@ -191,6 +191,21 @@ public class ParityLaunchTests : IDisposable
     }
 
     [Fact]
+    public void Gate_drops_r57_noise_style_switches_quietly_on_an_old_engine()
+    {
+        var both = new[] { "--fingerprint-noise-flat-areas", "--fingerprint-webgl-no-read-margin" };
+        using var err = new StderrCapture();
+        var (r56, warnings) = LaunchOpts.GateEngineSwitches(FakeEngine(new[] { "proxy-auth" }),
+            new[] { "--foo" }.Concat(both), quiet: false);
+        Assert.Equal(new[] { "--foo" }, r56);
+        Assert.Empty(warnings);
+        Assert.Equal("", err.Text);
+        var (r57, _) = LaunchOpts.GateEngineSwitches(
+            FakeEngine(new[] { "fingerprint-noise-flat-areas", "fingerprint-webgl-no-read-margin" }), both, quiet: true);
+        Assert.Equal(both, r57);
+    }
+
+    [Fact]
     public void Gate_is_silent_under_quiet_but_still_reports()
     {
         var exe = FakeEngine(Array.Empty<string>());

@@ -230,6 +230,10 @@ _ENV_TO_BOOL = {
     "CC_FINGERPRINT_NOISE": "fingerprint_noise",
     "CC_CANVAS_NOISE": "canvas_noise",
     "CC_GPU_STRING_SPOOF": "gpu_string_spoof",
+    # r57 noise style. CC_FLAT_AREA_NOISE is TRUE-triggered (fingerprint_args tests `is True`) and
+    # CC_WEBGL_READ_MARGIN false-triggered; both must arrive as real booleans for the same reason.
+    "CC_FLAT_AREA_NOISE": "flat_area_noise",
+    "CC_WEBGL_READ_MARGIN": "webgl_read_margin",
 }
 
 _TRUE = ("1", "true", "yes", "on")

@@ -902,7 +902,12 @@ GATED_ENGINE_SWITCHES = {
 # every launch of an older build, and dropping them keeps that build's own behaviour: an engine
 # before 152 r22 cannot allow them, and one before 154 r36 blocks by default, which is what the
 # block switch asks for anyway.
-QUIET_GATED_ENGINE_SWITCHES = ("--allow-third-party-cookies", "--block-third-party-cookies")
+QUIET_GATED_ENGINE_SWITCHES = (
+    "--allow-third-party-cookies", "--block-third-party-cookies",
+    # r57 noise style: an older engine already noises flat areas and has no read margin, so dropping
+    # them keeps exactly what was asked for or what that engine does.
+    "--fingerprint-noise-flat-areas", "--fingerprint-webgl-no-read-margin",
+)
 
 
 def gate_engine_switches(exe, args, quiet=False):

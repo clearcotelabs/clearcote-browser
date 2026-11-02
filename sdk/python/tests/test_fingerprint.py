@@ -179,6 +179,14 @@ def test_independent_gpu_string_and_canvas_noise_toggles():
     assert fingerprint_args({"gpu_string_spoof": True, "canvas_noise": True}) == fingerprint_args({})
 
 
+def test_r57_noise_style_options():
+    assert "--fingerprint-noise-flat-areas" in fingerprint_args({"flat_area_noise": True})
+    assert "--fingerprint-webgl-no-read-margin" in fingerprint_args({"webgl_read_margin": False})
+    # True == 1 in Python: only a real True turns flat-area noise on, and the defaults add nothing.
+    assert "--fingerprint-noise-flat-areas" not in fingerprint_args({"flat_area_noise": 1})
+    assert fingerprint_args({"flat_area_noise": False, "webgl_read_margin": True}) == fingerprint_args({})
+
+
 def test_skips_empty_and_none():
     args = fingerprint_args({"fingerprint": "", "timezone": None, "gpu_vendor": ""})
     assert not any(a.startswith("--fingerprint=") for a in args)

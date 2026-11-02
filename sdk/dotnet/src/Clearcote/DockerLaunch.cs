@@ -141,6 +141,7 @@ internal static class DockerLaunch
     {
         ["LightStealth"] = "CC_LIGHT_STEALTH", ["DisableGpuFingerprint"] = "CC_DISABLE_GPU_FINGERPRINT",
         ["FingerprintNoise"] = "CC_FINGERPRINT_NOISE", ["CanvasNoise"] = "CC_CANVAS_NOISE", ["GpuStringSpoof"] = "CC_GPU_STRING_SPOOF",
+        ["FlatAreaNoise"] = "CC_FLAT_AREA_NOISE", ["WebglReadMargin"] = "CC_WEBGL_READ_MARGIN",
     };
     private static readonly string[] Special =
         { "DevicePixelRatio", "FingerprintProfile", "Headless", "Proxy", "Args", "LicenseKey", "LicenseApiBase", "PersonaEnv", "StockRuntime", "RuntimeBindings" };

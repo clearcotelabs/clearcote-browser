@@ -171,6 +171,16 @@ def test_gate_keeps_every_switch_on_new_engine(tmp_path):
     assert not caught
 
 
+def test_gate_drops_r57_noise_style_switches_quietly_on_old_engine(tmp_path):
+    both = ["--fingerprint-noise-flat-areas", "--fingerprint-webgl-no-read-margin"]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        args, notes = gate_engine_switches(fake_engine(tmp_path, ["proxy-auth"]), ["--foo", *both], quiet=False)
+    assert args == ["--foo"] and notes == [] and not caught
+    args, _ = gate_engine_switches(fake_engine(tmp_path, [s[2:] for s in both]), both, quiet=False)
+    assert args == both
+
+
 def test_gate_drops_each_unsupported_switch_with_warning(tmp_path):
     exe = fake_engine(tmp_path, ["proxy-auth"])
     with warnings.catch_warnings(record=True) as caught:
