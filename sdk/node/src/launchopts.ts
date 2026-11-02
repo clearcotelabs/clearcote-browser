@@ -651,9 +651,15 @@ export function resolveProxy(proxy: PwProxy | undefined, engineSupportsProxyAuth
  * without a user gesture opens a popup, while genuine Chrome blocks it (measured 2026-10-28: real Chrome
  * 155/156 without the switch blocked, r53 with it opened). Stripping it restores Chrome's blocker; popups
  * opened by a click or from `page.evaluate` (a user gesture) still open.
+ * `--disable-ipc-flooding-protection` is added by Playwright to every launch; with it all 300 of 300 rapid
+ * `history.replaceState()` calls take effect, where genuine Chrome ignores those past 200 within 10 s, which a
+ * page can count (measured 2026-11-02: r56 through the SDK 300/300 every run; r56 without the switch 200,
+ * as plain Chrome; plain Chrome with the switch 300). Note for automation: a script that changes the URL more
+ * than 200 times in 10 s now sees the extra calls ignored, as in Chrome; `args: ["--disable-ipc-flooding-protection"]`
+ * turns the protection back off.
  * A caller's own `ignoreDefaultArgs` always wins.
  */
-export const DEFAULT_IGNORED_ARGS: readonly string[] = ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking"];
+export const DEFAULT_IGNORED_ARGS: readonly string[] = ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking", "--disable-ipc-flooding-protection"];
 
 /**
  * `--ignore-gpu-blocklist` for headed launches and for every launch on Windows.

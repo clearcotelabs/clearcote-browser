@@ -46,7 +46,7 @@ def fake_engine(tmp_path, switches):
 # -- GPU launch defaults (#1 + #2) -------------------------------------------------------------
 
 def test_strips_playwright_automation_and_swiftshader_defaults():
-    assert list(DEFAULT_IGNORED_ARGS) == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking"]
+    assert list(DEFAULT_IGNORED_ARGS) == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking", "--disable-ipc-flooding-protection"]
 
 
 def test_ignore_gpu_blocklist_when_headed_on_any_os():
@@ -441,7 +441,7 @@ NEW = [s[2:] for s in ALL] + [s[2:] for s in QUIET_GATED_ENGINE_SWITCHES] + ["pr
 
 def test_prepare_defaults_ignore_args_and_gpu_blocklist(prepared):
     _exe, args, pw, *_ = prepared(NEW, headless=True)
-    assert pw["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking"]
+    assert pw["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking", "--disable-ipc-flooding-protection"]
     assert ("--ignore-gpu-blocklist" in args) == (sys.platform == "win32")
     _exe, args, pw, *_ = prepared(NEW, headless=False)
     assert "--ignore-gpu-blocklist" in args
@@ -523,7 +523,7 @@ def test_launch_persistent_context_default_ignore_args(monkeypatch, tmp_path):
                         lambda kw: ("chrome", [], dict(kw), False, False, None))
     monkeypatch.setattr(clearcote, "apply_headless_geometry", lambda *a, **k: None)
     clearcote.launch_persistent_context(str(tmp_path / "udd"), quiet=True)  # it seeds the profile: not the cwd
-    assert captured["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking"]
+    assert captured["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking", "--disable-ipc-flooding-protection"]
 
 
 async def test_async_launch_persistent_context_default_ignore_args(monkeypatch, tmp_path):
@@ -537,7 +537,7 @@ async def test_async_launch_persistent_context_default_ignore_args(monkeypatch, 
     monkeypatch.setattr(async_api, "_prepare", fake_prepare)
     with pytest.raises(RuntimeError, match="stop here"):
         await async_api.launch_persistent_context(str(tmp_path / "udd"), quiet=True)
-    assert seen["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking"]
+    assert seen["ignore_default_args"] == ["--enable-automation", "--enable-unsafe-swiftshader", "--hide-scrollbars", "--disable-popup-blocking", "--disable-ipc-flooding-protection"]
 
 
 def test_release_channel_reaches_every_pro_download_path(monkeypatch):
