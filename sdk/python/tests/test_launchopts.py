@@ -382,8 +382,7 @@ PW157 = ("AcceptCHFrame", "AvoidUnnecessaryBeforeUnloadCheckSync", "HttpsUpgrade
 def test_playwright_feature_override_re_enables_only_what_a_site_can_observe():
     from clearcote._launchopts import playwright_feature_override_args
     out = playwright_feature_override_args(playwright_features=PW157, screenshot_surface=False)
-    assert out == ["--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,MediaRouter,PaintHolding,"
-                   "RenderDocument"]
+    assert out == ["--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,PaintHolding,RenderDocument"]
     # LazyFrameLoading (Playwright 1.49) is page-visible too
     out = playwright_feature_override_args(playwright_features=("LazyFrameLoading", "Translate"),
                                            screenshot_surface=False)
@@ -404,8 +403,8 @@ def test_playwright_feature_override_is_skipped_only_when_playwrights_exact_swit
 
 def test_playwright_screenshot_surface_is_re_emitted():
     from clearcote._launchopts import playwright_feature_override_args
-    out = playwright_feature_override_args(playwright_features=("MediaRouter",), screenshot_surface=True)
-    assert out == ["--disable-features=MediaRouter", "--enable-features=CDPScreenshotNewSurface"]
+    out = playwright_feature_override_args(playwright_features=("PaintHolding",), screenshot_surface=True)
+    assert out == ["--disable-features=PaintHolding", "--enable-features=CDPScreenshotNewSurface"]
 
 
 def test_parse_playwright_disabled_features_reads_every_release_shape():
@@ -446,8 +445,8 @@ def test_dropping_playwrights_disable_switch_still_keeps_its_screenshot_switch()
     exact = "--disable-features=" + ",".join(PW157)
     assert playwright_feature_override_args([exact], PW157, True) == ["--enable-features=CDPScreenshotNewSurface"]
     # ...but a screenshot switch the caller dropped is not re-added
-    assert playwright_feature_override_args(["--enable-features=CDPScreenshotNewSurface"], ("MediaRouter",), True) \
-        == ["--disable-features=MediaRouter"]
+    assert playwright_feature_override_args(["--enable-features=CDPScreenshotNewSurface"], ("PaintHolding",), True) \
+        == ["--disable-features=PaintHolding"]
 
 
 def test_parse_is_robust_to_a_bracket_in_a_comment_and_rejects_an_unrecognised_list():

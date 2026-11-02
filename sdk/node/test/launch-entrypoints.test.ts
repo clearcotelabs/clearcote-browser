@@ -612,7 +612,8 @@ describe("Playwright's --disable-features is replaced without ThirdPartyStorageP
       for (const f of ["ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades"]) expect(feats).not.toContain(f);
       // Which entries Playwright disables varies by release (1.63 dropped RenderDocument): check the installed one's.
       const kept = (installedPlaywrightDisabledFeatures() ?? PLAYWRIGHT_DISABLED_FEATURES).filter((f) => !PAGE_VISIBLE_PLAYWRIGHT_FEATURES.has(f));
-      expect(kept).toContain("MediaRouter");
+      expect(kept).toContain("PaintHolding");
+      expect(feats).not.toContain("MediaRouter");
       for (const f of kept) expect(feats).toContain(f);
       expect(feats.includes("WebBluetooth")).toBe(platform === "linux");
       await browser.close();
@@ -623,14 +624,15 @@ describe("Playwright's --disable-features is replaced without ThirdPartyStorageP
     const context = await launchPersistentContext(join(root, "p"), { ...base(), fingerprint: "s1" });
     const feats = disabledFeatures(stub.launches.at(-1)!.opts.args as string[]);
     expect(feats).not.toContain("ThirdPartyStoragePartitioning");
-    expect(feats).toContain("MediaRouter");
+    expect(feats).not.toContain("MediaRouter");
+    expect(feats).toContain("PaintHolding");
     await context.close();
   });
 
   it("not when the caller dropped Playwright's defaults", async () => {
     const browser = await launch({ ...base(), ephemeralProfile: false, ignoreDefaultArgs: true } as never);
     const args = stub.launches.at(-1)!.opts.args as string[];
-    expect(args.some((a) => a.includes("MediaRouter"))).toBe(false);
+    expect(args.some((a) => a.includes("PaintHolding"))).toBe(false);
     await browser.close();
   });
 
@@ -639,7 +641,7 @@ describe("Playwright's --disable-features is replaced without ThirdPartyStorageP
     try {
       const srv = await serve({ ...base(), port, fingerprint: "s1" });
       const line = stub.spawns.at(-1)!;
-      expect(line.some((a) => a.includes("MediaRouter") || a.includes("ThirdPartyStoragePartitioning"))).toBe(false);
+      expect(line.some((a) => a.includes("PaintHolding") || a.includes("ThirdPartyStoragePartitioning"))).toBe(false);
       await srv.close();
     } finally {
       await close();

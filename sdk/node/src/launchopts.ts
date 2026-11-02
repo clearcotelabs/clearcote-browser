@@ -102,12 +102,19 @@ export const PLAYWRIGHT_DISABLED_FEATURES = [
  *   RTX 3070): plain Chrome "downloadable" for all three; launched by Playwright "unavailable"; a
  *   bisect of Playwright's switches pins it to this one feature. On r53 re-enabling it brings
  *   LanguageDetector back; LanguageModel/Summarizer stay "unavailable" for an engine reason.
+ * - MediaRouter: with it off, `new PresentationRequest(["cast:"]).reconnect(id)` rejects with
+ *   "Error joining route: No matching route" where genuine Chrome says "Route not found", and
+ *   fingerprint.com's agent reads that message: bot "bad" (chromium_automation). Measured 2026-11-01
+ *   (r56, genuine Chrome 156.0.8078.76, Windows): plain Chrome not detected; r56, or plain Chrome,
+ *   with only this feature disabled detected every run; r56 with it enabled not detected. A bisect of
+ *   Playwright's switches pins it to this one feature. DialMediaRouteProvider (DIAL discovery on the
+ *   local network) stays off.
  *
  * Deliberately left off although a page could observe it: BoundaryEventDispatchTracksNodeRemoval
  * (Playwright 1.61, microsoft/playwright#38568), which Playwright's own pointer actions rely on. */
 export const PAGE_VISIBLE_PLAYWRIGHT_FEATURES: ReadonlySet<string> = new Set([
   "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading",
-  "AvoidCorsURLLoaderRestartOnRedirect", "OptimizationHints",
+  "AvoidCorsURLLoaderRestartOnRedirect", "OptimizationHints", "MediaRouter",
 ]);
 
 /** The `--disable-features` list in a Playwright chromiumSwitches source (1.5x/1.6x array form,

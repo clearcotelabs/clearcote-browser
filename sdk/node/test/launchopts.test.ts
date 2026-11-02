@@ -376,7 +376,7 @@ describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
   it("re-enables only what a page or server can observe", async () => {
     const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
     expect(playwrightFeatureOverrideArgs(undefined, PW157, false))
-      .toEqual(["--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,MediaRouter,PaintHolding,RenderDocument"]);
+      .toEqual(["--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,PaintHolding,RenderDocument"]);
     expect(playwrightFeatureOverrideArgs(undefined, ["LazyFrameLoading", "Translate"], false))
       .toEqual(["--disable-features=Translate"]);
   });
@@ -385,16 +385,24 @@ describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
     // Off, a same-origin request in a cross-site iframe sends Sec-Fetch-Storage-Access: active, which
     // genuine Chrome omits (measured on Chrome 156 launched plainly vs by Playwright 1.64.1).
     const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
-    expect(playwrightFeatureOverrideArgs(undefined, ["MediaRouter", "AvoidCorsURLLoaderRestartOnRedirect", "Translate"], false))
-      .toEqual(["--disable-features=MediaRouter,Translate"]);
+    expect(playwrightFeatureOverrideArgs(undefined, ["PaintHolding", "AvoidCorsURLLoaderRestartOnRedirect", "Translate"], false))
+      .toEqual(["--disable-features=PaintHolding,Translate"]);
   });
 
   it("re-enables OptimizationHints (2026-10-29)", async () => {
     // Off, the built-in AI APIs answer availability() "unavailable", where genuine Chrome answers
     // "downloadable" (measured on Chrome 156 launched plainly vs by Playwright).
     const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
-    expect(playwrightFeatureOverrideArgs(undefined, ["MediaRouter", "OptimizationHints", "Translate"], false))
-      .toEqual(["--disable-features=MediaRouter,Translate"]);
+    expect(playwrightFeatureOverrideArgs(undefined, ["PaintHolding", "OptimizationHints", "Translate"], false))
+      .toEqual(["--disable-features=PaintHolding,Translate"]);
+  });
+
+  it("re-enables MediaRouter (2026-11-01)", async () => {
+    // Off, PresentationRequest(["cast:"]).reconnect() rejects "Error joining route: No matching route"
+    // where genuine Chrome says "Route not found"; fingerprint.com reports bot "bad" (chromium_automation).
+    const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
+    expect(playwrightFeatureOverrideArgs(undefined, ["DialMediaRouteProvider", "MediaRouter", "Translate"], false))
+      .toEqual(["--disable-features=DialMediaRouteProvider,Translate"]);
   });
 
   it("is skipped only when Playwright's exact switch is dropped", async () => {
@@ -408,8 +416,8 @@ describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
 
   it("re-emits the screenshot surface switch", async () => {
     const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
-    expect(playwrightFeatureOverrideArgs(undefined, ["MediaRouter"], true))
-      .toEqual(["--disable-features=MediaRouter", "--enable-features=CDPScreenshotNewSurface"]);
+    expect(playwrightFeatureOverrideArgs(undefined, ["PaintHolding"], true))
+      .toEqual(["--disable-features=PaintHolding", "--enable-features=CDPScreenshotNewSurface"]);
   });
 
   it("parses every Playwright release shape", async () => {
@@ -440,11 +448,11 @@ describe("playwrightFeatureOverrideArgs (2026-10-06)", () => {
 describe("playwrightFeatureOverrideArgs, second review (2026-10-06)", () => {
   it("keeps Playwright's screenshot switch when only its disable switch is dropped", async () => {
     const { playwrightFeatureOverrideArgs } = await import("../src/launchopts.js");
-    const pw = ["MediaRouter", "Translate"];
+    const pw = ["PaintHolding", "Translate"];
     expect(playwrightFeatureOverrideArgs([`--disable-features=${pw.join(",")}`], pw, true))
       .toEqual(["--enable-features=CDPScreenshotNewSurface"]);
     expect(playwrightFeatureOverrideArgs(["--enable-features=CDPScreenshotNewSurface"], pw, true))
-      .toEqual(["--disable-features=MediaRouter,Translate"]);
+      .toEqual(["--disable-features=PaintHolding,Translate"]);
   });
 
   it("is robust to a bracket in a comment and rejects an unrecognised list", async () => {

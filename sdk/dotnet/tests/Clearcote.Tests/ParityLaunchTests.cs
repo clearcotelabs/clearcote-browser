@@ -276,35 +276,38 @@ public class ParityLaunchTests : IDisposable
         var feats = OnlyDisableFeatures(args);
         foreach (var f in new[] { "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading" })
             Assert.DoesNotContain(f, feats);  // what a page or a server can observe stays as in genuine Chrome
-        foreach (var f in new[] { "MediaRouter", "Translate", "PaintHolding" }) Assert.Contains(f, feats);
+        foreach (var f in new[] { "Translate", "PaintHolding" }) Assert.Contains(f, feats);
+        Assert.DoesNotContain("MediaRouter", feats);  // PresentationRequest reconnect message (measured 2026-11-01)
         Assert.Equal(platform == "linux", feats.Contains("WebBluetooth"));
     }
 
     [Fact]
     public void Override_re_enables_only_what_a_site_can_observe_and_needs_the_exact_switch_to_skip()
     {
-        var pw = new[] { "AcceptCHFrame", "LazyFrameLoading", "MediaRouter", "ThirdPartyStoragePartitioning", "Translate",
+        var pw = new[] { "AcceptCHFrame", "LazyFrameLoading", "PaintHolding", "MediaRouter", "ThirdPartyStoragePartitioning", "Translate",
                          "AvoidCorsURLLoaderRestartOnRedirect", "OptimizationHints" };
         // AvoidCorsURLLoaderRestartOnRedirect off sends Sec-Fetch-Storage-Access: active on same-origin
         // requests in cross-site iframes, which genuine Chrome omits (measured 2026-10-28, Chrome 156).
         // OptimizationHints off makes the built-in AI APIs answer "unavailable", where genuine Chrome
-        // answers "downloadable" (measured 2026-10-29, Chrome 156).
-        Assert.Equal(new[] { "--disable-features=MediaRouter,Translate" },
+        // answers "downloadable" (measured 2026-10-29, Chrome 156). MediaRouter off makes
+        // PresentationRequest(["cast:"]).reconnect() reject "Error joining route: No matching route" where
+        // genuine Chrome says "Route not found"; fingerprint.com flags it (measured 2026-11-01, r56 + Chrome 156).
+        Assert.Equal(new[] { "--disable-features=PaintHolding,Translate" },
             LaunchOpts.PlaywrightFeatureOverrideArgs(null, pw, screenshotSurface: false));
         Assert.Empty(LaunchOpts.PlaywrightFeatureOverrideArgs(new[] { "--disable-features=" + string.Join(",", pw) }, pw, false));
         // Playwright drops only an EXACT match, so a different value still needs the replacement.
         Assert.NotEmpty(LaunchOpts.PlaywrightFeatureOverrideArgs(new[] { "--disable-features=MediaRouter" }, pw, false));
-        Assert.Equal(new[] { "--disable-features=MediaRouter", "--enable-features=CDPScreenshotNewSurface" },
-            LaunchOpts.PlaywrightFeatureOverrideArgs(null, new[] { "MediaRouter" }, true));
+        Assert.Equal(new[] { "--disable-features=PaintHolding", "--enable-features=CDPScreenshotNewSurface" },
+            LaunchOpts.PlaywrightFeatureOverrideArgs(null, new[] { "PaintHolding" }, true));
     }
 
     [Fact]
     public void Dropping_the_disable_switch_keeps_the_screenshot_switch_and_parse_is_robust()
     {
-        var pw = new[] { "MediaRouter", "Translate" };
+        var pw = new[] { "PaintHolding", "Translate" };
         Assert.Equal(new[] { "--enable-features=CDPScreenshotNewSurface" },
-            LaunchOpts.PlaywrightFeatureOverrideArgs(new[] { "--disable-features=MediaRouter,Translate" }, pw, true));
-        Assert.Equal(new[] { "--disable-features=MediaRouter,Translate" },
+            LaunchOpts.PlaywrightFeatureOverrideArgs(new[] { "--disable-features=PaintHolding,Translate" }, pw, true));
+        Assert.Equal(new[] { "--disable-features=PaintHolding,Translate" },
             LaunchOpts.PlaywrightFeatureOverrideArgs(new[] { "--enable-features=CDPScreenshotNewSurface" }, pw, true));
         Assert.Equal(new[] { "MediaRouter", "Translate" }, LaunchOpts.ParsePlaywrightDisabledFeatures(
             "const disabledFeatures = [\n // see ] here\n \"MediaRouter\",\n \"Translate\"\n];"));
@@ -333,11 +336,11 @@ public class ParityLaunchTests : IDisposable
         var fp = Fingerprint.Args(new FingerprintOptions { Fingerprint = "s1", Platform = "windows" });
         var served = Clearcote.AssembleArgs(fp, new(), new(), null, null, Array.Empty<string>(), null, false,
             new Clearcote.EngineExtras(exe, false, true, null, null, ViaPlaywright: false));
-        Assert.DoesNotContain(served, a => a.Contains("MediaRouter") || a.Contains("ThirdPartyStoragePartitioning"));
+        Assert.DoesNotContain(served, a => a.Contains("PaintHolding") || a.Contains("ThirdPartyStoragePartitioning"));
         var exact = "--disable-features=" + string.Join(",", LaunchOpts.InstalledPlaywrightDisabledFeatures() ?? LaunchOpts.PlaywrightDisabledFeatures);
         var dropped = Clearcote.AssembleArgs(fp, new(), new(), null, null, Array.Empty<string>(), null, false,
             new Clearcote.EngineExtras(exe, false, true, null, null, ViaPlaywright: true, IgnoreDefaultArgs: new[] { exact }));
-        Assert.DoesNotContain(dropped, a => a.Contains("MediaRouter"));
+        Assert.DoesNotContain(dropped, a => a.Contains("PaintHolding"));
     }
 
     // ── fingerprint pass-through ─────────────────────────────────────────────

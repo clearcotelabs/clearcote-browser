@@ -581,7 +581,8 @@ def test_launch_replaces_playwrights_list_without_partitioning(prepared, platfor
                                        installed_playwright_disabled_features)
     playwrights = installed_playwright_disabled_features() or PLAYWRIGHT_DISABLED_FEATURES
     kept = [f for f in playwrights if f not in PAGE_VISIBLE_PLAYWRIGHT_FEATURES]
-    assert "MediaRouter" in kept
+    assert "PaintHolding" in kept
+    assert "MediaRouter" not in feats
     for f in kept:
         assert f in feats, f
     assert ("WebBluetooth" in feats) == (platform == "linux")
@@ -592,9 +593,9 @@ def test_cors_restart_feature_is_re_enabled():
     # genuine Chrome omits (measured 2026-10-28 on Chrome 156 launched plainly vs by Playwright 1.64.1).
     from clearcote._launchopts import playwright_feature_override_args
     args = playwright_feature_override_args(
-        playwright_features=("MediaRouter", "AvoidCorsURLLoaderRestartOnRedirect", "Translate"),
+        playwright_features=("PaintHolding", "AvoidCorsURLLoaderRestartOnRedirect", "Translate"),
         screenshot_surface=False)
-    assert args == ["--disable-features=MediaRouter,Translate"]
+    assert args == ["--disable-features=PaintHolding,Translate"]
 
 
 def test_optimization_hints_is_re_enabled():
@@ -602,9 +603,20 @@ def test_optimization_hints_is_re_enabled():
     # "downloadable" (measured 2026-10-29 on Chrome 156 launched plainly vs by Playwright).
     from clearcote._launchopts import playwright_feature_override_args
     args = playwright_feature_override_args(
-        playwright_features=("MediaRouter", "OptimizationHints", "Translate"),
+        playwright_features=("PaintHolding", "OptimizationHints", "Translate"),
         screenshot_surface=False)
-    assert args == ["--disable-features=MediaRouter,Translate"]
+    assert args == ["--disable-features=PaintHolding,Translate"]
+
+
+def test_media_router_is_re_enabled():
+    # Off, PresentationRequest(["cast:"]).reconnect() rejects "Error joining route: No matching route"
+    # where genuine Chrome says "Route not found"; fingerprint.com reports bot "bad" (chromium_automation)
+    # (measured 2026-11-01 on r56 and Chrome 156).
+    from clearcote._launchopts import playwright_feature_override_args
+    args = playwright_feature_override_args(
+        playwright_features=("DialMediaRouteProvider", "MediaRouter", "Translate"),
+        screenshot_surface=False)
+    assert args == ["--disable-features=DialMediaRouteProvider,Translate"]
 
 
 def test_the_users_own_disable_features_are_kept(prepared):
@@ -620,10 +632,10 @@ def test_no_copy_of_playwrights_list_when_the_caller_dropped_it(prepared):
                                               or PLAYWRIGHT_DISABLED_FEATURES)
     for ignore in (True, [exact]):
         _exe, args, _pw, *_ = prepared(NEW, headless=True, ignore_default_args=ignore)
-        assert not any("MediaRouter" in a for a in args), args
+        assert not any("PaintHolding" in a for a in args), args
     # a different --disable-features value does NOT remove Playwright's list (exact match only)
     _exe, args, _pw, *_ = prepared(NEW, headless=True, ignore_default_args=["--disable-features=X"])
-    assert "MediaRouter" in _only_disable_features(args)
+    assert "PaintHolding" in _only_disable_features(args)
 
 
 def test_serve_never_carries_playwrights_list(served_line):

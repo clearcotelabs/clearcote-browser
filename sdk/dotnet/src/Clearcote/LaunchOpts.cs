@@ -65,10 +65,16 @@ public static class LaunchOpts
     /// with it off, the built-in AI APIs (LanguageModel, Summarizer, LanguageDetector) answer
     /// availability() "unavailable" at once, where genuine Chrome on desktop hardware answers
     /// "downloadable" (measured 2026-10-29, genuine Chrome 156.0.8078.73 plain vs launched by
-    /// Playwright; a bisect of Playwright's switches pins it to this feature).
+    /// Playwright; a bisect of Playwright's switches pins it to this feature). MediaRouter: with it
+    /// off, new PresentationRequest(["cast:"]).reconnect(id) rejects with "Error joining route: No
+    /// matching route" where genuine Chrome says "Route not found", and fingerprint.com's agent reads
+    /// that message: bot "bad" (chromium_automation). Measured 2026-11-01 (r56, genuine Chrome
+    /// 156.0.8078.76): plain Chrome not detected; r56, or plain Chrome, with only this feature disabled
+    /// detected every run; r56 with it enabled not detected. DialMediaRouteProvider (DIAL discovery on
+    /// the local network) stays off.
     public static readonly IReadOnlySet<string> PageVisiblePlaywrightFeatures = new HashSet<string>(StringComparer.Ordinal)
         { "ThirdPartyStoragePartitioning", "AcceptCHFrame", "HttpsUpgrades", "LazyFrameLoading",
-          "AvoidCorsURLLoaderRestartOnRedirect", "OptimizationHints" };
+          "AvoidCorsURLLoaderRestartOnRedirect", "OptimizationHints", "MediaRouter" };
 
     private static readonly Regex PwAssign = new(@"\bdisabledFeatures\s*=", RegexOptions.Compiled);
     private static readonly Regex PwArray = new(@"^\s*(?:\([^)]*\)\s*=>\s*)?\[([\s\S]*?)\]", RegexOptions.Compiled);
