@@ -26,6 +26,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -119,6 +120,70 @@ def _facts_cache_path():
     return os.path.join(base, ".clearcote", "persona-host-facts.json") if base else None
 
 
+def describe_probe(stdout, stderr, returncode):
+    """The probe's stdout, or a ``RuntimeError`` saying why there is none. The engine prints a refusal (no lease, a
+    FREE token without its file, the clock set back) on stderr only: reading stdout alone turned every one of those
+    into "list index out of range"."""
+    if returncode == 0 and (stdout or "").strip():
+        return stdout
+    lines = [line for line in (stderr or "").strip().splitlines() if line.strip()]
+    said = re.sub(r"^\[clearcote\]\s*", "", lines[-1].strip()) if lines else ""
+    if returncode is not None and returncode < 0:
+        why = f"it was stopped by signal {-returncode}"
+    elif returncode != 0:
+        why = f"it exited with code {returncode}"
+    else:
+        why = "it exited without output"
+    raise RuntimeError(f"{why}: {said[:300]}" if said else why)
+
+
+def _win_spawn_race(exc):
+    """Windows could not start the process: "side-by-side configuration is incorrect" (ERROR_SXS_CANT_GEN_ACTCTX)."""
+    m = str(exc).lower()
+    return getattr(exc, "winerror", None) == 14001 or "side-by-side" in m or "side by side" in m
+
+
+def _spawn_probe(exe, run):
+    """``run(exe)`` with the launch's recovery (``_win_av_retry``): the probe runs before the launch on the same
+    binary, so without it a build Windows will not start in place failed the probe on every launch and the launch's
+    own recovery was never reached. From this build's recovered copy when one exists; else in place, then once from
+    a new recovered copy."""
+    if sys.platform != "win32":
+        return run(exe)
+    from ._winlaunch import make_recovered_copy, recovered_exe
+    from .download import warm_files
+    ready = recovered_exe(exe)
+    if ready:
+        try:
+            return run(ready)
+        except OSError as e:
+            if not _win_spawn_race(e):
+                raise
+    try:
+        return run(exe)
+    except OSError as e:
+        if not _win_spawn_race(e):
+            raise
+        first = e
+    try:
+        copy = make_recovered_copy(exe, warm_files)
+    except OSError:
+        raise first from None  # the copy failed (disk full, locked files): report the first failure
+    return run(copy)
+
+
+def _run_probe(cmd, env):
+    def run(exe):
+        return subprocess.run([exe, *cmd[1:]], env=env, capture_output=True, text=True, errors="replace", timeout=30)
+    try:
+        r = _spawn_probe(cmd[0], run)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("it did not answer within 30 s") from None
+    except OSError as e:
+        raise RuntimeError(f"it could not be started: {e}") from None
+    return describe_probe(r.stdout, r.stderr, r.returncode)
+
+
 def host_facts(exe, args, run_token, runner=None, env=None):
     """The facts of this machine the generator needs, as the engine itself reports them for a launch with
     these switches: ``chrome --cc-persona-host-facts`` prints ``{"gpu_vendor": ...}`` and exits. Cached per
@@ -145,8 +210,7 @@ def host_facts(exe, args, run_token, runner=None, env=None):
         except (OSError, ValueError):
             pass
     if runner is None:
-        def runner(cmd, env):
-            return subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=30).stdout
+        runner = _run_probe
     # The launch's own env, run-token FILE included: the engine refuses a FREE token without the file, so a probe
     # given only CLEARCOTE_RUN_TOKEN died and every free launch failed before its persona was fetched (0.63.0/0.63.1).
     env = dict(os.environ if env is None else env)

@@ -17,14 +17,16 @@
 //
 // The selector list mirrors the Python SDK's (_persona.py), the engine's (components/ungoogled/persona_token.cc)
 // and the service's (services/cc-persona/src/selector.mjs): a switch added to one must be added to the others.
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
+import { warmFiles } from "./download.js";
 import { engineSupportsSwitch } from "./launchopts.js";
 import { LicenseError, licenseUserAgent } from "./license.js";
 import { proxiedRequest } from "./net.js";
+import { makeRecoveredCopy, recoveredExe } from "./winlaunch.js";
 
 export const TOKEN_ENV = "CLEARCOTE_PERSONA_TOKEN";
 export const TOKEN_GZ_ENV = "CLEARCOTE_PERSONA_TOKEN_GZ";
@@ -117,9 +119,53 @@ function factsCachePath(env: Env): string | null {
   return base ? join(base, ".clearcote", "persona-host-facts.json") : null;
 }
 
+/**
+ * The probe's stdout, or an error saying why there is none. The engine prints a refusal (no lease, a FREE token
+ * without its file, the clock set back) on stderr only, and a binary that could not start has no output at all:
+ * reading stdout alone turned every one of those into "Unexpected end of JSON input".
+ */
+export function describeProbe(r: { stdout?: string | null; stderr?: string | null; status: number | null; signal?: string | null; error?: Error }): string {
+  const stdout = r.stdout ?? "";
+  if (!r.error && r.status === 0 && stdout.trim()) return stdout;
+  const said = (r.stderr ?? "").trim().split(/\r?\n/).filter(Boolean).pop()?.replace(/^\[clearcote\]\s*/, "");
+  let why: string;
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT") why = "it did not answer within 30 s";
+  else if (r.error) why = `it could not be started: ${r.error.message}`;
+  else if (r.signal) why = `it was stopped by ${r.signal}`;
+  else if (r.status !== 0) why = `it exited with code ${r.status}`;
+  else why = "it exited without output";
+  throw new Error(said ? `${why}: ${said.slice(0, 300)}` : why);
+}
+
+/** Windows could not start the process ("spawnSync <path> UNKNOWN" / "side-by-side configuration is incorrect"). */
+function winSpawnRace(r: SpawnSyncReturns<string>): boolean {
+  if (!r.error) return false;
+  return (r.error as NodeJS.ErrnoException).code === "UNKNOWN" || /side.by.side/i.test(r.error.message);
+}
+
+/**
+ * spawnSync with winAvRetry's recovery: the probe runs before the launch on the same binary, so without it a build
+ * Windows will not start in place failed the probe on every launch and the launch's own recovery was never reached.
+ * From this build's recovered copy when one exists; else in place, then once from a new recovered copy.
+ */
+function spawnProbe(exe: string, args: string[], opts: SpawnSyncOptionsWithStringEncoding): SpawnSyncReturns<string> {
+  if (process.platform !== "win32") return spawnSync(exe, args, opts);
+  const ready = recoveredExe(exe);
+  if (ready) {
+    const r = spawnSync(ready, args, opts);
+    if (!winSpawnRace(r)) return r;
+  }
+  const r = spawnSync(exe, args, opts);
+  if (!winSpawnRace(r)) return r;
+  try {
+    return spawnSync(makeRecoveredCopy(exe, warmFiles), args, opts);
+  } catch {
+    return r; // the copy failed (disk full, locked files): report the first failure
+  }
+}
+
 function defaultRunner(cmd: string[], env: Env): string {
-  const r = spawnSync(cmd[0], cmd.slice(1), { env: env as NodeJS.ProcessEnv, encoding: "utf8", timeout: 30000, windowsHide: true });
-  return r.stdout ?? "";
+  return describeProbe(spawnProbe(cmd[0], cmd.slice(1), { env: env as NodeJS.ProcessEnv, encoding: "utf8", timeout: 30000, windowsHide: true }));
 }
 
 /**

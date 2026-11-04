@@ -138,16 +138,60 @@ internal static class PersonaToken
         return string.IsNullOrEmpty(baseDir) ? null : Path.Combine(baseDir, ".clearcote", "persona-host-facts.json");
     }
 
+    /// <summary>The probe's stdout, or an exception saying why there is none. The engine prints a refusal (no lease, a
+    /// FREE token without its file, the clock set back) on stderr only: reading stdout alone turned every one of those
+    /// into a JSON parse error.</summary>
+    internal static string DescribeProbe(string? stdout, string? stderr, int exitCode)
+    {
+        if (exitCode == 0 && !string.IsNullOrWhiteSpace(stdout)) return stdout!;
+        var said = (stderr ?? "").Split('\n').Select(l => l.Trim()).LastOrDefault(l => l.Length > 0) ?? "";
+        if (said.StartsWith("[clearcote]", StringComparison.Ordinal)) said = said["[clearcote]".Length..].TrimStart();
+        if (said.Length > 300) said = said[..300];
+        var why = exitCode != 0 ? $"it exited with code {exitCode}" : "it exited without output";
+        throw new InvalidOperationException(said.Length > 0 ? $"{why}: {said}" : why);
+    }
+
+    /// <summary><paramref name="run"/>(exe) with the launch's recovery (WinLaunch): the probe runs before the launch on
+    /// the same binary, so without it a build Windows will not start in place failed the probe on every launch and the
+    /// launch's own recovery was never reached. From this build's recovered copy when one exists; else in place, then
+    /// once from a new recovered copy.</summary>
+    internal static T SpawnProbe<T>(string exe, Func<string, T> run, bool windows)
+    {
+        if (!windows) return run(exe);
+        var ready = WinLaunch.RecoveredExe(exe);
+        if (ready is not null)
+        {
+            try { return run(ready); }
+            catch (Exception e) when (WinLaunch.IsWinLaunchRace(e)) { /* the copy went bad: try in place */ }
+        }
+        try { return run(exe); }
+        catch (Exception first) when (WinLaunch.IsWinLaunchRace(first))
+        {
+            string copy;
+            try { copy = WinLaunch.MakeRecoveredCopy(exe, WinLaunch.WarmFiles); }
+            catch (Exception) { throw first; } // the copy failed (disk full, locked files): report the first failure
+            return run(copy);
+        }
+    }
+
     private static string DefaultRunner(string[] cmd, IDictionary<string, string> env)
     {
-        var psi = new ProcessStartInfo(cmd[0]) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
-        foreach (var a in cmd.Skip(1)) psi.ArgumentList.Add(a);
-        foreach (var kv in env) psi.Environment[kv.Key] = kv.Value;
-        using var p = Process.Start(psi) ?? throw new InvalidOperationException("could not start the engine");
-        var stdout = p.StandardOutput.ReadToEndAsync();
-        _ = p.StandardError.ReadToEndAsync();
-        if (!p.WaitForExit(30000)) { try { p.Kill(true); } catch { /* gone */ } throw new TimeoutException("host-facts probe timed out"); }
-        return stdout.Result;
+        (string Out, string Err, int Code) Run(string exe)
+        {
+            var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+            foreach (var a in cmd.Skip(1)) psi.ArgumentList.Add(a);
+            foreach (var kv in env) psi.Environment[kv.Key] = kv.Value;
+            using var p = Process.Start(psi) ?? throw new InvalidOperationException("Process.Start returned no process");
+            var stdout = p.StandardOutput.ReadToEndAsync();
+            var stderr = p.StandardError.ReadToEndAsync();
+            if (!p.WaitForExit(30000)) { try { p.Kill(true); } catch { /* gone */ } throw new TimeoutException("it did not answer within 30 s"); }
+            return (stdout.Result, stderr.Result, p.ExitCode);
+        }
+        (string Out, string Err, int Code) r;
+        try { r = SpawnProbe(cmd[0], Run, OperatingSystem.IsWindows()); }
+        catch (TimeoutException) { throw; }
+        catch (Exception e) { throw new InvalidOperationException($"it could not be started: {e.Message}"); }
+        return DescribeProbe(r.Out, r.Err, r.Code);
     }
 
     /// <summary>The facts of this machine the generator needs, as the engine reports them for a launch with these switches (<c>chrome --cc-persona-host-facts</c>); cached per binary + relevant switches.</summary>
