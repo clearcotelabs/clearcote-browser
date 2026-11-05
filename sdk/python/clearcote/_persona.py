@@ -345,7 +345,7 @@ def _lease_from_env(env):
     return _EnvLease(token) if token else None
 
 
-def apply(exe, args, env, lease, supports=None, runner=None, fetch=None):
+def apply(exe, args, env, lease, supports=None, runner=None, fetch=None, now=None):
     """``(args, env)`` for a launch of ``exe``: on an r51+ engine with a lease (the SDK's, or a run token the caller
     put in the environment), the launch gets its persona token (and a profile moves off the command line); otherwise
     both come back unchanged."""
@@ -354,9 +354,13 @@ def apply(exe, args, env, lease, supports=None, runner=None, fetch=None):
         lease = _lease_from_env(env)
     if lease is None or not engine_wants_persona_token(exe, supports):
         return args, env
+    # A clock far off makes the engine refuse the token whatever the key: say so before the probe fails on it.
+    from ._clockcheck import assert_clock_for
+    assert_clock_for(lease.token, "licence token", now)
     sel, profile_json, args = selector_from_args(args)
     facts = host_facts(exe, args, lease.token, runner=runner, env=env)
     token = persona_token_for(lease, sel, facts, profile_json=profile_json, fetch=fetch)
+    assert_clock_for(token, "persona token", now)
     env = dict(os.environ if env is None else env)
     return args, inject_persona_token(env, token)
 

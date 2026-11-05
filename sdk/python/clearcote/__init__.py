@@ -41,6 +41,7 @@ from ._fonts import apply_font_env, check_font_dirs
 from ._shaderdialect import apply_shader_dialect
 from . import _persona  # r51+: server-side personas (the signed persona token)
 from ._persona import PersonaServiceError
+from ._clockcheck import ClockSkewError
 from . import _personaenv
 from ._geometry import (apply_headless_geometry, caller_sized_the_window, engine_places_persona_window,
                         place_window)
@@ -216,6 +217,7 @@ __all__ = [
     "OfflineKeyError",
     "LicenseServerChallengeError",
     "PersonaServiceError",
+    "ClockSkewError",
     "OPENROUTER_BASE_URL",
     "RELEASE",
     "__version__",

@@ -323,13 +323,17 @@ internal static class PersonaToken
 
     /// <summary>Prepare a launch of <paramref name="exe"/>: on an r51+ engine with a lease, fetch the persona token; otherwise the args come back unchanged and <see cref="Plan.Env"/> is the identity.</summary>
     public static async Task<Plan> PrepareAsync(string exe, IEnumerable<string> args, LeaseSession? lease, ProxySpec? proxy,
-        Func<string?, string, bool>? supports = null, FactsRunner? runner = null, Fetcher? fetch = null, string? runTokenFile = null)
+        Func<string?, string, bool>? supports = null, FactsRunner? runner = null, Fetcher? fetch = null, string? runTokenFile = null,
+        double? now = null)
     {
         var list = args.ToList();
         if (lease is null || string.IsNullOrEmpty(lease.Token) || !EngineWantsToken(exe, supports)) return new Plan(list, new Dictionary<string, string>());
+        // A clock far off makes the engine refuse the token whatever the key: say so before the probe fails on it.
+        ClockCheck.AssertFor(lease.Token, "licence token", now);
         var (sel, profileJson, outArgs) = Selector(list);
         var host = HostFacts(exe, outArgs, lease.Token, runner, runTokenFile);
         var token = await TokenForAsync(lease, sel, host, profileJson, proxy, fetch).ConfigureAwait(false);
+        ClockCheck.AssertFor(token, "persona token", now);
         return new Plan(outArgs, TokenVars(token));
     }
 

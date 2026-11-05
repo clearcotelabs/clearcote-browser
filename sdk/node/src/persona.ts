@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
+import { assertClockFor } from "./clockcheck.js";
 import { warmFiles } from "./download.js";
 import { engineSupportsSwitch } from "./launchopts.js";
 import { LicenseError, licenseUserAgent } from "./license.js";
@@ -282,12 +283,15 @@ export interface PersonaLaunch {
  * the identity.
  */
 export async function preparePersonaLaunch(exe: string, args: readonly string[], lease: LeaseLike | null | undefined, proxy: unknown = undefined,
-  deps: { supports?: Probe; runner?: FactsRunner; fetch?: Fetcher; env?: Env } = {}): Promise<PersonaLaunch> {
+  deps: { supports?: Probe; runner?: FactsRunner; fetch?: Fetcher; env?: Env; now?: () => number } = {}): Promise<PersonaLaunch> {
   const l = lease?.token ? lease : leaseFromEnv(deps.env);
   if (!l?.token || !engineWantsPersonaToken(exe, deps.supports)) return { args: [...args], env: (b) => b };
+  // A clock far off makes the engine refuse the token whatever the key: say so before the probe fails on it.
+  assertClockFor(l.token, "licence token", deps.now?.());
   const { sel, profileJson, args: out } = selectorFromArgs(args);
   const host = hostFacts(exe, out, l.token, deps.runner, deps.env);
   const token = await personaTokenFor(l, sel, host, profileJson, proxy, deps.fetch);
+  assertClockFor(token, "persona token", deps.now?.());
   return { args: out, env: (b) => injectPersonaToken(b ?? { ...process.env }, token) };
 }
 

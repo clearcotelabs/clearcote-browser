@@ -197,6 +197,7 @@ export {
   type LeaseSession,
 } from "./license.js";
 export { PersonaServiceError } from "./persona.js";  // r51+: the persona service refused or could not be reached
+export { ClockSkewError } from "./clockcheck.js";      // this computer's clock is too far off for the engine to accept a token
 
 /** On by default (since 0.66.0): resolve the egress geo (the proxy's exit IP, or this machine's own
  * public IP without a proxy) and fill any unset `timezone`, `acceptLanguage`, `location` and `webrtcIp`
