@@ -12,6 +12,7 @@ import os
 import re
 import sys
 
+from ._angle_device_id import capture_for_engine
 from ._languages import resolve_languages
 
 # kwargs accepted by launch()/launch_persistent_context() that are fingerprint options
@@ -141,6 +142,9 @@ def encode_profile(value):
             raw = handle.read()
     else:
         raw = str(value).encode("utf-8")  # assume a JSON string
+    # A capture from Chrome up to 117 has no device id in its WebGL renderer, a string 156 cannot print:
+    # add the one real captures of that card print (_angle_device_id.py). The caller's dict is not touched.
+    raw = capture_for_engine(raw)
     return base64.b64encode(gzip.compress(raw, 9)).decode("ascii")
 
 

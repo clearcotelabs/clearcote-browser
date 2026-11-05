@@ -5,6 +5,7 @@ import { gzipSync } from "node:zlib";
 import { existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolveLanguages } from "./languages.js";
+import { captureForEngine } from "./angledeviceid.js";
 
 export interface FingerprintOptions {
   /**
@@ -306,7 +307,9 @@ export function encodeProfile(value: string | Record<string, unknown>): string {
   } else {
     raw = Buffer.from(value); // assume a JSON string
   }
-  return gzipSync(raw, { level: 9 }).toString("base64");
+  // A capture from Chrome up to 117 has no device id in its WebGL renderer, a string 156 cannot print:
+  // add the one real captures of that card print (angledeviceid.ts). The caller's object is not touched.
+  return gzipSync(captureForEngine(raw), { level: 9 }).toString("base64");
 }
 
 /** An imported profile's own thread count and memory (top-level `hardware_concurrency` / `device_memory`), when it

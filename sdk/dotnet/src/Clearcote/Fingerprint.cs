@@ -283,6 +283,9 @@ public static class Fingerprint
             raw = File.Exists(s) ? File.ReadAllBytes(s) : Encoding.UTF8.GetBytes(s);
         else
             raw = JsonSerializer.SerializeToUtf8Bytes(value);
+        // A capture from Chrome up to 117 has no device id in its WebGL renderer, a string 156 cannot print:
+        // add the one real captures of that card print (AngleDeviceId.cs). The caller's object is not touched.
+        raw = AngleDeviceId.CaptureForEngine(raw);
         using var ms = new MemoryStream();
         using (var gz = new GZipStream(ms, CompressionLevel.SmallestSize, leaveOpen: true))
             gz.Write(raw, 0, raw.Length);
