@@ -455,11 +455,13 @@ There is one open build and one licensed build. The licensed build is offered tw
 
 [Get it free with GitHub](https://www.clearcotelabs.com/pricing?utm_source=github&utm_medium=readme&utm_content=builds-and-tiers#free) · [Get Pro](https://www.clearcotelabs.com/pricing?utm_source=github&utm_medium=readme&utm_content=builds-and-tiers) · per-feature table: [Node](sdk/node/README.md#whats-in-each-tier)
 
-### Build availability (October 2026)
+### Build availability (November 2026)
 
 | Chromium | Licensed build (Free with GitHub, Pro) | Open build |
 |---|---|---|
-| **155** (`155.0.8059.39`) | **Available now** | ~Dec 2026 |
+| **157** (`157.0.8103.50`) | **Available now** (Windows, Linux) | ~Jan 2027 |
+| **156** (`156.0.8078.47`) | Available (Windows, Linux) | ~Jan 2027 |
+| **155** (`155.0.8059.39`) | Available (newest on macOS) | ~Dec 2026 |
 | **154** (`154.0.8037.57`) | Available | ~Dec 2026 |
 | **153** (`153.0.8010.53`) | Available | ~Nov 2026 |
 | **152** (`152.0.7977.82`) | Available | ~Nov 2026 |
@@ -468,7 +470,7 @@ There is one open build and one licensed build. The licensed build is offered tw
 | **149** (`149.0.7827.114`) | Available | Available |
 
 Open-build dates are estimates on a two-month cadence, not promises. Choose a major with
-`launch(version="155")`, or omit `version` for the newest your tier allows.
+`launch(version="157")`, or omit `version` for the newest your tier allows.
 
 The open 151 build is an official, optimized Chromium build: the "page crashed!" / `STATUS_BREAKPOINT`
 crashes of the open 150 build are gone, and it starts as root in a container without extra
