@@ -459,7 +459,7 @@ There is one open build and one licensed build. The licensed build is offered tw
 
 | Chromium | Licensed build (Free with GitHub, Pro) | Open build |
 |---|---|---|
-| **157** (`157.0.8103.50`) | **Available now** (Windows, Linux) | ~Jan 2027 |
+| **157** (`157.0.8103.78`) | **Available now** (Windows, Linux; Chrome's 11 November security update) | ~Jan 2027 |
 | **156** (`156.0.8078.47`) | Available (Windows, Linux) | ~Jan 2027 |
 | **155** (`155.0.8059.39`) | Available (newest on macOS) | ~Dec 2026 |
 | **154** (`154.0.8037.57`) | Available | ~Dec 2026 |
