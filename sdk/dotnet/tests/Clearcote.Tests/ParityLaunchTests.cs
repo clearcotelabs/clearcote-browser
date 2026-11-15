@@ -213,8 +213,7 @@ public class ParityLaunchTests : IDisposable
             new[] { "--foo", "--fingerprint-noise-per-profile", "--fingerprint-noise-flat-areas" }, quiet: false);
         Assert.Equal(new[] { "--foo", "--fingerprint-noise-flat-areas" }, old);
         Assert.Equal(new[] { "clearcote: NoisePerProfile = true needs engine r60 or newer; this engine ignores it, so it was not applied." }, warnings);
-        Assert.Single(err.Text.Split('
-', StringSplitOptions.RemoveEmptyEntries));
+        Assert.Single(err.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries));
         // The 152 r22 switches keep their own wording.
         var (_, w22) = LaunchOpts.GateEngineSwitches(FakeEngine(Array.Empty<string>()), new[] { "--transparent-proxy" }, quiet: true);
         Assert.Contains("needs engine 152 r22 or newer", w22[0]);
