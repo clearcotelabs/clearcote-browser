@@ -234,6 +234,8 @@ _ENV_TO_BOOL = {
     # CC_WEBGL_READ_MARGIN false-triggered; both must arrive as real booleans for the same reason.
     "CC_FLAT_AREA_NOISE": "flat_area_noise",
     "CC_WEBGL_READ_MARGIN": "webgl_read_margin",
+    # r60: TRUE-triggered (`is True`) like CC_FLAT_AREA_NOISE, so it must arrive as a real boolean.
+    "CC_NOISE_PER_PROFILE": "noise_per_profile",
 }
 
 _TRUE = ("1", "true", "yes", "on")

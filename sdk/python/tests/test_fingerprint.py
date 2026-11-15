@@ -187,6 +187,14 @@ def test_r57_noise_style_options():
     assert fingerprint_args({"flat_area_noise": False, "webgl_read_margin": True}) == fingerprint_args({})
 
 
+def test_noise_per_profile_option():
+    assert "--fingerprint-noise-per-profile" in fingerprint_args({"noise_per_profile": True})
+    assert "--fingerprint-noise-per-profile" not in fingerprint_args({})
+    # Only a real True turns it on (True == 1 in Python).
+    assert "--fingerprint-noise-per-profile" not in fingerprint_args({"noise_per_profile": 1})
+    assert fingerprint_args({"noise_per_profile": False}) == fingerprint_args({})
+
+
 def test_skips_empty_and_none():
     args = fingerprint_args({"fingerprint": "", "timezone": None, "gpu_vendor": ""})
     assert not any(a.startswith("--fingerprint=") for a in args)

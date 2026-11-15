@@ -123,7 +123,7 @@ public static class Multiplex
     };
     private static readonly string[] BooleanKeys =
     {
-        "lightStealth", "realGpuHost", "disableGpuFingerprint", "fingerprintNoise", "gpuStringSpoof", "canvasNoise", "flatAreaNoise", "webglReadMargin",
+        "lightStealth", "realGpuHost", "disableGpuFingerprint", "fingerprintNoise", "gpuStringSpoof", "canvasNoise", "flatAreaNoise", "webglReadMargin", "noisePerProfile",
         "fingerprintVoices", "allowThirdPartyCookies", "transparentProxy", "socks5Udp",
     };
     private static readonly string[] StringKeys =

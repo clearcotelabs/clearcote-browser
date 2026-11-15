@@ -150,8 +150,8 @@ export interface FingerprintOptions {
    */
   realGpuHost?: boolean;
   /**
-   * Set `false` to turn OFF the per-eTLD+1 farbling NOISE (canvas/WebGL/audio/client-rects), so
-   * those surfaces return their natural, unperturbed values. Use when a site's anti-bot ML scores
+   * Set `false` to turn OFF the per-eTLD+1 farbling NOISE (canvas and WebGL readback; audio and client
+   * rects never get noise), so those surfaces return their natural, unperturbed values. Use when a site's anti-bot ML scores
    * the noise pattern as "tampered". Identity spoofs (UA/screen/GPU/persona)
    * stay on. Default (unset/`true`) keeps the noise.
    */
@@ -190,6 +190,14 @@ export interface FingerprintOptions {
    * `flatAreaNoise: true` or with the noise off. Needs engine r57; dropped on older engines.
    */
   webglReadMargin?: boolean;
+  /**
+   * `true` gives canvas and WebGL noise ONE seed per profile instead of one per site (eTLD+1), on every
+   * farbled exit (getImageData, toDataURL/toBlob/convertToBlob, WebGL readPixels), so a profile gives
+   * the same canvas/WebGL result on every site. Default `false`: a different noise result per site.
+   * No effect with the noise off (`fingerprintNoise: false`). Needs engine r60; on an older engine it
+   * is dropped with a warning, because that engine would quietly keep per-site noise.
+   */
+  noisePerProfile?: boolean;
   /**
    * Import a real captured fingerprint so the browser presents *that machine's* identity instead
    * of the synthetic seed-derived one. Accepts a path to a `.json` profile, a profile object, or a
@@ -262,6 +270,7 @@ export const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "canvasNoise",
   "flatAreaNoise",
   "webglReadMargin",
+  "noisePerProfile",
   "fingerprintProfile",
   "storageQuota",
   "canvasBridge",
@@ -681,8 +690,8 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // as <uuid>.local. mergeFeatureFlags folds this into any other --disable-features value.
   if (o.webrtcMdns === "off") args.push("--disable-features=WebRtcHideLocalIpsWithMdns");
   if (o.disableGpuFingerprint) args.push("--disable-gpu-fingerprint");
-  // fingerprintNoise=false turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects)
-  // so those surfaces return natural values — for sites whose ML flags the noise as "tampered".
+  // fingerprintNoise=false turns OFF the per-eTLD+1 farbling noise (canvas and WebGL readback; audio
+  // and client rects never get noise) so those surfaces return natural values — for sites whose ML flags the noise as "tampered".
   // Identity spoofs (UA/screen/GPU/persona) stay on. Default keeps the noise.
   if (o.fingerprintNoise === false) args.push("--disable-fingerprint-noise");
   // The two INDEPENDENT halves of the bundles above (engine >= Chromium 150 r12).
@@ -692,6 +701,9 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
   // areas and have no read margin to turn off).
   if (o.flatAreaNoise === true) args.push("--fingerprint-noise-flat-areas");
   if (o.webglReadMargin === false) args.push("--fingerprint-webgl-no-read-margin");
+  // r60+: one noise seed per profile instead of per site. Dropped WITH a warning on older engines by
+  // gateEngineSwitches (they would silently keep per-site noise, the opposite of what was asked).
+  if (o.noisePerProfile === true) args.push("--fingerprint-noise-per-profile");
   // fingerprintVoices=false keeps the host's own speech voices under a persona (engine 152 r22+).
   if (o.fingerprintVoices === false) args.push("--disable-fingerprint-voices");
   // Persona schema (see FingerprintOptions.personaSchema); the real-GPU declaration gates a

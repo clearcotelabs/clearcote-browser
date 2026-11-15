@@ -132,6 +132,7 @@ _BOOL_ENV = {
     "fingerprint_noise": "CC_FINGERPRINT_NOISE", "canvas_noise": "CC_CANVAS_NOISE",
     "gpu_string_spoof": "CC_GPU_STRING_SPOOF",
     "flat_area_noise": "CC_FLAT_AREA_NOISE", "webgl_read_margin": "CC_WEBGL_READ_MARGIN",
+    "noise_per_profile": "CC_NOISE_PER_PROFILE",
 }
 # Handled specially below, or on this side of the connection.
 _SPECIAL = ("location", "fingerprint_profile", "headless", "proxy", "args", "license_key", "license_api_base",

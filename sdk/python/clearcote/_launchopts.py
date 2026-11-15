@@ -890,11 +890,20 @@ def software_webgpu_args(exe, claimed_platform, platform=None, present=()):
 
 # -- new engine switches (152 r22+) -------------------------------------------------------------
 
-# Switches introduced in engine 152 r22, with what the caller asked for. Gated per binary.
+# Switches introduced in engine 152 r22 or later, with what the caller asked for. Gated per binary;
+# the engine each one needs is in GATED_ENGINE_SWITCH_MINIMUM (152 r22 when not listed).
 GATED_ENGINE_SWITCHES = {
     "--fingerprint-passthrough": 'fingerprint="off" (pass-through debug mode)',
     "--disable-fingerprint-voices": "fingerprint_voices=False",
     "--transparent-proxy": "transparent_proxy=True",
+    # r60: one canvas/WebGL noise seed per profile. Warned, not quiet: an older engine would keep
+    # per-site noise, the opposite of what was asked.
+    "--fingerprint-noise-per-profile": "noise_per_profile=True",
+}
+
+# The engine a GATED_ENGINE_SWITCHES entry needs, named in its warning, when it is not 152 r22.
+GATED_ENGINE_SWITCH_MINIMUM = {
+    "--fingerprint-noise-per-profile": "r60",
 }
 
 # Third-party cookie switches, dropped WITHOUT a warning on an engine that lacks them. Every launch
@@ -911,7 +920,8 @@ QUIET_GATED_ENGINE_SWITCHES = (
 
 
 def gate_engine_switches(exe, args, quiet=False):
-    """Drop any 152 r22+ switch the engine that will run does not implement, with a warning.
+    """Drop any 152 r22+ switch (r60+ for noise_per_profile) the engine that will run does not
+    implement, with a warning.
 
     Chromium ignores unknown switches silently, so an older engine would launch without the feature
     and without saying so. Detection is the same NUL-delimited literal probe as
@@ -928,7 +938,8 @@ def gate_engine_switches(exe, args, quiet=False):
         if what is None or engine_supports_switch(exe, name[2:]):
             out.append(a)
             continue
-        notes.append(f"clearcote: {what} needs engine 152 r22 or newer; this engine ignores it, "
+        minimum = GATED_ENGINE_SWITCH_MINIMUM.get(name, "152 r22")
+        notes.append(f"clearcote: {what} needs engine {minimum} or newer; this engine ignores it, "
                      "so it was not applied.")
     if not quiet:
         for n in notes:

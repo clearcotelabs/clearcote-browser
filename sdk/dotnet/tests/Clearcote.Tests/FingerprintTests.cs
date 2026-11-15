@@ -118,6 +118,14 @@ public class FingerprintTests
     }
 
     [Fact]
+    public void NoisePerProfile_maps_to_its_switch_and_is_absent_by_default()
+    {
+        Assert.Contains("--fingerprint-noise-per-profile", Fingerprint.Args(new FingerprintOptions { NoisePerProfile = true }));
+        Assert.DoesNotContain("--fingerprint-noise-per-profile", Fingerprint.Args(new FingerprintOptions()));
+        Assert.Equal(Fingerprint.Args(new FingerprintOptions()), Fingerprint.Args(new FingerprintOptions { NoisePerProfile = false }));
+    }
+
+    [Fact]
     public void Skips_empty_but_still_defaults_timezone()
     {
         using var _ = new Sandbox().Os("windows");

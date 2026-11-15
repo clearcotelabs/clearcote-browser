@@ -210,6 +210,24 @@ def test_gate_drops_third_party_cookie_switches_without_warning(tmp_path):
     assert r36 == ["--block-third-party-cookies"]
 
 
+def test_gate_drops_noise_per_profile_with_r60_warning(tmp_path):
+    old = fake_engine(tmp_path, ["fingerprint-noise-flat-areas", "transparent-proxy"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        args, notes = gate_engine_switches(old, [
+            "--foo", "--fingerprint-noise-per-profile", "--fingerprint-noise-flat-areas"], quiet=False)
+    assert args == ["--foo", "--fingerprint-noise-flat-areas"]
+    assert notes == ["clearcote: noise_per_profile=True needs engine r60 or newer; this engine ignores it, "
+                     "so it was not applied."]
+    assert len(caught) == 1
+    # The 152 r22 switches keep their own wording.
+    _, notes = gate_engine_switches(fake_engine(tmp_path, []), ["--transparent-proxy"], quiet=True)
+    assert "needs engine 152 r22 or newer" in notes[0]
+    args, notes = gate_engine_switches(fake_engine(tmp_path, ["fingerprint-noise-per-profile"]),
+                                       ["--fingerprint-noise-per-profile"], quiet=False)
+    assert args == ["--fingerprint-noise-per-profile"] and notes == []
+
+
 def test_gate_silent_under_quiet_but_reports(tmp_path):
     exe = fake_engine(tmp_path, [])
     with warnings.catch_warnings(record=True) as caught:

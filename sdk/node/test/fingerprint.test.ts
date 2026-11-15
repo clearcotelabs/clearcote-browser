@@ -145,6 +145,12 @@ describe("fingerprintArgs", () => {
     expect(fingerprintArgs({})).not.toContain("--fingerprint-webgl-no-read-margin");
   });
 
+  it("maps noisePerProfile to --fingerprint-noise-per-profile, absent by default", () => {
+    expect(fingerprintArgs({ noisePerProfile: true })).toContain("--fingerprint-noise-per-profile");
+    expect(fingerprintArgs({})).not.toContain("--fingerprint-noise-per-profile");
+    expect(fingerprintArgs({ noisePerProfile: false })).toEqual(fingerprintArgs({}));
+  });
+
   it("skips empty / undefined / null values", () => {
     const args = fingerprintArgs({ fingerprint: "", timezone: undefined, gpuVendor: null as unknown as string });
     expect(args.some((a) => a.startsWith("--fingerprint="))).toBe(false);

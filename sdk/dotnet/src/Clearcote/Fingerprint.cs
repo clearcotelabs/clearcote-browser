@@ -99,7 +99,8 @@ public class FingerprintOptions
     public string? WebrtcMdns { get; set; }
     /// Present the machine's real GPU instead of a spoofed one (most coherent vs strict classifiers).
     public bool? DisableGpuFingerprint { get; set; }
-    /// Set false to turn OFF per-eTLD+1 farbling noise (canvas/WebGL/audio/client-rects).
+    /// Set false to turn OFF per-eTLD+1 farbling noise (canvas and WebGL readback; audio and client
+    /// rects never get noise).
     public bool? FingerprintNoise { get; set; }
 
     /// <summary>
@@ -152,6 +153,15 @@ public class FingerprintOptions
     /// <c>true</c>. No effect with FlatAreaNoise = true or the noise off. Needs engine r57.
     /// </summary>
     public bool? WebglReadMargin { get; set; }
+
+    /// <summary>
+    /// <c>true</c> gives canvas and WebGL noise ONE seed per profile instead of one per site (eTLD+1), on
+    /// every farbled exit (getImageData, toDataURL/toBlob/convertToBlob, WebGL readPixels), so a profile
+    /// gives the same canvas/WebGL result on every site. Default <c>false</c>: a different noise result
+    /// per site. No effect with the noise off (<c>FingerprintNoise = false</c>). Needs engine r60; on an
+    /// older engine it is dropped with a warning, because that engine would quietly keep per-site noise.
+    /// </summary>
+    public bool? NoisePerProfile { get; set; }
     /// Import a real captured fingerprint: a path to a .json profile, a JSON string, or an object.
     public object? FingerprintProfile { get; set; }
     /// navigator.storage.estimate().quota in MEGABYTES.
@@ -550,6 +560,9 @@ public static class Fingerprint
         // r57 noise style; dropped without a warning on older engines by GateEngineSwitches.
         if (o.FlatAreaNoise == true) args.Add("--fingerprint-noise-flat-areas");
         if (o.WebglReadMargin == false) args.Add("--fingerprint-webgl-no-read-margin");
+        // r60: one noise seed per profile; dropped WITH a warning on older engines by GateEngineSwitches
+        // (they would silently keep per-site noise, the opposite of what was asked).
+        if (o.NoisePerProfile == true) args.Add("--fingerprint-noise-per-profile");
         // FingerprintVoices=false keeps the host's own speech voices under a persona (engine 152 r22+).
         if (o.FingerprintVoices == false) args.Add("--disable-fingerprint-voices");
         // Persona schema (see PersonaSchema); the real-GPU declaration gates a schema-2 persona's discrete-GPU

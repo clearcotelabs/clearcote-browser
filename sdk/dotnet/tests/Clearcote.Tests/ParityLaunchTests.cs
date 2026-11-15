@@ -206,6 +206,25 @@ public class ParityLaunchTests : IDisposable
     }
 
     [Fact]
+    public void Gate_drops_NoisePerProfile_before_r60_with_a_warning_naming_r60()
+    {
+        using var err = new StderrCapture();
+        var (old, warnings) = LaunchOpts.GateEngineSwitches(FakeEngine(new[] { "fingerprint-noise-flat-areas", "transparent-proxy" }),
+            new[] { "--foo", "--fingerprint-noise-per-profile", "--fingerprint-noise-flat-areas" }, quiet: false);
+        Assert.Equal(new[] { "--foo", "--fingerprint-noise-flat-areas" }, old);
+        Assert.Equal(new[] { "clearcote: NoisePerProfile = true needs engine r60 or newer; this engine ignores it, so it was not applied." }, warnings);
+        Assert.Single(err.Text.Split('
+', StringSplitOptions.RemoveEmptyEntries));
+        // The 152 r22 switches keep their own wording.
+        var (_, w22) = LaunchOpts.GateEngineSwitches(FakeEngine(Array.Empty<string>()), new[] { "--transparent-proxy" }, quiet: true);
+        Assert.Contains("needs engine 152 r22 or newer", w22[0]);
+        var (r60, w60) = LaunchOpts.GateEngineSwitches(FakeEngine(new[] { "fingerprint-noise-per-profile" }),
+            new[] { "--fingerprint-noise-per-profile" }, quiet: true);
+        Assert.Equal(new[] { "--fingerprint-noise-per-profile" }, r60);
+        Assert.Empty(w60);
+    }
+
+    [Fact]
     public void Gate_is_silent_under_quiet_but_still_reports()
     {
         var exe = FakeEngine(Array.Empty<string>());

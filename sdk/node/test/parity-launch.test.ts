@@ -181,6 +181,22 @@ describe("gateEngineSwitches", () => {
     expect(r57.args).toEqual(both);
   });
 
+  it("drops noisePerProfile on an engine before r60 WITH a warning naming r60, keeps it on r60", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const old = gateEngineSwitches(fakeEngine(["fingerprint-noise-flat-areas", "transparent-proxy"]),
+      ["--foo", "--fingerprint-noise-per-profile", "--fingerprint-noise-flat-areas"], false);
+    expect(old.args).toEqual(["--foo", "--fingerprint-noise-flat-areas"]);
+    expect(old.warnings).toEqual([
+      "clearcote: noisePerProfile: true needs engine r60 or newer; this engine ignores it, so it was not applied.",
+    ]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    // The 152 r22 switches keep their own wording.
+    expect(gateEngineSwitches(fakeEngine([]), ["--transparent-proxy"], true).warnings[0]).toMatch(/needs engine 152 r22 or newer/);
+    const r60 = gateEngineSwitches(fakeEngine(["fingerprint-noise-per-profile"]), ["--fingerprint-noise-per-profile"], false);
+    expect(r60.args).toEqual(["--fingerprint-noise-per-profile"]);
+    expect(r60.warnings).toEqual([]);
+  });
+
   it("is silent under quiet but still reports the warnings", () => {
     const exe = fakeEngine([]);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

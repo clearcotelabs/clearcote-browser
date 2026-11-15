@@ -853,11 +853,20 @@ export function softwareWebgpuArgs(
 
 // ── new engine switches (152 r22+) ──────────────────────────────────────────────────────────────
 
-/** Switches introduced in engine 152 r22, with what the caller asked for. Gated per binary. */
+/** Switches introduced in engine 152 r22 or later, with what the caller asked for. Gated per binary;
+ * the engine each one needs is in {@link GATED_ENGINE_SWITCH_MINIMUM} (152 r22 when not listed). */
 export const GATED_ENGINE_SWITCHES: Readonly<Record<string, string>> = {
   "--fingerprint-passthrough": "fingerprint: \"off\" (pass-through debug mode)",
   "--disable-fingerprint-voices": "fingerprintVoices: false",
   "--transparent-proxy": "transparentProxy: true",
+  // r60: one canvas/WebGL noise seed per profile. Warned, not quiet: an older engine would keep
+  // per-site noise, the opposite of what was asked.
+  "--fingerprint-noise-per-profile": "noisePerProfile: true",
+};
+
+/** The engine a {@link GATED_ENGINE_SWITCHES} entry needs, named in its warning, when it is not 152 r22. */
+export const GATED_ENGINE_SWITCH_MINIMUM: Readonly<Record<string, string>> = {
+  "--fingerprint-noise-per-profile": "r60",
 };
 
 /**
@@ -875,7 +884,7 @@ export const QUIET_GATED_ENGINE_SWITCHES: readonly string[] = [
 ];
 
 /**
- * Drop any 152 r22+ switch the engine that will run does not implement, with a warning.
+ * Drop any 152 r22+ switch (r60+ for noisePerProfile) the engine that will run does not implement, with a warning.
  *
  * Chromium ignores unknown switches silently, so an older engine would launch without the feature
  * and without saying so. Detection is the same NUL-delimited literal probe as {@link engineSupportsSwitch}.
@@ -888,7 +897,8 @@ export function gateEngineSwitches(exe: string | undefined, args: string[], quie
     const what = GATED_ENGINE_SWITCHES[name];
     if (!what) return true;
     if (engineSupportsSwitch(exe, name.slice(2))) return true;
-    warnings.push(`clearcote: ${what} needs engine 152 r22 or newer; this engine ignores it, so it was not applied.`);
+    const min = GATED_ENGINE_SWITCH_MINIMUM[name] ?? "152 r22";
+    warnings.push(`clearcote: ${what} needs engine ${min} or newer; this engine ignores it, so it was not applied.`);
     return false;
   });
   if (!quiet) for (const w of warnings) console.warn(w);

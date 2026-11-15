@@ -143,6 +143,7 @@ const BOOL_ENV: Record<string, string> = {
   lightStealth: "CC_LIGHT_STEALTH", disableGpuFingerprint: "CC_DISABLE_GPU_FINGERPRINT",
   fingerprintNoise: "CC_FINGERPRINT_NOISE", canvasNoise: "CC_CANVAS_NOISE", gpuStringSpoof: "CC_GPU_STRING_SPOOF",
   flatAreaNoise: "CC_FLAT_AREA_NOISE", webglReadMargin: "CC_WEBGL_READ_MARGIN",
+  noisePerProfile: "CC_NOISE_PER_PROFILE",
 };
 const SPECIAL = ["location", "fingerprintProfile", "headless", "proxy", "args", "licenseKey", "licenseApiBase", "personaEnv", "stockRuntime", "runtimeBindings", "geoip"];
 const SDK_SIDE = ["timeout", "slowMo", "humanize", "showCursor", "quiet", "docker", "dockerImage", "ephemeralProfile"];

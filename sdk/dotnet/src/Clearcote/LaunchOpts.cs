@@ -813,12 +813,22 @@ public static class LaunchOpts
 
     // ── new engine switches (152 r22+) ───────────────────────────────────────
 
-    /// Switches introduced in engine 152 r22, with the option that asked for each. Gated per binary.
+    /// Switches introduced in engine 152 r22 or later, with the option that asked for each. Gated per
+    /// binary; the engine each one needs is in <see cref="GatedEngineSwitchMinimum"/> (152 r22 when not listed).
     public static readonly IReadOnlyDictionary<string, string> GatedEngineSwitches = new Dictionary<string, string>
     {
         ["--fingerprint-passthrough"] = "Fingerprint = \"off\" (pass-through debug mode)",
         ["--disable-fingerprint-voices"] = "FingerprintVoices = false",
         ["--transparent-proxy"] = "TransparentProxy = true",
+        // r60: one canvas/WebGL noise seed per profile. Warned, not quiet: an older engine would keep
+        // per-site noise, the opposite of what was asked.
+        ["--fingerprint-noise-per-profile"] = "NoisePerProfile = true",
+    };
+
+    /// The engine a <see cref="GatedEngineSwitches"/> entry needs, named in its warning, when it is not 152 r22.
+    public static readonly IReadOnlyDictionary<string, string> GatedEngineSwitchMinimum = new Dictionary<string, string>
+    {
+        ["--fingerprint-noise-per-profile"] = "r60",
     };
 
     /// Third-party cookie switches, dropped WITHOUT a warning on an engine that lacks them. Every
@@ -833,7 +843,7 @@ public static class LaunchOpts
         "--fingerprint-noise-flat-areas", "--fingerprint-webgl-no-read-margin",
     };
 
-    /// Drop any 152 r22+ switch the engine that will run does not implement, with a warning.
+    /// Drop any 152 r22+ switch (r60+ for NoisePerProfile) the engine that will run does not implement, with a warning.
     /// Chromium ignores unknown switches silently, so an older engine would otherwise launch without
     /// the feature and without saying so.
     public static (List<string> Args, List<string> Warnings) GateEngineSwitches(string? exe, IEnumerable<string> args, bool quiet = false)
@@ -853,7 +863,8 @@ public static class LaunchOpts
                 outArgs.Add(a);
                 continue;
             }
-            warnings.Add($"clearcote: {what} needs engine 152 r22 or newer; this engine ignores it, so it was not applied.");
+            var min = GatedEngineSwitchMinimum.TryGetValue(name, out var m) ? m : "152 r22";
+            warnings.Add($"clearcote: {what} needs engine {min} or newer; this engine ignores it, so it was not applied.");
         }
         if (!quiet) foreach (var w in warnings) Console.Error.WriteLine(w);
         return (outArgs, warnings);

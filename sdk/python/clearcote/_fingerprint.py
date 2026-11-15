@@ -52,6 +52,8 @@ FINGERPRINT_KEYS = (
     # r57 noise style: flat-area noise (r56 style) and the WebGL partial-read margin.
     "flat_area_noise",
     "webgl_read_margin",
+    # r60: one canvas/WebGL noise seed per profile instead of per site.
+    "noise_per_profile",
     "fingerprint_profile",
     "storage_quota",
     "canvas_bridge",
@@ -534,8 +536,8 @@ def fingerprint_args(opts):
     # identity (linkable) — best for single-identity/per-host use.
     if opts.get("disable_gpu_fingerprint"):
         args.append("--disable-gpu-fingerprint")
-    # fingerprint_noise=False turns OFF the per-eTLD+1 farbling noise (canvas/WebGL/audio/
-    # client-rects) so those surfaces return natural, unperturbed values — useful when a site's
+    # fingerprint_noise=False turns OFF the per-eTLD+1 farbling noise (canvas and WebGL readback;
+    # audio and client rects never get noise) so those surfaces return natural, unperturbed values — useful when a site's
     # anti-bot ML scores the noise pattern as "tampered". Identity spoofs
     # (UA/screen/GPU/persona) stay on. Default (unset/True) keeps the noise.
     if opts.get("fingerprint_noise") is False:
@@ -569,6 +571,14 @@ def fingerprint_args(opts):
     # readPixels (r57+), so 1-2 edge pixels of a partial read can differ from a full read.
     if opts.get("webgl_read_margin") is False:
         args.append("--fingerprint-webgl-no-read-margin")
+    # noise_per_profile=True gives canvas and WebGL noise ONE seed per profile instead of one per
+    # site (eTLD+1), on every farbled exit (getImageData, toDataURL/toBlob/convertToBlob, WebGL
+    # readPixels), so a profile gives the same canvas/WebGL result on every site. Default: per-site
+    # noise. No effect with the noise off (fingerprint_noise=False). Needs engine r60; on an older
+    # engine gate_engine_switches drops it WITH a warning, since that engine would quietly keep
+    # per-site noise.
+    if opts.get("noise_per_profile") is True:
+        args.append("--fingerprint-noise-per-profile")
     # fingerprint_voices=False keeps the host's own speech voices under a persona (engine 152 r22+).
     if opts.get("fingerprint_voices") is False:
         args.append("--disable-fingerprint-voices")
