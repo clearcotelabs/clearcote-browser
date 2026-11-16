@@ -53,6 +53,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import type { Browser } from "playwright-core";
 import { installColorSchemeDefaultConnected } from "./colorscheme.js";
+import { isFingerprintPassthrough } from "./fingerprint.js";
 import { applyGeoipMode, dropAutoWebrtcIp, geoipMode, type GeoFillable } from "./geoip.js";
 import { installHumanize, installHumanizeOnContext } from "./humanize.js";
 import { RUNTIME_BINDINGS_SWITCH, STOCK_RUNTIME_SWITCH, runtimeBindingsWanted, stockRuntimeWanted } from "./launchopts.js";
@@ -832,7 +833,8 @@ const GEOIP_FILLED = ["timezone", "acceptLanguage", "location", "webrtcIp"] as c
  * (en-US -> America/New_York). Removes `geoip` from `options`.
  */
 export async function applyGeoipBeforeStart(options: Record<string, unknown>): Promise<void> {
-  const mode = geoipMode(options.geoip as boolean | undefined);  // on by default, as a native launch
+  // on by default, as a native launch; not for pass-through (fingerprint: "off"), which shows the host
+  const mode = geoipMode(options.geoip as boolean | undefined, undefined, isFingerprintPassthrough(options.fingerprint));
   delete options.geoip;
   if (mode === "off") return;
   const fp: GeoFillable = {};
@@ -844,7 +846,7 @@ export async function applyGeoipBeforeStart(options: Record<string, unknown>): P
 }
 
 export async function startContainer(options: Record<string, unknown>): Promise<DockerContainer & { exe: string }> {
-  const geoipOff = geoipMode(options.geoip as boolean | undefined) === "off";
+  const geoipOff = geoipMode(options.geoip as boolean | undefined, undefined, isFingerprintPassthrough(options.fingerprint)) === "off";
   await applyGeoipBeforeStart(options);  // geoip: true -> the region first; GeoipError starts nothing
   const env = containerEnv(options);
   const idle = idleExitSeconds();

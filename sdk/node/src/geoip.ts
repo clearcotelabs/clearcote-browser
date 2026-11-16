@@ -384,13 +384,19 @@ export async function applyGeoip(fp: GeoFillable, proxy: unknown, quiet?: boolea
  *   - "strict": `geoip: true`. Fails closed ({@link GeoipError}), as before.
  *   - "auto":   the default. A lookup that fails warns and launches with the persona's defaults.
  *   - "off":    `geoip: false`, or CLEARCOTE_GEOIP=0/false/no/off (an explicit `geoip: true` still wins).
+ *
+ * `passthrough` (the launch has `fingerprint: "off"`): the default is "off" too. Pass-through shows the
+ * host, and the lookup would hand it a language, timezone and WebRTC IP taken from the IP address:
+ * fingerprintArgs cannot tell those from values the caller set, so it sent them (measured on r60: a
+ * machine set to en-GB reported nl-NL,nl,en-US,en from a Dutch address). `geoip: true` is the caller
+ * asking for the lookup and still runs it.
  */
 export type GeoipMode = "off" | "auto" | "strict";
 export const GEOIP_ENV = "CLEARCOTE_GEOIP";
 
-export function geoipMode(geoip: boolean | undefined | null, env: Record<string, string | undefined> = process.env): GeoipMode {
+export function geoipMode(geoip: boolean | undefined | null, env: Record<string, string | undefined> = process.env, passthrough = false): GeoipMode {
   if (geoip === true) return "strict";
-  if (geoip === false) return "off";
+  if (geoip === false || passthrough) return "off";
   return /^(0|false|no|off)$/i.test((env[GEOIP_ENV] ?? "").trim()) ? "off" : "auto";
 }
 

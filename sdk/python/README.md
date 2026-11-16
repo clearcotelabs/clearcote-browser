@@ -195,12 +195,14 @@ Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the 
 
 | Option | Effect |
 |---|---|
-| `fingerprint="off"` | No persona at all — for telling whether a problem comes from the spoofing or from your environment. |
+| `fingerprint="off"` | Pass-through: no persona, for telling whether a problem comes from the spoofing or from your environment. See below. |
 | `fingerprint_voices=False` | Keep the host's own `speechSynthesis` voices under a persona. |
 | `allow_third_party_cookies=False` | Block third-party cookies. Since 0.45.0 they are allowed by default, as in Chrome; embedded sign-in, payment and captcha frames rely on them. |
 | `transparent_proxy=True` | With a proxy: send the headers a direct connection sends, and report connection timing as a reused connection. |
 
 On an older engine each of these is skipped with a warning; the launch still works.
+
+`fingerprint="off"` removes the persona and nothing else. The page reads this machine's own GPU (WebGL and WebGPU), speech voices, languages and timezone. Nothing is taken from the IP address: `timezone`, `accept_language` and `webrtc_ip` apply only when you set them or pass `geoip=True`, and without a `webrtc_ip` WebRTC gathers no ICE candidates. What the engine does on every launch stays: for example the brand list is Chromium's, and a host with no audio output device still reports a 48 kHz sample rate.
 
 `stock_runtime=True` (or `CLEARCOTE_STOCK_RUNTIME=1`) gives Playwright the browser's stock DevTools behaviour back: `page.on("console")` and `page.on("pageerror")` receive events, `page.set_content()` works, and `expose_function()` / `expose_binding()` keep working after a navigation. It is off by default because pages can observe some of what it restores. It needs an engine from r32 on; an older engine launches without it and the SDK warns once. It applies to local and Docker launches, not to cloud browsers.
 

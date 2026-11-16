@@ -891,12 +891,17 @@ export const QUIET_GATED_ENGINE_SWITCHES: readonly string[] = [
  */
 export function gateEngineSwitches(exe: string | undefined, args: string[], quiet?: boolean): { args: string[]; warnings: string[] } {
   const warnings: string[] = [];
+  // A pass-through launch sends --disable-fingerprint-voices itself (PASSTHROUGH_HOST_SWITCHES): an engine
+  // without it drops it with no warning, which would name an option the caller never set. Both switches
+  // arrived with 152 r22, so that engine already gets the warning about pass-through.
+  const passthrough = args.includes("--fingerprint-passthrough");
   const out = args.filter((a) => {
     const name = a.split("=")[0];
     if (QUIET_GATED_ENGINE_SWITCHES.includes(name)) return engineSupportsSwitch(exe, name.slice(2));
     const what = GATED_ENGINE_SWITCHES[name];
     if (!what) return true;
     if (engineSupportsSwitch(exe, name.slice(2))) return true;
+    if (name === "--disable-fingerprint-voices" && passthrough) return false;
     const min = GATED_ENGINE_SWITCH_MINIMUM[name] ?? "152 r22";
     warnings.push(`clearcote: ${what} needs engine ${min} or newer; this engine ignores it, so it was not applied.`);
     return false;

@@ -12,6 +12,13 @@ export interface FingerprintOptions {
    * Master fingerprint seed (the per-eTLD+1 farbling root). Same seed => the same stable
    * identity across launches; different seeds => unlinkable identities. Any string or number
    * is accepted (non-numeric seeds are hashed engine-side — they will not crash the renderer).
+   *
+   * `"off"` is pass-through, for telling whether a problem comes from the persona or from the
+   * environment: no persona, the host's own GPU and voices, and no timezone, language, location or
+   * WebRTC IP taken from the IP address (only the ones set here; `geoip: true` still looks them up).
+   * Without a `webrtcIp` WebRTC gathers no ICE candidates. What the engine does on every launch stays,
+   * e.g. Chromium's brand list and a 48 kHz audio sample rate on a host with no audio output device.
+   * Engine 152 r22+.
    */
   fingerprint?: string | number;
   /**
@@ -452,6 +459,26 @@ export function isFingerprintPassthrough(value: unknown): boolean {
   return typeof value === "string" && value.trim().toLowerCase() === "off";
 }
 
+/**
+ * What a pass-through launch sends besides `--fingerprint-passthrough`, so the page reads the host's own
+ * GPU (WebGL strings and parameters, the WebGPU adapter) and the host's own speech voices. From engine r51
+ * every launch carries a persona token, pass-through included (a selector with no seed gets the default
+ * persona), and the engine serves that persona's GPU and voice list unless these two switches say
+ * otherwise: measured on r60, a Windows host with an RTX 3070 answered "GTX 1660 ... OpenGL 4.5.0" and no
+ * voices without them. Both are selector switches, so the token is issued for them. The GPU switch is in
+ * every engine; the voices switch is gated like `fingerprintVoices: false` (see gateEngineSwitches).
+ */
+export const PASSTHROUGH_HOST_SWITCHES: readonly string[] = ["--disable-gpu-fingerprint", "--disable-fingerprint-voices"];
+
+/**
+ * `fpArgs` without the {@link PASSTHROUGH_HOST_SWITCHES} the caller already passed in their own `args`:
+ * a switch goes on the command line once.
+ */
+export function withoutCallerRepeats(fpArgs: string[], userArgs: readonly string[]): string[] {
+  const own = new Set(userArgs.map((a) => String(a).split("=")[0]));
+  return fpArgs.filter((a) => !(PASSTHROUGH_HOST_SWITCHES.includes(a) && own.has(a)));
+}
+
 /** Build the Chromium switches for a set of fingerprint options. */
 /** Parse the leading integer (the major) out of a version string like "120.0.6099.109" -> 120. */
 function majorFromVersion(value?: string): number | undefined {
@@ -582,7 +609,9 @@ export function fingerprintArgs(o: FingerprintOptions): string[] {
     // the SDK normally adds for coherence. Only what the caller set explicitly for locale and network
     // survives, mirroring the engine, which keeps timezone / accept-lang / webrtc-ip in this mode.
     // `--fingerprint-passthrough` also makes a 152 r22+ engine strip persona switches passed in `args`.
-    args.push("--fingerprint-passthrough");
+    // PASSTHROUGH_HOST_SWITCHES: an r51+ engine still gets a persona token, and serves its GPU and
+    // voices unless told to show the host's.
+    args.push("--fingerprint-passthrough", ...PASSTHROUGH_HOST_SWITCHES);
     if (o.timezone) args.push(`--timezone=${o.timezone}`);
     if (o.acceptLanguage) {
       const [accept, uiLocale] = resolveLanguages(cleanAcceptLanguage(String(o.acceptLanguage)));

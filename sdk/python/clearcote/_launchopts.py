@@ -928,6 +928,10 @@ def gate_engine_switches(exe, args, quiet=False):
     :func:`engine_supports_switch`. Returns ``(args, warnings)``; the warnings are emitted through
     :mod:`warnings` unless ``quiet``."""
     out, notes = [], []
+    # A pass-through launch sends --disable-fingerprint-voices itself (PASSTHROUGH_HOST_SWITCHES): an engine
+    # without it drops it with no warning, which would name an option the caller never set. Both switches
+    # arrived with 152 r22, so that engine already gets the warning about pass-through.
+    passthrough = "--fingerprint-passthrough" in args
     for a in args:
         name = str(a).split("=", 1)[0]
         if name in QUIET_GATED_ENGINE_SWITCHES:
@@ -937,6 +941,8 @@ def gate_engine_switches(exe, args, quiet=False):
         what = GATED_ENGINE_SWITCHES.get(name)
         if what is None or engine_supports_switch(exe, name[2:]):
             out.append(a)
+            continue
+        if name == "--disable-fingerprint-voices" and passthrough:
             continue
         minimum = GATED_ENGINE_SWITCH_MINIMUM.get(name, "152 r22")
         notes.append(f"clearcote: {what} needs engine {minimum} or newer; this engine ignores it, "

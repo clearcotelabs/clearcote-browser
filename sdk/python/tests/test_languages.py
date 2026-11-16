@@ -142,7 +142,8 @@ def test_timezone_default_follows_the_callers_own_tag():
 
 def test_passthrough_expands_the_same_way():
     args = fingerprint_args({"fingerprint": "off", "accept_language": "de-AT"})
-    assert args == ["--fingerprint-passthrough", "--accept-lang=de-DE,de,en-US,en", "--lang=de"]
+    assert args == ["--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices",
+                    "--accept-lang=de-DE,de,en-US,en", "--lang=de"]
 
 
 def test_geoip_countries_map_to_one_resolvable_os_locale():

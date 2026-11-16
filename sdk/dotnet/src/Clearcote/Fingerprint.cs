@@ -398,6 +398,24 @@ public static class Fingerprint
     public static bool IsFingerprintPassthrough(string? value)
         => value is not null && string.Equals(value.Trim(), "off", StringComparison.OrdinalIgnoreCase);
 
+    /// What a pass-through launch sends besides <c>--fingerprint-passthrough</c>, so the page reads the host's own GPU
+    /// (WebGL strings and parameters, the WebGPU adapter) and the host's own speech voices. From engine r51 every
+    /// launch carries a persona token, pass-through included (a selector with no seed gets the default persona), and
+    /// the engine serves that persona's GPU and voice list unless these two switches say otherwise: measured on r60, a
+    /// Windows host with an RTX 3070 answered "GTX 1660 ... OpenGL 4.5.0" and no voices without them. Both are
+    /// selector switches, so the token is issued for them. The GPU switch is in every engine; the voices switch is
+    /// gated like <c>FingerprintVoices = false</c> (see <see cref="LaunchOpts.GateEngineSwitches"/>).
+    public static readonly IReadOnlyList<string> PassthroughHostSwitches =
+        new[] { "--disable-gpu-fingerprint", "--disable-fingerprint-voices" };
+
+    /// <paramref name="fpArgs"/> without the <see cref="PassthroughHostSwitches"/> the caller already passed in their
+    /// own <c>Args</c>: a switch goes on the command line once.
+    internal static List<string> WithoutCallerRepeats(IEnumerable<string> fpArgs, IEnumerable<string>? userArgs)
+    {
+        var own = new HashSet<string>((userArgs ?? Array.Empty<string>()).Select(a => a.Split('=', 2)[0]), StringComparer.Ordinal);
+        return fpArgs.Where(a => !(PassthroughHostSwitches.Contains(a) && own.Contains(a))).ToList();
+    }
+
     /// Build the Chromium switches for a set of fingerprint options (ports fingerprintArgs()).
     private static readonly Dictionary<string, string> GpuMakerNames = new()
     {
@@ -450,7 +468,10 @@ public static class Fingerprint
             // coherence defaults. Only explicit locale and network values survive, mirroring the
             // engine, which keeps timezone / accept-lang / webrtc-ip in this mode.
             // `--fingerprint-passthrough` also makes a 152 r22+ engine strip persona switches from Args.
+            // PassthroughHostSwitches: an r51+ engine still gets a persona token, and serves its GPU and voices
+            // unless told to show the host's.
             var pt = new List<string> { "--fingerprint-passthrough" };
+            pt.AddRange(PassthroughHostSwitches);
             if (!string.IsNullOrEmpty(o.Timezone)) pt.Add($"--timezone={o.Timezone}");
             if (!string.IsNullOrEmpty(o.AcceptLanguage))
             {

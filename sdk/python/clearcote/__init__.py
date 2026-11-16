@@ -35,6 +35,7 @@ from ._fingerprint import (
     fingerprint_args,
     is_fingerprint_passthrough,
     persona_platform,
+    without_caller_repeats,
 )
 from ._fontpersona import ensure_persona_fonts, font_reachability, profile_with_windows11_faces
 from ._fonts import apply_font_env, check_font_dirs
@@ -662,7 +663,7 @@ def _prepare(kwargs):
     # Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udp_relay_or_fallback), asked before geoip
     # so a sticky session is already on its UDP-capable exit when geoip looks the exit up.
     socks5_udp = udp_relay_or_fallback(kwargs.get("proxy"), socks5_udp, quiet)
-    geo_applied = apply_geoip_mode(fp, kwargs.get("proxy"), geoip_mode(geoip), quiet=quiet)
+    geo_applied = apply_geoip_mode(fp, kwargs.get("proxy"), geoip_mode(geoip, passthrough=passthrough), quiet=quiet)
     exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update, pro=_cc_pro, version=version,
                           release_channel=release_channel)
     _guard(exe)
@@ -720,7 +721,9 @@ def _prepare(kwargs):
             # leaves nothing running. The key never reaches Playwright: every launch pops it.
             proxy_args = proxy_args + request_proxy_args(proxy_args)
             kwargs[_REQUEST_ROUTE_KEY] = (proxy_opt, proxy_args, quiet)
-    base = (fingerprint_args(fp) + agent_args(agent) + extension_args(extensions)
+    user = list(extra_args or [])
+    # without_caller_repeats: a pass-through launch's host switches go out once when the caller passed them too
+    base = (without_caller_repeats(fingerprint_args(fp), user) + agent_args(agent) + extension_args(extensions)
             + portable_args(portable_profile, encryption_key) + proxy_args)
     # behind a proxy, disable QUIC so no HTTP/3 UDP egresses around it (r54+: kept on through the relay)
     base += quic_args(proxy_opt, socks5_udp, exe)
@@ -737,7 +740,6 @@ def _prepare(kwargs):
         base += playwright_feature_override_args(kwargs.get("ignore_default_args"))
     if disable_privacy_sandbox:
         base += privacy_sandbox_args()
-    user = list(extra_args or [])
     # default WebRTC to leak-proof unless the user wired a webrtc_ip / policy themselves
     base += webrtc_default_deny_args(base + user, fp.get("webrtc_ip"))
     base += engine_extras_args(allow_third_party_cookies, transparent_proxy, proxy_opt, quiet=quiet)

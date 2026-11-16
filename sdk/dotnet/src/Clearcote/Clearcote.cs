@@ -673,7 +673,9 @@ public static partial class Clearcote
         // geoip so a sticky session is already on its UDP-capable exit when geoip looks the exit up.
         copy.Socks5Udp = await LaunchOpts.UdpRelayOrFallbackAsync(copy.Proxy, copy.Socks5Udp, copy.Quiet).ConfigureAwait(false);
         // geoip is on by default: the proxy's exit, or this machine's own IP without a proxy (GeoIp.Mode).
-        var geo = await GeoIp.ApplyModeAsync(copy, copy.Proxy, GeoIp.Mode(copy.Geoip), copy.Quiet).ConfigureAwait(false);
+        // Not for pass-through (Fingerprint = "off"), which shows the host.
+        var geoMode = GeoIp.Mode(copy.Geoip, passthrough: Fingerprint.IsFingerprintPassthrough(copy.Fingerprint));
+        var geo = await GeoIp.ApplyModeAsync(copy, copy.Proxy, geoMode, copy.Quiet).ConfigureAwait(false);
         return (copy, geo.EgressDrift, geo);
     }
 
@@ -752,7 +754,8 @@ public static partial class Clearcote
         EngineExtras? extra = null)
     {
         var baseList = new List<string>();
-        baseList.AddRange(fpArgs);
+        // WithoutCallerRepeats: a pass-through launch's host switches go out once when the caller passed them too.
+        baseList.AddRange(Fingerprint.WithoutCallerRepeats(fpArgs, userArgs));
         baseList.AddRange(extArgs);
         baseList.AddRange(proxyArgs);
         baseList.AddRange(LaunchOpts.QuicArgs(proxyForQuic, socks5Udp, extra?.Exe));

@@ -163,12 +163,47 @@ public class ParityLaunchTests : IDisposable
         var exe = FakeEngine(new[] { "proxy-auth" });
         using var err = new StderrCapture();
         var (args, warnings) = LaunchOpts.GateEngineSwitches(exe,
+            new[] { "--foo=1", "--transparent-proxy", "--disable-fingerprint-voices" }, quiet: false);
+        Assert.Equal(new[] { "--foo=1" }, args);
+        Assert.Equal(2, warnings.Count);
+        Assert.Contains("clearcote: TransparentProxy = true needs engine 152 r22 or newer; this engine ignores it, so it was not applied.", warnings);
+        Assert.Contains("clearcote: FingerprintVoices = false needs engine 152 r22 or newer; this engine ignores it, so it was not applied.", warnings);
+        Assert.Equal(2, err.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+    }
+
+    [Fact]
+    public void Gate_passthrough_on_an_older_engine_warns_once_for_it()
+    {
+        // ...and not for the voices switch a pass-through launch brings along.
+        var exe = FakeEngine(new[] { "proxy-auth" });
+        using var err = new StderrCapture();
+        var (args, warnings) = LaunchOpts.GateEngineSwitches(exe,
             new[] { "--foo=1", "--transparent-proxy", "--disable-fingerprint-voices", "--fingerprint-passthrough" }, quiet: false);
         Assert.Equal(new[] { "--foo=1" }, args);
-        Assert.Equal(3, warnings.Count);
+        Assert.Equal(2, warnings.Count);
         Assert.Contains("clearcote: TransparentProxy = true needs engine 152 r22 or newer; this engine ignores it, so it was not applied.", warnings);
-        Assert.All(warnings, w => Assert.EndsWith("needs engine 152 r22 or newer; this engine ignores it, so it was not applied.", w));
-        Assert.Equal(3, err.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+        Assert.Contains(warnings, w => w.StartsWith("clearcote: Fingerprint = \"off\" (pass-through debug mode) needs engine 152 r22"));
+        Assert.Equal(2, err.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+    }
+
+    [Fact]
+    public void Gate_passthrough_alone_on_an_older_engine_keeps_the_gpu_switch()
+    {
+        using var err = new StderrCapture();
+        var (args, warnings) = LaunchOpts.GateEngineSwitches(FakeEngine(new[] { "disable-gpu-fingerprint" }),
+            Fingerprint.Args(new FingerprintOptions { Fingerprint = "off" }), quiet: false);
+        Assert.Equal(new[] { "--disable-gpu-fingerprint" }, args);
+        Assert.Single(warnings);
+        var (kept, none) = LaunchOpts.GateEngineSwitches(
+            FakeEngine(new[] { "fingerprint-passthrough", "disable-fingerprint-voices", "disable-gpu-fingerprint" }),
+            Fingerprint.Args(new FingerprintOptions { Fingerprint = "off" }), quiet: false);
+        Assert.Equal(new[] { "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices" }, kept);
+        Assert.Empty(none);
+        // the voices switch pass-through brings along never gets a warning of its own
+        var (half, quiet) = LaunchOpts.GateEngineSwitches(FakeEngine(new[] { "fingerprint-passthrough", "disable-gpu-fingerprint" }),
+            Fingerprint.Args(new FingerprintOptions { Fingerprint = "off" }), quiet: false);
+        Assert.Equal(new[] { "--fingerprint-passthrough", "--disable-gpu-fingerprint" }, half);
+        Assert.Empty(quiet);
     }
 
     [Fact]
@@ -403,8 +438,37 @@ public class ParityLaunchTests : IDisposable
         {
             Fingerprint = "off", Platform = "windows", Brand = "Edge", GpuVendor = "X", LightStealth = true, FingerprintVoices = false,
         });
-        Assert.Equal(new[] { "--fingerprint-passthrough" }, args);
+        // The two switches that show the host's own GPU and voices are not persona switches: from engine r51 a
+        // pass-through launch still carries a persona token, and the engine serves that token's GPU and voices
+        // without them (measured on r60: "GTX 1660 ... OpenGL 4.5.0" and no voices on an RTX 3070 host).
+        Assert.Equal(new[] { "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices" }, args);
         Assert.DoesNotContain(args, a => a.StartsWith("--fingerprint="));
+        Assert.Equal(new[] { "--disable-gpu-fingerprint", "--disable-fingerprint-voices" }, Fingerprint.PassthroughHostSwitches);
+        foreach (var s in Fingerprint.PassthroughHostSwitches) Assert.Contains(s[2..], PersonaToken.SelectorSwitches);
+        // the options that send the same switches under a persona add no second copy
+        Assert.Equal(args, Fingerprint.Args(new FingerprintOptions { Fingerprint = "off", DisableGpuFingerprint = true, FingerprintVoices = false }));
+    }
+
+    [Fact]
+    public void Passthrough_host_switches_go_on_the_command_line_once()
+    {
+        var fp = new List<string> { "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices", "--timezone=Europe/Berlin" };
+        Assert.Equal(fp, Fingerprint.WithoutCallerRepeats(fp, Array.Empty<string>()));
+        Assert.Equal(fp, Fingerprint.WithoutCallerRepeats(fp, null));
+        Assert.Equal(new[] { "--fingerprint-passthrough", "--disable-fingerprint-voices", "--timezone=Europe/Berlin" },
+            Fingerprint.WithoutCallerRepeats(fp, new[] { "--disable-gpu-fingerprint" }));
+        Assert.Equal(new[] { "--fingerprint-passthrough", "--timezone=Europe/Berlin" },
+            Fingerprint.WithoutCallerRepeats(fp, new[] { "--disable-fingerprint-voices", "--disable-gpu-fingerprint", "--timezone=UTC", "--fingerprint-passthrough" }));
+
+        var exe = FakeEngine(new[] { "fingerprint-passthrough", "disable-fingerprint-voices", "disable-gpu-fingerprint" });
+        var off = Fingerprint.Args(new FingerprintOptions { Fingerprint = "off" });
+        foreach (var userArgs in new[] { Array.Empty<string>(), new[] { "--disable-gpu-fingerprint", "--disable-fingerprint-voices" } })
+        {
+            var args = Clearcote.AssembleArgs(off, new(), new(), null, null, userArgs, null, false,
+                new Clearcote.EngineExtras(exe, true, true, null, null));
+            foreach (var s in new[] { "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices" })
+                Assert.Single(args, a => a == s);
+        }
     }
 
     [Fact]
@@ -412,7 +476,8 @@ public class ParityLaunchTests : IDisposable
     {
         Assert.Equal(new[]
         {
-            "--fingerprint-passthrough", "--timezone=Europe/Berlin", "--accept-lang=de-DE,de", "--lang=de", "--webrtc-ip=1.2.3.4",
+            "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices",
+            "--timezone=Europe/Berlin", "--accept-lang=de-DE,de", "--lang=de", "--webrtc-ip=1.2.3.4",
         }, Fingerprint.Args(new FingerprintOptions
         {
             Fingerprint = "off", Timezone = "Europe/Berlin", AcceptLanguage = "de-DE,de;q=0.9", WebrtcIp = "1.2.3.4",

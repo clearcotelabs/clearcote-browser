@@ -186,12 +186,27 @@ def test_gate_drops_each_unsupported_switch_with_warning(tmp_path):
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         args, notes = gate_engine_switches(exe, [
+            "--foo=1", "--transparent-proxy", "--disable-fingerprint-voices"], quiet=False)
+    assert args == ["--foo=1"]
+    assert len(notes) == 2
+    assert len(caught) == 2
+    assert "transparent_proxy=True needs engine 152 r22 or newer; this engine ignores it, so it was not applied." in "\n".join(notes)
+    assert "fingerprint_voices=False needs engine 152 r22" in "\n".join(notes)
+
+
+def test_gate_passthrough_on_an_older_engine_warns_once_for_it(tmp_path):
+    # ...and not for the voices switch a pass-through launch brings along
+    exe = fake_engine(tmp_path, ["proxy-auth"])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        args, notes = gate_engine_switches(exe, [
             "--foo=1", "--transparent-proxy",
             "--disable-fingerprint-voices", "--fingerprint-passthrough"], quiet=False)
     assert args == ["--foo=1"]
-    assert len(notes) == 3
-    assert len(caught) == 3
-    assert "transparent_proxy=True needs engine 152 r22 or newer; this engine ignores it, so it was not applied." in "\n".join(notes)
+    assert len(notes) == 2
+    assert len(caught) == 2
+    assert "transparent_proxy=True needs engine 152 r22" in "\n".join(notes)
+    assert 'fingerprint="off" (pass-through debug mode) needs engine 152 r22' in "\n".join(notes)
 
 
 def test_gate_drops_third_party_cookie_switches_without_warning(tmp_path):
@@ -278,15 +293,16 @@ def test_not_passthrough(v):
 def test_passthrough_emits_no_persona_switches():
     args = fingerprint_args({"fingerprint": "off", "platform": "windows", "brand": "Edge",
                              "gpu_vendor": "X", "light_stealth": True})
-    assert args == ["--fingerprint-passthrough"]
+    # the two switches that show the host's own GPU and voices are not persona switches (see test_passthrough.py)
+    assert args == ["--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices"]
     assert not any(a.startswith("--fingerprint=") for a in args)
 
 
 def test_passthrough_keeps_only_explicit_locale_network():
     assert fingerprint_args({"fingerprint": "off", "timezone": "Europe/Berlin",
                              "accept_language": "de-DE,de;q=0.9", "webrtc_ip": "1.2.3.4"}) == [
-        "--fingerprint-passthrough", "--timezone=Europe/Berlin", "--accept-lang=de-DE,de",
-        "--lang=de", "--webrtc-ip=1.2.3.4"]
+        "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices",
+        "--timezone=Europe/Berlin", "--accept-lang=de-DE,de", "--lang=de", "--webrtc-ip=1.2.3.4"]
 
 
 def test_passthrough_adds_no_coherence_defaults():

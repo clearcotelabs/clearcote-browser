@@ -212,9 +212,11 @@ def apply_geoip_before_start(kwargs: dict, quiet=False) -> dict:
     defaults to en-US and the timezone follows its primary tag (en-US -> America/New_York; see
     _fingerprint._default_timezone). Pops ``geoip`` from ``kwargs`` and returns it."""
     from . import apply_geoip_mode, drop_auto_webrtc_ip
+    from ._fingerprint import is_fingerprint_passthrough
     from ._license import resolve_license_key
     from .geoip import geoip_mode
-    mode = geoip_mode(kwargs.pop("geoip", None))
+    # not for pass-through (fingerprint="off"), which shows the host
+    mode = geoip_mode(kwargs.pop("geoip", None), passthrough=is_fingerprint_passthrough(kwargs.get("fingerprint")))
     if mode == "off":
         return kwargs
     fp = {k: kwargs[k] for k in GEOIP_FILLED if kwargs.get(k) is not None}
@@ -949,8 +951,10 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     raises: a browser on the open engine, one sending traffic direct, or one whose every request the proxy
     turns away is never handed back in their place. The container
     carries this process's owner token for sweep_stale()."""
+    from ._fingerprint import is_fingerprint_passthrough
     from .geoip import geoip_mode
-    geoip_off = geoip_mode(kwargs.get("geoip")) == "off"
+    geoip_off = geoip_mode(kwargs.get("geoip"),
+                           passthrough=is_fingerprint_passthrough(kwargs.get("fingerprint"))) == "off"
     apply_geoip_before_start(kwargs, quiet)  # geoip (default on): the region first; GeoipError starts nothing
     env = container_env(kwargs)
     idle = idle_exit_seconds()

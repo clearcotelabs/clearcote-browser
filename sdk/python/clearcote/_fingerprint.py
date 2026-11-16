@@ -120,6 +120,23 @@ def is_fingerprint_passthrough(value):
     return value.strip().lower() == "off"
 
 
+# What a pass-through launch sends besides --fingerprint-passthrough, so the page reads the host's own GPU
+# (WebGL strings and parameters, the WebGPU adapter) and the host's own speech voices. From engine r51 every
+# launch carries a persona token, pass-through included (a selector with no seed gets the default persona),
+# and the engine serves that persona's GPU and voice list unless these two switches say otherwise: measured
+# on r60, a Windows host with an RTX 3070 answered "GTX 1660 ... OpenGL 4.5.0" and no voices without them.
+# Both are selector switches, so the token is issued for them. The GPU switch is in every engine; the voices
+# switch is gated like fingerprint_voices=False (see gate_engine_switches).
+PASSTHROUGH_HOST_SWITCHES = ("--disable-gpu-fingerprint", "--disable-fingerprint-voices")
+
+
+def without_caller_repeats(fp_args, user_args):
+    """``fp_args`` without the :data:`PASSTHROUGH_HOST_SWITCHES` the caller already passed in their own
+    ``args``: a switch goes on the command line once."""
+    own = {str(a).split("=", 1)[0] for a in (user_args or [])}
+    return [a for a in fp_args if not (a in PASSTHROUGH_HOST_SWITCHES and a in own)]
+
+
 def clean_accept_language(value):
     """Normalize an Accept-Language value for Chromium's ``--accept-lang``: a plain comma-separated
     tag list with NO ``;q=`` weights or spaces (Chromium adds the q-weights to the header itself; a
@@ -436,8 +453,10 @@ def fingerprint_args(opts):
         # defaults the SDK normally adds for coherence. Only what the caller set explicitly for locale
         # and network survives, mirroring the engine, which keeps timezone / accept-lang / webrtc-ip
         # in this mode. --fingerprint-passthrough also makes a 152 r22+ engine strip persona switches
-        # passed in `args`.
+        # passed in `args`. PASSTHROUGH_HOST_SWITCHES: an r51+ engine still gets a persona token, and
+        # serves its GPU and voices unless told to show the host's.
         args.append("--fingerprint-passthrough")
+        args.extend(PASSTHROUGH_HOST_SWITCHES)
         if opts.get("timezone"):
             args.append(f"--timezone={opts['timezone']}")
         if opts.get("accept_language"):

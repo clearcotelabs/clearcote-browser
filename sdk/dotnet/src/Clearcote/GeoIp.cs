@@ -422,10 +422,15 @@ public static class GeoIp
     ///   - Strict: <c>Geoip = true</c>. Fails closed (<see cref="GeoipException"/>), as before.
     ///   - Auto:   the default. A lookup that fails warns and launches with the persona's defaults.
     ///   - Off:    <c>Geoip = false</c>, or CLEARCOTE_GEOIP=0/false/no/off.
-    public static GeoipMode Mode(bool? geoip, IDictionary<string, string?>? env = null)
+    /// <paramref name="passthrough"/> (the launch has <c>Fingerprint = "off"</c>): the default is Off too. Pass-through
+    /// shows the host, and the lookup would hand it a language, timezone and WebRTC IP taken from the IP address:
+    /// <see cref="Fingerprint.Args"/> cannot tell those from values the caller set, so it sent them (measured on r60: a
+    /// machine set to en-GB reported nl-NL,nl,en-US,en from a Dutch address). <c>Geoip = true</c> is the caller asking
+    /// for the lookup and still runs it.
+    public static GeoipMode Mode(bool? geoip, IDictionary<string, string?>? env = null, bool passthrough = false)
     {
         if (geoip == true) return GeoipMode.Strict;
-        if (geoip == false) return GeoipMode.Off;
+        if (geoip == false || passthrough) return GeoipMode.Off;
         return (Env(env, GeoipEnv) ?? "").Trim().ToLowerInvariant() is "0" or "false" or "no" or "off" ? GeoipMode.Off : GeoipMode.Auto;
     }
 

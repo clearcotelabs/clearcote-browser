@@ -30,7 +30,7 @@ import type {
 } from "playwright-core";
 import { makeRecoveredCopy, recoveredExe, removeFailedLaunchDirs } from "./winlaunch.js";
 import { checkInstall, ensureBinary, ensureRunnableHere, ensureVersion, proEnsureBinary, resolvedEngineVersion, resolveReleaseChannel, warmFiles, type DownloadOptions } from "./download.js";
-import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, type FingerprintOptions } from "./fingerprint.js";
+import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, withoutCallerRepeats, type FingerprintOptions } from "./fingerprint.js";
 import { applyGeoipMode, directStunEligible, dropAutoWebrtcIp, geoipMode, resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
 import { defaultColorScheme, engineDecidesColorScheme, installColorSchemeDefault } from "./colorscheme.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeLaunchOptions } from "./humanize.js";
@@ -583,7 +583,8 @@ function assembleArgs(
   // build hides it while exposing usb/serial/hid (an OS-origin tell on a Windows persona); a
   // Windows build shows it under a LINUX claim, which genuine Chrome 154 on Linux does not. The
   // host is never consulted; whichever switch agrees with this build's default is a no-op.
-  const base = [...fpArgs, ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic, socks5Udp, extra?.exe), ...socks5UdpArgs(socks5Udp, proxyForQuic),
+  // withoutCallerRepeats: a pass-through launch's host switches go out once when the caller passed them too.
+  const base = [...withoutCallerRepeats(fpArgs, userArgs), ...agArgs, ...extArgs, ...proxyArgs, ...quicArgs(proxyForQuic, socks5Udp, extra?.exe), ...socks5UdpArgs(socks5Udp, proxyForQuic),
     ...webBluetoothArgs(
       fpArgs.find((a) => a.startsWith("--fingerprint-platform="))?.slice("--fingerprint-platform=".length),
     ),
@@ -1149,7 +1150,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udpRelayOrFallback), asked before geoip so a
   // sticky session is already on its UDP-capable exit when geoip looks the exit up.
   const socks5Udp = await udpRelayOrFallback((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, socks5UdpOpt, quiet);
-  const geoApplied = await applyGeoipMode(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, geoipMode(geoip), quiet);
+  const geoApplied = await applyGeoipMode(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, geoipMode(geoip, undefined, isFingerprintPassthrough(fingerprint.fingerprint)), quiet);
   const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
   const egressDrift = startEgressDriftCheck((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, geo?.ip ?? undefined, quiet);
@@ -1310,7 +1311,7 @@ async function launchLocalPersistentContextNow(
   // Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udpRelayOrFallback), asked before geoip so a
   // sticky session is already on its UDP-capable exit when geoip looks the exit up.
   const socks5Udp = await udpRelayOrFallback((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, socks5UdpOpt, quiet);
-  const geoApplied = await applyGeoipMode(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, geoipMode(geoip), quiet);
+  const geoApplied = await applyGeoipMode(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, geoipMode(geoip, undefined, isFingerprintPassthrough(fingerprint.fingerprint)), quiet);
   const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
   const egressDrift = startEgressDriftCheck((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, geo?.ip ?? undefined, quiet);
@@ -1668,7 +1669,7 @@ async function serveNow(options: ServeOptions = {}): Promise<Server> {
   // Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udpRelayOrFallback), asked before geoip so a
   // sticky session is already on its UDP-capable exit when geoip looks the exit up.
   const socks5Udp = await udpRelayOrFallback(proxyOpt as PwProxy | undefined, socks5UdpOpt, quiet);
-  const geoApplied = await applyGeoipMode(fingerprint, proxyOpt, geoipMode(geoip), quiet);  // on by default (./geoip.ts)
+  const geoApplied = await applyGeoipMode(fingerprint, proxyOpt, geoipMode(geoip, undefined, isFingerprintPassthrough(fingerprint.fingerprint)), quiet);  // on by default (./geoip.ts)
   const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
   const egressDrift = startEgressDriftCheck(proxyOpt, geo?.ip ?? undefined, quiet);

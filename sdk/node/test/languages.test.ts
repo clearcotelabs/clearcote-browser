@@ -139,7 +139,7 @@ describe("resolveLanguages", () => {
 
   it("expands the same way in pass-through mode", () => {
     expect(fingerprintArgs({ fingerprint: "off", acceptLanguage: "de-AT" })).toEqual([
-      "--fingerprint-passthrough", "--accept-lang=de-DE,de,en-US,en", "--lang=de",
+      "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices", "--accept-lang=de-DE,de,en-US,en", "--lang=de",
     ]);
   });
 

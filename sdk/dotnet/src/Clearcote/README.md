@@ -610,10 +610,16 @@ proxy; `Geoip = false` or `CLEARCOTE_GEOIP=0` turns it off. `Geoip = true` throw
 unresolved unless `Timezone` and `AcceptLanguage` are both set; the exit IP comes from an IP echo through the proxy, its geo from the
 offline geoip-all-in-one database shared with the Python and Node SDKs, downloaded on first use;
 `CLEARCOTE_GEOIP_ECHO_URL` points the echo at your own endpoint(s), and `CLEARCOTE_GEOIP_IPAPI=1` also asks
-ip-api.com, whose free endpoint is for non-commercial use only), `Fingerprint = "off"` (no persona), `FingerprintVoices = false`,
+ip-api.com, whose free endpoint is for non-commercial use only), `Fingerprint = "off"` (pass-through: no persona; see below), `FingerprintVoices = false`,
 `TransparentProxy = true` (engine 152 r22+; skipped with a warning on older engines), `LicenseThroughProxy`,
 `ReleaseChannel`, and `License.GetSessionSeatsAsync()`. Third-party cookies are allowed by default since 0.45.0,
 as in Chrome; `AllowThirdPartyCookies = false` blocks them (an engine before 152 r22 always blocks them).
+
+`Fingerprint = "off"` removes the persona and nothing else. The page reads this machine's own GPU (WebGL and WebGPU),
+speech voices, languages and timezone. Nothing is taken from the IP address: `Timezone`, `AcceptLanguage` and
+`WebrtcIp` apply only when you set them or pass `Geoip = true`, and without a `WebrtcIp` WebRTC gathers no ICE
+candidates. What the engine does on every launch stays: for example the brand list is Chromium's, and a host with no
+audio output device still reports a 48 kHz sample rate.
 
 `StockRuntime = true` (or `CLEARCOTE_STOCK_RUNTIME=1`) gives Playwright the browser's stock DevTools behaviour
 back: the page's `Console` and `PageError` events fire, `SetContentAsync` works, and `ExposeFunctionAsync` /

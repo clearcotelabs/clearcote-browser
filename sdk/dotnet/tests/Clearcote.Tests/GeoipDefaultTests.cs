@@ -210,4 +210,55 @@ public sealed class GeoipDefaultTests : IDisposable
         Assert.Null(envOff.Options.Timezone);
         Assert.Equal(2, _asked.Count);
     }
+
+    // Pass-through (Fingerprint = "off") shows the host: nothing is taken from the IP address. Measured on r60
+    // (2026-11-16): a machine set to en-GB reported nl-NL,nl,en-US,en from a Dutch address, because the default
+    // lookup filled AcceptLanguage and Fingerprint.Args sent it as if the caller had set it.
+    [Fact]
+    public void Passthrough_turns_the_default_off_and_true_still_asks_for_the_lookup()
+    {
+        Assert.Equal(GeoipMode.Off, GeoIp.Mode(null, E(), passthrough: true));
+        Assert.Equal(GeoipMode.Off, GeoIp.Mode(null, E("1"), passthrough: true));
+        Assert.Equal(GeoipMode.Off, GeoIp.Mode(false, E(), passthrough: true));
+        Assert.Equal(GeoipMode.Strict, GeoIp.Mode(true, E(), passthrough: true));
+        Assert.Equal(GeoipMode.Auto, GeoIp.Mode(null, E(), passthrough: false));
+    }
+
+    [Fact]
+    public async Task A_passthrough_launch_takes_nothing_from_the_IP_address()
+    {
+        _sb.Env(GeoIp.GeoipEnv, null).Env("CLEARCOTE_LICENSE_KEY", null).Env("CLEARCOTE_OFFLINE_KEY", null);
+        _sb.TempHome();   // never this machine's own saved licence key
+        var seeded = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Fingerprint = "seed-1", Quiet = true });
+        Assert.Single(_asked);
+        Assert.Equal("de-DE", seeded.Options.AcceptLanguage);
+        Assert.Equal("203.0.113.7", seeded.Options.WebrtcIp);
+
+        // the lookup the persona launch cached in this process is not applied either
+        var off = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Fingerprint = "off", Quiet = true });
+        Assert.Single(_asked);
+        Assert.Null(off.Options.Timezone);
+        Assert.Null(off.Options.AcceptLanguage);
+        Assert.Null(off.Options.Location);
+        Assert.Null(off.Options.WebrtcIp);
+        Assert.False(GeoIp.DirectStunEligible(off.Options, off.Geo, null));
+        Assert.Equal(new[] { "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices" },
+            Fingerprint.Args(off.Options));
+
+        // what the caller set is kept
+        var kept = await Clearcote.PrepareLaunchAsync(new LaunchOptions
+            { Fingerprint = "off", Quiet = true, Timezone = "Europe/Vienna", AcceptLanguage = "de-AT", WebrtcIp = "198.51.100.4" });
+        Assert.Single(_asked);
+        Assert.Equal("Europe/Vienna", kept.Options.Timezone);
+        Assert.Equal("de-AT", kept.Options.AcceptLanguage);
+        Assert.Equal("198.51.100.4", kept.Options.WebrtcIp);
+
+        // Geoip = true is the caller asking for the lookup: it runs and fills what is unset
+        GeoIp.ResetDirectCache();
+        var asked = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Fingerprint = "off", Quiet = true, Geoip = true, Timezone = "Europe/Vienna" });
+        Assert.Equal(2, _asked.Count);
+        Assert.Equal("Europe/Vienna", asked.Options.Timezone);
+        Assert.Equal("de-DE", asked.Options.AcceptLanguage);
+        Assert.Equal("203.0.113.7", asked.Options.WebrtcIp);
+    }
 }

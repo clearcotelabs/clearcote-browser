@@ -161,7 +161,7 @@ public class LanguagesTests
 
     [Fact]
     public void Passthrough_expands_the_same_way()
-        => Assert.Equal(new[] { "--fingerprint-passthrough", "--accept-lang=de-DE,de,en-US,en", "--lang=de" },
+        => Assert.Equal(new[] { "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices", "--accept-lang=de-DE,de,en-US,en", "--lang=de" },
             Fingerprint.Args(new FingerprintOptions { Fingerprint = "off", AcceptLanguage = "de-AT" }));
 
     [Fact]

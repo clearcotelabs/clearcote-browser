@@ -148,11 +148,23 @@ describe("gateEngineSwitches", () => {
   it("drops each unsupported switch with a warning on an older engine, keeping everything else", () => {
     const exe = fakeEngine(["proxy-auth"]);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const r = gateEngineSwitches(exe, ["--foo=1", "--transparent-proxy", "--disable-fingerprint-voices"], false);
+    expect(r.args).toEqual(["--foo=1"]);
+    expect(r.warnings).toHaveLength(2);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(r.warnings.join("\n")).toMatch(/transparentProxy: true needs engine 152 r22/);
+    expect(r.warnings.join("\n")).toMatch(/fingerprintVoices: false needs engine 152 r22/);
+  });
+
+  it("pass-through on an older engine: one warning for it, none for the voices switch it brings along", () => {
+    const exe = fakeEngine(["proxy-auth"]);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const r = gateEngineSwitches(exe, ["--foo=1", "--transparent-proxy", "--disable-fingerprint-voices", "--fingerprint-passthrough"], false);
     expect(r.args).toEqual(["--foo=1"]);
-    expect(r.warnings).toHaveLength(3);
-    expect(warn).toHaveBeenCalledTimes(3);
+    expect(r.warnings).toHaveLength(2);
+    expect(warn).toHaveBeenCalledTimes(2);
     expect(r.warnings.join("\n")).toMatch(/transparentProxy: true needs engine 152 r22/);
+    expect(r.warnings.join("\n")).toMatch(/fingerprint: "off" \(pass-through debug mode\) needs engine 152 r22/);
   });
 
   it("drops the third-party cookie switches an older engine lacks WITHOUT a warning", () => {
@@ -240,13 +252,16 @@ describe("fingerprint pass-through (--fingerprint=off)", () => {
 
   it("emits NO persona switches — never --fingerprint=off, which an old engine would read as a seed", () => {
     const args = fingerprintArgs({ fingerprint: "off", platform: "windows", brand: "Edge", gpuVendor: "X", lightStealth: true });
-    expect(args).toEqual(["--fingerprint-passthrough"]);
+    // the two switches that show the host's own GPU and voices are not persona switches (see passthrough.test.ts)
+    expect(args).toEqual(["--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices"]);
     expect(args.some((a) => a.startsWith("--fingerprint="))).toBe(false);
   });
 
   it("keeps only explicit locale/network values, like the engine does", () => {
     expect(fingerprintArgs({ fingerprint: "off", timezone: "Europe/Berlin", acceptLanguage: "de-DE,de;q=0.9", webrtcIp: "1.2.3.4" })).toEqual([
       "--fingerprint-passthrough",
+      "--disable-gpu-fingerprint",
+      "--disable-fingerprint-voices",
       "--timezone=Europe/Berlin",
       "--accept-lang=de-DE,de",
       "--lang=de",

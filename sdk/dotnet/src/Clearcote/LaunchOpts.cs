@@ -850,7 +850,12 @@ public static class LaunchOpts
     {
         var warnings = new List<string>();
         var outArgs = new List<string>();
-        foreach (var a in args)
+        var all = args.ToList();
+        // A pass-through launch sends --disable-fingerprint-voices itself (Fingerprint.PassthroughHostSwitches): an
+        // engine without it drops it with no warning, which would name an option the caller never set. Both switches
+        // arrived with 152 r22, so that engine already gets the warning about pass-through.
+        var passthrough = all.Contains("--fingerprint-passthrough");
+        foreach (var a in all)
         {
             var name = a.Split('=', 2)[0];
             if (QuietGatedEngineSwitches.Contains(name))
@@ -863,6 +868,7 @@ public static class LaunchOpts
                 outArgs.Add(a);
                 continue;
             }
+            if (name == "--disable-fingerprint-voices" && passthrough) continue;
             var min = GatedEngineSwitchMinimum.TryGetValue(name, out var m) ? m : "152 r22";
             warnings.Add($"clearcote: {what} needs engine {min} or newer; this engine ignores it, so it was not applied.");
         }
