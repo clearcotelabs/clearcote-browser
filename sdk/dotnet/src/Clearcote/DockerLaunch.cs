@@ -1006,7 +1006,7 @@ internal static class DockerLaunch
         // as the native launch does: the caller's options are never written to. With geoip off the container's
         // entrypoint builds the persona as a native launch does: Accept-Language defaults to en-US and the timezone
         // follows its primary tag (en-US -> America/New_York).
-        // Not for pass-through (Fingerprint = "off"), which shows the host.
+        // For pass-through (Fingerprint = "off") only the WebRTC IP.
         var geoMode = GeoIp.Mode(o.Geoip, passthrough: Fingerprint.IsFingerprintPassthrough(o.Fingerprint));
         if (geoMode != GeoipMode.Off)
         {

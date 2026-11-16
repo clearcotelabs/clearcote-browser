@@ -211,21 +211,75 @@ public sealed class GeoipDefaultTests : IDisposable
         Assert.Equal(2, _asked.Count);
     }
 
-    // Pass-through (Fingerprint = "off") shows the host: nothing is taken from the IP address. Measured on r60
-    // (2026-11-16): a machine set to en-GB reported nl-NL,nl,en-US,en from a Dutch address, because the default
-    // lookup filled AcceptLanguage and Fingerprint.Args sent it as if the caller had set it.
+    // Pass-through (Fingerprint = "off") shows the host: from the IP address it takes the WebRTC IP and nothing else.
+    // Measured on r60 (2026-11-16): a machine set to en-GB reported nl-NL,nl,en-US,en from a Dutch address, because
+    // the default lookup filled AcceptLanguage and Fingerprint.Args sent it as if the caller had set it. The WebRTC IP
+    // stays: without one the engine gathers no ICE candidates, where Chrome on the same machine shows a host and a
+    // server-reflexive candidate.
     [Fact]
-    public void Passthrough_turns_the_default_off_and_true_still_asks_for_the_lookup()
+    public void Passthrough_default_is_the_WebRTC_only_lookup()
     {
-        Assert.Equal(GeoipMode.Off, GeoIp.Mode(null, E(), passthrough: true));
-        Assert.Equal(GeoipMode.Off, GeoIp.Mode(null, E("1"), passthrough: true));
+        Assert.Equal(GeoipMode.WebrtcOnly, GeoIp.Mode(null, E(), passthrough: true));
+        Assert.Equal(GeoipMode.WebrtcOnly, GeoIp.Mode(null, E("1"), passthrough: true));
         Assert.Equal(GeoipMode.Off, GeoIp.Mode(false, E(), passthrough: true));
+        Assert.Equal(GeoipMode.Off, GeoIp.Mode(null, E("0"), passthrough: true));
         Assert.Equal(GeoipMode.Strict, GeoIp.Mode(true, E(), passthrough: true));
+        Assert.Equal(GeoipMode.Strict, GeoIp.Mode(true, E("0"), passthrough: true));
         Assert.Equal(GeoipMode.Auto, GeoIp.Mode(null, E(), passthrough: false));
     }
 
     [Fact]
-    public async Task A_passthrough_launch_takes_nothing_from_the_IP_address()
+    public async Task WebrtcOnly_fills_the_WebRTC_IP_alone_and_reports_it_like_the_default_lookup()
+    {
+        var fp = new FingerprintOptions();
+        var applied = await GeoIp.ApplyModeAsync(fp, null, GeoipMode.WebrtcOnly, quiet: true);
+        Assert.Equal(new ProxyOptions?[] { null }, _asked);
+        Assert.Equal("203.0.113.7", fp.WebrtcIp);
+        Assert.Null(fp.Timezone);
+        Assert.Null(fp.AcceptLanguage);
+        Assert.Null(fp.Location);
+        Assert.True(applied.AutoWebrtcIp);
+        Assert.Equal("203.0.113.7", applied.Ip);
+        Assert.True(GeoIp.DirectStunEligible(fp, applied, null));   // no proxy: this machine's own address, real STUN on r54+
+
+        // through a proxy: the exit's address, never real STUN, and gone again on the open build
+        GeoIp.ResetDirectCache();
+        var viaProxy = new FingerprintOptions { Timezone = "Europe/Vienna" };
+        var p = await GeoIp.ApplyModeAsync(viaProxy, Proxy, GeoipMode.WebrtcOnly, quiet: true);
+        Assert.Equal(2, _asked.Count);
+        Assert.Equal("Europe/Vienna", viaProxy.Timezone);
+        Assert.Null(viaProxy.AcceptLanguage);
+        Assert.Equal("203.0.113.7", viaProxy.WebrtcIp);
+        Assert.False(GeoIp.DirectStunEligible(viaProxy, p, Proxy));
+        GeoIp.DropAutoWebrtcIp(viaProxy, p, Proxy, licensed: true);
+        Assert.Equal("203.0.113.7", viaProxy.WebrtcIp);   // licensed build: kept
+        GeoIp.DropAutoWebrtcIp(viaProxy, p, Proxy, licensed: false);
+        Assert.Null(viaProxy.WebrtcIp);                    // open build: dropped, as for a persona launch
+
+        // a WebRTC IP of the caller's needs no lookup
+        var own = new FingerprintOptions { WebrtcIp = "198.51.100.4" };
+        var none = await GeoIp.ApplyModeAsync(own, null, GeoipMode.WebrtcOnly, quiet: true);
+        Assert.Equal(2, _asked.Count);
+        Assert.Equal("198.51.100.4", own.WebrtcIp);
+        Assert.False(none.AutoWebrtcIp);
+        Assert.False(GeoIp.DirectStunEligible(own, none, null));
+    }
+
+    [Fact]
+    public async Task WebrtcOnly_warns_and_launches_when_the_lookup_fails()
+    {
+        _answer = new GeoResult(null, "could not determine the exit IP", 5);
+        var fp = new FingerprintOptions();
+        var applied = await GeoIp.ApplyModeAsync(fp, null, GeoipMode.WebrtcOnly, quiet: false);
+        Assert.Null(fp.WebrtcIp);
+        Assert.False(applied.AutoWebrtcIp);
+        Assert.Contains("geoip (on by default)", _err.ToString());
+        Assert.Contains("Launching without a WebRTC IP", _err.ToString());
+        Assert.DoesNotContain("persona's default timezone", _err.ToString());
+    }
+
+    [Fact]
+    public async Task A_passthrough_launch_takes_only_the_WebRTC_IP_from_the_IP_address()
     {
         _sb.Env(GeoIp.GeoipEnv, null).Env("CLEARCOTE_LICENSE_KEY", null).Env("CLEARCOTE_OFFLINE_KEY", null);
         _sb.TempHome();   // never this machine's own saved licence key
@@ -234,29 +288,45 @@ public sealed class GeoipDefaultTests : IDisposable
         Assert.Equal("de-DE", seeded.Options.AcceptLanguage);
         Assert.Equal("203.0.113.7", seeded.Options.WebrtcIp);
 
-        // the lookup the persona launch cached in this process is not applied either
+        // the lookup the persona launch cached in this process gives pass-through its WebRTC IP only
         var off = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Fingerprint = "off", Quiet = true });
         Assert.Single(_asked);
         Assert.Null(off.Options.Timezone);
         Assert.Null(off.Options.AcceptLanguage);
         Assert.Null(off.Options.Location);
-        Assert.Null(off.Options.WebrtcIp);
-        Assert.False(GeoIp.DirectStunEligible(off.Options, off.Geo, null));
-        Assert.Equal(new[] { "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices" },
+        Assert.Equal("203.0.113.7", off.Options.WebrtcIp);
+        Assert.True(GeoIp.DirectStunEligible(off.Options, off.Geo, null));
+        Assert.Equal(new[] { "--fingerprint-passthrough", "--disable-gpu-fingerprint", "--disable-fingerprint-voices", "--webrtc-ip=203.0.113.7" },
             Fingerprint.Args(off.Options));
 
-        // what the caller set is kept
+        // through a proxy the open build gets no WebRTC IP from the lookup, as a persona launch
+        var viaProxy = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Fingerprint = "off", Quiet = true, Proxy = Proxy });
+        Assert.Equal(2, _asked.Count);
+        Assert.Equal("203.0.113.7", viaProxy.Options.WebrtcIp);
+        Clearcote.DropAutoWebrtcIp(viaProxy.Options, viaProxy.Geo);
+        Assert.Null(viaProxy.Options.WebrtcIp);
+        Assert.Null(viaProxy.Options.AcceptLanguage);
+
+        // what the caller set is kept, and a WebRTC IP of the caller's needs no lookup
         var kept = await Clearcote.PrepareLaunchAsync(new LaunchOptions
             { Fingerprint = "off", Quiet = true, Timezone = "Europe/Vienna", AcceptLanguage = "de-AT", WebrtcIp = "198.51.100.4" });
-        Assert.Single(_asked);
+        Assert.Equal(2, _asked.Count);
         Assert.Equal("Europe/Vienna", kept.Options.Timezone);
         Assert.Equal("de-AT", kept.Options.AcceptLanguage);
         Assert.Equal("198.51.100.4", kept.Options.WebrtcIp);
 
-        // Geoip = true is the caller asking for the lookup: it runs and fills what is unset
-        GeoIp.ResetDirectCache();
-        var asked = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Fingerprint = "off", Quiet = true, Geoip = true, Timezone = "Europe/Vienna" });
+        // Geoip = false and CLEARCOTE_GEOIP=0 mean no lookup at all
+        var none = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Fingerprint = "off", Quiet = true, Geoip = false });
+        Assert.Null(none.Options.WebrtcIp);
+        _sb.Env(GeoIp.GeoipEnv, "0");
+        var envOff = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Fingerprint = "off", Quiet = true });
+        Assert.Null(envOff.Options.WebrtcIp);
         Assert.Equal(2, _asked.Count);
+        _sb.Env(GeoIp.GeoipEnv, null);
+
+        // Geoip = true is the caller asking for the whole lookup: it runs and fills what is unset
+        var asked = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Fingerprint = "off", Quiet = true, Geoip = true, Timezone = "Europe/Vienna" });
+        Assert.Equal(3, _asked.Count);
         Assert.Equal("Europe/Vienna", asked.Options.Timezone);
         Assert.Equal("de-DE", asked.Options.AcceptLanguage);
         Assert.Equal("203.0.113.7", asked.Options.WebrtcIp);

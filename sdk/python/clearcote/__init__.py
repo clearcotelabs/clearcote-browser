@@ -520,13 +520,29 @@ def apply_geoip_mode(fp, proxy, mode, quiet=False):
     (a :class:`GeoipApplied`, whose ``.ip`` is the egress IP the lookup found), where
     ``auto_webrtc_ip`` says the WebRTC IP came from the default lookup. "strict" is
     :func:`apply_geoip`. "auto" skips the lookup when every field it fills is already set, reuses a
-    no-proxy lookup for 10 minutes, and on failure warns once and launches without filling anything."""
-    global _direct_geo
+    no-proxy lookup for 10 minutes, and on failure warns once and launches without filling anything.
+    "webrtc" is "auto" for the WebRTC IP alone: no lookup when the caller set one, and nothing else on
+    ``fp`` is touched. What comes back is the same, so the open-build drop (drop_auto_webrtc_ip) and real
+    STUN with no proxy (direct_stun_eligible) treat the address as they treat any default lookup's."""
     if mode == "off":
         return GeoipApplied()
     if mode == "strict":
         geo = apply_geoip(fp, proxy, quiet=quiet)
         return GeoipApplied(geo, False, (geo or {}).get("ip"))
+    if mode == "webrtc":
+        if fp.get("webrtc_ip") is not None:
+            return GeoipApplied()
+        only = {}
+        applied = _apply_geoip_auto(only, proxy, quiet, webrtc_only=True)
+        if only.get("webrtc_ip") is not None:
+            fp["webrtc_ip"] = only["webrtc_ip"]
+        return applied
+    return _apply_geoip_auto(fp, proxy, quiet)
+
+
+def _apply_geoip_auto(fp, proxy, quiet=False, webrtc_only=False):
+    """The default lookup. ``webrtc_only``: its warning says what a pass-through launch goes without."""
+    global _direct_geo
     if all(fp.get(k) is not None for k in ("timezone", "accept_language", "location", "webrtc_ip")):
         return GeoipApplied()
     had_webrtc_ip = fp.get("webrtc_ip") is not None
@@ -543,8 +559,12 @@ def apply_geoip_mode(fp, proxy, mode, quiet=False):
     except GeoipError as e:
         if not quiet and not os.environ.get("CLEARCOTE_NO_WARN"):
             msg = str(e).replace("geoip: ", "geoip (on by default): ", 1).split(" Launching anyway")[0]
-            sys.stderr.write(f"clearcote: warning: {msg} Launching with the persona's default timezone and "
-                             "language; pass geoip=True to fail instead, or geoip=False to skip the lookup.\n")
+            if webrtc_only:
+                sys.stderr.write(f"clearcote: warning: {msg} Launching without a WebRTC IP, so WebRTC gathers no "
+                                 "ICE candidates; pass webrtc_ip, or geoip=False to skip the lookup.\n")
+            else:
+                sys.stderr.write(f"clearcote: warning: {msg} Launching with the persona's default timezone and "
+                                 "language; pass geoip=True to fail instead, or geoip=False to skip the lookup.\n")
         return GeoipApplied()
     if geo and direct:
         _direct_geo = ({"timezone": geo.get("timezone"), "accept_language": geo.get("accept_language"),

@@ -4,8 +4,9 @@
 // and voices unless --disable-gpu-fingerprint and --disable-fingerprint-voices say otherwise; the default geoip
 // lookup filled a language, timezone and WebRTC IP from the IP address, which went out as if the caller had set
 // them. Measured on r60 (2026-11-16): a Windows host with an RTX 3070 set to en-GB answered "GTX 1660 ... OpenGL
-// 4.5.0", no voices and nl-NL from a Dutch address. So pass-through sends the two switches itself and skips the
-// default lookup.
+// 4.5.0", no voices and nl-NL from a Dutch address. So pass-through sends the two switches itself, and takes
+// only the WebRTC IP from the default lookup: without one the engine gathers no ICE candidates at all (measured
+// on r60), where Chrome on the same machine shows a host and a server-reflexive candidate.
 //
 // Hermetic: Playwright and the geoip resolver are stand-ins and the "engine" is a small file. Mirrors
 // sdk/python/tests/test_passthrough.py.
@@ -67,7 +68,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 import { fingerprintArgs, PASSTHROUGH_HOST_SWITCHES, withoutCallerRepeats } from "../src/fingerprint.js";
-import { geoipMode, geoResolver, resetDirectGeoCache, type GeoResult } from "../src/geoip.js";
+import { applyGeoipMode, directStunEligible, dropAutoWebrtcIp, geoipMode, geoResolver, resetDirectGeoCache, type GeoFillable, type GeoResult } from "../src/geoip.js";
 import { gateEngineSwitches } from "../src/launchopts.js";
 import { SELECTOR_SWITCHES, selectorFromArgs } from "../src/persona.js";
 import { applyGeoipBeforeStart } from "../src/docker.js";
@@ -81,6 +82,8 @@ const GEO = { ip: "203.0.113.7", country: "NL", timezone: "Europe/Amsterdam", ac
 // 152 r22 brought pass-through and the voices switch; the GPU switch is in every engine.
 const ENGINE_R22 = ["fingerprint-passthrough", "disable-fingerprint-voices", "disable-gpu-fingerprint", "allow-third-party-cookies"];
 const ENGINE_OLD = ["disable-gpu-fingerprint"];
+// r54 brought real STUN for a launch with no proxy whose WebRTC IP is this machine's own.
+const ENGINE_R54 = [...ENGINE_R22, "webrtc-direct-stun"];
 
 afterAll(() => {
   if (stub.savedProfileDir === undefined) delete process.env.CLEARCOTE_PROFILE_DIR;
@@ -219,54 +222,141 @@ describe("older engines", () => {
   });
 });
 
-describe("nothing taken from the IP address", () => {
-  it("geoipMode: pass-through turns the default lookup off, and geoip: true still asks for it", () => {
-    expect(geoipMode(undefined, {}, true)).toBe("off");
-    expect(geoipMode(undefined, { CLEARCOTE_GEOIP: "1" }, true)).toBe("off");
+describe("from the IP address: the WebRTC IP and nothing else", () => {
+  const PROXY = { server: "http://proxy.example:8080" };
+  const ONLY_LOCALE = ["--accept-lang=", "--lang=", "--timezone=", "--fingerprint-location="];
+
+  it("geoipMode: pass-through's default is the WebRTC-only lookup; true asks for all of it, false and the variable for none", () => {
+    expect(geoipMode(undefined, {}, true)).toBe("webrtc");
+    expect(geoipMode(undefined, { CLEARCOTE_GEOIP: "1" }, true)).toBe("webrtc");
     expect(geoipMode(false, {}, true)).toBe("off");
+    expect(geoipMode(undefined, { CLEARCOTE_GEOIP: "0" }, true)).toBe("off");
     expect(geoipMode(true, {}, true)).toBe("strict");
+    expect(geoipMode(true, { CLEARCOTE_GEOIP: "0" }, true)).toBe("strict");
     expect(geoipMode(undefined, {}, false)).toBe("auto");
     expect(geoipMode(undefined, {})).toBe("auto");
   });
 
-  it.each(["launch", "launch-incognito", "persistent"])("%s: a persona launch looks the address up, pass-through does not", async (entry) => {
+  it("applyGeoipMode 'webrtc' fills the WebRTC IP alone and reports it like the default lookup does", async () => {
+    const fp: GeoFillable = {};
+    const applied = await applyGeoipMode(fp, undefined, "webrtc", true);
+    expect(asked).toEqual([undefined]);
+    expect(fp).toEqual({ webrtcIp: "203.0.113.7" });
+    expect(applied.autoWebrtcIp).toBe(true);
+    expect(applied.ip).toBe("203.0.113.7");
+    expect(directStunEligible(fp, applied, undefined)).toBe(true);   // no proxy: this machine's own address, real STUN on r54+
+    // through a proxy: the exit's address, never real STUN, and gone again on the open build
+    resetDirectGeoCache();
+    const viaProxy: GeoFillable = { timezone: "Europe/Berlin" };
+    const p = await applyGeoipMode(viaProxy, PROXY, "webrtc", true);
+    expect(asked).toEqual([undefined, PROXY]);
+    expect(viaProxy).toEqual({ timezone: "Europe/Berlin", webrtcIp: "203.0.113.7" });
+    expect(directStunEligible(viaProxy, p, PROXY)).toBe(false);
+    dropAutoWebrtcIp(viaProxy, p, PROXY, true);
+    expect(viaProxy.webrtcIp).toBe("203.0.113.7");                   // licensed build: kept
+    dropAutoWebrtcIp(viaProxy, p, PROXY, false);
+    expect(viaProxy.webrtcIp).toBeUndefined();                       // open build: dropped, as for a persona launch
+  });
+
+  it("applyGeoipMode 'webrtc' asks nothing when the caller set a WebRTC IP, and reuses the no-proxy lookup", async () => {
+    const set: GeoFillable = { webrtcIp: "198.51.100.4" };
+    const applied = await applyGeoipMode(set, undefined, "webrtc", true);
+    expect(asked).toEqual([]);
+    expect(set).toEqual({ webrtcIp: "198.51.100.4" });
+    expect(applied.autoWebrtcIp).toBe(false);
+    await applyGeoipMode({}, undefined, "auto", true);
+    const fp: GeoFillable = {};
+    const cached = await applyGeoipMode(fp, undefined, "webrtc", true);
+    expect(asked).toHaveLength(1);
+    expect(fp).toEqual({ webrtcIp: "203.0.113.7" });
+    expect(directStunEligible(fp, cached, undefined)).toBe(true);
+  });
+
+  it("applyGeoipMode 'webrtc' warns and launches when the lookup fails, saying what is missing", async () => {
+    answer = { geo: null, reason: "could not determine the exit IP", elapsedMs: 5 };
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const fp: GeoFillable = {};
+    const applied = await applyGeoipMode(fp, undefined, "webrtc", false);
+    expect(fp).toEqual({});
+    expect(applied.autoWebrtcIp).toBe(false);
+    const out = err.mock.calls.map((c) => String(c[0])).join("");
+    expect(out).toContain("geoip (on by default)");
+    expect(out).toContain("Launching without a WebRTC IP");
+    expect(out).not.toContain("persona's default timezone");
+  });
+
+  it.each(["launch", "launch-incognito", "persistent"])("%s: pass-through gets the WebRTC IP, with real STUN, and no language, timezone or location", async (entry) => {
     process.env.CLEARCOTE_GEOIP = "1";
-    const exe = fakeEngine(ENGINE_R22, "r22");
+    const exe = fakeEngine(ENGINE_R54, "r54");
     let args = await launchArgs(entry, { executablePath: exe, headless: false, quiet: true, fingerprint: "seed-1" });
     expect(asked).toHaveLength(1);
     expect(args).toContain("--accept-lang=nl-NL,nl,en-US,en");
     expect(args).toContain("--timezone=Europe/Amsterdam");
     expect(args).toContain("--webrtc-ip=203.0.113.7");
+    expect(args).toContain("--webrtc-direct-stun");
 
     asked = [];
     resetDirectGeoCache();
     args = await launchArgs(entry, { executablePath: exe, headless: false, quiet: true, fingerprint: "off" });
-    expect(asked).toEqual([]);
-    for (const p of ["--accept-lang=", "--lang=", "--timezone=", "--webrtc-ip=", "--fingerprint-location=", "--webrtc-direct-stun"]) expect(named(args, p)).toEqual([]);
+    expect(asked).toEqual([undefined]);
+    expect(args).toContain("--webrtc-ip=203.0.113.7");
+    expect(args).toContain("--webrtc-direct-stun");
+    for (const p of ONLY_LOCALE) expect(named(args, p)).toEqual([]);
   });
 
-  it("the lookup a persona launch cached in this process is not applied either", async () => {
+  it("the lookup a persona launch cached in this process gives pass-through its WebRTC IP only", async () => {
     process.env.CLEARCOTE_GEOIP = "1";
-    const exe = fakeEngine(ENGINE_R22, "r22");
+    const exe = fakeEngine(ENGINE_R54, "r54");
     await launchArgs("persistent", { executablePath: exe, headless: false, quiet: true, fingerprint: "seed-1" });
     const args = await launchArgs("persistent", { executablePath: exe, headless: false, quiet: true, fingerprint: "off" });
     expect(asked).toHaveLength(1);
-    for (const p of ["--accept-lang=", "--timezone=", "--webrtc-ip="]) expect(named(args, p)).toEqual([]);
+    expect(args).toContain("--webrtc-ip=203.0.113.7");
+    for (const p of ONLY_LOCALE) expect(named(args, p)).toEqual([]);
   });
 
-  it("what the caller set is kept", async () => {
+  it("through a proxy the open build gets no WebRTC IP from the lookup, pass-through or not", async () => {
     process.env.CLEARCOTE_GEOIP = "1";
-    const exe = fakeEngine(ENGINE_R22, "r22");
-    const args = await launchArgs("persistent", { executablePath: exe, headless: false, quiet: true, fingerprint: "off",
+    const exe = fakeEngine(ENGINE_R54, "r54");
+    for (const fingerprint of ["seed-1", "off"]) {
+      asked = [];
+      const args = await launchArgs("persistent", { executablePath: exe, headless: false, quiet: true, fingerprint, proxy: PROXY });
+      expect(asked, fingerprint).toEqual([PROXY]);
+      expect(named(args, "--webrtc-ip="), fingerprint).toEqual([]);
+      expect(args, fingerprint).not.toContain("--webrtc-direct-stun");
+    }
+  });
+
+  it("what the caller set is kept, and a WebRTC IP of the caller's needs no lookup", async () => {
+    process.env.CLEARCOTE_GEOIP = "1";
+    const exe = fakeEngine(ENGINE_R54, "r54");
+    let args = await launchArgs("persistent", { executablePath: exe, headless: false, quiet: true, fingerprint: "off",
       timezone: "Europe/Berlin", acceptLanguage: "de-DE", webrtcIp: "198.51.100.4" });
     expect(asked).toEqual([]);
     expect(args).toContain("--timezone=Europe/Berlin");
     expect(args).toContain("--accept-lang=de-DE,de,en-US,en");
     expect(args).toContain("--webrtc-ip=198.51.100.4");
+    expect(args).not.toContain("--webrtc-direct-stun");   // a hand-set address may name another place
+    args = await launchArgs("persistent", { executablePath: exe, headless: false, quiet: true, fingerprint: "off", timezone: "Europe/Berlin" });
+    expect(asked).toHaveLength(1);
+    expect(args).toContain("--timezone=Europe/Berlin");
+    expect(args).toContain("--webrtc-ip=203.0.113.7");
+    expect(named(args, "--accept-lang=")).toEqual([]);
   });
 
-  it("geoip: true is the caller asking for the lookup: it runs and fills what is unset", async () => {
-    const exe = fakeEngine(ENGINE_R22, "r22");
+  it("geoip: false and CLEARCOTE_GEOIP=0 mean no lookup at all", async () => {
+    const exe = fakeEngine(ENGINE_R54, "r54");
+    process.env.CLEARCOTE_GEOIP = "1";
+    let args = await launchArgs("persistent", { executablePath: exe, headless: false, quiet: true, fingerprint: "off", geoip: false });
+    expect(asked).toEqual([]);
+    for (const p of [...ONLY_LOCALE, "--webrtc-ip=", "--webrtc-direct-stun"]) expect(named(args, p)).toEqual([]);
+    process.env.CLEARCOTE_GEOIP = "0";
+    args = await launchArgs("persistent", { executablePath: exe, headless: false, quiet: true, fingerprint: "off" });
+    expect(asked).toEqual([]);
+    expect(named(args, "--webrtc-ip=")).toEqual([]);
+  });
+
+  it("geoip: true is the caller asking for the whole lookup: it runs and fills what is unset", async () => {
+    const exe = fakeEngine(ENGINE_R54, "r54");
     const args = await launchArgs("persistent", { executablePath: exe, headless: false, quiet: true, fingerprint: "off", geoip: true, timezone: "Europe/Berlin" });
     expect(asked).toHaveLength(1);
     expect(args).toContain("--timezone=Europe/Berlin");
@@ -274,15 +364,19 @@ describe("nothing taken from the IP address", () => {
     expect(args).toContain("--webrtc-ip=203.0.113.7");
   });
 
-  it("the Docker launch does not look the address up for pass-through either", async () => {
+  it("the Docker launch hands a pass-through container the WebRTC IP alone", async () => {
     process.env.CLEARCOTE_GEOIP = "1";
     const off: Record<string, unknown> = { fingerprint: "off", quiet: true };
     await applyGeoipBeforeStart(off);
-    expect(asked).toEqual([]);
-    expect(off).toEqual({ fingerprint: "off", quiet: true });
+    expect(asked).toHaveLength(1);
+    expect(off).toEqual({ fingerprint: "off", quiet: true, webrtcIp: "203.0.113.7" });
+    const none: Record<string, unknown> = { fingerprint: "off", quiet: true, geoip: false };
+    await applyGeoipBeforeStart(none);
+    expect(none).toEqual({ fingerprint: "off", quiet: true });
+    resetDirectGeoCache();
     const seeded: Record<string, unknown> = { fingerprint: "seed-1", quiet: true };
     await applyGeoipBeforeStart(seeded);
-    expect(asked).toHaveLength(1);
+    expect(asked).toHaveLength(2);
     expect(seeded.timezone).toBe("Europe/Amsterdam");
   });
 });

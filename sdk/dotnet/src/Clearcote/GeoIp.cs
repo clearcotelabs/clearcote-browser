@@ -29,7 +29,7 @@ public sealed class GeoipException : Exception
 
 /// How a launch applies geoip (<see cref="GeoIp.Mode"/>): Off, Auto (the default: fails open) or Strict
 /// (<c>Geoip = true</c>: fails closed).
-public enum GeoipMode { Off, Auto, Strict }
+public enum GeoipMode { Off, Auto, Strict, WebrtcOnly }
 
 /// Region lookup for the connection a launch will use (ports geoip.ts).
 ///
@@ -422,16 +422,21 @@ public static class GeoIp
     ///   - Strict: <c>Geoip = true</c>. Fails closed (<see cref="GeoipException"/>), as before.
     ///   - Auto:   the default. A lookup that fails warns and launches with the persona's defaults.
     ///   - Off:    <c>Geoip = false</c>, or CLEARCOTE_GEOIP=0/false/no/off.
-    /// <paramref name="passthrough"/> (the launch has <c>Fingerprint = "off"</c>): the default is Off too. Pass-through
-    /// shows the host, and the lookup would hand it a language, timezone and WebRTC IP taken from the IP address:
-    /// <see cref="Fingerprint.Args"/> cannot tell those from values the caller set, so it sent them (measured on r60: a
-    /// machine set to en-GB reported nl-NL,nl,en-US,en from a Dutch address). <c>Geoip = true</c> is the caller asking
-    /// for the lookup and still runs it.
+    ///   - WebrtcOnly: the default of a pass-through launch (<paramref name="passthrough"/>: it has
+    ///     <c>Fingerprint = "off"</c>). The same lookup, but only the WebRTC IP is taken from it.
+    /// Pass-through shows the host, and the full lookup would hand it a language, timezone and location taken from the
+    /// IP address: <see cref="Fingerprint.Args"/> cannot tell those from values the caller set, so it sent them
+    /// (measured on r60: a machine set to en-GB reported nl-NL,nl,en-US,en from a Dutch address). The WebRTC IP is
+    /// kept because the engine gathers no ICE candidates without one (measured on r60: none, where Chrome on the same
+    /// machine and the persona launch show a host and a server-reflexive candidate); with no proxy it is this machine's
+    /// own address, sent by real STUN on r54+. <c>Geoip = true</c> is the caller asking for the whole lookup and still
+    /// runs it; <c>Geoip = false</c> and CLEARCOTE_GEOIP=0 mean no lookup at all.
     public static GeoipMode Mode(bool? geoip, IDictionary<string, string?>? env = null, bool passthrough = false)
     {
         if (geoip == true) return GeoipMode.Strict;
-        if (geoip == false || passthrough) return GeoipMode.Off;
-        return (Env(env, GeoipEnv) ?? "").Trim().ToLowerInvariant() is "0" or "false" or "no" or "off" ? GeoipMode.Off : GeoipMode.Auto;
+        if (geoip == false) return GeoipMode.Off;
+        if ((Env(env, GeoipEnv) ?? "").Trim().ToLowerInvariant() is "0" or "false" or "no" or "off") return GeoipMode.Off;
+        return passthrough ? GeoipMode.WebrtcOnly : GeoipMode.Auto;
     }
 
     /// The default lookup's budget: CLEARCOTE_GEOIP_TIMEOUT_SECONDS when set, else 10 s (Strict keeps 20 s).
@@ -453,9 +458,23 @@ public static class GeoIp
 
     /// Apply geoip in <paramref name="mode"/> (see <see cref="Mode"/>). Auto skips the lookup when every field it
     /// fills is already set, reuses a no-proxy lookup for 10 minutes, and on failure warns once and launches.
-    internal static async Task<GeoipApplied> ApplyModeAsync(FingerprintOptions fp, ProxyOptions? proxy, GeoipMode mode, bool quiet = false)
+    /// WebrtcOnly is Auto for the WebRTC IP alone: no lookup when the caller set one, and nothing else on
+    /// <paramref name="fp"/> is touched. What comes back is the same, so the open-build drop
+    /// (<see cref="DropAutoWebrtcIp"/>) and real STUN with no proxy (<see cref="DirectStunEligible"/>) treat the
+    /// address as they treat any default lookup's. <paramref name="webrtcOnly"/> (set by that mode only): the warning
+    /// of a failed lookup says what a pass-through launch goes without.
+    internal static async Task<GeoipApplied> ApplyModeAsync(FingerprintOptions fp, ProxyOptions? proxy, GeoipMode mode, bool quiet = false,
+        bool webrtcOnly = false)
     {
         if (mode == GeoipMode.Off) return GeoipApplied.None;
+        if (mode == GeoipMode.WebrtcOnly)
+        {
+            if (!string.IsNullOrEmpty(fp.WebrtcIp)) return GeoipApplied.None;
+            var only = new FingerprintOptions();
+            var applied = await ApplyModeAsync(only, proxy, GeoipMode.Auto, quiet, webrtcOnly: true).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(only.WebrtcIp)) fp.WebrtcIp = only.WebrtcIp;
+            return applied;
+        }
         if (mode == GeoipMode.Strict)
         {
             // Capture the geo ApplyForLaunchAsync filled from, for its IP (DirectStunEligible).
@@ -505,8 +524,11 @@ public static class GeoIp
             if (!quiet && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLEARCOTE_NO_WARN")))
             {
                 var msg = Regex.Replace(Regex.Replace(e.Message, "^geoip: ", "geoip (on by default): "), @" Launching anyway[\s\S]*$", "");
-                Console.Error.WriteLine($"clearcote: warning: {msg} Launching with the persona's default timezone and language; " +
-                                        "pass Geoip = true to fail instead, or Geoip = false to skip the lookup.");
+                Console.Error.WriteLine(webrtcOnly
+                    ? $"clearcote: warning: {msg} Launching without a WebRTC IP, so WebRTC gathers no ICE candidates; " +
+                      "pass WebrtcIp, or Geoip = false to skip the lookup."
+                    : $"clearcote: warning: {msg} Launching with the persona's default timezone and language; " +
+                      "pass Geoip = true to fail instead, or Geoip = false to skip the lookup.");
             }
             return GeoipApplied.None;
         }

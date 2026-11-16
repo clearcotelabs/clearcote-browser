@@ -215,7 +215,7 @@ def apply_geoip_before_start(kwargs: dict, quiet=False) -> dict:
     from ._fingerprint import is_fingerprint_passthrough
     from ._license import resolve_license_key
     from .geoip import geoip_mode
-    # not for pass-through (fingerprint="off"), which shows the host
+    # for pass-through (fingerprint="off") only the WebRTC IP
     mode = geoip_mode(kwargs.pop("geoip", None), passthrough=is_fingerprint_passthrough(kwargs.get("fingerprint")))
     if mode == "off":
         return kwargs

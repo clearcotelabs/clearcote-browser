@@ -833,7 +833,7 @@ const GEOIP_FILLED = ["timezone", "acceptLanguage", "location", "webrtcIp"] as c
  * (en-US -> America/New_York). Removes `geoip` from `options`.
  */
 export async function applyGeoipBeforeStart(options: Record<string, unknown>): Promise<void> {
-  // on by default, as a native launch; not for pass-through (fingerprint: "off"), which shows the host
+  // on by default, as a native launch; for pass-through (fingerprint: "off") only the WebRTC IP
   const mode = geoipMode(options.geoip as boolean | undefined, undefined, isFingerprintPassthrough(options.fingerprint));
   delete options.geoip;
   if (mode === "off") return;

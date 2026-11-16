@@ -385,19 +385,25 @@ export async function applyGeoip(fp: GeoFillable, proxy: unknown, quiet?: boolea
  *   - "auto":   the default. A lookup that fails warns and launches with the persona's defaults.
  *   - "off":    `geoip: false`, or CLEARCOTE_GEOIP=0/false/no/off (an explicit `geoip: true` still wins).
  *
- * `passthrough` (the launch has `fingerprint: "off"`): the default is "off" too. Pass-through shows the
- * host, and the lookup would hand it a language, timezone and WebRTC IP taken from the IP address:
- * fingerprintArgs cannot tell those from values the caller set, so it sent them (measured on r60: a
- * machine set to en-GB reported nl-NL,nl,en-US,en from a Dutch address). `geoip: true` is the caller
- * asking for the lookup and still runs it.
+ *   - "webrtc": the default of a pass-through launch (`passthrough`: it has `fingerprint: "off"`). The
+ *               same lookup, but only the WebRTC IP is taken from it.
+ *
+ * Pass-through shows the host, and the full lookup would hand it a language, timezone and location taken
+ * from the IP address: fingerprintArgs cannot tell those from values the caller set, so it sent them
+ * (measured on r60: a machine set to en-GB reported nl-NL,nl,en-US,en from a Dutch address). The WebRTC IP
+ * is kept because the engine gathers no ICE candidates without one (measured on r60: none, where Chrome on
+ * the same machine and the persona launch show a host and a server-reflexive candidate); with no proxy it
+ * is this machine's own address, sent by real STUN on r54+. `geoip: true` is the caller asking for the
+ * whole lookup and still runs it; `geoip: false` and CLEARCOTE_GEOIP=0 mean no lookup at all.
  */
-export type GeoipMode = "off" | "auto" | "strict";
+export type GeoipMode = "off" | "auto" | "strict" | "webrtc";
 export const GEOIP_ENV = "CLEARCOTE_GEOIP";
 
 export function geoipMode(geoip: boolean | undefined | null, env: Record<string, string | undefined> = process.env, passthrough = false): GeoipMode {
   if (geoip === true) return "strict";
-  if (geoip === false || passthrough) return "off";
-  return /^(0|false|no|off)$/i.test((env[GEOIP_ENV] ?? "").trim()) ? "off" : "auto";
+  if (geoip === false) return "off";
+  if (/^(0|false|no|off)$/i.test((env[GEOIP_ENV] ?? "").trim())) return "off";
+  return passthrough ? "webrtc" : "auto";
 }
 
 /** The default lookup's budget: CLEARCOTE_GEOIP_TIMEOUT_SECONDS when set, else 10 s (strict keeps 20 s). */
@@ -419,6 +425,9 @@ export interface GeoipApplied {
 /**
  * Apply geoip in `mode` (see {@link geoipMode}). "auto" skips the lookup when every field it fills is
  * already set, reuses a no-proxy lookup for 10 minutes, and on failure warns once and launches.
+ * "webrtc" is "auto" for the WebRTC IP alone: no lookup when the caller set one, and nothing else on
+ * `fp` is touched. What comes back is the same, so the open-build drop (dropAutoWebrtcIp) and real STUN
+ * with no proxy (directStunEligible) treat the address as they treat any default lookup's.
  */
 export async function applyGeoipMode(fp: GeoFillable, proxy: unknown, mode: GeoipMode, quiet?: boolean): Promise<GeoipApplied> {
   if (mode === "off") return { autoWebrtcIp: false };
@@ -426,6 +435,18 @@ export async function applyGeoipMode(fp: GeoFillable, proxy: unknown, mode: Geoi
     const geo = await applyGeoip(fp, proxy, quiet);
     return { geo, autoWebrtcIp: false, ip: geo?.ip };
   }
+  if (mode === "webrtc") {
+    if (fp.webrtcIp != null) return { autoWebrtcIp: false };
+    const only: GeoFillable = {};
+    const applied = await applyAuto(only, proxy, quiet, true);
+    if (only.webrtcIp != null) fp.webrtcIp = only.webrtcIp;
+    return applied;
+  }
+  return applyAuto(fp, proxy, quiet, false);
+}
+
+/** The default lookup. `webrtcOnly`: its warning says what a pass-through launch goes without. */
+async function applyAuto(fp: GeoFillable, proxy: unknown, quiet: boolean | undefined, webrtcOnly: boolean): Promise<GeoipApplied> {
   if (fp.timezone != null && fp.acceptLanguage != null && fp.location != null && fp.webrtcIp != null) return { autoWebrtcIp: false };
   const hadWebrtcIp = fp.webrtcIp != null;
   const direct = !proxy;
@@ -444,8 +465,10 @@ export async function applyGeoipMode(fp: GeoFillable, proxy: unknown, mode: Geoi
     if (!(e instanceof GeoipError)) throw e;
     if (!quiet && !process.env.CLEARCOTE_NO_WARN)
       process.stderr.write(`clearcote: warning: ${e.message.replace(/^geoip: /, "geoip (on by default): ")
-        .replace(/ Launching anyway[\s\S]*$/, "")} Launching with the persona's default timezone and language; ` +
-        "pass geoip: true to fail instead, or geoip: false to skip the lookup.\n");
+        .replace(/ Launching anyway[\s\S]*$/, "")} ` + (webrtcOnly
+        ? "Launching without a WebRTC IP, so WebRTC gathers no ICE candidates; pass webrtcIp, or geoip: false to skip the lookup.\n"
+        : "Launching with the persona's default timezone and language; " +
+          "pass geoip: true to fail instead, or geoip: false to skip the lookup.\n"));
     return { autoWebrtcIp: false };
   }
 }

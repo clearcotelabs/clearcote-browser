@@ -14,11 +14,11 @@ export interface FingerprintOptions {
    * is accepted (non-numeric seeds are hashed engine-side — they will not crash the renderer).
    *
    * `"off"` is pass-through, for telling whether a problem comes from the persona or from the
-   * environment: no persona, the host's own GPU and voices, and no timezone, language, location or
-   * WebRTC IP taken from the IP address (only the ones set here; `geoip: true` still looks them up).
-   * Without a `webrtcIp` WebRTC gathers no ICE candidates. What the engine does on every launch stays,
-   * e.g. Chromium's brand list and a 48 kHz audio sample rate on a host with no audio output device.
-   * Engine 152 r22+.
+   * environment: no persona, the host's own GPU and voices, and no timezone, language or location
+   * taken from the IP address (only the ones set here; `geoip: true` still looks them up). The WebRTC
+   * IP is still looked up, so WebRTC gathers candidates as Chrome does; `geoip: false` skips that too.
+   * What the engine does on every launch stays, e.g. Chromium's brand list and a 48 kHz audio sample
+   * rate on a host with no audio output device. Engine 152 r22+.
    */
   fingerprint?: string | number;
   /**

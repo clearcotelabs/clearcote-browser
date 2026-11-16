@@ -673,7 +673,7 @@ public static partial class Clearcote
         // geoip so a sticky session is already on its UDP-capable exit when geoip looks the exit up.
         copy.Socks5Udp = await LaunchOpts.UdpRelayOrFallbackAsync(copy.Proxy, copy.Socks5Udp, copy.Quiet).ConfigureAwait(false);
         // geoip is on by default: the proxy's exit, or this machine's own IP without a proxy (GeoIp.Mode).
-        // Not for pass-through (Fingerprint = "off"), which shows the host.
+        // For pass-through (Fingerprint = "off") only the WebRTC IP.
         var geoMode = GeoIp.Mode(copy.Geoip, passthrough: Fingerprint.IsFingerprintPassthrough(copy.Fingerprint));
         var geo = await GeoIp.ApplyModeAsync(copy, copy.Proxy, geoMode, copy.Quiet).ConfigureAwait(false);
         return (copy, geo.EgressDrift, geo);

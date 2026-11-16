@@ -98,23 +98,28 @@ def geoip_timeout_seconds(env=None):
 #   "strict": geoip=True. Fails closed (GeoipError), as before.
 #   "auto":   the default. A lookup that fails warns and launches with the persona's defaults.
 #   "off":    geoip=False, or CLEARCOTE_GEOIP=0/false/no/off (an explicit geoip=True still wins).
-# Pass-through (fingerprint="off"): the default is "off" too. Pass-through shows the host, and the lookup
-# would hand it a language, timezone and WebRTC IP taken from the IP address: fingerprint_args cannot tell
-# those from values the caller set, so it sent them (measured on r60: a machine set to en-GB reported
-# nl-NL,nl,en-US,en from a Dutch address). geoip=True is the caller asking for the lookup and still runs it.
+#   "webrtc": the default of a pass-through launch (fingerprint="off"). The same lookup, but only the WebRTC
+#             IP is taken from it.
+# Pass-through shows the host, and the full lookup would hand it a language, timezone and location taken from
+# the IP address: fingerprint_args cannot tell those from values the caller set, so it sent them (measured on
+# r60: a machine set to en-GB reported nl-NL,nl,en-US,en from a Dutch address). The WebRTC IP is kept because
+# the engine gathers no ICE candidates without one (measured on r60: none, where Chrome on the same machine
+# and the persona launch show a host and a server-reflexive candidate); with no proxy it is this machine's own
+# address, sent by real STUN on r54+. geoip=True is the caller asking for the whole lookup and still runs it;
+# geoip=False and CLEARCOTE_GEOIP=0 mean no lookup at all.
 GEOIP_ENV = "CLEARCOTE_GEOIP"
 _GEOIP_ENV_OFF = ("0", "false", "no", "off")
 
 
 def geoip_mode(geoip, env=None, passthrough=False):
-    """``"off"`` | ``"auto"`` | ``"strict"`` for a launch's ``geoip`` option (None = the default).
-    ``passthrough``: the launch has ``fingerprint="off"``, whose default is "off"."""
+    """``"off"`` | ``"auto"`` | ``"strict"`` | ``"webrtc"`` for a launch's ``geoip`` option (None = the
+    default). ``passthrough``: the launch has ``fingerprint="off"``, whose default is "webrtc"."""
     if geoip is not None:  # any explicit value, as the old `if geoip:` read it
         return "strict" if geoip else "off"
-    if passthrough:
-        return "off"
     env = os.environ if env is None else env
-    return "off" if str(env.get(GEOIP_ENV) or "").strip().lower() in _GEOIP_ENV_OFF else "auto"
+    if str(env.get(GEOIP_ENV) or "").strip().lower() in _GEOIP_ENV_OFF:
+        return "off"
+    return "webrtc" if passthrough else "auto"
 
 
 class GeoipError(RuntimeError):

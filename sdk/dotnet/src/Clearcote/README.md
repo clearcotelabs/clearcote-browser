@@ -616,10 +616,11 @@ ip-api.com, whose free endpoint is for non-commercial use only), `Fingerprint = 
 as in Chrome; `AllowThirdPartyCookies = false` blocks them (an engine before 152 r22 always blocks them).
 
 `Fingerprint = "off"` removes the persona and nothing else. The page reads this machine's own GPU (WebGL and WebGPU),
-speech voices, languages and timezone. Nothing is taken from the IP address: `Timezone`, `AcceptLanguage` and
-`WebrtcIp` apply only when you set them or pass `Geoip = true`, and without a `WebrtcIp` WebRTC gathers no ICE
-candidates. What the engine does on every launch stays: for example the brand list is Chromium's, and a host with no
-audio output device still reports a 48 kHz sample rate.
+speech voices, languages and timezone. No timezone, language or location is taken from the IP address: `Timezone` and
+`AcceptLanguage` apply only when you set them or pass `Geoip = true`. The WebRTC IP is still looked up (this machine's
+own address, or the proxy's exit), so WebRTC gathers candidates as Chrome does; `Geoip = false` skips that lookup too,
+and WebRTC then gathers no ICE candidates unless you set `WebrtcIp`. What the engine does on every launch stays: for
+example the brand list is Chromium's, and a host with no audio output device still reports a 48 kHz sample rate.
 
 `StockRuntime = true` (or `CLEARCOTE_STOCK_RUNTIME=1`) gives Playwright the browser's stock DevTools behaviour
 back: the page's `Console` and `PageError` events fire, `SetContentAsync` works, and `ExposeFunctionAsync` /
