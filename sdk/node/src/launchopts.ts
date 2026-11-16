@@ -4,11 +4,12 @@
 
 import { hostPersonaPlatform } from "./fingerprint.js";
 import { warnOnce } from "./warnings.js";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { createRequire } from "node:module";
 import { isIP } from "node:net";
-import { basename, dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 
 /** A Playwright proxy descriptor. */
 export interface PwProxy {
@@ -451,6 +452,14 @@ const switchCache = new Map<string, boolean>();
  * is not `\0proxy-auth\0`). On Windows the switches live in chrome.dll next to the launcher, on
  * macOS in the bundle's framework (macosFrameworkBinary); elsewhere in the executable. Cached per (path, size, mtime). Any failure answers false, which
  * selects the legacy (Playwright) path — slower, never silently broken.
+ *
+ * WHERE A NAME WAS FOUND IS REMEMBERED ({@link switchPositions}). A launch asks for about seven names, and
+ * each search used to read the binary from its start: the names sit together near the end of a 290 MB
+ * chrome.dll, so one launch read about 1.8 GB (measured on r60: 7 probes, 130 to 185 ms each, 1.0 of the
+ * 2.0 s a first launch took). Now a name found before is checked where it was found (its bytes are read
+ * again, so the answer never comes from the file of positions alone), and a new name is searched from just
+ * before the names already found, then in the rest of the file. A name the binary lacks still costs one
+ * full read, as before.
  */
 /**
  * Engine r54+ (pro-r54-06): `--webrtc-direct-stun` for a launch with no proxy whose WebRTC IP is this
@@ -509,26 +518,136 @@ export function engineSupportsSwitch(exe: string | undefined, name: string): boo
     const cached = switchCache.get(key);
     if (cached !== undefined) return cached;
     const needle = Buffer.from(`\0${name}\0`, "latin1");
+    // Positions are kept for real engine binaries only: a small file is read whole in no time.
+    const known = st.size >= switchPositions.minSize ? knownPositions(file, st.size, st.mtimeMs) : null;
     const fd = openSync(file, "r");
-    let found = false;
+    let at = -1;
     try {
-      const chunk = Buffer.alloc(8 * 1024 * 1024);
-      let tail = Buffer.alloc(0);
-      for (;;) {
-        const n = readSync(fd, chunk, 0, chunk.length, null);
-        if (n <= 0) break;
-        const view = Buffer.concat([tail, chunk.subarray(0, n)]);
-        if (view.indexOf(needle) !== -1) { found = true; break; }
-        tail = Buffer.from(view.subarray(view.length - needle.length));
+      const before = known?.at.get(name);
+      if (before !== undefined && needleAt(fd, needle, before, st.size)) {
+        at = before;
+      } else {
+        const start = known ? searchStart(known.at, st.size) : 0;
+        at = findInFile(fd, needle, start, st.size);
+        if (at < 0 && start > 0) at = findInFile(fd, needle, 0, Math.min(st.size, start + needle.length - 1));
       }
     } finally {
       closeSync(fd);
     }
-    switchCache.set(key, found);
-    return found;
+    if (known && at >= 0 && known.at.get(name) !== at) {
+      known.at.set(name, at);
+      savePositions(known);
+    }
+    switchCache.set(key, at >= 0);
+    return at >= 0;
   } catch {
     return false;
   }
+}
+
+const PROBE_CHUNK = 8 * 1024 * 1024;
+
+/**
+ * Where the probe keeps the offsets of the names it found, per binary (path, size, mtime in seconds; the
+ * Python SDK reads and writes the same file). Offsets of switch names only, nothing secret: no
+ * answer is taken from it without reading the binary at that offset, and a missing, stale or damaged file
+ * only makes a probe search again. `minSize`: binaries below it are not remembered (tests use small
+ * stand-ins, and searching them costs nothing). `lookBack`: how far before the first known name a search
+ * for a new one starts. Tests change these; nothing else does.
+ */
+export const switchPositions = {
+  file: (): string => join(homedir(), ".clearcote", "engine-switches.json"),
+  minSize: 2 * PROBE_CHUNK,
+  lookBack: 4 * PROBE_CHUNK,
+  /** Binaries remembered at once; the oldest entry goes first. */
+  maxFiles: 8,
+};
+
+interface KnownPositions { key: string; at: Map<string, number> }
+const positionsByFile = new Map<string, KnownPositions>();
+
+/** @internal tests: forget every probe answer and position held in memory (the file stays). */
+export function resetSwitchProbe(): void {
+  switchCache.clear();
+  positionsByFile.clear();
+}
+
+function readPositionsFile(): Record<string, Record<string, unknown>> {
+  try {
+    const all = JSON.parse(readFileSync(switchPositions.file(), "utf8")) as { files?: unknown };
+    if (all && typeof all.files === "object" && all.files !== null && !Array.isArray(all.files)) return all.files as Record<string, Record<string, unknown>>;
+  } catch { /* none yet, or unreadable: search again */ }
+  return {};
+}
+
+/** The offsets known for this binary: from memory, else from the positions file (read once per binary). */
+function knownPositions(file: string, size: number, mtimeMs: number): KnownPositions {
+  const key = `${resolvePath(file)}|${size}|${Math.floor(mtimeMs / 1000)}`;
+  let known = positionsByFile.get(key);
+  if (!known) {
+    known = { key, at: new Map() };
+    const stored = readPositionsFile()[key];
+    if (stored && typeof stored === "object") {
+      for (const [n, off] of Object.entries(stored)) {
+        if (typeof off === "number" && Number.isInteger(off) && off >= 0 && off < size) known.at.set(n, off);
+      }
+    }
+    positionsByFile.set(key, known);
+  }
+  return known;
+}
+
+/** Best effort: written whole to a temporary file and renamed into place; a failure only costs a later search. */
+function savePositions(known: KnownPositions): void {
+  let tmp: string | undefined;
+  try {
+    const path = switchPositions.file();
+    const files = readPositionsFile();
+    delete files[known.key];
+    files[known.key] = Object.fromEntries(known.at);  // last = newest
+    const keys = Object.keys(files);
+    for (const k of keys.slice(0, Math.max(0, keys.length - switchPositions.maxFiles))) delete files[k];
+    mkdirSync(dirname(path), { recursive: true });
+    tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ v: 1, files }));
+    renameSync(tmp, path);
+  } catch {
+    // read-only home, a concurrent writer on Windows: nothing depends on it
+    try { if (tmp) rmSync(tmp, { force: true }); } catch { /* nothing was written */ }
+  }
+}
+
+/** Whether the bytes at `offset` are `needle`. */
+function needleAt(fd: number, needle: Buffer, offset: number, size: number): boolean {
+  if (offset < 0 || offset + needle.length > size) return false;
+  const got = Buffer.alloc(needle.length);
+  return readSync(fd, got, 0, needle.length, offset) === needle.length && got.equals(needle);
+}
+
+/** Where a search for a new name starts: `lookBack` before the first name already found, on a chunk boundary. */
+function searchStart(at: Map<string, number>, size: number): number {
+  if (at.size === 0) return 0;
+  const first = Math.min(...at.values());
+  if (!(first >= 0 && first < size)) return 0;
+  return Math.max(0, Math.floor((first - switchPositions.lookBack) / PROBE_CHUNK) * PROBE_CHUNK);
+}
+
+/** The offset of the first `needle` that lies wholly in [from, to), or -1. */
+function findInFile(fd: number, needle: Buffer, from: number, to: number): number {
+  const keep = needle.length - 1;
+  const buf = Buffer.allocUnsafe(keep + PROBE_CHUNK);
+  let carry = 0;  // bytes kept from the end of the previous read, at buf[0..carry)
+  for (let pos = from; pos < to;) {
+    const n = readSync(fd, buf, carry, Math.min(PROBE_CHUNK, to - pos), pos);
+    if (n <= 0) break;
+    const len = carry + n;
+    const i = buf.subarray(0, len).indexOf(needle);
+    if (i !== -1) return pos - carry + i;
+    pos += n;
+    carry = Math.min(keep, len);
+    buf.copy(buf, 0, len - carry, len);
+  }
+  return -1;
 }
 
 /**

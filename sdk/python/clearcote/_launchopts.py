@@ -3,9 +3,12 @@ proxy resolution. Kept pure (input -> switches / cleaned options) so they're uni
 mirror the Node SDK exactly."""
 
 import glob
+import json
 import os
 import re
 import sys
+import threading
+import types
 import warnings
 from urllib.parse import unquote
 
@@ -523,9 +526,16 @@ def engine_supports_switch(exe, name):
     elsewhere in the executable itself. Cached per
     (path, size, mtime). Any failure answers False, which selects the legacy (Playwright) path —
     slower, never silently broken.
+
+    WHERE A NAME WAS FOUND IS REMEMBERED (:data:`switch_positions`). A launch asks for about seven names,
+    and each search used to read the binary from its start: the names sit together near the end of a
+    290 MB chrome.dll, so one launch read about 1.8 GB (measured on r60: 7 probes, 1.2 of the 3.0 s a
+    first launch took). Now a name found before is checked where it was found (its bytes are read again,
+    so the answer never comes from the file of positions alone), and a new name is searched from just
+    before the names already found, then in the rest of the file. A name the binary lacks still costs
+    one full read, as before.
     """
     try:
-        import os
         exe = str(exe or "")
         if not exe:
             return False
@@ -541,21 +551,137 @@ def engine_supports_switch(exe, name):
         if key in _SWITCH_CACHE:
             return _SWITCH_CACHE[key]
         needle = b"\x00" + name.encode("ascii") + b"\x00"
-        found = False
+        # Positions are kept for real engine binaries only: a small file is read whole in no time.
+        known = _known_positions(path, st.st_size, st.st_mtime) if st.st_size >= switch_positions.min_size else None
+        at = -1
         with open(path, "rb") as fh:
-            tail = b""
-            while True:
-                chunk = fh.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                if needle in tail + chunk:
-                    found = True
-                    break
-                tail = chunk[-len(needle):]
-        _SWITCH_CACHE[key] = found
-        return found
+            before = known["at"].get(name) if known else None
+            if before is not None and _needle_at(fh, needle, before, st.st_size):
+                at = before
+            else:
+                start = _search_start(known["at"], st.st_size) if known else 0
+                at = _find_in_file(fh, needle, start, st.st_size)
+                if at < 0 and start > 0:
+                    at = _find_in_file(fh, needle, 0, min(st.st_size, start + len(needle) - 1))
+        if known is not None and at >= 0 and known["at"].get(name) != at:
+            known["at"][name] = at
+            _save_positions(known)
+        _SWITCH_CACHE[key] = at >= 0
+        return at >= 0
     except Exception:  # noqa: BLE001
         return False
+
+
+_PROBE_CHUNK = 8 * 1024 * 1024
+
+# Where the probe keeps the offsets of the names it found, per binary (path, size, mtime in seconds; the Node SDK
+# reads and writes the same file). Offsets of switch names only, nothing secret: no answer is taken from
+# it without reading the binary at that offset, and a missing, stale or damaged file only makes a probe search
+# again. ``min_size``: binaries below it are not remembered (tests use small stand-ins, and searching them costs
+# nothing). ``look_back``: how far before the first known name a search for a new one starts. ``max_files``:
+# binaries remembered at once; the oldest entry goes first. Tests change these; nothing else does.
+switch_positions = types.SimpleNamespace(
+    file=lambda: os.path.join(os.path.expanduser("~"), ".clearcote", "engine-switches.json"),
+    min_size=2 * _PROBE_CHUNK,
+    look_back=4 * _PROBE_CHUNK,
+    max_files=8,
+)
+
+_POSITIONS_BY_FILE = {}  # key -> {"key": key, "at": {name: offset}}
+
+
+def reset_switch_probe():
+    """Tests: forget every probe answer and position held in memory (the file stays)."""
+    _SWITCH_CACHE.clear()
+    _POSITIONS_BY_FILE.clear()
+
+
+def _read_positions_file():
+    try:
+        with open(switch_positions.file(), encoding="utf-8") as fh:
+            files = json.load(fh).get("files")
+        if isinstance(files, dict):
+            return files
+    except Exception:  # noqa: BLE001 -- none yet, or unreadable: search again
+        pass
+    return {}
+
+
+def _known_positions(path, size, mtime):
+    """The offsets known for this binary: from memory, else from the positions file (read once per binary)."""
+    key = "%s|%d|%d" % (os.path.abspath(path), size, int(mtime))
+    known = _POSITIONS_BY_FILE.get(key)
+    if known is None:
+        known = {"key": key, "at": {}}
+        stored = _read_positions_file().get(key)
+        if isinstance(stored, dict):
+            for name, off in stored.items():
+                if isinstance(off, int) and not isinstance(off, bool) and 0 <= off < size:
+                    known["at"][name] = off
+        _POSITIONS_BY_FILE[key] = known
+    return known
+
+
+def _save_positions(known):
+    """Best effort: written whole to a temporary file and renamed into place; a failure only costs a later
+    search."""
+    tmp = None
+    try:
+        path = switch_positions.file()
+        files = _read_positions_file()
+        files.pop(known["key"], None)
+        files[known["key"]] = dict(known["at"])  # last = newest
+        for old in list(files)[:max(0, len(files) - switch_positions.max_files)]:
+            del files[old]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"v": 1, "files": files}, fh, separators=(",", ":"))
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 -- read-only home, a concurrent writer on Windows: nothing depends on it
+        try:
+            if tmp:
+                os.remove(tmp)
+        except OSError:
+            pass  # nothing was written
+
+
+def _needle_at(fh, needle, offset, size):
+    """Whether the bytes at ``offset`` are ``needle``."""
+    if offset < 0 or offset + len(needle) > size:
+        return False
+    fh.seek(offset)
+    return fh.read(len(needle)) == needle
+
+
+def _search_start(at, size):
+    """Where a search for a new name starts: ``look_back`` before the first name already found, on a chunk
+    boundary."""
+    if not at:
+        return 0
+    first = min(at.values())
+    if not 0 <= first < size:
+        return 0
+    return max(0, (first - switch_positions.look_back) // _PROBE_CHUNK * _PROBE_CHUNK)
+
+
+def _find_in_file(fh, needle, start, end):
+    """The offset of the first ``needle`` that lies wholly in [start, end), or -1."""
+    keep = len(needle) - 1
+    tail = b""  # the last bytes of the previous read
+    pos = start
+    fh.seek(start)
+    while pos < end:
+        chunk = fh.read(min(_PROBE_CHUNK, end - pos))
+        if not chunk:
+            break
+        view = tail + chunk
+        i = view.find(needle)
+        if i != -1:
+            return pos - len(tail) + i
+        pos += len(chunk)
+        tail = view[-keep:] if keep else b""
+    return -1
 
 
 # Options that only exist from a given engine revision. An unknown switch is ignored by Chromium,
