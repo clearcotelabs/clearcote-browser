@@ -645,6 +645,13 @@ public static class LaunchOpts
     /// keep it from matching a longer literal. On Windows the switches live in chrome.dll next to the
     /// launcher, on macOS in the bundle's framework (<see cref="MacosFrameworkBinary"/>); elsewhere in the
     /// executable. Cached per (path, size, mtime). Any failure answers false.
+    ///
+    /// WHERE A NAME WAS FOUND IS REMEMBERED (<see cref="SwitchPositions"/>), as in the Node and Python SDKs. A
+    /// launch asks for about seven names, and each search used to read the binary from its start: the names sit
+    /// together near the end of a 290 MB chrome.dll. Now a name found before is checked where it was found (its
+    /// bytes are read again, so the answer never comes from the file of positions alone), and a new name is
+    /// searched from just before the names already found, then in the rest of the file. A name the binary lacks
+    /// still costs one full read, as before.
     /// For a macOS bundle executable (<c>X.app/Contents/MacOS/X</c>), the framework binary that holds the
     /// engine (<c>X.app/Contents/Frameworks/X Framework.framework/Versions/Current/X Framework</c>); null for
     /// anything else. The executable itself is a small launcher with no switch strings.
@@ -689,27 +696,206 @@ public static class LaunchOpts
             file = MacosFrameworkBinary(file) ?? file;
             var fi = new FileInfo(file);
             if (!fi.Exists) return false;
-            var key = $"{fi.FullName}|{name}|{fi.Length}|{fi.LastWriteTimeUtc.Ticks}";
+            var size = fi.Length;
+            var key = $"{fi.FullName}|{name}|{size}|{fi.LastWriteTimeUtc.Ticks}";
             if (SwitchCache.TryGetValue(key, out var cached)) return cached;
             var needle = System.Text.Encoding.Latin1.GetBytes($"\0{name}\0");
-            var found = false;
-            using (var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16))
+            // Positions are kept for real engine binaries only: a small file is read whole in no time.
+            var known = size >= SwitchPositions.MinSize ? KnownPositionsFor(fi.FullName, size, fi.LastWriteTimeUtc) : null;
+            long at;
+            using (var fh = File.OpenHandle(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
-                var chunk = new byte[8 * 1024 * 1024];
-                var carry = 0; // bytes kept from the previous chunk's tail, at chunk[0..carry]
-                int n;
-                while ((n = fs.Read(chunk, carry, chunk.Length - carry)) > 0)
+                long before = -1, start = 0;
+                if (known is not null)
                 {
-                    var len = carry + n;
-                    if (chunk.AsSpan(0, len).IndexOf(needle) >= 0) { found = true; break; }
-                    carry = Math.Min(needle.Length - 1, len);
-                    Buffer.BlockCopy(chunk, len - carry, chunk, 0, carry);
+                    lock (known)
+                    {
+                        if (!known.At.TryGetValue(name, out before)) before = -1;
+                        start = SearchStart(known.At, size);
+                    }
+                }
+                if (before >= 0 && NeedleAt(fh, needle, before, size))
+                {
+                    at = before;
+                }
+                else
+                {
+                    at = FindInFile(fh, needle, start, size);
+                    if (at < 0 && start > 0) at = FindInFile(fh, needle, 0, Math.Min(size, start + needle.Length - 1));
                 }
             }
-            SwitchCache[key] = found;
-            return found;
+            if (known is not null && at >= 0)
+            {
+                bool changed;
+                lock (known)
+                {
+                    changed = !known.At.TryGetValue(name, out var had) || had != at;
+                    if (changed) known.At[name] = at;
+                }
+                if (changed) SavePositions(known);
+            }
+            SwitchCache[key] = at >= 0;
+            return at >= 0;
         }
         catch { return false; }
+    }
+
+    private const int ProbeChunk = 8 * 1024 * 1024;
+
+    /// Where the probe keeps the offsets of the names it found, per binary (path, size, mtime in seconds; the
+    /// Node and Python SDKs read and write the same file). Offsets of switch names only, nothing secret: no
+    /// answer is taken from it without reading the binary at that offset, and a missing, stale or damaged file
+    /// only makes a probe search again. <c>MinSize</c>: binaries below it are not remembered (tests use small
+    /// stand-ins, and searching them costs nothing). <c>LookBack</c>: how far before the first known name a
+    /// search for a new one starts. Tests change these; nothing else does.
+    internal static class SwitchPositions
+    {
+        internal static Func<string> FilePath = () => Path.Combine(Native.ClearcoteDir, "engine-switches.json");
+        internal static long MinSize = 2L * ProbeChunk;
+        internal static long LookBack = 4L * ProbeChunk;
+        /// Binaries remembered at once; the oldest entry goes first.
+        internal static int MaxFiles = 8;
+    }
+
+    private sealed class KnownPositions
+    {
+        public readonly string Key;
+        public readonly Dictionary<string, long> At = new(StringComparer.Ordinal);
+        public KnownPositions(string key) => Key = key;
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, KnownPositions> PositionsByFile = new();
+
+    /// Bytes the probe read from engine binaries on this thread (tests measure a probe with it).
+    [ThreadStatic] internal static long ProbeBytesRead;
+
+    /// Tests: forget every probe answer and position held in memory (the file stays).
+    internal static void ResetSwitchProbe()
+    {
+        SwitchCache.Clear();
+        PositionsByFile.Clear();
+    }
+
+    private static System.Text.Json.Nodes.JsonObject ReadPositionsFile()
+    {
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(SwitchPositions.FilePath())) is System.Text.Json.Nodes.JsonObject all
+                && all["files"] is System.Text.Json.Nodes.JsonObject files)
+            {
+                all.Remove("files"); // detach, so it can be written back under a new root
+                return files;
+            }
+        }
+        catch { /* none yet, or unreadable: search again */ }
+        return new System.Text.Json.Nodes.JsonObject();
+    }
+
+    /// The offsets known for this binary: from memory, else from the positions file (read once per binary).
+    private static KnownPositions KnownPositionsFor(string fullPath, long size, DateTime mtimeUtc)
+    {
+        var key = $"{fullPath}|{size}|{new DateTimeOffset(DateTime.SpecifyKind(mtimeUtc, DateTimeKind.Utc)).ToUnixTimeSeconds()}";
+        return PositionsByFile.GetOrAdd(key, k =>
+        {
+            var known = new KnownPositions(k);
+            try
+            {
+                if (ReadPositionsFile()[k] is System.Text.Json.Nodes.JsonObject stored)
+                {
+                    foreach (var (n, v) in stored)
+                    {
+                        if (v is System.Text.Json.Nodes.JsonValue jv && jv.TryGetValue<long>(out var off) && off >= 0 && off < size)
+                            known.At[n] = off;
+                    }
+                }
+            }
+            catch { /* a damaged entry: search again */ }
+            return known;
+        });
+    }
+
+    /// Best effort: written whole to a temporary file and renamed into place; a failure only costs a later search.
+    private static void SavePositions(KnownPositions known)
+    {
+        string? tmp = null;
+        try
+        {
+            var path = SwitchPositions.FilePath();
+            var files = ReadPositionsFile();
+            files.Remove(known.Key);
+            var mine = new System.Text.Json.Nodes.JsonObject();
+            lock (known)
+            {
+                foreach (var (n, off) in known.At) mine[n] = off;
+            }
+            files[known.Key] = mine; // last = newest
+            var keys = files.Select(kv => kv.Key).ToList();
+            foreach (var old in keys.Take(Math.Max(0, keys.Count - SwitchPositions.MaxFiles))) files.Remove(old);
+            var dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            tmp = $"{path}.{Environment.ProcessId}.{Environment.CurrentManagedThreadId}.tmp";
+            File.WriteAllText(tmp, new System.Text.Json.Nodes.JsonObject { ["v"] = 1, ["files"] = files }.ToJsonString());
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch
+        {
+            // read-only home, a concurrent writer on Windows: nothing depends on it
+            try { if (tmp is not null) File.Delete(tmp); } catch { /* nothing was written */ }
+        }
+    }
+
+    /// Whether the bytes at <paramref name="offset"/> are <paramref name="needle"/>.
+    private static bool NeedleAt(Microsoft.Win32.SafeHandles.SafeFileHandle fh, byte[] needle, long offset, long size)
+    {
+        if (offset < 0 || offset + needle.Length > size) return false;
+        var got = new byte[needle.Length];
+        var n = ReadFully(fh, got, offset);
+        ProbeBytesRead += n;
+        return n == needle.Length && got.AsSpan().SequenceEqual(needle);
+    }
+
+    /// Reads until <paramref name="into"/> is full or the file ends; the number of bytes read.
+    private static int ReadFully(Microsoft.Win32.SafeHandles.SafeFileHandle fh, Span<byte> into, long offset)
+    {
+        var total = 0;
+        while (total < into.Length)
+        {
+            var n = RandomAccess.Read(fh, into[total..], offset + total);
+            if (n <= 0) break;
+            total += n;
+        }
+        return total;
+    }
+
+    /// Where a search for a new name starts: <c>LookBack</c> before the first name already found, on a chunk boundary.
+    private static long SearchStart(Dictionary<string, long> at, long size)
+    {
+        if (at.Count == 0) return 0;
+        var first = at.Values.Min();
+        if (!(first >= 0 && first < size)) return 0;
+        var from = first - SwitchPositions.LookBack;
+        return from <= 0 ? 0 : from / ProbeChunk * ProbeChunk;
+    }
+
+    /// The offset of the first <paramref name="needle"/> that lies wholly in [from, to), or -1.
+    private static long FindInFile(Microsoft.Win32.SafeHandles.SafeFileHandle fh, byte[] needle, long from, long to)
+    {
+        var keep = needle.Length - 1;
+        var buf = new byte[keep + ProbeChunk];
+        var carry = 0; // bytes kept from the end of the previous read, at buf[0..carry)
+        for (var pos = from; pos < to;)
+        {
+            var n = ReadFully(fh, buf.AsSpan(carry, (int)Math.Min(ProbeChunk, to - pos)), pos);
+            if (n <= 0) break;
+            ProbeBytesRead += n;
+            var len = carry + n;
+            var i = buf.AsSpan(0, len).IndexOf(needle);
+            if (i >= 0) return pos - carry + i;
+            pos += n;
+            carry = Math.Min(keep, len);
+            Buffer.BlockCopy(buf, len - carry, buf, 0, carry);
+        }
+        return -1;
     }
 
     // ── software WebGPU under a desktop claim (155 r47+) ─────────────────────
