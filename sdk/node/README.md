@@ -163,12 +163,13 @@ Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the 
 |---|---|
 | `fingerprint: "off"` | Pass-through: no persona, for telling whether a problem comes from the spoofing or from your environment. See below. |
 | `fingerprintVoices: false` | Keep the host's own `speechSynthesis` voices under a persona. |
+| `noisePerProfile: true` | One canvas and WebGL noise per profile on every site, instead of one per site. Engine r60+; no effect with the noise off. |
 | `allowThirdPartyCookies: false` | Block third-party cookies. Since 0.45.0 they are allowed by default, as in Chrome; embedded sign-in, payment and captcha frames rely on them. |
 | `transparentProxy: true` | With a proxy: send the headers a direct connection sends, and report connection timing as a reused connection. |
 
 On an older engine each of these is skipped with a warning; the launch still works.
 
-`fingerprint: "off"` removes the persona and nothing else. The page reads this machine's own GPU (WebGL and WebGPU), speech voices, languages and timezone. No timezone, language or location is taken from the IP address: `timezone` and `acceptLanguage` apply only when you set them or pass `geoip: true`. The WebRTC IP is still looked up (this machine's own address, or the proxy's exit), so WebRTC gathers candidates as Chrome does; `geoip: false` skips that lookup too, and WebRTC then gathers no ICE candidates unless you set `webrtcIp`. What the engine does on every launch stays: for example the brand list is Chromium's, and a host with no audio output device still reports a 48 kHz sample rate.
+`fingerprint: "off"` removes the persona and nothing else. The page reads this machine's own GPU (WebGL and WebGPU), speech voices, languages and timezone. No timezone, language or location is taken from the IP address: `timezone` and `acceptLanguage` apply only when you set them or pass `geoip: true`; behind a proxy the page therefore shows this machine's timezone and language, and the SDK warns about it. The WebRTC IP is still looked up (this machine's own address, or the proxy's exit), so WebRTC gathers candidates as Chrome does; `geoip: false` skips that lookup too, and WebRTC then gathers no ICE candidates unless you set `webrtcIp`. What the engine does on every launch stays: for example the brand list is Chromium's, and a host with no audio output device still reports a 48 kHz sample rate.
 
 `stockRuntime: true` (or `CLEARCOTE_STOCK_RUNTIME=1`) gives Playwright the browser's stock DevTools behaviour back: `page.on("console")` and `page.on("pageerror")` receive events, `page.setContent()` works, and `exposeFunction()` / `exposeBinding()` keep working after a navigation. It is off by default because pages can observe some of what it restores. It needs an engine from r32 on; an older engine launches without it and the SDK warns once. It applies to local and Docker launches, not to cloud browsers.
 

@@ -617,7 +617,8 @@ as in Chrome; `AllowThirdPartyCookies = false` blocks them (an engine before 152
 
 `Fingerprint = "off"` removes the persona and nothing else. The page reads this machine's own GPU (WebGL and WebGPU),
 speech voices, languages and timezone. No timezone, language or location is taken from the IP address: `Timezone` and
-`AcceptLanguage` apply only when you set them or pass `Geoip = true`. The WebRTC IP is still looked up (this machine's
+`AcceptLanguage` apply only when you set them or pass `Geoip = true`; behind a proxy the page therefore shows this
+machine's timezone and language, and the SDK warns about it. The WebRTC IP is still looked up (this machine's
 own address, or the proxy's exit), so WebRTC gathers candidates as Chrome does; `Geoip = false` skips that lookup too,
 and WebRTC then gathers no ICE candidates unless you set `WebrtcIp`. What the engine does on every launch stays: for
 example the brand list is Chromium's, and a host with no audio output device still reports a 48 kHz sample rate.
