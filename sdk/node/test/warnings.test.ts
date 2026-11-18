@@ -12,6 +12,12 @@ describe("coherenceWarnings", () => {
   it("flags a proxy without geo coherence, silent with geoip or manual geo", () => {
     expect(codes({ proxy: { server: "http://h:8080" }, headless: false }).has("proxy-no-geo")).toBe(true);
     expect(codes({ proxy: { server: "http://h:8080" }, geoip: true, headless: false }).has("proxy-no-geo")).toBe(false);
+    // pass-through keeps the host's timezone and language behind a proxy: the warning says so, and how to change it
+    const off = coherenceWarnings({ proxy: { server: "http://h:8080" }, fingerprint: "off", headless: false }, "linux").find((w) => w.code === "proxy-no-geo");
+    expect(off?.message).toContain("pass-through");
+    expect(off?.message).toContain("geoip:true");
+    expect(off?.message).not.toContain("without geoip");
+    expect(codes({ proxy: { server: "http://h:8080" }, fingerprint: "off", geoip: true, headless: false }).has("proxy-no-geo")).toBe(false);
     expect(codes({ proxy: "http://h:8080", timezone: "America/New_York", acceptLanguage: "en-US,en", headless: false }).has("proxy-no-geo")).toBe(false);
   });
 

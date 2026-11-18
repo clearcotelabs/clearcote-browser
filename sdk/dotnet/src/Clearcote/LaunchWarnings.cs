@@ -188,10 +188,14 @@ public static class LaunchWarnings
         var bridgeOn = !string.IsNullOrEmpty(o.CanvasBridge?.Url);
 
         if (server.Length > 0 && !geoip && string.IsNullOrEmpty(o.Timezone) && string.IsNullOrEmpty(o.AcceptLanguage))
-            Warn("proxy-no-geo",
-                "proxy set without Geoip and no Timezone/AcceptLanguage - the browser's timezone and language " +
-                "will reflect THIS host, not the proxy's exit region (a geo-mismatch tell). Pass Geoip = true, or " +
-                "set Timezone + AcceptLanguage.");
+            Warn("proxy-no-geo", Fingerprint.IsFingerprintPassthrough(o.Fingerprint)
+                // pass-through takes only the WebRTC IP from the default lookup: say that, not "without Geoip"
+                ? "Fingerprint = \"off\" (pass-through) with a proxy - the browser shows THIS host's timezone and language, " +
+                  "as Chrome does, not the proxy's exit region (a geo-mismatch tell). Pass Geoip = true to take them from " +
+                  "the exit, or set Timezone + AcceptLanguage."
+                : "proxy set without Geoip and no Timezone/AcceptLanguage - the browser's timezone and language " +
+                  "will reflect THIS host, not the proxy's exit region (a geo-mismatch tell). Pass Geoip = true, or " +
+                  "set Timezone + AcceptLanguage.");
         // No SOCKS + geoip warning: geoip resolves through socks5 (with credentials), and a scheme it cannot use
         // fails the launch with a GeoipException that names it.
 

@@ -77,10 +77,17 @@ def coherence_warnings(opts, host_platform=None, build_major=None):
 
     # --- proxy / geo coherence ---
     if server and not geoip and not tz and not lang:
-        warn("proxy-no-geo",
-             "proxy set without geoip and no timezone/accept_language - the browser's timezone and "
-             "language will reflect THIS host, not the proxy's exit region (a geo-mismatch tell). "
-             "Pass geoip=True, or set timezone + accept_language.")
+        if is_fingerprint_passthrough(opts.get("fingerprint")):
+            # pass-through takes only the WebRTC IP from the default lookup: say that, not "without geoip"
+            warn("proxy-no-geo",
+                 "fingerprint=\"off\" (pass-through) with a proxy - the browser shows THIS host's timezone "
+                 "and language, as Chrome does, not the proxy's exit region (a geo-mismatch tell). "
+                 "Pass geoip=True to take them from the exit, or set timezone + accept_language.")
+        else:
+            warn("proxy-no-geo",
+                 "proxy set without geoip and no timezone/accept_language - the browser's timezone and "
+                 "language will reflect THIS host, not the proxy's exit region (a geo-mismatch tell). "
+                 "Pass geoip=True, or set timezone + accept_language.")
     # No SOCKS + geoip warning: geoip resolves through socks5 (with credentials) since 0.29.0, and
     # a scheme it cannot use fails the launch with a GeoipError that names it.
 

@@ -181,6 +181,13 @@ public class LaunchLaneTests : IDisposable
         var proxy = new ProxyOptions { Server = "http://h:1" };
         Assert.Contains("proxy-no-geo", Codes(new FingerprintOptions(), proxy));
         Assert.DoesNotContain("proxy-no-geo", Codes(new FingerprintOptions(), proxy, geoip: true));
+        // pass-through keeps the host's timezone and language behind a proxy: the warning says so, and how to change it
+        var off = LaunchWarnings.Coherence(new FingerprintOptions { Fingerprint = "off" }, proxy, false, false, null, false, null, "linux", "150")
+            .Single(w => w.Code == "proxy-no-geo");
+        Assert.Contains("pass-through", off.Message);
+        Assert.Contains("Geoip = true", off.Message);
+        Assert.DoesNotContain("without Geoip", off.Message);
+        Assert.DoesNotContain("proxy-no-geo", Codes(new FingerprintOptions { Fingerprint = "off" }, proxy, geoip: true));
         Assert.DoesNotContain("proxy-no-geo", Codes(new FingerprintOptions { Timezone = "Europe/Berlin" }, proxy));
 
         // any claim the host's fonts cannot back, not only on a Mac

@@ -17,6 +17,13 @@ def test_proxy_without_geo():
     assert "proxy-no-geo" in codes({"proxy": {"server": "http://h:8080"}, "headless": False})
     # silent when geoip is on or manual geo is supplied
     assert "proxy-no-geo" not in codes({"proxy": {"server": "http://h:8080"}, "geoip": True, "headless": False})
+    # pass-through keeps the host's timezone and language behind a proxy: the warning says so, and how to change it
+    off = [w for w in coherence_warnings({"proxy": {"server": "http://h:8080"}, "fingerprint": "off", "headless": False},
+                                         host_platform="linux") if w["code"] == "proxy-no-geo"]
+    assert len(off) == 1 and "pass-through" in off[0]["message"] and "geoip=True" in off[0]["message"]
+    assert "without geoip" not in off[0]["message"]
+    assert "proxy-no-geo" not in codes(
+        {"proxy": {"server": "http://h:8080"}, "fingerprint": "off", "geoip": True, "headless": False})
     assert "proxy-no-geo" not in codes(
         {"proxy": "http://h:8080", "timezone": "America/New_York", "accept_language": "en-US,en", "headless": False})
 
