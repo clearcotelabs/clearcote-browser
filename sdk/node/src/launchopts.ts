@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve as resolvePath } from "node:path";
+import { threadId } from "node:worker_threads";
 
 /** A Playwright proxy descriptor. */
 export interface PwProxy {
@@ -608,7 +609,7 @@ function savePositions(known: KnownPositions): void {
     const keys = Object.keys(files);
     for (const k of keys.slice(0, Math.max(0, keys.length - switchPositions.maxFiles))) delete files[k];
     mkdirSync(dirname(path), { recursive: true });
-    tmp = `${path}.${process.pid}.tmp`;
+    tmp = `${path}.${process.pid}.${threadId}.tmp`;  // per thread, as in Python and .NET: two workers never share one
     writeFileSync(tmp, JSON.stringify({ v: 1, files }));
     renameSync(tmp, path);
   } catch {
@@ -627,7 +628,8 @@ function needleAt(fd: number, needle: Buffer, offset: number, size: number): boo
 /** Where a search for a new name starts: `lookBack` before the first name already found, on a chunk boundary. */
 function searchStart(at: Map<string, number>, size: number): number {
   if (at.size === 0) return 0;
-  const first = Math.min(...at.values());
+  let first = Infinity;
+  for (const off of at.values()) if (off < first) first = off;  // no spread: a huge entry must not throw
   if (!(first >= 0 && first < size)) return 0;
   return Math.max(0, Math.floor((first - switchPositions.lookBack) / PROBE_CHUNK) * PROBE_CHUNK);
 }
