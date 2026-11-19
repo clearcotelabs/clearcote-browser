@@ -235,3 +235,114 @@ def test_host_facts_probe_gets_the_launch_env_with_the_run_token_file(exe, servi
     probe_env = facts_runner.calls[0][1]
     assert probe_env["CLEARCOTE_RUN_TOKEN_FILE"] == tok
     assert probe_env["CLEARCOTE_RUN_TOKEN"] == "hdr.sig"
+
+
+# --- stale host GPU vendor (CR-ZQJ4SX) ----------------------------------------------------------------------------
+
+STALE_MSG = ("BrowserType.launch: Target page, context or browser has been closed\n"
+             "[pid=14076][err] [clearcote] no usable persona for this run (generated for another host GPU vendor "
+             "(none, this machine: nvidia)). This engine needs a Clearcote SDK, Profile Manager or Helper that "
+             "fetches personas (r51+).")
+
+
+def test_host_facts_are_not_kept_on_disk(exe, service, facts_runner, tmp_path):
+    """Up to 0.70.0 a saved answer was never checked again: a "none" saved before the NVIDIA driver (or in a Remote
+    Desktop session) failed every later launch. A new process asks the engine again."""
+    old = tmp_path / ".clearcote" / "persona-host-facts.json"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    st = os.stat(exe)
+    key = json.dumps([os.path.abspath(exe), st.st_size, int(st.st_mtime), []])
+    old.write_text(json.dumps({key: {"gpu_vendor": "none"}}))
+    apply(exe, ["--fingerprint=1"], {}, FakeLease(), supports=R51, runner=facts_runner)
+    assert len(facts_runner.calls) == 1  # the old file's "none" was not used
+    assert service.requests[0][1]["host"] == {"gpu_vendor": "nvidia"}
+    assert json.loads(old.read_text()) == {key: {"gpu_vendor": "none"}}  # nor rewritten
+    assert sorted(p.name for p in old.parent.iterdir()) == ["persona-host-facts.json"]
+
+
+def test_stale_host_vendor_reads_the_engine_refusal():
+    assert _persona.stale_host_vendor(Exception(STALE_MSG)) == ("none", "nvidia")
+    assert _persona.stale_host_vendor(Exception("... (generated for another host GPU vendor (?, this machine: amd))")) == ("?", "amd")
+    assert _persona.stale_host_vendor(Exception("no usable persona for this run (not valid yet)")) is None
+    assert _persona.stale_host_vendor(Exception("Target page, context or browser has been closed")) is None
+
+
+def test_heal_fetches_a_persona_for_the_vendor_the_engine_named(exe, service, monkeypatch, capsys):
+    calls = []
+
+    def none_runner(cmd, env):  # the probe keeps answering "none": the heal must not depend on it
+        calls.append(cmd)
+        return '{"gpu_vendor": "none"}'
+
+    lease = FakeLease()
+    args = ["--fingerprint=3", "--headless"]
+    pw = {"env": {"PATH": "/bin"}}
+    apply_to_pw_kwargs(exe, args, pw, lease, supports=R51, runner=none_runner)
+    assert len(service.requests) == 1 and service.requests[-1][1]["host"] == {"gpu_vendor": "none"}
+    pw["env"].pop(_persona.TOKEN_ENV)
+
+    assert _persona.heal_stale_host_vendor(exe, args, pw, lease, Exception(STALE_MSG), supports=R51, runner=none_runner)
+    assert len(service.requests) == 2  # a new token (the cached one was for "none")
+    assert service.requests[-1][1]["host"] == {"gpu_vendor": "nvidia"}
+    assert pw["env"][_persona.TOKEN_ENV].startswith("tok-") and pw["env"]["PATH"] == "/bin"
+    assert len(calls) == 1  # no second probe: the engine's own answer was used
+    assert "(none -> nvidia)" in capsys.readouterr().err
+    # the rest of this process launches with the corrected answer
+    assert _persona.host_facts(exe, args, lease.token, runner=none_runner) == {"gpu_vendor": "nvidia"}
+
+
+def test_heal_ignores_other_failures(exe, service, facts_runner):
+    pw = {}
+    assert not _persona.heal_stale_host_vendor(exe, [], pw, FakeLease(), Exception("not valid yet"),
+                                               supports=R51, runner=facts_runner)
+    assert pw == {} and service.requests == []
+
+
+def test_launch_retries_once_on_a_stale_host_vendor(monkeypatch):
+    import clearcote
+    healed, starts = [], []
+
+    def heal(exe, args, pw_kwargs, lease, exc):
+        healed.append(str(exc))
+        pw_kwargs["env"] = {"T": "new"}
+        return _persona.stale_host_vendor(exc) is not None
+
+    monkeypatch.setattr(_persona, "heal_stale_host_vendor", heal)
+    pw = {"env": {"T": "old"}}
+
+    def start():
+        starts.append(pw["env"]["T"])
+        if len(starts) == 1:
+            raise RuntimeError(STALE_MSG)
+        return "browser"
+
+    assert clearcote._retry_on_stale_host_vendor("exe", [], pw, None, start) == "browser"
+    assert starts == ["old", "new"] and len(healed) == 1
+
+    def always_stale():
+        raise RuntimeError(STALE_MSG)
+
+    with pytest.raises(RuntimeError):  # once only: a second refusal is raised, not looped on
+        clearcote._retry_on_stale_host_vendor("exe", [], {"env": {}}, None, always_stale)
+
+    def other():
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        clearcote._retry_on_stale_host_vendor("exe", [], {"env": {}}, None, other)
+
+
+def test_async_launch_retries_once_on_a_stale_host_vendor(monkeypatch):
+    import asyncio
+    from clearcote import async_api
+    monkeypatch.setattr(_persona, "heal_stale_host_vendor", lambda *a, **k: _persona.stale_host_vendor(a[4]) is not None)
+    n = []
+
+    async def start():
+        n.append(1)
+        if len(n) == 1:
+            raise RuntimeError(STALE_MSG)
+        return "ctx"
+
+    assert asyncio.run(async_api._retry_on_stale_host_vendor_async("exe", [], {}, None, start)) == "ctx"
+    assert len(n) == 2

@@ -82,7 +82,7 @@ import { emitCoherenceWarnings, emitWarnings, serveExposureWarnings } from "./wa
 import { checkFontDirs, fontLaunchEnv } from "./fonts.js";
 import { withShaderDialect, type ShaderDialect } from "./shaderdialect.js";
 import { apply as applyPersonaEnv } from "./personaenv.js";
-import { preparePersonaLaunch } from "./persona.js";  // r51+: server-side personas (the signed persona token)
+import { preparePersonaLaunch, type PersonaLaunch } from "./persona.js";  // r51+: server-side personas (the signed persona token)
 import {
   applyHeadlessGeometry, fitServedWindow, headedLinuxFit, installWindowFixup, placeWindow, servedGeometry,
   FIT_PLAN, type WindowPlan,
@@ -1083,6 +1083,20 @@ export async function retryOnStaleRunToken<T>(lease: LeaseSession | null, start:
 }
 
 /**
+ * Run `start()`; if the engine refuses the persona as "generated for another host GPU vendor" (the GPU this machine
+ * renders on is not the one the persona was fetched for), fetch one for the GPU the engine named and launch once
+ * more. `start` must build its env from `persona.env()` each time it is called. Exported for tests.
+ */
+export async function retryOnStaleHostVendor<T>(persona: Pick<PersonaLaunch, "heal">, start: () => Promise<T>): Promise<T> {
+  try {
+    return await start();
+  } catch (e) {
+    if (!(await persona.heal(e))) throw e;
+    return await start();
+  }
+}
+
+/**
  * LOCAL OR CLOUD. `cloud: true` runs the browser on Clearcote's servers instead and resolves to the
  * same Playwright `Browser`, connected over CDP, with `humanize` applied here exactly as for a local
  * browser. `cloud` unset follows CLEARCOTE_CLOUD=1|true|yes. The API key comes from `apiKey` or
@@ -1217,7 +1231,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   const launchArgs = [...engineArgs, ...(geom?.args ?? []), ...widevineCdm];
   // r51+: the signed persona token, fetched once before the launch; every attempt's env carries it.
   const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env: runtimeEnv() });
-  const browser = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
+  const browser = await releaseLeaseOnFailure(lease, () => retryOnStaleHostVendor(personaLaunch, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
     // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
     const { args: finalArgs, env } = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(runtimeEnv()), personaEnv);
     return chromium.launch({
@@ -1230,7 +1244,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
       ...(env ? { env } : {}),
       args: finalArgs,
     });
-  }, exe)), launchToken).catch(closeOnFailure(reqRoute));
+  }, exe))), launchToken).catch(closeOnFailure(reqRoute));
   if (reqRoute) browser.on("disconnected", () => { void reqRoute.proxy.close(); });
   // Release the concurrency slot + remove the run-token file when the browser closes.
   if (lease) browser.on("disconnected", () => { void lease.stop(); launchToken?.release(); });
@@ -1409,7 +1423,7 @@ async function launchLocalPersistentContextNow(
   try {
     // r51+: the signed persona token, fetched once before the launch; every attempt's env carries it.
     const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env: runtimeEnv() });
-    context = await releaseLeaseOnFailure(lease, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
+    context = await releaseLeaseOnFailure(lease, () => retryOnStaleHostVendor(personaLaunch, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
       // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
       const { args: finalArgs, env } = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(runtimeEnv()), personaEnv);
       return chromium.launchPersistentContext(userDataDir, {
@@ -1420,7 +1434,7 @@ async function launchLocalPersistentContextNow(
         ...(env ? { env } : {}),
         args: finalArgs,
       });
-    }, exe)), launchToken);
+    }, exe))), launchToken);
   } catch (e) {
     crlsetPlan?.close();
     await reqRoute?.proxy.close().catch(() => {});

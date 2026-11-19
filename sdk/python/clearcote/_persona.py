@@ -115,11 +115,6 @@ def selector_from_args(args):
     return sel, profile_json, out
 
 
-def _facts_cache_path():
-    base = os.environ.get("LOCALAPPDATA") if sys.platform == "win32" else os.environ.get("HOME")
-    return os.path.join(base, ".clearcote", "persona-host-facts.json") if base else None
-
-
 def describe_probe(stdout, stderr, returncode):
     """The probe's stdout, or a ``RuntimeError`` saying why there is none. The engine prints a refusal (no lease, a
     FREE token without its file, the clock set back) on stderr only: reading stdout alone turned every one of those
@@ -184,31 +179,28 @@ def _run_probe(cmd, env):
     return describe_probe(r.stdout, r.stderr, r.returncode)
 
 
-def host_facts(exe, args, run_token, runner=None, env=None):
-    """The facts of this machine the generator needs, as the engine itself reports them for a launch with
-    these switches: ``chrome --cc-persona-host-facts`` prints ``{"gpu_vendor": ...}`` and exits. Cached per
-    (binary, the switches that influence the answer) in memory and in ``~/.clearcote``."""
+def _facts_key(exe, args):
     relevant = tuple(sorted(a for a in args if _switch(a) and _switch(a)[0] in HOST_FACT_SWITCHES))
     try:
         st = os.stat(exe)
-        key = (os.path.abspath(exe), st.st_size, int(st.st_mtime), relevant)
+        return (os.path.abspath(exe), st.st_size, int(st.st_mtime), relevant), relevant
     except OSError:
-        key = (str(exe), 0, 0, relevant)
+        return (str(exe), 0, 0, relevant), relevant
+
+
+def host_facts(exe, args, run_token, runner=None, env=None):
+    """The facts of this machine the generator needs, as the engine itself reports them for a launch with
+    these switches: ``chrome --cc-persona-host-facts`` prints ``{"gpu_vendor": ...}`` and exits. Cached per
+    (binary, the switches that influence the answer) for the life of this process only.
+
+    Up to 0.70.0 the answer was also kept on disk (``persona-host-facts.json``) and never checked again. The
+    vendor is that of the adapter Windows lists first, which changes with a driver install or a Remote Desktop
+    session; a saved "none" on a machine that now renders on NVIDIA then failed every launch with "generated for
+    another host GPU vendor". The probe takes about 0.1 s, so each process asks once."""
+    key, relevant = _facts_key(exe, args)
     with _LOCK:
         if key in _HOST_FACTS:
             return dict(_HOST_FACTS[key])
-    disk = _facts_cache_path()
-    skey = json.dumps(list(key))
-    if disk:
-        try:
-            with open(disk, encoding="utf-8") as f:
-                stored = json.load(f).get(skey)
-            if isinstance(stored, dict) and isinstance(stored.get("gpu_vendor"), str):
-                with _LOCK:
-                    _HOST_FACTS[key] = stored
-                return dict(stored)
-        except (OSError, ValueError):
-            pass
     if runner is None:
         runner = _run_probe
     # The launch's own env, run-token FILE included: the engine refuses a FREE token without the file, so a probe
@@ -227,20 +219,38 @@ def host_facts(exe, args, run_token, runner=None, env=None):
     facts = {"gpu_vendor": facts["gpu_vendor"]}
     with _LOCK:
         _HOST_FACTS[key] = facts
-    if disk:
-        try:
-            os.makedirs(os.path.dirname(disk), exist_ok=True)
-            try:
-                with open(disk, encoding="utf-8") as f:
-                    all_facts = json.load(f)
-            except (OSError, ValueError):
-                all_facts = {}
-            all_facts[skey] = facts
-            with open(disk, "w", encoding="utf-8") as f:
-                json.dump(all_facts, f)
-        except OSError:
-            pass
     return dict(facts)
+
+
+# The engine's refusal when the persona was generated for another GPU vendor than the one it renders on
+# (pro-r51-02 Bind): "generated for another host GPU vendor (<token's>, this machine: <engine's>)". The second
+# value is exactly what the probe reports ("none" for no hardware GPU), so it can stand in for a new probe.
+_STALE_VENDOR = re.compile(r"generated for another host GPU vendor \(([^,()]*), this machine: ([A-Za-z0-9_.-]+)\)")
+
+
+def stale_host_vendor(exc):
+    """``(token's vendor, this machine's vendor)`` when ``exc`` is the engine refusing a persona generated for
+    another host GPU vendor, else None."""
+    m = _STALE_VENDOR.search(str(exc))
+    return (m.group(1), m.group(2)) if m else None
+
+
+def heal_stale_host_vendor(exe, args, pw_kwargs, lease, exc, **kw):
+    """After a launch the engine refused for "another host GPU vendor": take the vendor the engine named as this
+    machine's, fetch a persona token for it into ``pw_kwargs["env"]`` and return True so the caller launches once
+    more. ``args`` are the launch's args as they were BEFORE :func:`apply_to_pw_kwargs` (a profile still on them).
+    False when ``exc`` is anything else."""
+    stale = stale_host_vendor(exc)
+    if not stale:
+        return False
+    was, now = stale
+    key, _ = _facts_key(exe, args)
+    with _LOCK:
+        _HOST_FACTS[key] = {"gpu_vendor": now}
+    sys.stderr.write(f"clearcote: the GPU this machine renders on changed ({was} -> {now}); "
+                     "fetched a persona for it and launching once more\n")
+    apply_to_pw_kwargs(exe, args, pw_kwargs, lease, **kw)
+    return True
 
 
 def persona_hosts():

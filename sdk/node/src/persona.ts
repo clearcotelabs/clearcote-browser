@@ -19,8 +19,8 @@
 // and the service's (services/cc-persona/src/selector.mjs): a switch added to one must be added to the others.
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { assertClockFor } from "./clockcheck.js";
 import { warmFiles } from "./download.js";
@@ -115,11 +115,6 @@ export function selectorFromArgs(args: readonly string[]): { sel: Selector; prof
   return { sel, profileJson, args: out };
 }
 
-function factsCachePath(env: Env): string | null {
-  const base = process.platform === "win32" ? env.LOCALAPPDATA : env.HOME;
-  return base ? join(base, ".clearcote", "persona-host-facts.json") : null;
-}
-
 /**
  * The probe's stdout, or an error saying why there is none. The engine prints a refusal (no lease, a FREE token
  * without its file, the clock set back) on stderr only, and a binary that could not start has no output at all:
@@ -169,29 +164,34 @@ function defaultRunner(cmd: string[], env: Env): string {
   return describeProbe(spawnProbe(cmd[0], cmd.slice(1), { env: env as NodeJS.ProcessEnv, encoding: "utf8", timeout: 30000, windowsHide: true }));
 }
 
+function factsKey(exe: string, relevant: readonly string[]): string {
+  try {
+    const st = statSync(exe);
+    return JSON.stringify([resolvePath(exe), st.size, Math.floor(st.mtimeMs / 1000), relevant]);
+  } catch {
+    return JSON.stringify([exe, 0, 0, relevant]);
+  }
+}
+
+function relevantSwitches(args: readonly string[]): string[] {
+  return args.filter((a) => { const s = parseSwitch(a); return !!s && HOST_FACT_SWITCHES.has(s[0]); }).sort();
+}
+
 /**
  * The facts of this machine the generator needs, as the engine itself reports them for a launch with these
  * switches: `chrome --cc-persona-host-facts` prints {"gpu_vendor": ...} and exits. Cached per (binary, the switches
- * that influence the answer) in memory and in ~/.clearcote.
+ * that influence the answer) for the life of this process only.
+ *
+ * Up to 0.70.0 the answer was also kept on disk (persona-host-facts.json) and never checked again. The vendor is
+ * that of the adapter Windows lists first, which changes with a driver install or a Remote Desktop session; a saved
+ * "none" on a machine that now renders on NVIDIA then failed every launch with "generated for another host GPU
+ * vendor". The probe takes about 0.1 s, so each process asks once.
  */
 export function hostFacts(exe: string, args: readonly string[], runToken: string, runner: FactsRunner = defaultRunner, env: Env = process.env): HostFacts {
-  const relevant = args.filter((a) => { const s = parseSwitch(a); return !!s && HOST_FACT_SWITCHES.has(s[0]); }).sort();
-  let key: string;
-  try {
-    const st = statSync(exe);
-    key = JSON.stringify([resolvePath(exe), st.size, Math.floor(st.mtimeMs / 1000), relevant]);
-  } catch {
-    key = JSON.stringify([exe, 0, 0, relevant]);
-  }
+  const relevant = relevantSwitches(args);
+  const key = factsKey(exe, relevant);
   const hit = facts.get(key);
   if (hit) return { ...hit };
-  const disk = factsCachePath(env);
-  if (disk && existsSync(disk)) {
-    try {
-      const stored = (JSON.parse(readFileSync(disk, "utf8")) as Record<string, HostFacts>)[key];
-      if (stored && typeof stored.gpu_vendor === "string") { facts.set(key, stored); return { ...stored }; }
-    } catch { /* unreadable cache: probe again */ }
-  }
   const probeEnv: Env = { ...env, CLEARCOTE_RUN_TOKEN: runToken }; // the probe runs after the licence gate, like every launch
   delete probeEnv[TOKEN_ENV];
   delete probeEnv[TOKEN_GZ_ENV];
@@ -206,16 +206,18 @@ export function hostFacts(exe: string, args: readonly string[], runToken: string
     throw new PersonaServiceError(`the engine did not report its host facts (${(e as Error).message})`);
   }
   facts.set(key, out);
-  if (disk) {
-    try {
-      mkdirSync(dirname(disk), { recursive: true });
-      let all: Record<string, HostFacts> = {};
-      try { all = JSON.parse(readFileSync(disk, "utf8")); } catch { /* fresh cache */ }
-      all[key] = out;
-      writeFileSync(disk, JSON.stringify(all));
-    } catch { /* best effort */ }
-  }
   return { ...out };
+}
+
+// The engine's refusal when the persona was generated for another GPU vendor than the one it renders on
+// (pro-r51-02 Bind): "generated for another host GPU vendor (<token's>, this machine: <engine's>)". The second value
+// is exactly what the probe reports ("none" for no hardware GPU), so it can stand in for a new probe.
+const STALE_VENDOR = /generated for another host GPU vendor \(([^,()]*), this machine: ([A-Za-z0-9_.-]+)\)/;
+
+/** [token's vendor, this machine's vendor] when `err` is the engine refusing a persona for another GPU vendor. */
+export function staleHostVendor(err: unknown): [string, string] | null {
+  const m = STALE_VENDOR.exec(String((err as Error)?.message ?? err));
+  return m ? [m[1], m[2]] : null;
 }
 
 export function personaHosts(env: Env = process.env): string[] {
@@ -275,6 +277,11 @@ export interface PersonaLaunch {
   args: string[];
   /** `base` with the persona token added (or `base` itself when this engine needs none). */
   env(base: Env | undefined): Env | undefined;
+  /**
+   * After a launch the engine refused as "generated for another host GPU vendor": fetch a persona for the vendor the
+   * engine named as this machine's, so the next `env()` carries it, and resolve true. False for any other error.
+   */
+  heal(err: unknown): Promise<boolean>;
 }
 
 /**
@@ -285,14 +292,24 @@ export interface PersonaLaunch {
 export async function preparePersonaLaunch(exe: string, args: readonly string[], lease: LeaseLike | null | undefined, proxy: unknown = undefined,
   deps: { supports?: Probe; runner?: FactsRunner; fetch?: Fetcher; env?: Env; now?: () => number } = {}): Promise<PersonaLaunch> {
   const l = lease?.token ? lease : leaseFromEnv(deps.env);
-  if (!l?.token || !engineWantsPersonaToken(exe, deps.supports)) return { args: [...args], env: (b) => b };
+  if (!l?.token || !engineWantsPersonaToken(exe, deps.supports)) return { args: [...args], env: (b) => b, heal: async () => false };
   // A clock far off makes the engine refuse the token whatever the key: say so before the probe fails on it.
   assertClockFor(l.token, "licence token", deps.now?.());
   const { sel, profileJson, args: out } = selectorFromArgs(args);
   const host = hostFacts(exe, out, l.token, deps.runner, deps.env);
-  const token = await personaTokenFor(l, sel, host, profileJson, proxy, deps.fetch);
+  let token = await personaTokenFor(l, sel, host, profileJson, proxy, deps.fetch);
   assertClockFor(token, "persona token", deps.now?.());
-  return { args: out, env: (b) => injectPersonaToken(b ?? { ...process.env }, token) };
+  const heal = async (err: unknown): Promise<boolean> => {
+    const stale = staleHostVendor(err);
+    if (!stale) return false;
+    const fixed = { gpu_vendor: stale[1] };
+    facts.set(factsKey(exe, relevantSwitches(out)), fixed); // the rest of this process launches with it too
+    process.stderr.write(`clearcote: the GPU this machine renders on changed (${stale[0]} -> ${stale[1]}); `
+      + "fetched a persona for it and launching once more\n");
+    token = await personaTokenFor(l, sel, fixed, profileJson, proxy, deps.fetch);
+    return true;
+  };
+  return { args: out, env: (b) => injectPersonaToken(b ?? { ...process.env }, token), heal };
 }
 
 /**

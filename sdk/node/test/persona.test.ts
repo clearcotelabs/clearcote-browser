@@ -2,13 +2,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import {
   API_ENV, PersonaServiceError, TOKEN_ENV, TOKEN_GZ_ENV, clearPersonaCaches, fetchPersonaToken, injectPersonaToken,
-  preparePersonaLaunch, selectorFromArgs,
+  preparePersonaLaunch, selectorFromArgs, staleHostVendor,
 } from "../src/persona.js";
 
 const R51 = (_exe: string | undefined, name: string) => name === "cc-persona-host-facts";
@@ -145,7 +145,6 @@ describe("server-side personas (r51)", () => {
   });
 
   it("raises when the engine does not report its host facts", async () => {
-    // its own test: the probe's answer is also cached on disk under this test's HOME
     await expect(preparePersonaLaunch(exe, ["--fingerprint=1"], lease, undefined, { ...deps(), runner: () => "not json" })).rejects.toThrow(/host facts/);
     expect(svc.requests).toHaveLength(0);
   });
@@ -155,5 +154,63 @@ describe("server-side personas (r51)", () => {
     expect(env[TOKEN_ENV]).toBeUndefined();
     expect(gunzipSync(Buffer.from(env[TOKEN_GZ_ENV]!, "base64")).toString()).toBe("a".repeat(40000));
     expect(injectPersonaToken(env, "short")).toEqual({ [TOKEN_ENV]: "short" });
+  });
+
+  // --- stale host GPU vendor (CR-ZQJ4SX) ---
+  const STALE = "BrowserType.launch: Target page, context or browser has been closed\n[pid=14076][err] [clearcote] no usable "
+    + "persona for this run (generated for another host GPU vendor (none, this machine: nvidia)). This engine needs a "
+    + "Clearcote SDK, Profile Manager or Helper that fetches personas (r51+).";
+
+  it("does not keep host facts on disk: a saved answer from another time is not used", async () => {
+    // Up to 0.70.0 a "none" saved before the NVIDIA driver (or in a Remote Desktop session) failed every launch.
+    const old = join(dir, ".clearcote", "persona-host-facts.json");
+    mkdirSync(join(dir, ".clearcote"), { recursive: true });
+    const st = statSync(exe);
+    const key = JSON.stringify([exe, st.size, Math.floor(st.mtimeMs / 1000), []]);
+    writeFileSync(old, JSON.stringify({ [key]: { gpu_vendor: "none" } }));
+    await preparePersonaLaunch(exe, ["--fingerprint=1"], lease, undefined, deps());
+    expect(runnerCalls).toHaveLength(1);
+    expect(svc.requests[0].body.host).toEqual({ gpu_vendor: "nvidia" });
+    expect(JSON.parse(readFileSync(old, "utf8"))).toEqual({ [key]: { gpu_vendor: "none" } });
+    expect(readdirSync(join(dir, ".clearcote"))).toEqual(["persona-host-facts.json"]);
+  });
+
+  it("reads the engine's stale-vendor refusal and nothing else", () => {
+    expect(staleHostVendor(new Error(STALE))).toEqual(["none", "nvidia"]);
+    expect(staleHostVendor("x (generated for another host GPU vendor (?, this machine: amd))")).toEqual(["?", "amd"]);
+    expect(staleHostVendor(new Error("no usable persona for this run (not valid yet)"))).toBeNull();
+    expect(staleHostVendor(undefined)).toBeNull();
+  });
+
+  it("heals with the vendor the engine named, without probing again", async () => {
+    const probes: string[][] = [];
+    const noneRunner = (cmd: string[]) => { probes.push(cmd); return '{"gpu_vendor":"none"}'; };
+    const p = await preparePersonaLaunch(exe, ["--fingerprint=3", "--headless"], lease, undefined, { ...deps(), runner: noneRunner });
+    expect(svc.requests[0].body.host).toEqual({ gpu_vendor: "none" });
+    expect(await p.heal(new Error("Target page, context or browser has been closed"))).toBe(false);
+    expect(svc.requests).toHaveLength(1);
+    expect(await p.heal(new Error(STALE))).toBe(true);
+    expect(svc.requests).toHaveLength(2);
+    expect(svc.requests[1].body.host).toEqual({ gpu_vendor: "nvidia" });
+    expect(p.env({ PATH: "/bin" })?.[TOKEN_ENV]).toMatch(/^tok-/);
+    expect(probes).toHaveLength(1);
+    // later launches in this process start from the corrected answer
+    await preparePersonaLaunch(exe, ["--fingerprint=4", "--headless"], lease, undefined, { ...deps(), runner: noneRunner });
+    expect(svc.requests[2].body.host).toEqual({ gpu_vendor: "nvidia" });
+    expect(probes).toHaveLength(1);
+  });
+
+  it("retries a launch once on a stale host vendor, and only on that", async () => {
+    const { retryOnStaleHostVendor } = await import("../src/index.js");
+    const persona = { heal: async (e: unknown) => staleHostVendor(e) !== null };
+    let n = 0;
+    expect(await retryOnStaleHostVendor(persona, async () => { if (++n === 1) throw new Error(STALE); return "browser"; })).toBe("browser");
+    expect(n).toBe(2);
+    n = 0;
+    await expect(retryOnStaleHostVendor(persona, async () => { n++; throw new Error(STALE); })).rejects.toThrow(/another host GPU vendor/);
+    expect(n).toBe(2);
+    n = 0;
+    await expect(retryOnStaleHostVendor(persona, async () => { n++; throw new Error("boom"); })).rejects.toThrow("boom");
+    expect(n).toBe(1);
   });
 });

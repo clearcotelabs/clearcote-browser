@@ -230,7 +230,9 @@ public static partial class Clearcote
         IBrowser browser;
         try
         {
-            browser = await License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
+            // A persona the engine refuses as "generated for another host GPU vendor" (the GPU this machine renders on
+            // changed) is fetched again for the vendor it named, and the launch runs once more (PersonaToken).
+            browser = await License.ReleaseLeaseOnFailureAsync(lease, () => PersonaToken.RetryOnStaleHostVendorAsync(personaLaunch.HealAsync, () => License.RetryOnStaleRunTokenAsync(lease, () =>
                 WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchAsync(new BrowserTypeLaunchOptions(options.PlaywrightLaunchOptions ?? new())
                 {
                     ExecutablePath = exePath,
@@ -242,7 +244,7 @@ public static partial class Clearcote
                     IgnoreDefaultArgs = options.IgnoreDefaultArgs ?? LaunchOpts.DefaultIgnoredArgs.ToArray(),
                     Env = persona.Env(personaLaunch.Env(envFor())),
                     Proxy = ToPwProxy(proxy),
-                }), exe)), launchToken).ConfigureAwait(false);
+                }), exe))), launchToken).ConfigureAwait(false);
         }
         catch
         {
@@ -447,7 +449,8 @@ public static partial class Clearcote
         IBrowserContext context;
         try
         {
-            context = await Crlset.CloseOnFailureAsync(crlsetPlan, () => License.ReleaseLeaseOnFailureAsync(lease, () => License.RetryOnStaleRunTokenAsync(lease, () =>
+            // As LaunchAsync: a persona refused for "another host GPU vendor" is fetched again and launched once more.
+            context = await Crlset.CloseOnFailureAsync(crlsetPlan, () => License.ReleaseLeaseOnFailureAsync(lease, () => PersonaToken.RetryOnStaleHostVendorAsync(personaLaunch.HealAsync, () => License.RetryOnStaleRunTokenAsync(lease, () =>
                 WinLaunch.WinAvRetryAsync(exePath => pw.Chromium.LaunchPersistentContextAsync(userDataDir,
                 new BrowserTypeLaunchPersistentContextOptions(options.PlaywrightContextOptions ?? new())
                 {
@@ -468,7 +471,7 @@ public static partial class Clearcote
                     ScreenSize = options.ScreenSize,
                     // r32+: the persona's colour scheme reaches the page instead of Playwright's light.
                     ColorScheme = ColorSchemeDefault.Resolve(options.ColorScheme, exe),
-                }), exe)), launchToken)).ConfigureAwait(false);
+                }), exe))), launchToken)).ConfigureAwait(false);
         }
         catch
         {

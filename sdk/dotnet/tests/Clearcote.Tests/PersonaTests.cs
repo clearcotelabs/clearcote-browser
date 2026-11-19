@@ -13,6 +13,7 @@ public class PersonaTests : IDisposable
     private static readonly Func<string?, string, bool> R51 = (_, name) => name == "cc-persona-host-facts";
     private static readonly Func<string?, string, bool> Old = (_, _) => false;
     private readonly Sandbox _sb = new();
+    private readonly string _home;
     private readonly string _dir;
     private readonly string _exe;
     private readonly List<string[]> _probes = new();
@@ -20,7 +21,7 @@ public class PersonaTests : IDisposable
 
     public PersonaTests()
     {
-        _sb.TempHome();
+        _home = _sb.TempHome();
         _dir = Path.Combine(Path.GetTempPath(), "cc-persona-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_dir);
         _exe = Path.Combine(_dir, "chrome");
@@ -198,6 +199,153 @@ public class PersonaTests : IDisposable
         }
         finally { listener.Stop(); await serving; }
     }
+
+    // --- stale host GPU vendor (CR-ZQJ4SX) --------------------------------------------------------------------------
+
+    private const string StaleMsg = "BrowserType.LaunchAsync: Target page, context or browser has been closed\n"
+        + "[pid=14076][err] [clearcote] no usable persona for this run (generated for another host GPU vendor "
+        + "(none, this machine: nvidia)). This engine needs a Clearcote SDK, Profile Manager or Helper that "
+        + "fetches personas (r51+).";
+
+    // Up to 0.70.0 a saved answer was never checked again: a "none" saved before the NVIDIA driver (or in a Remote
+    // Desktop session) failed every later launch. A new process asks the engine again, and writes nothing.
+    [Fact]
+    public async Task Host_facts_are_not_kept_on_disk()
+    {
+        _sb.Env("LOCALAPPDATA", _home);
+        var dir = Path.Combine(_home, ".clearcote");
+        var old = Path.Combine(dir, "persona-host-facts.json");
+        Directory.CreateDirectory(dir);
+        var fi = new FileInfo(_exe);
+        var key = JsonSerializer.Serialize(new object[] { fi.FullName, fi.Length, (long)(fi.LastWriteTimeUtc - DateTime.UnixEpoch).TotalSeconds, Array.Empty<string>() });
+        var saved = JsonSerializer.Serialize(new Dictionary<string, Dictionary<string, string>> { [key] = new() { ["gpu_vendor"] = "none" } });
+        File.WriteAllText(old, saved);
+        await PersonaToken.PrepareAsync(_exe, new[] { "--fingerprint=1" }, Lease(), null, R51, Runner, Fetch);
+        Assert.Single(_probes);   // the old file's "none" was not used
+        Assert.Equal("nvidia", _fetches.Single().Host["gpu_vendor"]);
+        Assert.Equal(saved, File.ReadAllText(old));   // nor rewritten
+        Assert.Equal(new[] { old }, Directory.GetFileSystemEntries(dir));
+        File.Delete(old);
+        PersonaToken.ClearCaches();
+        await PersonaToken.PrepareAsync(_exe, new[] { "--fingerprint=1" }, Lease(), null, R51, Runner, Fetch);
+        Assert.Equal(2, _probes.Count);
+        Assert.Empty(Directory.GetFileSystemEntries(dir));   // and none written on a machine without one
+    }
+
+    [Fact]
+    public void Stale_host_vendor_reads_the_engine_refusal()
+    {
+        Assert.Equal(("none", "nvidia"), PersonaToken.StaleHostVendor(new Exception(StaleMsg)));
+        Assert.Equal(("?", "amd"), PersonaToken.StaleHostVendor(new Exception("... (generated for another host GPU vendor (?, this machine: amd))")));
+        Assert.Equal(("none", "nvidia"), PersonaToken.StaleHostVendor(new InvalidOperationException("launch failed", new Exception(StaleMsg))));
+        Assert.Null(PersonaToken.StaleHostVendor(new Exception("[clearcote] no usable persona for this run (not valid yet)")));
+        Assert.Null(PersonaToken.StaleHostVendor(new Exception("Target page, context or browser has been closed")));
+    }
+
+    [Fact]
+    public async Task Heal_fetches_a_persona_for_the_vendor_the_engine_named_without_a_new_probe()
+    {
+        var probes = 0;
+        string NoneRunner(string[] cmd, IDictionary<string, string> env) { probes++; return "{\"gpu_vendor\":\"none\"}"; }   // the heal must not depend on it
+        var lease = Lease();
+        var text = "{\"screen\":{\"width\":1366}}";
+        var args = new[] { "--fingerprint=3", "--headless", "--fingerprint-profile=" + Fingerprint.EncodeProfile(text) };
+        var plan = await PersonaToken.PrepareAsync(_exe, args, lease, null, R51, NoneRunner, Fetch);
+        Assert.Equal("none", _fetches.Single().Host["gpu_vendor"]);
+
+        var err = new StringWriter();
+        var stdErr = Console.Error;
+        Console.SetError(err);
+        bool healed;
+        try { healed = await plan.HealAsync(new Exception(StaleMsg)); }
+        finally { Console.SetError(stdErr); }
+        Assert.True(healed);
+        Assert.Equal(2, _fetches.Count);   // a new token (the cached one was for "none")
+        Assert.Equal(new Dictionary<string, string> { ["gpu_vendor"] = "nvidia" }, _fetches[1].Host);
+        Assert.Equal(_fetches[0].Sel, _fetches[1].Sel);   // the same persona, recomputed from the args before apply
+        Assert.Equal(text, _fetches[1].Profile);
+        Assert.Equal(1, probes);   // no second probe: the engine's own answer was used
+        Assert.Contains("clearcote: the GPU this machine renders on changed (none -> nvidia); fetched a persona for it and launching once more", err.ToString());
+        // the rest of this process launches with the corrected answer
+        Assert.Equal("nvidia", PersonaToken.HostFacts(_exe, args, lease.Token, NoneRunner)["gpu_vendor"]);
+        Assert.Equal(1, probes);
+    }
+
+    [Fact]
+    public async Task Heal_puts_the_new_token_into_the_launch_env()
+    {
+        var n = 0;
+        Task<(string, double)> Counting(string rt, SortedDictionary<string, string> sel, IReadOnlyDictionary<string, string> host, string? profile, ProxySpec? _)
+            => Task.FromResult(($"tok-{++n}-{host["gpu_vendor"]}", (double)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600));
+        var plan = await PersonaToken.PrepareAsync(_exe, new[] { "--fingerprint=9" }, Lease(), null, R51, (_, _) => "{\"gpu_vendor\":\"none\"}", Counting);
+        Assert.Equal("tok-1-none", plan.Env(new Dictionary<string, string>())![PersonaToken.TokenEnv]);
+        var stdErr = Console.Error;
+        Console.SetError(TextWriter.Null);
+        try { Assert.True(await plan.HealAsync(new Exception(StaleMsg))); }
+        finally { Console.SetError(stdErr); }
+        var env = plan.Env(new Dictionary<string, string> { ["PATH"] = "/bin" })!;
+        Assert.Equal("tok-2-nvidia", env[PersonaToken.TokenEnv]);
+        Assert.Equal("/bin", env["PATH"]);
+    }
+
+    [Fact]
+    public async Task Heal_ignores_other_failures_and_plans_without_a_token()
+    {
+        var plan = await PersonaToken.PrepareAsync(_exe, new[] { "--fingerprint=1" }, Lease(), null, R51, Runner, Fetch);
+        Assert.False(await plan.HealAsync(new Exception("[clearcote] no usable persona for this run (not valid yet)")));
+        Assert.Single(_fetches);
+        Assert.Null(await PersonaToken.HealStaleHostVendorAsync(_exe, new[] { "--fingerprint=1" }, Lease(), null, new Exception("boom"), R51, Runner, Fetch));
+        Assert.Single(_fetches);
+        var free = await PersonaToken.PrepareAsync(_exe, new[] { "--fingerprint=1" }, null, null, R51, Runner, Fetch);
+        Assert.False(await free.HealAsync(new Exception(StaleMsg)));   // no lease, no token: nothing to heal
+        Assert.Single(_fetches);
+    }
+
+    [Fact]
+    public async Task Launch_retries_once_on_a_stale_host_vendor()
+    {
+        var healed = new List<string>();
+        var current = "old";
+        Task<bool> Heal(Exception e)
+        {
+            healed.Add(e.Message);
+            if (PersonaToken.StaleHostVendor(e) is null) return Task.FromResult(false);
+            current = "new";
+            return Task.FromResult(true);
+        }
+        var starts = new List<string>();
+        var got = await PersonaToken.RetryOnStaleHostVendorAsync(Heal, () =>
+        {
+            starts.Add(current);
+            if (starts.Count == 1) throw new PlaywrightLike(StaleMsg);
+            return Task.FromResult("browser");
+        });
+        Assert.Equal("browser", got);
+        Assert.Equal(new[] { "old", "new" }, starts);
+        Assert.Single(healed);
+
+        // once only: a second refusal is raised, not looped on
+        var tries = 0;
+        healed.Clear();
+        var again = await Assert.ThrowsAsync<PlaywrightLike>(() => PersonaToken.RetryOnStaleHostVendorAsync<string>(Heal, () => { tries++; throw new PlaywrightLike(StaleMsg); }));
+        Assert.Equal(2, tries);
+        Assert.Single(healed);
+        Assert.Contains("this machine: nvidia", again.Message);
+
+        // any other failure passes through unchanged, without a second start
+        tries = 0;
+        healed.Clear();
+        var boom = new InvalidOperationException("boom");
+        var other = await Assert.ThrowsAsync<InvalidOperationException>(() => PersonaToken.RetryOnStaleHostVendorAsync<string>(Heal, () => { tries++; throw boom; }));
+        Assert.Same(boom, other);
+        Assert.Equal(1, tries);
+
+        // a heal that fails (the persona service down) is what the caller sees
+        var down = new PersonaServiceError("no persona service answered");
+        Assert.Same(down, await Assert.ThrowsAsync<PersonaServiceError>(() => PersonaToken.RetryOnStaleHostVendorAsync<string>(_ => throw down, () => throw new PlaywrightLike(StaleMsg))));
+    }
+
+    private sealed class PlaywrightLike : Exception { public PlaywrightLike(string m) : base(m) { } }
 
     private static int FreePort()
     {

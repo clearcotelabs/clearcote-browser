@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Clearcote;
 
@@ -64,8 +65,22 @@ internal static class PersonaToken
     public sealed class Plan
     {
         public List<string> Args { get; }
-        public IReadOnlyDictionary<string, string> Vars { get; }
-        internal Plan(List<string> args, IReadOnlyDictionary<string, string> vars) { Args = args; Vars = vars; }
+        /// <summary>The token variable(s). Replaced by <see cref="HealAsync"/>, so each attempt reads them when it builds its env.</summary>
+        public IReadOnlyDictionary<string, string> Vars { get; private set; }
+        private readonly Func<Exception, Task<Plan?>>? _heal;
+        internal Plan(List<string> args, IReadOnlyDictionary<string, string> vars, Func<Exception, Task<Plan?>>? heal = null) { Args = args; Vars = vars; _heal = heal; }
+
+        /// <summary>After a launch failed with <paramref name="e"/>: when the engine refused the persona as "generated for
+        /// another host GPU vendor", fetch a token for the vendor it named into <see cref="Vars"/> and return true so the
+        /// caller launches once more (<see cref="RetryOnStaleHostVendorAsync{T}"/>). False for any other failure.</summary>
+        public async Task<bool> HealAsync(Exception e)
+        {
+            if (_heal is null) return false;
+            var again = await _heal(e).ConfigureAwait(false);
+            if (again is null) return false;
+            Vars = again.Vars;
+            return true;
+        }
         /// <summary><paramref name="env"/> with the token added (or <paramref name="env"/> itself when this engine needs none).</summary>
         public IDictionary<string, string>? Env(IDictionary<string, string>? env)
         {
@@ -132,12 +147,6 @@ internal static class PersonaToken
         return (sel, profileJson, outArgs);
     }
 
-    private static string? FactsCachePath()
-    {
-        var baseDir = OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("LOCALAPPDATA") : Environment.GetEnvironmentVariable("HOME");
-        return string.IsNullOrEmpty(baseDir) ? null : Path.Combine(baseDir, ".clearcote", "persona-host-facts.json");
-    }
-
     /// <summary>The probe's stdout, or an exception saying why there is none. The engine prints a refusal (no lease, a
     /// FREE token without its file, the clock set back) on stderr only: reading stdout alone turned every one of those
     /// into a JSON parse error.</summary>
@@ -194,32 +203,28 @@ internal static class PersonaToken
         return DescribeProbe(r.Out, r.Err, r.Code);
     }
 
-    /// <summary>The facts of this machine the generator needs, as the engine reports them for a launch with these switches (<c>chrome --cc-persona-host-facts</c>); cached per binary + relevant switches.</summary>
-    public static Dictionary<string, string> HostFacts(string exe, IEnumerable<string> args, string runToken, FactsRunner? runner = null, string? runTokenFile = null)
+    private static (string Key, string[] Relevant) FactsKey(string exe, IEnumerable<string> args)
     {
         var relevant = args.Where(a => Switch(a) is { } s && HostFactSwitches.Contains(s.Name)).OrderBy(a => a, StringComparer.Ordinal).ToArray();
-        string key;
         try
         {
             var fi = new FileInfo(exe);
-            key = JsonSerializer.Serialize(new object[] { fi.FullName, fi.Length, (long)(fi.LastWriteTimeUtc - DateTime.UnixEpoch).TotalSeconds, relevant });
+            return (JsonSerializer.Serialize(new object[] { fi.FullName, fi.Length, (long)(fi.LastWriteTimeUtc - DateTime.UnixEpoch).TotalSeconds, relevant }), relevant);
         }
-        catch (Exception) { key = JsonSerializer.Serialize(new object[] { exe, 0, 0, relevant }); }
+        catch (Exception) { return (JsonSerializer.Serialize(new object[] { exe, 0, 0, relevant }), relevant); }
+    }
+
+    /// <summary>The facts of this machine the generator needs, as the engine reports them for a launch with these
+    /// switches (<c>chrome --cc-persona-host-facts</c>); cached per binary + relevant switches for the life of this
+    /// process only.</summary>
+    /// <remarks>Up to 0.70.0 the answer was also kept on disk (<c>persona-host-facts.json</c>) and never checked again.
+    /// The vendor is that of the adapter Windows lists first, which changes with a driver install or a Remote Desktop
+    /// session; a saved "none" on a machine that now renders on NVIDIA then failed every launch with "generated for
+    /// another host GPU vendor". The probe takes about 0.1 s, so each process asks once.</remarks>
+    public static Dictionary<string, string> HostFacts(string exe, IEnumerable<string> args, string runToken, FactsRunner? runner = null, string? runTokenFile = null)
+    {
+        var (key, relevant) = FactsKey(exe, args);
         lock (Lock) { if (Facts.TryGetValue(key, out var hit)) return new Dictionary<string, string>(hit); }
-        var disk = FactsCachePath();
-        if (disk is not null && File.Exists(disk))
-        {
-            try
-            {
-                var all = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(File.ReadAllText(disk));
-                if (all is not null && all.TryGetValue(key, out var stored) && stored.TryGetValue("gpu_vendor", out _))
-                {
-                    lock (Lock) Facts[key] = stored;
-                    return new Dictionary<string, string>(stored);
-                }
-            }
-            catch (Exception) { /* unreadable cache: probe again */ }
-        }
         var env = new Dictionary<string, string>();
         foreach (System.Collections.DictionaryEntry e in Environment.GetEnvironmentVariables()) env[(string)e.Key] = (string?)e.Value ?? "";
         env[License.RunTokenEnv] = runToken; // the probe runs after the licence gate, like every launch
@@ -239,19 +244,53 @@ internal static class PersonaToken
         }
         catch (Exception e) { throw new PersonaServiceError($"the engine did not report its host facts ({e.Message})"); }
         lock (Lock) Facts[key] = facts;
-        if (disk is not null)
-        {
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(disk)!);
-                Dictionary<string, Dictionary<string, string>> all = new();
-                try { all = JsonSerializer.Deserialize<Dictionary<string, Dictionary<string, string>>>(File.ReadAllText(disk)) ?? new(); } catch (Exception) { /* fresh cache */ }
-                all[key] = facts;
-                File.WriteAllText(disk, JsonSerializer.Serialize(all));
-            }
-            catch (Exception) { /* best effort */ }
-        }
         return new Dictionary<string, string>(facts);
+    }
+
+    // The engine's refusal when the persona was generated for another GPU vendor than the one it renders on
+    // (pro-r51-02 Bind): "generated for another host GPU vendor (<token's>, this machine: <engine's>)". The second
+    // value is exactly what the probe reports ("none" for no hardware GPU), so it can stand in for a new probe.
+    private static readonly Regex StaleVendor = new(@"generated for another host GPU vendor \(([^,()]*), this machine: ([A-Za-z0-9_.-]+)\)", RegexOptions.CultureInvariant);
+
+    /// <summary>(token's vendor, this machine's vendor) when <paramref name="e"/> is the engine refusing a persona
+    /// generated for another host GPU vendor, else null. Playwright's launch error carries the engine's stderr.</summary>
+    public static (string Was, string Now)? StaleHostVendor(Exception e)
+    {
+        var m = StaleVendor.Match(e.ToString());
+        return m.Success ? (m.Groups[1].Value, m.Groups[2].Value) : null;
+    }
+
+    /// <summary>After a launch the engine refused for "another host GPU vendor": take the vendor the engine named as
+    /// this machine's (no new probe), fetch a persona token for it and return the new plan. <paramref name="args"/> are
+    /// the launch's args as they were BEFORE <see cref="PrepareAsync"/> (a profile still on them). Null when
+    /// <paramref name="e"/> is anything else.</summary>
+    public static async Task<Plan?> HealStaleHostVendorAsync(string exe, IEnumerable<string> args, LeaseSession? lease, ProxySpec? proxy, Exception e,
+        Func<string?, string, bool>? supports = null, FactsRunner? runner = null, Fetcher? fetch = null, string? runTokenFile = null,
+        double? now = null)
+    {
+        if (StaleHostVendor(e) is not { } stale) return null;
+        var (was, vendor) = stale;
+        var list = args.ToList();
+        var (key, _) = FactsKey(exe, Selector(list).Args);
+        lock (Lock) Facts[key] = new Dictionary<string, string> { ["gpu_vendor"] = vendor };
+        Console.Error.WriteLine($"clearcote: the GPU this machine renders on changed ({was} -> {vendor}); fetched a persona for it and launching once more");
+        return await PrepareAsync(exe, list, lease, proxy, supports, runner, fetch, runTokenFile, now).ConfigureAwait(false);
+    }
+
+    /// <summary>Run <paramref name="start"/>; if <paramref name="heal"/> says the failure was a persona generated for
+    /// another host GPU vendor (and fetched one for this machine's), start once more. A second refusal, and any other
+    /// failure, is raised as it is. <paramref name="start"/> must read the plan's <see cref="Plan.Vars"/> when called.</summary>
+    public static async Task<T> RetryOnStaleHostVendorAsync<T>(Func<Exception, Task<bool>> heal, Func<Task<T>> start)
+    {
+        try
+        {
+            return await start().ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            if (!await heal(e).ConfigureAwait(false)) throw;
+        }
+        return await start().ConfigureAwait(false);
     }
 
     public static string[] Hosts()
@@ -334,7 +373,8 @@ internal static class PersonaToken
         var host = HostFacts(exe, outArgs, lease.Token, runner, runTokenFile);
         var token = await TokenForAsync(lease, sel, host, profileJson, proxy, fetch).ConfigureAwait(false);
         ClockCheck.AssertFor(token, "persona token", now);
-        return new Plan(outArgs, TokenVars(token));
+        return new Plan(outArgs, TokenVars(token),
+            e => HealStaleHostVendorAsync(exe, list, lease, proxy, e, supports, runner, fetch, runTokenFile, now));
     }
 
     internal static void ClearCaches() { lock (Lock) { Tokens.Clear(); Facts.Clear(); } }

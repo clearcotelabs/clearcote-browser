@@ -1283,6 +1283,19 @@ def _retry_on_stale_run_token(lease, pw_kwargs, launch_token, start):
         return start()
 
 
+def _retry_on_stale_host_vendor(exe, persona_args, pw_kwargs, lease, start):
+    """Run ``start()``; if the engine refuses the persona as "generated for another host GPU vendor" (the GPU this
+    machine renders on is not the one the persona was fetched for), fetch one for the GPU the engine named and
+    launch once more. ``persona_args`` are the args before ``_persona.apply_to_pw_kwargs``; ``start`` reads
+    ``pw_kwargs`` when called, so the new token in its env is all a retry needs."""
+    try:
+        return start()
+    except Exception as exc:  # noqa: BLE001
+        if not _persona.heal_stale_host_vendor(exe, persona_args, pw_kwargs, lease, exc):
+            raise
+        return start()
+
+
 def _release_lease_on_failure(lease, start, launch_token=None):
     """Run ``start()``; if the browser fails to start, release the lease before re-raising. On a
     per-browser plan (the free tier) the slot would otherwise stay taken until the lease TTL.
@@ -1426,17 +1439,18 @@ def _launch_incognito(kwargs):
     # outer > screen (see _geometry). The display switches go on the command line; no_viewport is a
     # context option, so it rides on new_page/new_context.
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args, exe)
-    launch_args = _with_geometry_args(args, geom)
-    launch_args = _persona.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, lease)  # r51+: the signed persona token
+    persona_args = _with_geometry_args(args, geom)
+    launch_args = _persona.apply_to_pw_kwargs(exe, persona_args, pw_kwargs, lease)  # r51+: the signed persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     # Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
     # instead of no proxy at all, which sent it from this machine's IP (_reqproxy.py).
     req_route = _start_request_route(pw_kwargs)
     with close_on_failure(req_route):
-        browser = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
-            lease, pw_kwargs, launch_token, lambda: _win_av_retry(
-                lambda e: _playwright().chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe
-            )), launch_token)
+        browser = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_host_vendor(
+            exe, persona_args, pw_kwargs, lease, lambda: _retry_on_stale_run_token(
+                lease, pw_kwargs, launch_token, lambda: _win_av_retry(
+                    lambda e: _playwright().chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe
+                ))), launch_token)
     _close_route_with(browser, "disconnected", req_route)
     if lease:  # release the concurrency slot + remove the run-token file when the browser closes
         def _on_disconnect(_b=None, _lease=lease, _lt=launch_token, _own=owns_lease):
@@ -1533,8 +1547,8 @@ def _launch_persistent_context_local(user_data_dir, kwargs):
         geom = apply_headless_geometry(pw_kwargs, seed, args, exe=exe)
     if engine_decides_color_scheme(exe):  # r32+: the persona's colour scheme, not Playwright's light
         default_color_scheme(pw_kwargs)
-    launch_args = _with_geometry_args(args, geom)  # carries --widevine-cdm-path when on (see _prepare)
-    launch_args = _persona.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, lease)  # r51+: the signed persona token
+    persona_args = _with_geometry_args(args, geom)  # carries --widevine-cdm-path when on (see _prepare)
+    launch_args = _persona.apply_to_pw_kwargs(exe, persona_args, pw_kwargs, lease)  # r51+: the signed persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     if crlset_plan:  # the readiness probe's port must bypass a launch proxy, so its server starts first
         launch_args = launch_args + crlset_plan.before_launch(pw_kwargs)
@@ -1543,13 +1557,14 @@ def _launch_persistent_context_local(user_data_dir, kwargs):
     req_route = _start_request_route(pw_kwargs)
     try:
         with close_on_failure(req_route):
-            context = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_run_token(
-                lease, pw_kwargs, launch_token, lambda: _win_av_retry(
-                    lambda e: _playwright().chromium.launch_persistent_context(
-                        user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
-                    ),
-                    exe,
-                )), launch_token)
+            context = _release_lease_on_failure(lease if owns_lease else None, lambda: _retry_on_stale_host_vendor(
+                exe, persona_args, pw_kwargs, lease, lambda: _retry_on_stale_run_token(
+                    lease, pw_kwargs, launch_token, lambda: _win_av_retry(
+                        lambda e: _playwright().chromium.launch_persistent_context(
+                            user_data_dir, executable_path=e, args=launch_args, **pw_kwargs
+                        ),
+                        exe,
+                    ))), launch_token)
     except BaseException:
         if crlset_plan:
             crlset_plan.close()

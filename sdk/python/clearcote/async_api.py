@@ -264,6 +264,17 @@ async def _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, start)
         return await start()
 
 
+async def _retry_on_stale_host_vendor_async(exe, persona_args, pw_kwargs, lease, start):
+    """Async twin of the sync ``_retry_on_stale_host_vendor``: a persona the engine refuses as "generated for
+    another host GPU vendor" is fetched again for the GPU it named (off the event loop), then one more launch."""
+    try:
+        return await start()
+    except Exception as exc:  # noqa: BLE001
+        if not await asyncio.to_thread(_persona.heal_stale_host_vendor, exe, persona_args, pw_kwargs, lease, exc):
+            raise
+        return await start()
+
+
 async def launch(cloud=None, **kwargs):
     """Launch Clearcote and return a Playwright **async** ``Browser``. Same kwargs as the sync
     ``clearcote.launch`` (fingerprint, platform, brand, gpu_*, timezone, accept_language, proxy,
@@ -306,8 +317,8 @@ async def _launch_incognito(kwargs):
     # Headless: the display switches go on the command line, no_viewport rides on
     # new_page/new_context (see _geometry).
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args, exe)
-    launch_args = _with_geometry_args(args, geom)
-    launch_args = await asyncio.to_thread(_persona.apply_to_pw_kwargs, exe, launch_args, pw_kwargs, lease)  # r51+ persona token
+    persona_args = _with_geometry_args(args, geom)
+    launch_args = await asyncio.to_thread(_persona.apply_to_pw_kwargs, exe, persona_args, pw_kwargs, lease)  # r51+ persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     # Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
     # instead of no proxy at all (_reqproxy.py, mirror sync).
@@ -315,8 +326,9 @@ async def _launch_incognito(kwargs):
     req_route = _start_request_route(pw_kwargs)
     try:
         with close_on_failure(req_route):
-            browser = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
-                lambda e: pw.chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe))
+            browser = await _retry_on_stale_host_vendor_async(exe, persona_args, pw_kwargs, lease, lambda: (
+                _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
+                    lambda e: pw.chromium.launch(executable_path=e, args=launch_args, **pw_kwargs), exe))))
     except BaseException:
         if lease:
             lease.stop()
@@ -393,8 +405,8 @@ async def _launch_persistent_context_local(user_data_dir, kwargs):
         geom = apply_headless_geometry(pw_kwargs, seed, args, exe=exe)
     if await asyncio.to_thread(engine_decides_color_scheme, exe):  # r32+ (mirror sync)
         default_color_scheme(pw_kwargs)
-    launch_args = _with_geometry_args(args, geom)  # carries --widevine-cdm-path when on (see _prepare)
-    launch_args = await asyncio.to_thread(_persona.apply_to_pw_kwargs, exe, launch_args, pw_kwargs, lease)  # r51+ persona token
+    persona_args = _with_geometry_args(args, geom)  # carries --widevine-cdm-path when on (see _prepare)
+    launch_args = await asyncio.to_thread(_persona.apply_to_pw_kwargs, exe, persona_args, pw_kwargs, lease)  # r51+ persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     if crlset_plan:  # the readiness probe's port must bypass a launch proxy, so its server starts first
         launch_args = launch_args + crlset_plan.before_launch(pw_kwargs)
@@ -404,9 +416,10 @@ async def _launch_persistent_context_local(user_data_dir, kwargs):
     req_route = _start_request_route(pw_kwargs)
     try:
         with close_on_failure(req_route):
-            context = await _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
-                lambda e: pw.chromium.launch_persistent_context(
-                    user_data_dir, executable_path=e, args=launch_args, **pw_kwargs), exe))
+            context = await _retry_on_stale_host_vendor_async(exe, persona_args, pw_kwargs, lease, lambda: (
+                _retry_on_stale_run_token_async(lease, pw_kwargs, launch_token, lambda: _win_av_retry_async(
+                    lambda e: pw.chromium.launch_persistent_context(
+                        user_data_dir, executable_path=e, args=launch_args, **pw_kwargs), exe))))
     except BaseException:
         if lease:
             lease.stop()
