@@ -174,7 +174,7 @@ class TestPrivacySandboxDefault:
     """Default flipped in 0.23.0: Privacy Sandbox stays ON unless explicitly disabled.
 
     The default persona is brand="chrome", so the surface follows what Google Chrome has. Since
-    0.70.2 the parts Google's own servers switch off in every Chrome after its first session
+    0.70.3 the parts Google's own servers switch off in every Chrome after its first session
     (Topics, Attribution Reporting, Fenced Frames; CHROME_SEED_DISABLED_FEATURES) are off by
     default too; the rest of the old list (FLEDGE, Shared Storage, ...) is still opt-in.
     """
