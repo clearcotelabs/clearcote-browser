@@ -9,6 +9,8 @@ import {
   mergeFeatureFlags,
   webBluetoothArgs,
   privacySandboxArgs,
+  chromeSeedArgs,
+  CHROME_SEED_DISABLED_FEATURES,
   quicArgs,
   relayProxyByIp,
   socks5UdpRefused,
@@ -26,6 +28,23 @@ describe("mergeFeatureFlags", () => {
     expect(out.filter((a) => a.startsWith("--enable-features="))).toEqual(["--enable-features=A,B,C"]);
     expect(out.filter((a) => a.startsWith("--disable-features="))).toEqual(["--disable-features=D,E"]);
     expect(out).toContain("--mute-audio");
+  });
+});
+
+describe("chromeSeedArgs", () => {
+  const ALL = "--disable-features=BrowsingTopics,ConversionMeasurement,FencedFrames,FencedFramesAPIChanges,FencedFramesAutomaticBeaconCredentials,FencedFramesCrossOriginAutomaticBeaconData,FencedFramesCrossOriginEventReporting,FencedFramesLocalUnpartitionedDataAccess,FencedFramesReportEventHeaderChanges,FencedFramesSrcPermissionsPolicy";
+  it("turns off what Chrome's server settings turn off", () => {
+    expect(chromeSeedArgs()).toEqual([ALL]);
+    expect(chromeSeedArgs(["--disable-features=Foo", "--lang=fi"])).toEqual([ALL]);
+  });
+  it("leaves out a feature the caller enables, with or without parameters", () => {
+    expect(chromeSeedArgs(["--enable-features=BrowsingTopics,Other"])[0]).toBe(ALL.replace("BrowsingTopics,", ""));
+    expect(chromeSeedArgs(["--enable-features=FencedFrames:implementation_type/mparch"])[0]).toBe(ALL.replace(",FencedFrames,", ","));
+    expect(chromeSeedArgs([`--enable-features=${CHROME_SEED_DISABLED_FEATURES.join(",")}`])).toEqual([]);
+  });
+  it("merges with the caller's own disable list into one switch", () => {
+    const merged = mergeFeatureFlags([...chromeSeedArgs(), "--disable-features=Foo"]);
+    expect(merged.filter((a) => a.startsWith("--disable-features="))).toEqual([ALL + ",Foo"]);
   });
 });
 

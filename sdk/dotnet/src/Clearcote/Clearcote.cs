@@ -783,6 +783,8 @@ public static partial class Clearcote
         // Playwright disables third-party storage partitioning, which genuine Chrome never does;
         // re-emit its list without that entry as the last --disable-features.
         if (extra is { ViaPlaywright: true }) baseList.AddRange(LaunchOpts.PlaywrightFeatureOverrideArgs(extra.IgnoreDefaultArgs));
+        // What Google's servers switch off in every Chrome after its first session.
+        baseList.AddRange(LaunchOpts.ChromeSeedArgs(userArgs));
         if (disablePrivacySandbox == true) baseList.AddRange(LaunchOpts.PrivacySandboxArgs());
         baseList.AddRange(LaunchOpts.WebrtcDefaultDenyArgs(baseList.Concat(userArgs), webrtcIp));
         if (extra is not null)

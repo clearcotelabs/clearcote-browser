@@ -75,6 +75,7 @@ from ._launchopts import (  # noqa: F401  (web_bluetooth_args re-exported for te
     merge_feature_flags,
     playwright_feature_override_args,
     privacy_sandbox_args,
+    chrome_seed_args,
     quic_args,
     relay_proxy_by_ip,
     socks5_udp_args,
@@ -758,6 +759,9 @@ def _prepare(kwargs):
     # its list without that entry as the last --disable-features. See playwright_feature_override_args.
     if not direct_launch:
         base += playwright_feature_override_args(kwargs.get("ignore_default_args"))
+    # What Google's servers switch off in every Chrome after its first session.
+    # See CHROME_SEED_DISABLED_FEATURES.
+    base += chrome_seed_args(user)
     if disable_privacy_sandbox:
         base += privacy_sandbox_args()
     # default WebRTC to leak-proof unless the user wired a webrtc_ip / policy themselves

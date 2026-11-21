@@ -226,6 +226,40 @@ def playwright_feature_override_args(ignore_default_args=None, playwright_featur
     return out
 
 
+#: Features Google turns OFF in Chrome from its servers (the variations seed), which a build that
+#: never fetches a seed keeps ON. Genuine Chrome has them only in the first session of a new profile,
+#: before the seed arrives; from the next start on they are gone.
+#:
+#: Measured 2026-11-21 on genuine Chrome 157.0.8103.79: a fresh profile and Clearcote r61 enumerate
+#: the same 16,188 web names; after the seed (studies TopicsDeprecation,
+#: AttributionReportingDeprecation, FencedFramesDeprecation) Chrome has 26 fewer --
+#: document.browsingTopics, attributionSrc on a/area/img/script,
+#: XMLHttpRequest.setAttributionReporting, window.fence, HTMLFencedFrameElement, FencedFrameConfig
+#: and the browsing-topics / interest-cohort permissions policies. With this list off, r61 equals
+#: that Chrome name for name (0 of 16,162 differ); r62 loses the same 26.
+#:
+#: Runtime base::Features, so no rebuild; a name a later Chromium has removed is ignored.
+CHROME_SEED_DISABLED_FEATURES = (
+    "BrowsingTopics", "ConversionMeasurement", "FencedFrames", "FencedFramesAPIChanges",
+    "FencedFramesAutomaticBeaconCredentials", "FencedFramesCrossOriginAutomaticBeaconData",
+    "FencedFramesCrossOriginEventReporting", "FencedFramesLocalUnpartitionedDataAccess",
+    "FencedFramesReportEventHeaderChanges", "FencedFramesSrcPermissionsPolicy",
+)
+
+
+def chrome_seed_args(user_args=()):
+    """``--disable-features`` for :data:`CHROME_SEED_DISABLED_FEATURES`, on every launch. A feature
+    the caller turns on themselves (``args=["--enable-features=BrowsingTopics"]``) is left out, so
+    their switch decides."""
+    wanted = set()
+    for a in user_args or ():
+        if isinstance(a, str) and a.startswith("--enable-features="):
+            for f in a[len("--enable-features="):].split(","):
+                wanted.add(re.split(r"[:<]", f)[0])
+    off = [f for f in CHROME_SEED_DISABLED_FEATURES if f not in wanted]
+    return ["--disable-features=" + ",".join(off)] if off else []
+
+
 def privacy_sandbox_args():
     """Disable Privacy Sandbox + intrusive APIs (runtime, no rebuild)."""
     return ["--disable-features=" + ",".join(PRIVACY_SANDBOX_FEATURES)]
