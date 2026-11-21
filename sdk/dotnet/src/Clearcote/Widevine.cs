@@ -59,6 +59,10 @@ public static class Widevine
     /// In the cache root: its mtime is the last update check (a failed one counts).
     public const string StampFile = ".last-check";
     internal const string WarnCode = "widevine-default";
+    /// Warning code for a default launch that leaves Widevine off because the engine lacks CDM host verification.
+    internal const string HostUnverifiedCode = "widevine-host-unverified";
+    /// Exported by a CDM host built with CDM host verification (Chrome, Edge, Brave; Clearcote from r63).
+    internal const string CdmHostVerifySymbol = "VerifyCdmHost_0";
     /// What a CDM version looks like; anything else never becomes a path.
     internal static readonly System.Text.RegularExpressions.Regex VersionPattern = new(@"^[0-9]+(\.[0-9]+){1,3}\z");   // ASCII digits; \z: $ also matches before a trailing newline
     /// Ask Google for a newer CDM at most once a day.
@@ -524,8 +528,32 @@ public static class Widevine
         if (mode == WidevineMode.Off || CallerSetCdmPath(userArgs)) return new List<string>();
         if (mode == WidevineMode.Explicit) return await CdmArgsAsync(exe, quiet).ConfigureAwait(false);
         if (!LaunchOpts.EngineSupportsSwitch(exe, "widevine-cdm-path")) return new List<string>();
+        if (!CdmHostVerified(exe))
+        {
+            LaunchWarnings.EmitOnce(new[]
+            {
+                new LaunchWarnings.Warning(HostUnverifiedCode,
+                    "Widevine is off by default on this engine: it sends the DRM licence request with a clear client id, " +
+                    "which detection sites flag on Windows and macOS. It comes back on by default with an engine that has " +
+                    "CDM host verification (r63 and later). Set Widevine = true (or CLEARCOTE_WIDEVINE=1) to use DRM anyway."),
+            }, quiet);
+            return new List<string>();
+        }
         var cdm = await DefaultCdmAsync(quiet, timeout).ConfigureAwait(false);
         return cdm is null ? new List<string>() : new List<string> { "--widevine-cdm-path=" + cdm };
+    }
+
+    /// <summary>Whether a CDM licence request from this engine carries an ENCRYPTED client id, as Chrome's does.</summary>
+    /// <remarks>Without CDM host verification (every Clearcote engine up to r62) the Widevine CDM puts its client id in
+    /// the clear, and that names the host OS. fingerprint.com flags that on Windows (anti_detect_browser, measured 10 of
+    /// 10 sessions on r62 behind a proxy, 1 of 12 with Widevine off); a clear request from a Linux host is not flagged.
+    /// So Linux always counts as fine; on Windows and macOS the engine must contain <see cref="CdmHostVerifySymbol"/>
+    /// (a NUL-delimited literal in chrome.dll / the framework binary). Same rule in the Node and Python SDKs.</remarks>
+    internal static bool CdmHostVerified(string? exe, bool? windowsOrMac = null)
+    {
+        var winOrMac = windowsOrMac ?? (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS());
+        if (!winOrMac) return true;
+        return LaunchOpts.EngineSupportsSwitch(exe, CdmHostVerifySymbol);
     }
 
     // ── profile seeding (an engine without --widevine-cdm-path) ────────────────

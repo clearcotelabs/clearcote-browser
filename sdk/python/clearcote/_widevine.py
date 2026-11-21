@@ -73,6 +73,10 @@ STAMP_FILE = ".last-check"  # in the cache root: mtime = the last update check (
 VERSION_RE = re.compile(r"[0-9]+(\.[0-9]+){1,3}")  # a CDM version (ASCII digits); anything else never becomes a path
 LOCK_WAIT_SECONDS = 300.0  # how long an install waits for another process installing the CDM
 WARN_CODE = "widevine-default"
+# warn_once code for a default launch that leaves Widevine off because the engine lacks CDM host verification.
+HOST_UNVERIFIED_CODE = "widevine-host-unverified"
+# Exported by a CDM host built with CDM host verification (Chrome, Edge, Brave; Clearcote from r63).
+CDM_HOST_VERIFY_SYMBOL = "VerifyCdmHost_0"
 _TRUTHY = ("1", "true", "yes", "on")
 _FALSY = ("0", "false", "no", "off")
 
@@ -582,5 +586,28 @@ def widevine_launch_args(exe, option, licensed, user_args=(), quiet=False, timeo
     from ._launchopts import engine_supports_switch
     if not engine_supports_switch(exe, "widevine-cdm-path"):
         return []
+    if not cdm_host_verified(exe):
+        from ._warnings import warn_once
+        warn_once(HOST_UNVERIFIED_CODE,
+                  "Widevine is off by default on this engine: it sends the DRM licence request with a clear client id, "
+                  "which detection sites flag on Windows and macOS. It comes back on by default with an engine that has "
+                  "CDM host verification (r63 and later). Pass widevine=True (or set CLEARCOTE_WIDEVINE=1) to use DRM "
+                  "anyway.", quiet=quiet)
+        return []
     cdm = default_cdm(quiet=quiet, timeout=timeout)
     return ["--widevine-cdm-path=" + cdm] if cdm else []
+
+
+def cdm_host_verified(exe, platform=None):
+    """Whether a CDM licence request from this engine carries an ENCRYPTED client id, as Chrome's does.
+
+    Without CDM host verification (every Clearcote engine up to r62) the Widevine CDM puts its client id in the
+    clear, and that names the host OS. fingerprint.com flags that on Windows (anti_detect_browser, measured 10 of 10
+    sessions on r62 behind a proxy, 1 of 12 with Widevine off); a clear request from a Linux host is not flagged. So
+    Linux always counts as fine; on Windows and macOS the engine must contain :data:`CDM_HOST_VERIFY_SYMBOL` (a
+    NUL-delimited literal in chrome.dll / the framework binary). Same rule in the Node and .NET SDKs."""
+    platform = sys.platform if platform is None else platform
+    if not (platform.startswith("win") or platform == "darwin"):
+        return True
+    from ._launchopts import engine_supports_switch
+    return engine_supports_switch(exe, CDM_HOST_VERIFY_SYMBOL)

@@ -10,6 +10,7 @@ import io
 import json
 import os
 import struct
+import sys
 import threading
 import time
 import zipfile
@@ -21,7 +22,11 @@ import clearcote.async_api as async_api
 from clearcote import _warnings
 from clearcote import _widevine as W
 
-ENGINE_1022 = b"\x00widevine-cdm-path\x00"
+# An engine with the --widevine-cdm-path switch (1022) AND CDM host verification (r63+): the licensed default turns
+# Widevine on on every host. ENGINE_1022_UNVERIFIED (r32..r62) keeps the default off on Windows and macOS hosts.
+ENGINE_1022 = b"\x00widevine-cdm-path\x00VerifyCdmHost_0\x00"
+ENGINE_1022_UNVERIFIED = b"\x00widevine-cdm-path\x00"
+WIN_OR_MAC = sys.platform.startswith("win") or sys.platform == "darwin"
 VERSION = "4.10.9999.0"
 KEY = "cc_lic_test_widevine_default"
 
@@ -564,6 +569,28 @@ def test_launch_args_off_touches_nothing(monkeypatch, tmp_path):
 def test_an_older_engine_costs_the_default_no_network(monkeypatch, tmp_path):
     monkeypatch.setattr(W, "fetch_widevine", lambda *a, **k: pytest.fail("network used"))
     assert W.widevine_launch_args(fake_engine(tmp_path), None, True) == []
+
+
+def test_cdm_host_verified(tmp_path):
+    verified = fake_engine(tmp_path, ENGINE_1022, name="hv")
+    unverified = fake_engine(tmp_path, ENGINE_1022_UNVERIFIED, name="nohv")
+    assert W.cdm_host_verified(unverified, "linux") is True
+    assert W.cdm_host_verified(verified) is True
+    assert W.cdm_host_verified(unverified) is (not WIN_OR_MAC)
+    assert W.cdm_host_verified(None, "win32") is False
+
+
+def test_default_on_an_unverified_engine(monkeypatch, tmp_path, capsys):
+    cdm = cached_cdm_dir(str(tmp_path / "wv"))
+    unverified = fake_engine(tmp_path, ENGINE_1022_UNVERIFIED, name="nohv2")
+    arg = "--widevine-cdm-path=" + cdm
+    want = [] if WIN_OR_MAC else [arg]
+    assert W.widevine_launch_args(unverified, None, True) == want
+    assert W.widevine_launch_args(unverified, None, True) == want
+    assert capsys.readouterr().err.count("clear client id") == (1 if WIN_OR_MAC else 0)  # once per process
+    assert W.widevine_launch_args(unverified, True, True, quiet=True) == [arg]           # asked for: on
+    monkeypatch.setenv("CLEARCOTE_WIDEVINE", "1")
+    assert W.widevine_launch_args(unverified, None, True, quiet=True) == [arg]           # env opt-in: on
 
 
 def test_explicit_failure_is_unchanged_best_effort(monkeypatch, tmp_path, capsys):

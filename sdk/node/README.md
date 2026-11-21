@@ -387,6 +387,10 @@ which claims the Google Chrome brand) on an engine from r32 loads the CDM by def
   Google refusing the request — the launch goes on without Widevine and prints one warning per process
   (`quiet: true` or `CLEARCOTE_NO_WARN=1` silences it); the unfinished download is cancelled, and that process
   retries it after 10 minutes.
+- **Windows and macOS: only on an engine with CDM host verification (r63 and later).** Without it the CDM
+  sends its licence request with a clear client id, unlike Chrome, and pages can read that. On such an engine
+  (r32 to r62) the default stays off and says so once per process; `widevine: true` or `CLEARCOTE_WIDEVINE=1`
+  still turns it on. Linux is unaffected.
 - **Opt out** with `CLEARCOTE_WIDEVINE=0` (every launch), or `widevine: false`. An explicit `widevine` wins
   over the environment; `widevine: false` is also accepted (and ignored) by `cloud: true` and Docker launches.
 - **Free (open) builds stay opt-in**: pass `widevine: true` (or set `CLEARCOTE_WIDEVINE=1`). On a

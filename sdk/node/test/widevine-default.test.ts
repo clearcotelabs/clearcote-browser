@@ -95,10 +95,14 @@ import { resetSeenWarnings } from "../src/warnings.js";
 import { LOCAL_ONLY_OPTIONS } from "../src/cloud.js";
 import { launch, launchPersistentContext, serve } from "../src/index.js";
 
-const ENGINE_1022 = "\0widevine-cdm-path\0";
+// An engine with the --widevine-cdm-path switch (1022) AND CDM host verification (r63+): the licensed default turns
+// Widevine on on every host. ENGINE_1022_UNVERIFIED (r32..r62) keeps the default off on Windows and macOS hosts.
+const ENGINE_1022 = "\0widevine-cdm-path\0VerifyCdmHost_0\0";
+const ENGINE_1022_UNVERIFIED = "\0widevine-cdm-path\0";
 const VERSION = "4.10.9999.0";
 const KEY = "cc_lic_test_widevine_default";
 const LINUX = process.platform === "linux";
+const WIN_OR_MAC = process.platform === "win32" || process.platform === "darwin";
 const SUB = LINUX ? "linux_x64" : "win_x64";
 const CDM_FILE = LINUX ? "libwidevinecdm.so" : "widevinecdm.dll";
 const DOWNLOAD_URL = "https://example.invalid/cdm.crx3";
@@ -555,6 +559,27 @@ describe("widevineLaunchArgs", () => {
 
   it("an older engine costs the default no network", async () => {
     expect(await W.widevineLaunchArgs(fakeEngine(), undefined, true, [])).toEqual([]); // the fetch stub throws on any call
+  });
+
+  it("cdmHostVerified: Linux always; Windows/macOS only with VerifyCdmHost_0 in the engine", () => {
+    const verified = fakeEngine([ENGINE_1022], "hv");
+    const unverified = fakeEngine([ENGINE_1022_UNVERIFIED], "nohv");
+    expect(W.cdmHostVerified(unverified, "linux")).toBe(true);
+    expect(W.cdmHostVerified(verified, process.platform)).toBe(true);
+    expect(W.cdmHostVerified(unverified, process.platform)).toBe(!WIN_OR_MAC);
+    expect(W.cdmHostVerified(undefined, "win32")).toBe(false);
+  });
+
+  it("licensed default, engine without CDM host verification: off on Windows/macOS (one note), on elsewhere", async () => {
+    const cdm = cachedCdm();
+    const unverified = fakeEngine([ENGINE_1022_UNVERIFIED], "nohv2");
+    const arg = `--widevine-cdm-path=${cdm}`;
+    expect(await W.widevineLaunchArgs(unverified, undefined, true, [])).toEqual(WIN_OR_MAC ? [] : [arg]);
+    expect(await W.widevineLaunchArgs(unverified, undefined, true, [])).toEqual(WIN_OR_MAC ? [] : [arg]);
+    expect(stderr.filter((l) => l.includes("clear client id")).length).toBe(WIN_OR_MAC ? 1 : 0); // once per process
+    expect(await W.widevineLaunchArgs(unverified, true, true, [], { quiet: true })).toEqual([arg]); // asked for: on
+    process.env.CLEARCOTE_WIDEVINE = "1";
+    expect(await W.widevineLaunchArgs(unverified, undefined, true, [], { quiet: true })).toEqual([arg]); // env opt-in: on
   });
 
   it("an explicit failure stays best-effort, without the default's warning", async () => {

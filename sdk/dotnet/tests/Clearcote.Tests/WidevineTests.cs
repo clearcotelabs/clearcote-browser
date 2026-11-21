@@ -27,7 +27,11 @@ public class WidevineTests : IDisposable
     // test reuse an earlier one's lease and make no licence call at all.
     private readonly string Key = "cc_lic_test_widevine_default_" + Guid.NewGuid().ToString("N")[..12];
     private const string DownloadUrl = "https://example.invalid/cdm.crx3";
-    private static readonly byte[] Engine1022 = Encoding.Latin1.GetBytes("\0widevine-cdm-path\0");
+    // An engine with the --widevine-cdm-path switch (1022) AND CDM host verification (r63+): the licensed default turns
+    // Widevine on on every host. Engine1022Unverified (r32..r62) keeps the default off on Windows and macOS hosts.
+    private static readonly byte[] Engine1022 = Encoding.Latin1.GetBytes("\0widevine-cdm-path\0VerifyCdmHost_0\0");
+    private static readonly byte[] Engine1022Unverified = Encoding.Latin1.GetBytes("\0widevine-cdm-path\0");
+    private static readonly bool WinOrMac = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS();
     private static readonly bool Linux = OperatingSystem.IsLinux();
     // This host's own CDM layout (read before any test fakes the OS): linux_x64, win_x64, or mac_arm64 on a Mac.
     private static readonly string Sub = Widevine.CdmPlatform().Subdir;
@@ -89,12 +93,12 @@ public class WidevineTests : IDisposable
         return d;
     }
 
-    private string FakeEngine(bool with1022, string name = "chrome")
+    private string FakeEngine(bool with1022, string name = "chrome", bool hostVerified = true)
     {
         var dir = Dir("cc-wv-engine-");
         var exe = Path.Combine(dir, name);
         var body = new List<byte>(Encoding.Latin1.GetBytes("\x7f" + "ELF"));
-        if (with1022) body.AddRange(Engine1022);
+        if (with1022) body.AddRange(hostVerified ? Engine1022 : Engine1022Unverified);
         body.AddRange(Encoding.Latin1.GetBytes("\0--remote-debugging-port\0"));
         File.WriteAllBytes(exe, body.ToArray());
         if (OperatingSystem.IsWindows()) File.WriteAllBytes(Path.Combine(dir, "chrome.dll"), body.ToArray());
@@ -594,6 +598,30 @@ public class WidevineTests : IDisposable
     [Fact]
     public async Task An_older_engine_costs_the_default_no_network()
         => Assert.Empty(await Widevine.LaunchArgsAsync(FakeEngine(false), null, true, null, quiet: false));
+
+    [Fact]
+    public void Cdm_host_verified_linux_always_windows_and_macos_only_with_the_symbol()
+    {
+        var verified = FakeEngine(true, "hv");
+        var unverified = FakeEngine(true, "nohv", hostVerified: false);
+        Assert.True(Widevine.CdmHostVerified(unverified, windowsOrMac: false));
+        Assert.True(Widevine.CdmHostVerified(verified));
+        Assert.Equal(!WinOrMac, Widevine.CdmHostVerified(unverified));
+        Assert.False(Widevine.CdmHostVerified(null, windowsOrMac: true));
+    }
+
+    [Fact]
+    public async Task Licensed_default_on_an_unverified_engine_is_off_on_windows_and_macos()
+    {
+        var cdm = CachedCdm();
+        var unverified = FakeEngine(true, "nohv2", hostVerified: false);
+        var arg = new[] { $"--widevine-cdm-path={cdm}" };
+        var want = WinOrMac ? Array.Empty<string>() : arg;
+        Assert.Equal(want, await Widevine.LaunchArgsAsync(unverified, null, true, null, quiet: false));
+        Assert.Equal(want, await Widevine.LaunchArgsAsync(unverified, null, true, null, quiet: false));
+        Assert.Equal(WinOrMac ? 1 : 0, _err.ToString().Split('\n').Count(l => l.Contains("clear client id", StringComparison.Ordinal))); // once per process
+        Assert.Equal(arg, await Widevine.LaunchArgsAsync(unverified, true, true, null, quiet: true)); // asked for: on
+    }
 
     [Fact]
     public async Task An_explicit_failure_stays_best_effort_without_the_defaults_warning()

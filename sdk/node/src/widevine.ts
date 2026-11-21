@@ -59,6 +59,10 @@ export const VERSION_RE = /^[0-9]+(\.[0-9]+){1,3}$/;
 /** How long a requested install waits for another process installing the CDM. */
 export const LOCK_WAIT_MS = 300_000;
 export const WARN_CODE = "widevine-default";
+/** warnOnce code for a default launch that leaves Widevine off because the engine lacks CDM host verification. */
+export const HOST_UNVERIFIED_CODE = "widevine-host-unverified";
+/** Exported by a CDM host built with CDM host verification (Chrome, Edge, Brave; Clearcote from r63). */
+export const CDM_HOST_VERIFY_SYMBOL = "VerifyCdmHost_0";
 const TRUTHY = ["1", "true", "yes", "on"];
 const FALSY = ["0", "false", "no", "off"];
 
@@ -606,6 +610,19 @@ export async function widevineCdmArgs(exe: string | undefined, opts: { quiet?: b
   }
 }
 
+/**
+ * Whether a CDM licence request from this engine carries an ENCRYPTED client id, as Chrome's does.
+ * Without CDM host verification (every Clearcote engine up to r62) the Widevine CDM puts its client id in
+ * the clear, and that names the host OS. fingerprint.com flags that on Windows (anti_detect_browser, measured
+ * 10 of 10 sessions on r62 behind a proxy, 1 of 12 with Widevine off); a clear request from a Linux host is
+ * not flagged. So: Linux always counts as fine; on Windows and macOS the engine must contain
+ * {@link CDM_HOST_VERIFY_SYMBOL} (a NUL-delimited literal in chrome.dll / the framework binary).
+ */
+export function cdmHostVerified(exe: string | undefined, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== "win32" && platform !== "darwin") return true;
+  return engineSupportsSwitch(exe, CDM_HOST_VERIFY_SYMBOL);
+}
+
 function callerSetCdmPath(userArgs: readonly string[] | undefined): boolean {
   return (userArgs ?? []).some((a) => String(a).split("=", 1)[0] === "--widevine-cdm-path");
 }
@@ -613,7 +630,8 @@ function callerSetCdmPath(userArgs: readonly string[] | undefined): boolean {
 /**
  * The Widevine switch for one launch, by {@link widevineMode}. explicit: {@link widevineCdmArgs} (the
  * behaviour `widevine: true` always had). default: the same switch, only on an engine that implements it
- * (r32+; an older engine keeps the old default, off), with the CDM from {@link defaultCdm} (bounded,
+ * (r32+; an older engine keeps the old default, off) and, on Windows and macOS hosts, only on an engine with
+ * CDM host verification ({@link cdmHostVerified}: r63+), with the CDM from {@link defaultCdm} (bounded,
  * fail-soft, warns once). off: nothing. A `--widevine-cdm-path` the caller put in `args` is theirs:
  * nothing is added then. Works for every launch path: such an engine loads the CDM without a profile,
  * incognito included.
@@ -626,6 +644,14 @@ export async function widevineLaunchArgs(
   if (mode === "off" || callerSetCdmPath(userArgs)) return [];
   if (mode === "explicit") return widevineCdmArgs(exe, { quiet: opts.quiet });
   if (!engineSupportsSwitch(exe, "widevine-cdm-path")) return [];
+  if (!cdmHostVerified(exe)) {
+    warnOnce(HOST_UNVERIFIED_CODE,
+      "Widevine is off by default on this engine: it sends the DRM licence request with a clear client id, " +
+        "which detection sites flag on Windows and macOS. It comes back on by default with an engine that has CDM " +
+        "host verification (r63 and later). Pass widevine: true (or set CLEARCOTE_WIDEVINE=1) to use DRM anyway.",
+      opts.quiet);
+    return [];
+  }
   const cdm = await defaultCdm(opts);
   return cdm ? [`--widevine-cdm-path=${cdm}`] : [];
 }
