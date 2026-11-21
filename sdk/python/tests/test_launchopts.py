@@ -4,6 +4,8 @@ from clearcote._launchopts import (
     extension_args,
     merge_feature_flags,
     privacy_sandbox_args,
+    chrome_seed_args,
+    CHROME_SEED_DISABLED_FEATURES,
     quic_args,
     relay_proxy_by_ip,
     socks5_udp_args,
@@ -22,6 +24,29 @@ def test_merge_feature_flags_collapses_into_one_each():
     assert [a for a in out if a.startswith("--enable-features=")] == ["--enable-features=A,B,C"]
     assert [a for a in out if a.startswith("--disable-features=")] == ["--disable-features=D,E"]
     assert "--mute-audio" in out
+
+
+_SEED_ALL = ("--disable-features=BrowsingTopics,ConversionMeasurement,FencedFrames,FencedFramesAPIChanges,"
+             "FencedFramesAutomaticBeaconCredentials,FencedFramesCrossOriginAutomaticBeaconData,"
+             "FencedFramesCrossOriginEventReporting,FencedFramesLocalUnpartitionedDataAccess,"
+             "FencedFramesReportEventHeaderChanges,FencedFramesSrcPermissionsPolicy")
+
+
+def test_chrome_seed_args_turn_off_what_chromes_server_settings_turn_off():
+    assert chrome_seed_args() == [_SEED_ALL]
+    assert chrome_seed_args(["--disable-features=Foo", "--lang=fi"]) == [_SEED_ALL]
+
+
+def test_chrome_seed_args_leave_out_a_feature_the_caller_enables():
+    assert chrome_seed_args(["--enable-features=BrowsingTopics,Other"]) == [_SEED_ALL.replace("BrowsingTopics,", "")]
+    assert chrome_seed_args(["--enable-features=FencedFrames:implementation_type/mparch"]) == [
+        _SEED_ALL.replace(",FencedFrames,", ",")]
+    assert chrome_seed_args(["--enable-features=" + ",".join(CHROME_SEED_DISABLED_FEATURES)]) == []
+
+
+def test_chrome_seed_args_merge_with_the_callers_disable_list():
+    merged = merge_feature_flags(chrome_seed_args() + ["--disable-features=Foo"])
+    assert [a for a in merged if a.startswith("--disable-features=")] == [_SEED_ALL + ",Foo"]
 
 
 def test_privacy_sandbox_args():

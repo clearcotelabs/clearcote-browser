@@ -33,6 +33,11 @@ from clearcote._fingerprint import fingerprint_args
 from clearcote._fonts import linux_font_env
 from clearcote._fingerprint import persona_platform
 from clearcote._launchopts import merge_feature_flags, serve_infobar_args, web_bluetooth_args
+try:  # what Google's servers switch off in every Chrome after its first session
+    from clearcote._launchopts import chrome_seed_args
+except ImportError:  # an image built with an SDK older than this entrypoint
+    def chrome_seed_args(user_args=()):
+        return []
 try:  # r51+: server-side personas (the signed persona token); an older SDK in the image has no module
     from clearcote import _persona as _persona_mod
 except ImportError:
@@ -720,7 +725,7 @@ base_args = (["--no-sandbox"] if not sandbox and "--no-sandbox" not in args + ex
 ] + gpu_args + [
     f"--remote-debugging-port={internal}", "--remote-allow-origins=*",
     "--user-data-dir=%s" % PROFILE_DIR,
-] + mode_args + window_args + args + web_bluetooth_args(persona_platform(opts)) + proxy_args + extra
+] + mode_args + window_args + args + web_bluetooth_args(persona_platform(opts)) + chrome_seed_args(extra) + proxy_args + extra
 # --no-sandbox is on Chromium's "unsupported command-line flag" list, and the warning bar it raises sits
 # on the first tab: 56px off that tab's innerHeight, a frame (outer - inner) no real Chrome has. With the
 # sandbox on there is no such flag and no bar. Without it, the SDK's serve() keeps the bar off the same way:

@@ -173,13 +173,14 @@ class TestNestedProbeLaunchIsLicensed:
 class TestPrivacySandboxDefault:
     """Default flipped in 0.23.0: Privacy Sandbox stays ON unless explicitly disabled.
 
-    The default persona is brand="chrome", and real Google Chrome ships Topics/FLEDGE/Shared
-    Storage/Fenced Frames. Disabling them by default presented a browser calling itself Google
-    Chrome while missing an API surface Google Chrome always has — which the live audit scores as
-    an implausible value, not as a privacy win.
+    The default persona is brand="chrome", so the surface follows what Google Chrome has. Since
+    0.70.2 the parts Google's own servers switch off in every Chrome after its first session
+    (Topics, Attribution Reporting, Fenced Frames; CHROME_SEED_DISABLED_FEATURES) are off by
+    default too; the rest of the old list (FLEDGE, Shared Storage, ...) is still opt-in.
     """
 
-    SANDBOX = "BrowsingTopics"
+    SANDBOX = "Fledge"
+    SEED = "BrowsingTopics,ConversionMeasurement,FencedFrames,"
 
     def _args(self, monkeypatch, **kwargs):
         monkeypatch.setattr(clearcote, "_resolve_binary", lambda *a, **k: "/path/chrome")
@@ -188,6 +189,17 @@ class TestPrivacySandboxDefault:
 
     def test_privacy_sandbox_is_not_disabled_by_default(self, monkeypatch):
         assert not any(self.SANDBOX in a for a in self._args(monkeypatch))
+
+    def test_what_chromes_servers_switch_off_is_off_by_default_in_one_switch(self, monkeypatch):
+        args = self._args(monkeypatch)
+        off = [a for a in args if a.startswith("--disable-features=")]
+        assert len(off) == 1 and self.SEED in off[0]
+
+    def test_a_feature_the_caller_enables_is_not_switched_off(self, monkeypatch):
+        args = self._args(monkeypatch, args=["--enable-features=BrowsingTopics"])
+        off = [a for a in args if a.startswith("--disable-features=")]
+        assert len(off) == 1 and "BrowsingTopics" not in off[0] and "ConversionMeasurement" in off[0]
+        assert any(a.startswith("--enable-features=") and "BrowsingTopics" in a for a in args)
 
     def test_opt_in_still_disables_it(self, monkeypatch):
         args = self._args(monkeypatch, disable_privacy_sandbox=True)

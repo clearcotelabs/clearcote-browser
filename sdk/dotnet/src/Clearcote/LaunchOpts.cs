@@ -23,6 +23,36 @@ public static class LaunchOpts
         "PrivateAggregationApi", "SharedStorageAPI", "FencedFrames",
     };
 
+    /// Features Google turns OFF in Chrome from its servers (the variations seed), which a build that
+    /// never fetches a seed keeps ON. Genuine Chrome has them only in the first session of a new
+    /// profile, before the seed arrives. Measured 2026-11-21 on genuine Chrome 157.0.8103.79: after
+    /// the seed (studies TopicsDeprecation, AttributionReportingDeprecation, FencedFramesDeprecation)
+    /// Chrome enumerates 26 fewer web names (document.browsingTopics, attributionSrc, window.fence,
+    /// HTMLFencedFrameElement, ...); with this list off, r61 equals that Chrome name for name.
+    /// Runtime base::Features, so no rebuild; a name a later Chromium has removed is ignored.
+    public static readonly string[] ChromeSeedDisabledFeatures =
+    {
+        "BrowsingTopics", "ConversionMeasurement", "FencedFrames", "FencedFramesAPIChanges",
+        "FencedFramesAutomaticBeaconCredentials", "FencedFramesCrossOriginAutomaticBeaconData",
+        "FencedFramesCrossOriginEventReporting", "FencedFramesLocalUnpartitionedDataAccess",
+        "FencedFramesReportEventHeaderChanges", "FencedFramesSrcPermissionsPolicy",
+    };
+
+    /// <c>--disable-features</c> for <see cref="ChromeSeedDisabledFeatures"/>, on every launch. A
+    /// feature the caller turns on themselves (<c>--enable-features=BrowsingTopics</c>) is left out.
+    public static List<string> ChromeSeedArgs(IEnumerable<string>? userArgs = null)
+    {
+        var wanted = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var a in userArgs ?? Array.Empty<string>())
+        {
+            if (!a.StartsWith("--enable-features=", StringComparison.Ordinal)) continue;
+            foreach (var f in a.Substring("--enable-features=".Length).Split(','))
+                wanted.Add(f.Split(':', '<')[0]);
+        }
+        var off = ChromeSeedDisabledFeatures.Where(f => !wanted.Contains(f)).ToList();
+        return off.Count > 0 ? new List<string> { $"--disable-features={string.Join(",", off)}" } : new List<string>();
+    }
+
     public static List<string> PrivacySandboxArgs()
         => new() { $"--disable-features={string.Join(",", PrivacySandboxFeatures)}" };
 

@@ -203,6 +203,37 @@ export function playwrightFeatureOverrideArgs(
   return out;
 }
 
+/** Features Google turns OFF in Chrome from its servers (the variations seed), which a build that
+ * never fetches a seed keeps ON. Genuine Chrome has them only in the first session of a new profile,
+ * before the seed arrives; from the next start on they are gone.
+ *
+ * Measured 2026-11-21 on genuine Chrome 157.0.8103.79: a fresh profile and Clearcote r61 enumerate the
+ * same 16,188 web names; after the seed (studies TopicsDeprecation, AttributionReportingDeprecation,
+ * FencedFramesDeprecation) Chrome has 26 fewer — document.browsingTopics, attributionSrc on
+ * a/area/img/script, XMLHttpRequest.setAttributionReporting, window.fence, HTMLFencedFrameElement,
+ * FencedFrameConfig and the browsing-topics / interest-cohort permissions policies. With this list
+ * off, r61 equals that Chrome name for name (0 of 16,162 differ); r62 loses the same 26.
+ *
+ * Runtime base::Features, so no rebuild; a name a later Chromium has removed is ignored. */
+export const CHROME_SEED_DISABLED_FEATURES = [
+  "BrowsingTopics", "ConversionMeasurement", "FencedFrames", "FencedFramesAPIChanges",
+  "FencedFramesAutomaticBeaconCredentials", "FencedFramesCrossOriginAutomaticBeaconData",
+  "FencedFramesCrossOriginEventReporting", "FencedFramesLocalUnpartitionedDataAccess",
+  "FencedFramesReportEventHeaderChanges", "FencedFramesSrcPermissionsPolicy",
+] as const;
+
+/** `--disable-features` for {@link CHROME_SEED_DISABLED_FEATURES}, on every launch. A feature the
+ * caller turns on themselves (`args: ["--enable-features=BrowsingTopics"]`) is left out, so their
+ * switch decides. */
+export function chromeSeedArgs(userArgs: readonly string[] = []): string[] {
+  const wanted = new Set<string>();
+  for (const a of userArgs) {
+    if (a.startsWith("--enable-features=")) for (const f of a.slice(18).split(",")) wanted.add(f.split(/[:<]/)[0]);
+  }
+  const off = CHROME_SEED_DISABLED_FEATURES.filter((f) => !wanted.has(f));
+  return off.length ? [`--disable-features=${off.join(",")}`] : [];
+}
+
 /** Disable Privacy Sandbox + intrusive APIs (runtime, no rebuild). */
 export function privacySandboxArgs(): string[] {
   return [`--disable-features=${PRIVACY_SANDBOX_FEATURES.join(",")}`];

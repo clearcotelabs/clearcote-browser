@@ -53,6 +53,7 @@ import {
   mergeFeatureFlags,
   playwrightFeatureOverrideArgs,
   privacySandboxArgs,
+  chromeSeedArgs,
   quicArgs,
   relayProxyByIp,
   socks5UdpArgs,
@@ -602,6 +603,8 @@ function assembleArgs(
   if (extra && extra.playwrightIgnoreDefaultArgs !== undefined) {
     base.push(...playwrightFeatureOverrideArgs(extra.playwrightIgnoreDefaultArgs ?? undefined));
   }
+  // What Google's servers switch off in every Chrome after its first session. See CHROME_SEED_DISABLED_FEATURES.
+  base.push(...chromeSeedArgs(userArgs));
   if (disablePrivacySandbox === true) base.push(...privacySandboxArgs());
   base.push(...webrtcDefaultDenyArgs([...base, ...userArgs], webrtcIp));
   if (extra) {
