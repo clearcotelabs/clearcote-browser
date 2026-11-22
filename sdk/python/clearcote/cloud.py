@@ -1145,6 +1145,9 @@ def _prepare_launch(kwargs, persistent=False, user_data_dir=None):
     # cloud=True. widevine=True is still refused, as before.
     if "widevine" in opts and not opts["widevine"]:
         opts.pop("widevine")
+    # real_computer=False is dropped the same way; a hosted browser has no "this computer", so True is refused.
+    if "real_computer" in opts and not opts["real_computer"]:
+        opts.pop("real_computer")
     sdk = {k: opts.pop(k) for k in SDK_SIDE_OPTIONS if k in opts}
     if persistent:
         if user_data_dir is not None:

@@ -208,6 +208,8 @@ internal static class DockerLaunch
             // Widevine = false: the opt-out of the licensed LOCAL default; the container has no default to turn
             // off, so it is accepted and dropped (Widevine = true is still refused).
             if (p.Name == nameof(LaunchOptions.Widevine) && value is false) continue;
+            // RealComputer = false: accepted and dropped too (the container has no "this computer").
+            if (p.Name == nameof(LaunchOptions.RealComputer) && value is RealComputer { Any: false }) continue;
             if (value is not null && !Equals(value, p.GetValue(defaults)))
                 throw new ArgumentException(
                     $"{p.Name} is not available when LaunchAsync runs Clearcote in Docker (there is no native macOS build here). {OffHint}");

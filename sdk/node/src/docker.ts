@@ -215,7 +215,7 @@ export function containerEnv(options: Record<string, unknown>): Record<string, s
   // widevine: false: the opt-out of the licensed LOCAL default; the container has no default to turn off, so it is
   // accepted and dropped (widevine: true is still refused).
   const unknown = Object.keys(options)
-    .filter((k) => !DOCKER_ACCEPTED.includes(k) && options[k] !== undefined && options[k] !== null && !(k === "widevine" && options[k] === false))
+    .filter((k) => !DOCKER_ACCEPTED.includes(k) && options[k] !== undefined && options[k] !== null && !(k === "widevine" && options[k] === false) && !(k === "realComputer" && options[k] === false))
     .sort();
   if (unknown.length) {
     const takes = DOCKER_ACCEPTED.filter((k) => !SDK_SIDE.includes(k)).sort().join(", ");

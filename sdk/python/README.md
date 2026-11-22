@@ -109,6 +109,27 @@ Native overrides: `hardware_concurrency`, `device_memory`, `color_depth`, `devic
 `max_touch_points`, and (opt-in) `screen_width` / `screen_height` / `avail_width` / `avail_height`.
 Needs the Clearcote 149.0.7827.114 (v0.1.0-pre.22) build or newer.
 
+### This computer instead of the persona (`real_computer`)
+
+For one identity per real desktop: show this computer's own screen, touch points and display language instead of
+the persona's generated values. Graphics card, processor, memory and noise stay the persona's.
+
+```python
+browser = launch(fingerprint="user-7423", real_computer=True)               # all three parts
+other = launch(fingerprint="user-7423", real_computer={"screen": True})     # just the screen
+```
+
+- `screen`: the primary display (size, work area, `device_pixel_ratio`), read from the operating system.
+- `touch`: `navigator.maxTouchPoints` as this computer reports it (Windows; 0 on macOS; Linux keeps the persona's).
+- `languages`: the system display language, expanded the way Chrome writes it (`en-GB` -> `en-GB,en-US,en`).
+  Behind a proxy with geoip on, the proxy's exit keeps deciding the languages.
+
+A value you set yourself (`screen_width`, `max_touch_points`, `accept_language`) wins. It is off by default because
+every profile on one computer then shares these values, which makes profiles easier to link, and servers and
+containers have no real display (the launch then keeps the generated value and says so once). Not available for
+`cloud=True` or Docker launches (`real_computer=False` is accepted there). The first launch in a process reads the
+computer once (about 2 s on Windows).
+
 ### Standing CDP endpoint (`serve()`)
 
 Run Clearcote as a **stealthy CDP endpoint** that any existing automation attaches to unchanged —

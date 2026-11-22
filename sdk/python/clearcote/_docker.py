@@ -242,7 +242,7 @@ def container_env(kwargs: dict) -> dict:
     # widevine=False: the opt-out of the licensed LOCAL default; the container has no default to turn off, so it is
     # accepted and dropped (widevine=True is still refused).
     unknown = sorted(k for k, v in kwargs.items() if k not in ACCEPTED and v is not None
-                     and not (k == "widevine" and v is False))
+                     and not (k == "widevine" and v is False) and not (k == "real_computer" and v is False))
     if unknown:
         raise ValueError(
             f"{unknown[0]} is not available when launch() runs Clearcote in Docker (there is no native "

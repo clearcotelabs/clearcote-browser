@@ -678,6 +678,9 @@ public static partial class Clearcote
         // geoip is on by default: the proxy's exit, or this machine's own IP without a proxy (GeoIp.Mode).
         // For pass-through (Fingerprint = "off") only the WebRTC IP.
         var geoMode = GeoIp.Mode(copy.Geoip, passthrough: Fingerprint.IsFingerprintPassthrough(copy.Fingerprint));
+        // RealComputer (opt-in): this computer's screen / touch / display language, before geoip so geoip only fills what
+        // is still empty (RealComputer.cs). Behind a proxy with geoip on, the exit keeps deciding the languages.
+        await RealComputer.ApplyAsync(copy, proxied: copy.Proxy is not null && geoMode != GeoipMode.Off, copy.Quiet).ConfigureAwait(false);
         var geo = await GeoIp.ApplyModeAsync(copy, copy.Proxy, geoMode, copy.Quiet).ConfigureAwait(false);
         return (copy, geo.EgressDrift, geo);
     }

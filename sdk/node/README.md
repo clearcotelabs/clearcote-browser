@@ -82,6 +82,27 @@ Native overrides: `hardwareConcurrency`, `deviceMemory`, `colorDepth`, `devicePi
 `maxTouchPoints`, and (opt-in) `screenWidth` / `screenHeight` / `availWidth` / `availHeight`. Needs the
 Clearcote 149.0.7827.114 (v0.1.0-pre.22) build or newer.
 
+### This computer instead of the persona (`realComputer`)
+
+For one identity per real desktop: show this computer's own screen, touch points and display language instead of
+the persona's generated values. Graphics card, processor, memory and noise stay the persona's.
+
+```ts
+const browser = await launch({ fingerprint: "user-7423", realComputer: true });          // all three parts
+const other = await launch({ fingerprint: "user-7423", realComputer: { screen: true } }); // just the screen
+```
+
+- `screen`: the primary display (size, work area, `devicePixelRatio`), read from the operating system.
+- `touch`: `navigator.maxTouchPoints` as this computer reports it (Windows; 0 on macOS; Linux keeps the persona's).
+- `languages`: the system display language, expanded the way Chrome writes it (`en-GB` -> `en-GB,en-US,en`).
+  Behind a proxy with geoip on, the proxy's exit keeps deciding the languages.
+
+A value you set yourself (`screenWidth`, `maxTouchPoints`, `acceptLanguage`) wins. It is off by default because every
+profile on one computer then shares these values, which makes profiles easier to link, and servers and containers
+have no real display (the launch then keeps the generated value and says so once). Not available for `cloud: true`
+or Docker launches (`realComputer: false` is accepted there). The first launch in a process reads the computer once
+(about 2 s on Windows).
+
 ### Standing CDP endpoint (`serve()`)
 
 Run Clearcote as a **stealthy CDP endpoint** any existing automation attaches to unchanged —

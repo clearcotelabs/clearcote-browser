@@ -89,6 +89,20 @@ export interface FingerprintOptions {
   /** navigator.maxTouchPoints (0 on a mouse-only desktop). */
   maxTouchPoints?: number;
   /**
+   * Show parts of THIS computer instead of the persona's generated values, for one identity per real desktop.
+   * `true` = all three parts, or pick them: `{ screen: true, touch: true, languages: true }`.
+   * - `screen`: the primary display (size, work area, devicePixelRatio), read from the operating system.
+   * - `touch`: navigator.maxTouchPoints as this computer reports it (Windows; 0 on macOS; Linux keeps the persona's).
+   * - `languages`: the system display language, expanded the way Chrome writes it (en-GB -> en-GB,en-US,en). Behind a
+   *   proxy with geoip on, the proxy's exit keeps deciding the languages.
+   * A value you set yourself (screenWidth, maxTouchPoints, acceptLanguage) always wins. Off by default: every profile
+   * on one computer then shares these values, which links profiles more easily, and servers and containers have no
+   * real display (the launch then keeps the generated value and says so once). Not available for cloud or Docker
+   * launches. Measured on a detection service's tampering score: this computer's touch value lowered it in 25 of 27
+   * paired runs and its real monitor in 16 of 16 (see ./realcomputer.ts).
+   */
+  realComputer?: boolean | { screen?: boolean; touch?: boolean; languages?: boolean };
+  /**
    * Light-stealth preset: spoof a coherent, seed-derived bundle of the metadata axes that SURVIVE
    * strict anti-bot checks — hardwareConcurrency, deviceMemory, colorDepth, devicePixelRatio,
    * maxTouchPoints — applied via the native override switches ONLY (never the `--fingerprint`
@@ -263,6 +277,7 @@ export const FINGERPRINT_KEYS: (keyof FingerprintOptions)[] = [
   "colorDepth",
   "devicePixelRatio",
   "maxTouchPoints",
+  "realComputer",
   "lightStealth",
   "personaSchema",
   "realGpuHost",

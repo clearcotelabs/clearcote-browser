@@ -76,6 +76,10 @@ public class FingerprintOptions
     public double? DevicePixelRatio { get; set; }
     /// navigator.maxTouchPoints (0 on a mouse-only desktop).
     public int? MaxTouchPoints { get; set; }
+    /// Show parts of THIS computer (screen, touch, display language) instead of the persona's generated values, for one
+    /// identity per real desktop: <c>RealComputer = true</c> for every part, or <c>new RealComputer { Screen = true }</c>.
+    /// Off by default; see <see cref="Clearcote.RealComputer"/> for the rules and the trade-off.
+    public RealComputer? RealComputer { get; set; }
     /// Light-stealth preset: spoof a coherent, seed-derived bundle of the metadata axes that SURVIVE
     /// strict anti-bot checks — HardwareConcurrency, DeviceMemory, ColorDepth, DevicePixelRatio,
     /// MaxTouchPoints — applied via the native override switches ONLY (never the --fingerprint persona

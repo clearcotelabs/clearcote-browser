@@ -1071,6 +1071,9 @@ export function prepareLaunch(options: Record<string, unknown>, persistent: bool
   // there is nothing to turn off here: dropped, so code written for both (and the warning's advice) works with
   // cloud: true. widevine: true is still refused, as before.
   if ("widevine" in opts && !opts.widevine) delete opts.widevine;
+  // realComputer: false (or unset) is dropped too, so one options object works locally and in the cloud; a hosted
+  // browser has no "this computer" to show, so realComputer: true (or any part) is still refused.
+  if ("realComputer" in opts && !opts.realComputer) delete opts.realComputer;
   const sdk: Record<string, unknown> = {};
   for (const k of SDK_SIDE_OPTIONS) {
     if (k in opts) {

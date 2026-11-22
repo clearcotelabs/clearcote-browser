@@ -68,7 +68,7 @@ _NUMERIC = (
     "persona_schema",
 )
 _BOOLEAN = (
-    "light_stealth", "real_gpu_host", "disable_gpu_fingerprint", "fingerprint_noise",
+    "light_stealth", "real_computer", "real_gpu_host", "disable_gpu_fingerprint", "fingerprint_noise",
     "gpu_string_spoof", "canvas_noise", "flat_area_noise", "webgl_read_margin", "noise_per_profile", "fingerprint_voices", "allow_third_party_cookies",
     "transparent_proxy", "socks5_udp",
 )

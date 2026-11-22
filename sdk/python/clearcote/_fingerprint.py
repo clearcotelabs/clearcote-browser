@@ -38,6 +38,8 @@ FINGERPRINT_KEYS = (
     "color_depth",
     "device_pixel_ratio",
     "max_touch_points",
+    # real_computer: this computer's screen / touch / display language (_realcomputer.py); consumed by the SDK.
+    "real_computer",
     "light_stealth",
     "location",
     "timezone",

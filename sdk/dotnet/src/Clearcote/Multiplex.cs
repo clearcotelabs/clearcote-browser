@@ -123,7 +123,7 @@ public static class Multiplex
     };
     private static readonly string[] BooleanKeys =
     {
-        "lightStealth", "realGpuHost", "disableGpuFingerprint", "fingerprintNoise", "gpuStringSpoof", "canvasNoise", "flatAreaNoise", "webglReadMargin", "noisePerProfile",
+        "lightStealth", "realComputer", "realGpuHost", "disableGpuFingerprint", "fingerprintNoise", "gpuStringSpoof", "canvasNoise", "flatAreaNoise", "webglReadMargin", "noisePerProfile",
         "fingerprintVoices", "allowThirdPartyCookies", "transparentProxy", "socks5Udp",
     };
     private static readonly string[] StringKeys =
@@ -223,6 +223,7 @@ public static class Multiplex
                 }
                 else options[key] = n;
             }
+            else if (key == "realComputer") options[key] = (RealComputer)ParseBool(name, value);   // true = every part
             else if (BooleanKeys.Contains(key)) options[key] = ParseBool(name, value);
             else options[key] = value;
             prms[name] = value;

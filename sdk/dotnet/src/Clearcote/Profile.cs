@@ -291,6 +291,19 @@ internal static class ProfileOptionsMap
                 value = sv.TryGetValue<string>(out var s) ? s : sv.ToJsonString();   // a numeric seed reads as its text
                 return true;
             }
+            if (t == typeof(RealComputer))
+            {
+                // true / false, or { "screen": true, "touch": true, "languages": true } (any key case), as Node and Python write it.
+                if (node is JsonValue bv && bv.TryGetValue<bool>(out var on)) { value = (RealComputer)on; return true; }
+                if (node is JsonObject ro)
+                {
+                    bool Part(string k) => ro.FirstOrDefault(kv => string.Equals(kv.Key, k, StringComparison.OrdinalIgnoreCase)).Value is JsonValue jv
+                                           && jv.TryGetValue<bool>(out var b) && b;
+                    value = new RealComputer { Screen = Part("screen"), Touch = Part("touch"), Languages = Part("languages") };
+                    return true;
+                }
+                return false;
+            }
             if (t == typeof(ProxyOptions) && node is JsonValue pv && pv.TryGetValue<string>(out var server))
             {
                 value = new ProxyOptions { Server = server };

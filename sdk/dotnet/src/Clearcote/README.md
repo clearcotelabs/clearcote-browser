@@ -477,6 +477,7 @@ var r = Clearcote.Clearcote.FontReportFor("/opt/clearcote/chrome");
 | `Platform` | `--fingerprint-platform` = `windows` \| `linux` \| `macos` \| `android` |
 | `Brand` / `BrandVersion` | `--fingerprint-brand` / `-brand-version` (`Chrome`, `Edge`, …) |
 | `TlsProfile` | `--fingerprint-tls-profile` — keep the TLS ClientHello coherent with the claimed Chrome major |
+| `RealComputer` | For one identity per real desktop: this computer's screen (size, work area, pixel ratio), touch points and display language instead of the persona's. `RealComputer = true` for all three, or `new RealComputer { Screen = true }`. Behind a proxy with geoip on, the exit keeps the languages; values you set win. Off by default (profiles on one computer would share these values); not for cloud or Docker launches. |
 | `GpuVendor` / `GpuRenderer` | WebGL `UNMASKED_VENDOR` / `RENDERER`. A short vendor name (`"intel"`) is sent as Chrome reports it (`Google Inc. (Intel)`); a vendor and renderer from two GPU makers throw `ArgumentException`. Pin both. |
 | `HardwareConcurrency` | `navigator.hardwareConcurrency` |
 | `Timezone` / `AcceptLanguage` | IANA tz + `navigator.languages` (+ coherent `Intl` locale) |

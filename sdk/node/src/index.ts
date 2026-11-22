@@ -31,6 +31,7 @@ import type {
 import { makeRecoveredCopy, recoveredExe, removeFailedLaunchDirs } from "./winlaunch.js";
 import { checkInstall, ensureBinary, ensureRunnableHere, ensureVersion, proEnsureBinary, resolvedEngineVersion, resolveReleaseChannel, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, withoutCallerRepeats, type FingerprintOptions } from "./fingerprint.js";
+import { withRealComputer } from "./realcomputer.js";
 import { applyGeoipMode, directStunEligible, dropAutoWebrtcIp, geoipMode, resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
 import { defaultColorScheme, engineDecidesColorScheme, installColorSchemeDefault } from "./colorscheme.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeLaunchOptions } from "./humanize.js";
@@ -1167,6 +1168,10 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   // Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udpRelayOrFallback), asked before geoip so a
   // sticky session is already on its UDP-capable exit when geoip looks the exit up.
   const socks5Udp = await udpRelayOrFallback((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, socks5UdpOpt, quiet);
+  // realComputer (opt-in): this computer's screen / touch / display language, before geoip so geoip only fills what
+  // is still empty (./realcomputer.ts). Behind a proxy with geoip on, the exit keeps deciding the languages.
+  Object.assign(fingerprint, await withRealComputer(fingerprint as Record<string, unknown>, {
+    proxied: !!proxyOpt && geoipMode(geoip, undefined, isFingerprintPassthrough(fingerprint.fingerprint)) !== "off", quiet }));
   const geoApplied = await applyGeoipMode(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, geoipMode(geoip, undefined, isFingerprintPassthrough(fingerprint.fingerprint)), quiet);
   const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
@@ -1328,6 +1333,10 @@ async function launchLocalPersistentContextNow(
   // Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udpRelayOrFallback), asked before geoip so a
   // sticky session is already on its UDP-capable exit when geoip looks the exit up.
   const socks5Udp = await udpRelayOrFallback((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, socks5UdpOpt, quiet);
+  // realComputer (opt-in): this computer's screen / touch / display language, before geoip so geoip only fills what
+  // is still empty (./realcomputer.ts). Behind a proxy with geoip on, the exit keeps deciding the languages.
+  Object.assign(fingerprint, await withRealComputer(fingerprint as Record<string, unknown>, {
+    proxied: !!proxyOpt && geoipMode(geoip, undefined, isFingerprintPassthrough(fingerprint.fingerprint)) !== "off", quiet }));
   const geoApplied = await applyGeoipMode(fingerprint, (pwOptions as PlaywrightLaunchOptions).proxy, geoipMode(geoip, undefined, isFingerprintPassthrough(fingerprint.fingerprint)), quiet);
   const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.
@@ -1686,6 +1695,10 @@ async function serveNow(options: ServeOptions = {}): Promise<Server> {
   // Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udpRelayOrFallback), asked before geoip so a
   // sticky session is already on its UDP-capable exit when geoip looks the exit up.
   const socks5Udp = await udpRelayOrFallback(proxyOpt as PwProxy | undefined, socks5UdpOpt, quiet);
+  // realComputer (opt-in): this computer's screen / touch / display language, before geoip so geoip only fills what
+  // is still empty (./realcomputer.ts). Behind a proxy with geoip on, the exit keeps deciding the languages.
+  Object.assign(fingerprint, await withRealComputer(fingerprint as Record<string, unknown>, {
+    proxied: !!proxyOpt && geoipMode(geoip, undefined, isFingerprintPassthrough(fingerprint.fingerprint)) !== "off", quiet }));
   const geoApplied = await applyGeoipMode(fingerprint, proxyOpt, geoipMode(geoip, undefined, isFingerprintPassthrough(fingerprint.fingerprint)), quiet);  // on by default (./geoip.ts)
   const geo = geoApplied.geo;
   // A rotating proxy changes the exit per connection; checked alongside the launch, awaited at the end.

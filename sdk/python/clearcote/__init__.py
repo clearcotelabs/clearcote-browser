@@ -684,6 +684,10 @@ def _prepare(kwargs):
     # Relay UDP: a proxy that refuses UDP ASSOCIATE gets no relay (udp_relay_or_fallback), asked before geoip
     # so a sticky session is already on its UDP-capable exit when geoip looks the exit up.
     socks5_udp = udp_relay_or_fallback(kwargs.get("proxy"), socks5_udp, quiet)
+    # real_computer (opt-in): this computer's screen / touch / display language, before geoip so geoip only fills
+    # what is still empty (_realcomputer.py). Behind a proxy with geoip on, the exit keeps deciding the languages.
+    from ._realcomputer import with_real_computer
+    fp.update(with_real_computer(fp, proxied=bool(proxy_opt) and geoip_mode(geoip, passthrough=passthrough) != "off", quiet=quiet))
     geo_applied = apply_geoip_mode(fp, kwargs.get("proxy"), geoip_mode(geoip, passthrough=passthrough), quiet=quiet)
     exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update, pro=_cc_pro, version=version,
                           release_channel=release_channel)
