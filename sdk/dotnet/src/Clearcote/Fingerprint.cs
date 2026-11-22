@@ -161,9 +161,12 @@ public class FingerprintOptions
     /// <summary>
     /// <c>true</c> gives canvas and WebGL noise ONE seed per profile instead of one per site (eTLD+1), on
     /// every farbled exit (getImageData, toDataURL/toBlob/convertToBlob, WebGL readPixels), so a profile
-    /// gives the same canvas/WebGL result on every site. Default <c>false</c>: a different noise result
-    /// per site. No effect with the noise off (<c>FingerprintNoise = false</c>). Needs engine r60; on an
-    /// older engine it is dropped with a warning, because that engine would quietly keep per-site noise.
+    /// gives the same canvas/WebGL result on every site, as a real device does; <c>false</c> gives a different
+    /// noise result per site. Unset (since 0.70.5): <c>true</c> for a new profile (a throwaway launch, or a
+    /// profile folder's first launch on engine r60+), <c>false</c> for a folder that already had a profile, so
+    /// its canvas does not change. The folder remembers its mode in <c>clearcote.json</c>; setting this changes
+    /// it (<see cref="NoiseMode"/>). No effect with the noise off (<c>FingerprintNoise = false</c>). Needs engine
+    /// r60; set explicitly on an older engine it is dropped with a warning.
     /// </summary>
     public bool? NoisePerProfile { get; set; }
     /// Import a real captured fingerprint: a path to a .json profile, a JSON string, or an object.

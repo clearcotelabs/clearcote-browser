@@ -221,6 +221,9 @@ def _serve_now(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=No
     # dropped the key and launched the FREE engine for a licensed caller -- and even had it resolved
     # the PRO engine, the gate would have refused to start without CLEARCOTE_RUN_TOKEN below.
     # launch()/launch_persistent_context() and Node's serve() have always done this.
+    # One noise per profile for a new folder (or serve's own temp one), the remembered mode for a known one.
+    from ._noisemode import has_chrome_data
+    kwargs["_cc_noise_dir"] = (user_data_dir, bool(user_data_dir) and has_chrome_data(user_data_dir))
     lease = _acquire_lease_from_kwargs(kwargs)
     # Build the full stealth arg set exactly like launch() does (fingerprint + privacy-sandbox +
     # webrtc leak-proofing + proxy + feature-merge + geoip), then launch the binary ourselves.

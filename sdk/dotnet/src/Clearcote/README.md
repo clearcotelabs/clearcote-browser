@@ -486,7 +486,7 @@ var r = Clearcote.Clearcote.FontReportFor("/opt/clearcote/chrome");
 | `PersonaSchema` | `--fingerprint-schema` — which identity model a seed derives: 7 (the default since 2026-10-26, engine 156 r51+ via the persona service), 5 (r45 to r51), 4 (154 r37 to 155 r44), 3 (154 r36), 2 (153 r29 to 154 r35), 1 (before r29); there is no 6; a seed's identity under a schema never changes |
 | `RealGpuHost` | `--fingerprint-gpu-backend-real` — this host renders on a real GPU, so a schema-2 persona may claim a dedicated card |
 | `FingerprintNoise = false` | turn OFF farbling noise (canvas and WebGL; audio and client rects never get noise) |
-| `NoisePerProfile = true` | `--fingerprint-noise-per-profile` — one canvas/WebGL noise result per profile on every site instead of one per site; engine r60+ (dropped with a warning on older engines); no effect with the noise off |
+| `NoisePerProfile` | `--fingerprint-noise-per-profile` — `true`: one canvas/WebGL noise result per profile on every site; `false`: one per site. Unset: on for a new profile (a throwaway launch, or a profile folder's first launch), off for a folder that already had a profile, remembered in `clearcote.json` (`NoiseMode`); engine r60+ (set explicitly on an older engine it is dropped with a warning); no effect with the noise off |
 | `FingerprintProfile` | import a real captured fingerprint (path / JSON string / object) |
 | `StorageQuota` | `navigator.storage.estimate().quota` in MB |
 | `CanvasBridge` | forward canvas/WebGL readback to a remote real-GPU host |

@@ -301,6 +301,7 @@ async def _launch_incognito(kwargs):
         print("clearcote: crlset: the async launch() has no profile to seed a CRLSet into; use "
               "launch_persistent_context(). Launching without one", file=sys.stderr)
     kwargs.pop("crlset_timeout", None)
+    kwargs["_cc_noise_dir"] = (None, False)  # no folder: a new profile (_noisemode.py)
     # seed reflects the merged/effective fingerprint (profile-aware) -> stable motor persona
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
@@ -372,6 +373,9 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
 
 
 async def _launch_persistent_context_local(user_data_dir, kwargs):
+    # Whether the folder already held a profile, before the seeding below writes into it (_noisemode.py).
+    from ._noisemode import has_chrome_data
+    kwargs["_cc_noise_dir"] = (user_data_dir, has_chrome_data(user_data_dir))
     # Automation strip before the Widevine helper (it appends --disable-component-update rather than
     # clobbering ['--enable-automation']) — mirrors the sync path.
     kwargs.setdefault("ignore_default_args", list(DEFAULT_IGNORED_ARGS))

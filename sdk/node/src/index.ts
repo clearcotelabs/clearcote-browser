@@ -32,6 +32,7 @@ import { makeRecoveredCopy, recoveredExe, removeFailedLaunchDirs } from "./winla
 import { checkInstall, ensureBinary, ensureRunnableHere, ensureVersion, proEnsureBinary, resolvedEngineVersion, resolveReleaseChannel, warmFiles, type DownloadOptions } from "./download.js";
 import { fingerprintArgs, isFingerprintPassthrough, splitFingerprintOptions, withoutCallerRepeats, type FingerprintOptions } from "./fingerprint.js";
 import { withRealComputer } from "./realcomputer.js";
+import { resolveNoisePerProfile } from "./noisemode.js";
 import { applyGeoipMode, directStunEligible, dropAutoWebrtcIp, geoipMode, resolveGeoDetailed, startEgressDriftCheck, GeoipError, type Geo } from "./geoip.js";
 import { defaultColorScheme, engineDecidesColorScheme, installColorSchemeDefault } from "./colorscheme.js";
 import { installHumanize, installHumanizeOnContext, type HumanizeLaunchOptions } from "./humanize.js";
@@ -1188,6 +1189,9 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline);  // open build + proxy: no default WebRTC IP
   // Before the warnings below, so they judge the persona that will actually run (as in Python).
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
+  // One noise per profile for a new profile folder, the remembered mode for a known one (./noisemode.ts).
+  fingerprint.noisePerProfile = resolveNoisePerProfile(fingerprint.noisePerProfile, null,
+    { exe, passthrough: isFingerprintPassthrough(fingerprint.fingerprint), quiet });
   // Widevine: on by default for a licensed launch (`pro`: the key that selects the PRO build, which claims
   // the Google Chrome brand) on an engine with --widevine-cdm-path, which loads the CDM without a profile;
   // opt-in for a free one. Bounded + fail-soft by default (see ./widevine.ts).
@@ -1349,6 +1353,9 @@ async function launchLocalPersistentContextNow(
   ensureRunnableHere(exe);
   dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline);  // open build + proxy: no default WebRTC IP
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
+  // One noise per profile for a new profile folder, the remembered mode for a known one (./noisemode.ts).
+  fingerprint.noisePerProfile = resolveNoisePerProfile(fingerprint.noisePerProfile, userDataDir,
+    { exe, passthrough: isFingerprintPassthrough(fingerprint.fingerprint), quiet });
   const { args: proxyArgs, proxy } = resolveProxy(await relayProxyByIp((pwOptions as PlaywrightLaunchOptions).proxy as PwProxy | undefined, socks5Udp, quiet), engineSupportsSwitch(exe, "proxy-auth"));
   warnUnsupportedEngineOptions(exe, fingerprint as Record<string, unknown>, proxyOpt as PwProxy | undefined, quiet);
   // As launch(): the request API reaches the proxy through a local forwarder (./reqproxy.ts).
@@ -1711,6 +1718,9 @@ async function serveNow(options: ServeOptions = {}): Promise<Server> {
   ensureRunnableHere(exe);
   dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline);  // open build + proxy: no default WebRTC IP
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
+  // One noise per profile for a new profile folder, the remembered mode for a known one (./noisemode.ts).
+  fingerprint.noisePerProfile = resolveNoisePerProfile(fingerprint.noisePerProfile, uddOption ?? null,
+    { exe, passthrough: isFingerprintPassthrough(fingerprint.fingerprint), quiet });
   // Widevine: as launch() (on by default for a licensed launch on an r32+ engine, opt-in otherwise).
   const widevineCdm = await widevineLaunchArgs(exe, widevine, !!pro, userArgs, { quiet });
   // passProxy: what is left for a plain --proxy-server once credentials went to the engine's own

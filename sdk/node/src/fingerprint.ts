@@ -214,9 +214,13 @@ export interface FingerprintOptions {
   /**
    * `true` gives canvas and WebGL noise ONE seed per profile instead of one per site (eTLD+1), on every
    * farbled exit (getImageData, toDataURL/toBlob/convertToBlob, WebGL readPixels), so a profile gives
-   * the same canvas/WebGL result on every site. Default `false`: a different noise result per site.
-   * No effect with the noise off (`fingerprintNoise: false`). Needs engine r60; on an older engine it
-   * is dropped with a warning, because that engine would quietly keep per-site noise.
+   * the same canvas/WebGL result on every site, as a real device does; `false` gives a different noise
+   * result per site. Unset (since 0.70.5): `true` for a new profile (a throwaway launch, or a profile
+   * folder's first launch on engine r60+), `false` for a folder that already had a profile, so its
+   * canvas does not change. The folder remembers its mode in `clearcote.json`; setting this option
+   * changes it. No effect with the noise off (`fingerprintNoise: false`). Needs engine r60; set
+   * explicitly on an older engine it is dropped with a warning, because that engine would quietly keep
+   * per-site noise.
    */
   noisePerProfile?: boolean;
   /**

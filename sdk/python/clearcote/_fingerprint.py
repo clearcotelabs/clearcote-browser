@@ -594,8 +594,9 @@ def fingerprint_args(opts):
         args.append("--fingerprint-webgl-no-read-margin")
     # noise_per_profile=True gives canvas and WebGL noise ONE seed per profile instead of one per
     # site (eTLD+1), on every farbled exit (getImageData, toDataURL/toBlob/convertToBlob, WebGL
-    # readPixels), so a profile gives the same canvas/WebGL result on every site. Default: per-site
-    # noise. No effect with the noise off (fingerprint_noise=False). Needs engine r60; on an older
+    # readPixels), so a profile gives the same canvas/WebGL result on every site. Unset (0.70.5+): the
+    # SDK sets it per folder before this runs (True for a new profile, False for one made earlier;
+    # _noisemode.py). No effect with the noise off (fingerprint_noise=False). Needs engine r60; on an older
     # engine gate_engine_switches drops it WITH a warning, since that engine would quietly keep
     # per-site noise.
     if opts.get("noise_per_profile") is True:

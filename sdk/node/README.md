@@ -184,7 +184,7 @@ Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the 
 |---|---|
 | `fingerprint: "off"` | Pass-through: no persona, for telling whether a problem comes from the spoofing or from your environment. See below. |
 | `fingerprintVoices: false` | Keep the host's own `speechSynthesis` voices under a persona. |
-| `noisePerProfile: true` | One canvas and WebGL noise per profile on every site, instead of one per site. Engine r60+; no effect with the noise off. |
+| `noisePerProfile` | One canvas and WebGL noise per profile on every site (`true`), or one per site (`false`). Unset: on for a new profile (a throwaway launch, or a profile folder's first launch), off for a folder that already had a profile, so its canvas does not change; the folder remembers its mode in `clearcote.json`. Engine r60+; no effect with the noise off. |
 | `allowThirdPartyCookies: false` | Block third-party cookies. Since 0.45.0 they are allowed by default, as in Chrome; embedded sign-in, payment and captcha frames rely on them. |
 | `transparentProxy: true` | With a proxy: send the headers a direct connection sends, and report connection timing as a reused connection. |
 

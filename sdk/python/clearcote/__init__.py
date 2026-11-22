@@ -108,6 +108,7 @@ from ._widevine import (  # noqa: F401  (widevine_cdm_args re-exported for tests
 )
 from ._crlset import apply_crlset_launch, fetch_crlset, install_crlset
 from ._autofillpref import apply_autofill_prefs
+from ._noisemode import has_chrome_data, resolve_noise_per_profile
 from . import _offline
 from ._offline import OfflineKeyError
 from ._license import (
@@ -592,6 +593,7 @@ def drop_auto_webrtc_ip(fp, applied, proxy, licensed):
         fp.pop("webrtc_ip", None)
 
 
+_NO_NOISE_DIR = object()  # _cc_noise_dir absent: _prepare leaves noise_per_profile as given
 _REQUEST_ROUTE_KEY = "_cc_request_route"  # _prepare -> the launch: (proxy, proxy_args, quiet) to route
 
 
@@ -706,6 +708,15 @@ def _prepare(kwargs):
                             quiet=quiet, pro=_cc_pro, lease=outer_lease)
     else:
         kwargs.pop("_cc_auto_profile", None)
+    # One noise per profile for a new profile folder, the remembered mode for a known one (_noisemode.py).
+    # _cc_noise_dir = (folder or None for no folder, whether it held Chrome data before this launch touched
+    # it); a caller that does not say leaves the option as given.
+    noise_dir = kwargs.pop("_cc_noise_dir", _NO_NOISE_DIR)
+    if noise_dir is not _NO_NOISE_DIR:
+        npp = resolve_noise_per_profile(fp.get("noise_per_profile"), noise_dir[0], exe=exe, passthrough=passthrough,
+                                        quiet=quiet, had_chrome_data=noise_dir[1])
+        if npp is not None:
+            fp["noise_per_profile"] = npp
     # Fonts are the most identifying surface measured -- 9.45 bits of entropy, and 35% of real
     # machines carry a font set nobody else has. A seeded persona with no profile used to fall
     # back to the engine's canonical per-OS list, which is byte-identical on every install: zero
@@ -1427,6 +1438,7 @@ def _launch_incognito(kwargs):
               "launching without one", file=sys.stderr)
     kwargs.pop("crlset_timeout", None)
     shader_dialect = kwargs.pop("shader_dialect", None)  # popped before _prepare: not a PW option
+    kwargs["_cc_noise_dir"] = (None, False)  # no folder: a new profile (_noisemode.py)
     persona_env = kwargs.pop("persona_env", None)  # 1021 env mode (_personaenv.py): not a PW option
     font_dirs = check_font_dirs(kwargs.pop("font_dirs", None))  # Linux fontconfig dirs; a typo raises before the lease
     # _cc_lease (internal): the host probe behind profile="auto" runs on its caller's slot rather
@@ -1519,6 +1531,8 @@ def _launch_persistent_context_local(user_data_dir, kwargs):
     # Set the default strip (DEFAULT_IGNORED_ARGS) BEFORE the Widevine helper so it appends
     # --disable-component-update to it rather than replacing it (which would lose the AutomationControlled
     # strip on Widevine launches).
+    # Whether the folder already held a profile, before the seeding below writes into it (_noisemode.py).
+    kwargs["_cc_noise_dir"] = (user_data_dir, has_chrome_data(user_data_dir))
     kwargs.setdefault("ignore_default_args", list(DEFAULT_IGNORED_ARGS))
     # Widevine ASKED FOR (widevine=True or CLEARCOTE_WIDEVINE=1): seed the CDM into this profile too, so
     # an engine without --widevine-cdm-path loads it (best-effort, as always). The licensed DEFAULT only
