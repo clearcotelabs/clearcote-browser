@@ -35,7 +35,8 @@ clearcote-serve = "clearcote._serve:_cli_main"
 test = ["pytest>=7.3", "pytest-asyncio>=0.24"]
 
 [project.urls]
-Homepage = "https://github.com/clearcotelabs/clearcote-browser"
+Homepage = "https://www.clearcotelabs.com"
+Documentation = "https://www.clearcotelabs.com/docs"
 Repository = "https://github.com/clearcotelabs/clearcote-browser"
 Issues = "https://github.com/clearcotelabs/clearcote-browser/issues"
 

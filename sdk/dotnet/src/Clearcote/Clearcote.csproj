@@ -16,7 +16,7 @@
     <Description>Playwright drop-in for the Clearcote anti-fingerprint Chromium build. Launch() returns a standard Microsoft.Playwright IBrowser backed by the verified Clearcote binary, which is auto-downloaded and SHA-256 checked. With a PRO license key it pulls the license-gated build and checks out a floating-concurrency lease.</Description>
     <PackageTags>anti-fingerprint;stealth;chromium;playwright;browser;automation;fingerprint;anti-detect</PackageTags>
     <PackageLicenseExpression>BSD-3-Clause</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/clearcotelabs/clearcote-browser</PackageProjectUrl>
+    <PackageProjectUrl>https://www.clearcotelabs.com</PackageProjectUrl>
     <RepositoryUrl>https://github.com/clearcotelabs/clearcote-browser</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
