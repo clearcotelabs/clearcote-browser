@@ -1,5 +1,17 @@
 # clearcote-mcp changelog
 
+## 0.3.2
+
+### Packaging
+
+- The PyPI and npm pages link the docs at https://www.clearcotelabs.com/docs/mcp (Repository stays on GitHub).
+- `server.json` (Official MCP Registry) marks every environment variable optional and gives `CLEARCOTE_GEOIP` and
+  `CLEARCOTE_CLOUD` a default of `0`, so directories that import the registry no longer list `CLEARCOTE_PROXY` and
+  `CLEARCOTE_API_KEY` as required.
+- `llms-install.md`: setup steps for agents such as Cline.
+
+No change to the server or its tools.
+
 ## 0.3.1
 
 ### Dependencies
