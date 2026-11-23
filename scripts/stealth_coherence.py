@@ -89,6 +89,9 @@ REQUIRED = {
     "measuretext-grid",   # measureText metrics truthful/on-grid (patch 060: noise factor 0)
     "worker-vs-main",     # main thread == OffscreenCanvas worker (patch 060)
     "bcr-vs-range",       # getBoundingClientRect == Range rects, on-grid (patch 050: clientRects offset mechanism removed)
+    # Added 2026-11-23 (patch 1056). Holds on every engine when --platform matches the build's OS
+    # (this gate's CI: Windows binary, windows persona); a cross-OS persona passes only with 1056.
+    "blob-native-endings-vs-ua",  # Blob {endings:"native"} writes CRLF iff the UA claims Windows
 }
 KNOWN_GAPS = {
     "origin-invariant": "canvas/WebGL readback is keyed by registrable domain, so one identity renders differently per site. Left domain-keyed by design (2026-06-30): per-site noise-unlinkability is retained. Flipping to persona-keyed (patch 001) is only warranted if the usage model becomes one-profile-per-identity.",
@@ -148,6 +151,11 @@ PROBE_JS = r"""async () => {
     return { vendor: gl.getParameter(x.UNMASKED_VENDOR_WEBGL), renderer: gl.getParameter(x.UNMASKED_RENDERER_WEBGL) }; } catch(e){ return 'ERR:'+e; } })();
   out.webgpu = await (async () => { try { if(!navigator.gpu) return 'no-webgpu'; const a=await navigator.gpu.requestAdapter(); if(!a) return 'no-adapter';
     const info=a.info||(a.requestAdapterInfo?await a.requestAdapterInfo():{}); return { vendor:info.vendor, architecture:info.architecture, features:Array.from(a.features||[]).sort() }; } catch(e){ return 'ERR:'+e; } })();
+
+  // Blob endings "native": CRLF (size 4) only in Windows builds, LF (size 3) elsewhere. Bot-detection
+  // device checks read it; patch 1056 makes it follow the persona's OS.
+  out.ua = navigator.userAgent;
+  out.blobNativeSize = (() => { try { return new Blob(['a\nb'], {endings: 'native'}).size; } catch (e) { return 'ERR:'+e; } })();
 
   return out;
 }""".replace("__STRS__", json.dumps(STRS))
@@ -221,6 +229,19 @@ def evaluate(a, b):
         checks.append(("webgl-webgpu-vendor-match", match,
                        f"webgpu '{wg.get('vendor')}' coheres with webgl '{wl.get('vendor')}'" if match
                        else f"MISMATCH webgpu '{wg.get('vendor')}' vs webgl '{wl.get('vendor')}'"))
+
+    # blob-native-endings-vs-ua: new Blob(["a\nb"], {endings:"native"}).size is 4 (CRLF) on a
+    # Windows build and 3 (LF) on every other build. It must match the OS the UA claims.
+    size = a.get("blobNativeSize")
+    ua_win = "windows nt" in str(a.get("ua", "")).lower()
+    if size not in (3, 4):
+        checks.append(("blob-native-endings-vs-ua", False, f"probe failed or option unsupported: size={size}"))
+    else:
+        crlf = size == 4
+        checks.append(("blob-native-endings-vs-ua", crlf == ua_win,
+                       f"endings native wrote {'CRLF' if crlf else 'LF'} (size {size}), UA claims "
+                       f"{'Windows' if ua_win else 'a non-Windows OS'}"
+                       + ("" if crlf == ua_win else ": the build OS shows through the persona (needs patch 1056)")))
 
     return checks
 
@@ -373,10 +394,13 @@ def selftest():
         "canvasHash": 111, "webglRenderHash": 222,
         "webgl": {"vendor": "Google Inc. (Intel)", "renderer": "ANGLE (Intel, ...)"},
         "webgpu": {"vendor": "intel", "architecture": "gen-12-lp", "features": []},
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+        "blobNativeSize": 4,
     }
     good_b = dict(good)  # same hashes => origin-invariant
     res = {cid: passed for cid, passed, _ in evaluate(good, good_b)}
-    for cid in ("measuretext-grid", "worker-vs-main", "bcr-vs-range", "origin-invariant", "webgl-webgpu-vendor-match"):
+    for cid in ("measuretext-grid", "worker-vs-main", "bcr-vs-range", "origin-invariant", "webgl-webgpu-vendor-match",
+                "blob-native-endings-vs-ua"):
         if not res.get(cid):
             fails.append(f"coherent fixture should pass {cid}, got {res.get(cid)}")
 
@@ -386,10 +410,19 @@ def selftest():
     bad["rects"]["rangeLeft"] = 9.999177932739258          # bcr != range
     bad_b = json.loads(json.dumps(good)); bad_b["canvasHash"] = 999  # per-origin divergence
     bad["webgpu"]["vendor"] = "nvidia"                     # vendor mismatch vs Intel webgl
+    bad["blobNativeSize"] = 3                              # LF from a build claiming Windows
     res2 = {cid: passed for cid, passed, _ in evaluate(bad, bad_b)}
-    for cid in ("measuretext-grid", "worker-vs-main", "bcr-vs-range", "origin-invariant", "webgl-webgpu-vendor-match"):
+    for cid in ("measuretext-grid", "worker-vs-main", "bcr-vs-range", "origin-invariant", "webgl-webgpu-vendor-match",
+                "blob-native-endings-vs-ua"):
         if res2.get(cid):
             fails.append(f"incoherent fixture should FAIL {cid}, but it passed")
+    # the other direction: a non-Windows claim must write LF; and a missing probe fails closed
+    for size, ua, want in ((3, "Mozilla/5.0 (X11; Linux x86_64)", True), (4, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", False),
+                           (None, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", False)):
+        fx = json.loads(json.dumps(good)); fx["blobNativeSize"] = size; fx["ua"] = ua
+        got = {cid: p for cid, p, _ in evaluate(fx, fx)}.get("blob-native-endings-vs-ua")
+        if got is not want:
+            fails.append(f"blob-native-endings-vs-ua: size={size} ua={ua[:30]} should be {want}, got {got}")
 
     # contract: coherent fixture => the known gaps "pass" => verdict must FLAG them (not ok)
     ok_all_pass, _ = verdict([(cid, True, "") for cid in (REQUIRED | set(KNOWN_GAPS))])
