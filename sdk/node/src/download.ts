@@ -1333,17 +1333,95 @@ function verCmp(a: string, b: string): number {
   return 0;
 }
 
-async function fetchCatalog(quiet?: boolean): Promise<Catalog> {
+// ── Version catalog cache ────────────────────────────────────────────────────
+// The catalog answer is kept in this process and in ~/.clearcote/catalog.json as {at, url, catalog} (`at` in
+// epoch seconds), so many launches from one machine ask the site once per CATALOG_TTL_SEC and not once each. A
+// burst of requests from one address is answered by the site's host with a 403 challenge page (25 browsers
+// started together were enough), which used to end in the bundled snapshot.
+const CATALOG_TTL_SEC = 600;
+// Each process adds its own 0-300 s, so processes started together do not all ask again at the same moment:
+// the first one to refresh the file serves the rest.
+const CATALOG_TTL_SPREAD_SEC = 300;
+// A kept answer this old is still preferred over the bundled snapshot when the catalog can't be reached.
+const CATALOG_STALE_MAX_SEC = 7 * 86400;
+type CatalogEntry = { at: number; url: string; catalog: Catalog };
+const catalogMemo = new Map<string, CatalogEntry>();
+let catalogSpreadSec: number | null = null;
+
+function catalogPath(): string {
+  return path.join(os.homedir(), ".clearcote", "catalog.json");
+}
+
+function catalogTtlSec(): number {
+  if (catalogSpreadSec === null) catalogSpreadSec = Math.random() * CATALOG_TTL_SPREAD_SEC;
+  return CATALOG_TTL_SEC + catalogSpreadSec;
+}
+
+/** The catalog kept for `url` when younger than `maxAgeSec` (this process first, then the file); null otherwise. */
+function keptCatalog(url: string, maxAgeSec: number): Catalog | null {
+  const p = catalogPath();
+  const usable = (e: unknown): e is CatalogEntry => {
+    const d = e as Partial<CatalogEntry> | null | undefined;
+    if (!d || typeof d.at !== "number" || d.url !== url) return false;
+    if (!d.catalog || !Array.isArray(d.catalog.builds) || !d.catalog.builds.length) return false;
+    const age = Date.now() / 1000 - d.at;
+    return age >= 0 && age < maxAgeSec; // a time ahead of this clock is no proof of age
+  };
+  const mem = catalogMemo.get(p);
+  if (usable(mem)) return mem.catalog;
+  try {
+    const d: unknown = JSON.parse(readFileSync(p, "utf8"));
+    if (usable(d)) {
+      catalogMemo.set(p, d);
+      return d.catalog;
+    }
+  } catch {
+    /* none, or corrupt: a miss */
+  }
+  return null;
+}
+
+/** Keep a usable answer (never a failure). Best-effort: a cache is never a reason to fail a launch. */
+function keepCatalog(url: string, catalog: Catalog): void {
+  const p = catalogPath();
+  const entry: CatalogEntry = { at: Date.now() / 1000, url, catalog };
+  catalogMemo.set(p, entry);
+  const tmp = `${p}.tmp-${randomBytes(4).toString("hex")}`;
+  try {
+    mkdirSync(path.dirname(p), { recursive: true });
+    writeFileSync(tmp, JSON.stringify(entry));
+    renameSync(tmp, p);
+  } catch {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * The public version catalog. An answer is reused for about 10-15 minutes, by this process and others on the
+ * machine. When the live catalog is unreachable, the last kept answer (up to a week old) is used; without one,
+ * the bundled snapshot.
+ */
+export async function fetchCatalog(quiet?: boolean): Promise<Catalog> {
+  const kept = keptCatalog(CATALOG_URL, catalogTtlSec());
+  if (kept) return kept;
+  let why = "";
   try {
     const res = await fetch(CATALOG_URL, { redirect: "follow", headers: { "User-Agent": "clearcote-sdk" }, signal: AbortSignal.timeout(30_000) });
     if (res.ok) {
       const data = (await res.json()) as Catalog;
-      if (data && Array.isArray(data.builds) && data.builds.length) return data;
+      if (data && Array.isArray(data.builds) && data.builds.length) {
+        keepCatalog(CATALOG_URL, data);
+        return data;
+      }
+    } else {
+      why = `HTTP ${res.status}`;
     }
   } catch (e) {
-    log(quiet, `version catalog unreachable (${(e as Error).message}); using the bundled snapshot`);
+    why = (e as Error).message;
   }
-  return CATALOG_FALLBACK;
+  const stale = keptCatalog(CATALOG_URL, CATALOG_STALE_MAX_SEC);
+  if (why) log(quiet, `version catalog unreachable (${why}); using ${stale ? "the last answer kept on this machine" : "the bundled snapshot"}`);
+  return stale ?? CATALOG_FALLBACK;
 }
 
 function catalogAvailable(cat: Catalog, plat: "windows" | "linux" | "macos"): string {

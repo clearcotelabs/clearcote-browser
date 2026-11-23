@@ -1198,18 +1198,100 @@ def _ver_key(v):
     return tuple(int(x) for x in re.findall(r"\d+", v or "")[:4])
 
 
+# ── Version catalog cache ────────────────────────────────────────────────────
+# The catalog answer is kept in this process and in ~/.clearcote/catalog.json as {at, url, catalog} (`at` in
+# epoch seconds), so many launches from one machine ask the site once per _CATALOG_TTL and not once each. A
+# burst of requests from one address is answered by the site's host with a 403 challenge page (25 browsers
+# started together were enough), which used to end in the bundled snapshot.
+_CATALOG_TTL = 600  # seconds a kept answer is used without asking again
+# Each process adds its own 0-300 s, so processes started together do not all ask again at the same moment:
+# the first one to refresh the file serves the rest.
+_CATALOG_TTL_SPREAD = 300
+# A kept answer this old is still preferred over the bundled snapshot when the catalog can't be reached.
+_CATALOG_STALE_MAX = 7 * 86400
+_catalog_memo = {}  # file path -> {"at": epoch seconds, "url": ..., "catalog": the parsed answer}
+_catalog_spread = None
+
+
+def _catalog_path():
+    return os.path.join(str(pathlib.Path.home()), ".clearcote", "catalog.json")
+
+
+def _catalog_ttl():
+    global _catalog_spread
+    if _catalog_spread is None:
+        import random
+
+        _catalog_spread = random.uniform(0, _CATALOG_TTL_SPREAD)  # noqa: S311 (timing spread, not a secret)
+    return _CATALOG_TTL + _catalog_spread
+
+
+def _catalog_entry_age(entry, url):
+    """Seconds since a ``{at, url, catalog}`` entry for this URL was kept, or None when it is not usable
+    (unreadable, another URL, no builds, or a time ahead of this clock: no proof of age)."""
+    try:
+        age = time.time() - float(entry["at"])
+        catalog = entry["catalog"]
+        if entry.get("url") != url or not (isinstance(catalog, dict) and catalog.get("builds")):
+            return None
+    except (TypeError, KeyError, ValueError, AttributeError):
+        return None
+    return age if age >= 0 else None
+
+
+def _kept_catalog(url, max_age):
+    """The catalog kept for ``url`` when younger than ``max_age`` seconds (this process first, then the file
+    another process may have written), or None."""
+    path = _catalog_path()
+    entry = _catalog_memo.get(path)
+    age = _catalog_entry_age(entry, url)
+    if age is None or age >= max_age:
+        try:
+            with open(path, encoding="utf-8") as f:
+                entry = json.load(f)
+        except (OSError, ValueError):
+            return None  # missing or corrupt: a miss
+        age = _catalog_entry_age(entry, url)
+        if age is None or age >= max_age:
+            return None
+        _catalog_memo[path] = entry
+    return entry["catalog"]
+
+
+def _keep_catalog(url, catalog):
+    entry = {"at": time.time(), "url": url, "catalog": catalog}
+    path = _catalog_path()
+    _catalog_memo[path] = entry
+    try:
+        _replace_json(path, entry)
+    except OSError:
+        pass  # this process still has it
+
+
 def _fetch_catalog(quiet=False):
     """The public version catalog (source of truth for which majors exist + each build's tier).
-    Falls back to the bundled snapshot when the live catalog is unreachable."""
+
+    An answer is reused for about 10-15 minutes, by this process and others on the machine. When the live
+    catalog is unreachable, the last kept answer (up to a week old) is used; without one, the bundled snapshot."""
     from .release import CATALOG_FALLBACK, CATALOG_URL
 
+    kept = _kept_catalog(CATALOG_URL, _catalog_ttl())
+    if kept is not None:
+        return kept
     try:
         data = json.loads(_http_get(CATALOG_URL).decode("utf-8"))
         if isinstance(data, dict) and data.get("builds"):
+            _keep_catalog(CATALOG_URL, data)
             return data
     except Exception as exc:  # noqa: BLE001
+        stale = _kept_catalog(CATALOG_URL, _CATALOG_STALE_MAX)
+        if stale is not None:
+            _log(quiet, f"version catalog unreachable ({exc}); using the last answer kept on this machine")
+            return stale
         _log(quiet, f"version catalog unreachable ({exc}); using the bundled snapshot")
-    return CATALOG_FALLBACK
+        return CATALOG_FALLBACK
+    stale = _kept_catalog(CATALOG_URL, _CATALOG_STALE_MAX)
+    return stale if stale is not None else CATALOG_FALLBACK
 
 
 def _catalog_available(catalog, plat):

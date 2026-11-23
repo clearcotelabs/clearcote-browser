@@ -1593,19 +1593,109 @@ public static class Download
         return 0;
     }
 
-    private static async Task<Catalog> FetchCatalogAsync(bool quiet)
+    // ── Version catalog cache ────────────────────────────────────────────────
+    // The catalog answer is kept in this process and in ~/.clearcote/catalog.json as {at, url, catalog} (at in
+    // epoch seconds), so many launches from one machine ask the site once per CatalogTtl and not once each. A
+    // burst of requests from one address is answered by the site's host with a 403 challenge page (25 browsers
+    // started together were enough), which used to end in the bundled snapshot.
+
+    /// How long a kept catalog answer is used without asking again.
+    internal static readonly TimeSpan CatalogTtl = TimeSpan.FromSeconds(600);
+    /// Each process adds its own 0-300 s, so processes started together do not all ask again at the same moment.
+    internal const double CatalogTtlSpreadSeconds = 300;
+    /// A kept answer this old is still preferred over the bundled snapshot when the catalog can't be reached.
+    internal static readonly TimeSpan CatalogStaleMax = TimeSpan.FromDays(7);
+    /// This process's share of the spread, in seconds (tests set it).
+    internal static double? CatalogSpreadSeconds;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double At, string Url, Catalog Catalog)> CatalogMemo = new();
+
+    /// Forget this process's kept catalog (tests).
+    internal static void ForgetCatalog() => CatalogMemo.Clear();
+
+    internal static string CatalogPath() => Path.Combine(Native.ClearcoteDir, "catalog.json");
+
+    private static double CatalogTtlSeconds()
     {
+        CatalogSpreadSeconds ??= Random.Shared.NextDouble() * CatalogTtlSpreadSeconds;
+        return CatalogTtl.TotalSeconds + CatalogSpreadSeconds.Value;
+    }
+
+    private static Catalog? ParseCatalog(string json)
+    {
+        var cat = JsonSerializer.Deserialize<Catalog>(json, CatalogJsonOpts);
+        return cat is { Builds.Count: > 0 } ? cat : null;
+    }
+
+    /// The catalog kept for <paramref name="url"/> when younger than <paramref name="maxAgeSeconds"/> (this
+    /// process first, then the file another process may have written), or null. An unreadable file is a miss.
+    private static Catalog? KeptCatalog(string url, double maxAgeSeconds)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        // A time ahead of this clock is no proof of age: a miss.
+        bool Young(double at) => now - at >= 0 && now - at < maxAgeSeconds;
+        var path = CatalogPath();
+        if (CatalogMemo.TryGetValue(path, out var memo) && memo.Url == url && Young(memo.At)) return memo.Catalog;
         try
         {
-            var json = await FetchTextAsync(Release.CatalogUrl).ConfigureAwait(false);
-            var cat = JsonSerializer.Deserialize<Catalog>(json, CatalogJsonOpts);
-            if (cat is { Builds.Count: > 0 }) return cat;
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+            if (root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("at", out var at) && at.ValueKind == JsonValueKind.Number && Young(at.GetDouble())
+                && root.TryGetProperty("url", out var u) && u.ValueKind == JsonValueKind.String && u.GetString() == url
+                && root.TryGetProperty("catalog", out var c) && c.ValueKind == JsonValueKind.Object
+                && ParseCatalog(c.GetRawText()) is { } cat)
+            {
+                CatalogMemo[path] = (at.GetDouble(), url, cat);
+                return cat;
+            }
+        }
+        catch { /* missing or unreadable */ }
+        return null;
+    }
+
+    /// Keep a usable answer (never a failure). Best-effort: written to a temporary file and renamed into place,
+    /// so another process never reads half of it.
+    private static void KeepCatalog(string url, Catalog cat, string catalogJson)
+    {
+        var at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        var path = CatalogPath();
+        CatalogMemo[path] = (at, url, cat);
+        try
+        {
+            Directory.CreateDirectory(Native.ClearcoteDir);
+            var tmp = $"{path}.tmp-{Convert.ToHexString(RandomNumberGenerator.GetBytes(4)).ToLowerInvariant()}";
+            File.WriteAllText(tmp, $"{{\"at\":{at.ToString("R", System.Globalization.CultureInfo.InvariantCulture)},\"url\":{JsonSerializer.Serialize(url)},\"catalog\":{catalogJson}}}");
+            try { File.Move(tmp, path, overwrite: true); }
+            catch { TryDelete(tmp); }
+        }
+        catch { /* this process still has it */ }
+    }
+
+    /// The public version catalog. An answer is reused for about 10-15 minutes, by this process and others on the
+    /// machine. When the live catalog is unreachable, the last kept answer (up to a week old) is used; without
+    /// one, the bundled snapshot.
+    internal static async Task<Catalog> FetchCatalogAsync(bool quiet)
+    {
+        var url = Release.CatalogUrl;
+        if (KeptCatalog(url, CatalogTtlSeconds()) is { } kept) return kept;
+        string? why = null;
+        try
+        {
+            var json = await FetchTextAsync(url).ConfigureAwait(false);
+            if (ParseCatalog(json) is { } cat)
+            {
+                KeepCatalog(url, cat, json);
+                return cat;
+            }
         }
         catch (Exception e)
         {
-            Log(quiet, $"version catalog unreachable ({e.Message}); using the bundled snapshot");
+            why = e.Message;
         }
-        return Release.CatalogFallback;
+        var stale = KeptCatalog(url, CatalogStaleMax.TotalSeconds);
+        if (why != null)
+            Log(quiet, $"version catalog unreachable ({why}); using {(stale != null ? "the last answer kept on this machine" : "the bundled snapshot")}");
+        return stale ?? Release.CatalogFallback;
     }
 
     /// Resolve a version selector against the public catalog, VALIDATING that it exists (and is
