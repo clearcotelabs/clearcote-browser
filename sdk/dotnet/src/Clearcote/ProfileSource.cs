@@ -82,6 +82,8 @@ public static class ProfileSource
     }
 
     /// The cached facts for <paramref name="exe"/>, or null (none, another binary, or older than 30 days).
+    internal const string HostCacheGpu = "real";
+
     public static HostFacts? ReadCachedHost(string exe)
     {
         try
@@ -89,6 +91,8 @@ public static class ProfileSource
             if (JsonNode.Parse(File.ReadAllText(HostCachePath())) is not JsonObject c) return null;
             if (c["_exe"] is not JsonValue e || !e.TryGetValue<string>(out var cachedExe) || ExeKey(cachedExe) != ExeKey(exe))
                 return null;   // different binary: re-measure
+            // "_gpu": "real" = read with the real GPU strings (0.71.0+); an older entry read the persona's: re-measure.
+            if (c["_gpu"] is not JsonValue g || !g.TryGetValue<string>(out var gpu) || gpu != HostCacheGpu) return null;
             // Host hardware does not change often, but a monitor or driver swap does; a month is a reasonable
             // compromise between staleness and paying for a launch every run. "_at" is epoch seconds (Python's
             // spelling, which this SDK writes) or an ISO time (Node's).
@@ -114,6 +118,7 @@ public static class ProfileSource
             var o = ProfileJson.HostTo(facts);
             o["_exe"] = ExeKey(exe);
             o["_at"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+            o["_gpu"] = HostCacheGpu;
             File.WriteAllText(HostCachePath(), o.ToJsonString());
         }
         catch
@@ -160,7 +165,9 @@ public static class ProfileSource
         if (cached is not null) return cached;
 
         // Geoip = false: the probe measures the host, not the egress; the default lookup would only cost time.
-        var browser = await launch(new LaunchOptions { ExecutablePath = exe, Headless = true, Quiet = true, Geoip = false }).ConfigureAwait(false);
+        // GpuStringSpoof = false: WebGL reports the GPU that really renders. With the persona's strings an r51+ engine
+        // reports the persona's own claim, which is not this machine's vendor on an AMD or software-rendering host.
+        var browser = await launch(new LaunchOptions { ExecutablePath = exe, Headless = true, Quiet = true, Geoip = false, GpuStringSpoof = false }).ConfigureAwait(false);
         try
         {
             var ctx = await browser.NewContextAsync().ConfigureAwait(false);

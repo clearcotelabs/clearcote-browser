@@ -169,6 +169,21 @@ public static class ProfileLib
         return _cachedStickyKey;
     }
 
+    private static readonly HashSet<string> MatchableGpuVendors = new(StringComparer.Ordinal) { "nvidia", "amd", "intel", "apple" };
+
+    /// The candidates whose GPU vendor is this host's, when the host's is known and the index has any; else all of them.
+    /// The vendor is a hard filter, not only a weight: sites that send a seed and run GPU arithmetic compare the card that
+    /// really computes with the declared one, so a profile of another vendor is caught however well its screen or cores
+    /// fit. When the index has none of this vendor the pool is kept as it was, and the launch says the persona's GPU
+    /// does not match this machine's (PersonaToken.WarnGpuHostMismatch).
+    public static List<ProfileIndexEntry> SameGpuVendor(List<ProfileIndexEntry> candidates, HostFacts host)
+    {
+        var hv = host.GpuVendor ?? "unknown";
+        if (!MatchableGpuVendors.Contains(hv)) return candidates;
+        var same = candidates.Where(e => e.GpuVendor == hv).ToList();
+        return same.Count > 0 ? same : candidates;
+    }
+
     /// <summary>
     /// Pick a profile for this host.
     ///
@@ -195,6 +210,7 @@ public static class ProfileLib
                 "Sync a newer index, or pass an explicit FingerprintProfile.");
         }
 
+        candidates = SameGpuVendor(candidates, host);
         // Tie-break by id so ordering is deterministic across runs, machines and SDKs.
         var scored = candidates
             .Select(e => (Entry: e, Score: ScoreProfile(e, host)))

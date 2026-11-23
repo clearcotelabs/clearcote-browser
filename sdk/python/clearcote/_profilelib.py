@@ -172,6 +172,23 @@ def default_sticky_key() -> str:
     return _cached_sticky_key
 
 
+_MATCHABLE_GPU_VENDORS = frozenset(("nvidia", "amd", "intel", "apple"))
+
+
+def same_gpu_vendor(candidates: Sequence[dict[str, Any]], host: dict[str, Any]) -> list:
+    """The candidates whose GPU vendor is this host's, when the host's is known and the index has any; else all.
+
+    The vendor is a hard filter, not only a weight: sites that send a seed and run GPU arithmetic compare the card
+    that really computes with the declared one, so a profile of another vendor is caught however well its screen or
+    cores fit. When the index has none of this vendor the pool is kept as it was, and the launch says the persona's
+    GPU does not match this machine's (_persona.warn_gpu_host_mismatch)."""
+    hv = host.get("gpu_vendor") or "unknown"
+    if hv not in _MATCHABLE_GPU_VENDORS:
+        return list(candidates)
+    same = [e for e in candidates if e.get("gpu_vendor") == hv]
+    return same or list(candidates)
+
+
 def select_profile(
     index: Sequence[dict[str, Any]],
     host: dict[str, Any],
@@ -197,6 +214,7 @@ def select_profile(
             "fingerprint_profile."
         )
 
+    candidates = same_gpu_vendor(candidates, host)
     # Tie-break by id so ordering is deterministic across runs, machines and SDKs.
     scored = sorted(
         ({"entry": e, "score": score_profile(e, host)} for e in candidates),

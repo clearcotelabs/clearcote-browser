@@ -907,7 +907,7 @@ public sealed class DockerLaunchTests : IDisposable
     }
 
     [Fact]
-    public async Task Geoip_fills_the_containers_clock_language_location_and_WebRTC_IP()
+    public async Task Geoip_fills_the_containers_clock_language_location_and_no_WebRTC_IP_behind_the_proxy()
     {
         var asked = GeoAnswers(Berlin);
         using var stub = new CdpStub();
@@ -918,7 +918,7 @@ public sealed class DockerLaunchTests : IDisposable
         Assert.Equal("Europe/Berlin", env["CC_TIMEZONE"]);
         Assert.Equal("de-DE", env["CC_ACCEPT_LANGUAGE"]);
         Assert.Equal("52.52,13.405", env["CC_LOCATION"]);
-        Assert.Equal("203.0.113.7", env["CC_WEBRTC_IP"]);
+        Assert.NotEqual("203.0.113.7", env.TryGetValue("CC_WEBRTC_IP", out var wip) ? wip : null);   // no UDP relay in the container
         Assert.DoesNotContain(env.Keys, k => k.Contains("GEOIP"));
         await browser.CloseAsync();
     }
@@ -998,14 +998,14 @@ public sealed class DockerLaunchTests : IDisposable
     }
 
     [Fact]
-    public async Task Geoip_on_never_sends_off()
+    public async Task Geoip_on_sends_off_only_behind_a_proxy()
     {
         GeoAnswers(Berlin);
         _docker.Labels = new() { ["com.clearcotelabs.serve-protocol"] = "4" };
         using var stub = new CdpStub();
         _docker.CdpPort = stub.Port;
         await Clearcote.LaunchAsync(new LaunchOptions { Geoip = true, Proxy = GeoProxy, Quiet = true });
-        Assert.Equal("203.0.113.7", _docker.Call("create").Env["CC_WEBRTC_IP"]);
+        Assert.Equal("off", _docker.Call("create").Env["CC_WEBRTC_IP"]);
     }
 
     [Fact]
@@ -1015,6 +1015,10 @@ public sealed class DockerLaunchTests : IDisposable
         Assert.Empty(DockerLaunch.WebrtcIpOffEnv(4, false, new Dictionary<string, string>()));
         Assert.Empty(DockerLaunch.WebrtcIpOffEnv(3, true, new Dictionary<string, string>()));
         Assert.Empty(DockerLaunch.WebrtcIpOffEnv(4, true, new Dictionary<string, string> { ["CC_WEBRTC_IP"] = "198.51.100.9" }));
+        // behind a proxy the container has no UDP relay: off unless the caller set an address
+        Assert.Equal("off", DockerLaunch.WebrtcIpOffEnv(4, false, new Dictionary<string, string>(), proxied: true)["CC_WEBRTC_IP"]);
+        Assert.Empty(DockerLaunch.WebrtcIpOffEnv(3, false, new Dictionary<string, string>(), proxied: true));
+        Assert.Empty(DockerLaunch.WebrtcIpOffEnv(4, false, new Dictionary<string, string> { ["CC_WEBRTC_IP"] = "198.51.100.9" }, proxied: true));
     }
 
     [Fact]
@@ -1030,7 +1034,7 @@ public sealed class DockerLaunchTests : IDisposable
         var (_, env, _) = _docker.Call("create");
         Assert.Equal("Europe/Berlin", env["CC_TIMEZONE"]);
         Assert.Equal("de-DE", env["CC_ACCEPT_LANGUAGE"]);
-        Assert.False(env.ContainsKey("CC_WEBRTC_IP"));   // no key = the open build: its WebRTC UDP would skip the proxy
+        Assert.False(env.ContainsKey("CC_WEBRTC_IP"));   // through a proxy: no UDP relay in the container, no WebRTC IP
     }
 
     [Fact]

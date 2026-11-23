@@ -355,7 +355,124 @@ def _lease_from_env(env):
     return _EnvLease(token) if token else None
 
 
-def apply(exe, args, env, lease, supports=None, runner=None, fetch=None, now=None):
+# ── GPU vendor guard ─────────────────────────────────────────────────────────────────────────────────────────────
+#
+# Sites can send a seed, run seeded arithmetic on the GPU and compare what the computing GPU's class (its vendor and
+# graphics backend, e.g. NVIDIA on Direct3D 11) returns with the WebGL renderer the page declares. A persona that names
+# another vendor than the GPU that really computes ("the card that computes is not the declared graphics card"), or a
+# graphics card's name over a software renderer (SwiftShader / WARP on Remote Desktop, a VM or a VPS), is caught by
+# that check whatever the strings say. The engine matches the persona to this machine's vendor by itself on NVIDIA and
+# Intel hosts; explicit gpu_vendor / gpu_renderer, an imported profile, an AMD host or a software-rendering host can
+# still end up with another vendor. After the persona token is fetched, the GPU it declares (the token's payload is
+# the generator's own output) is compared with the vendor the engine reports for this machine at this launch (read
+# fresh every process, see host_facts), and a mismatch is said once per process. CLEARCOTE_NO_GPU_HOST_CHECK=1
+# silences it (as do quiet and CLEARCOTE_NO_WARN). Mirrors persona.ts.
+
+GPU_CHECK_ENV = "CLEARCOTE_NO_GPU_HOST_CHECK"
+# Launches whose page does not show the persona's GPU strings, or whose WebGL does not render on this machine's
+# default adapter: the check has nothing to compare.
+_GPU_CHECK_SKIP_SWITCHES = frozenset((
+    "canvas-bridge-url", "use-adapter-luid", "disable-gpu-string-spoof", "disable-gpu-fingerprint",
+    "fingerprint-passthrough",
+))
+_HARDWARE_MAKERS = frozenset(("nvidia", "intel", "amd", "apple", "qualcomm", "arm"))
+_HOST_VENDOR_NAMES = {"nvidia": "NVIDIA", "intel": "Intel", "amd": "AMD"}
+_MAKER_NAMES = {"nvidia": "NVIDIA", "intel": "Intel", "amd": "AMD", "apple": "Apple", "qualcomm": "Qualcomm",
+                "arm": "ARM"}
+_PY_NAMES = {"vendor": "gpu_vendor", "renderer": "gpu_renderer", "spoof": "gpu_string_spoof=False"}
+
+
+def persona_gpu_from_token(token):
+    """``{"vendor", "renderer"}`` the persona token declares (its payload ``p`` is the generator's codec JSON), or
+    None."""
+    try:
+        body = str(token).split(".")[0]
+        payload = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode("utf-8"))
+        p = ((payload or {}).get("p") or {}).get("persona") or {}
+        renderer = p.get("webgl_renderer")
+        if not isinstance(renderer, str) or not renderer:
+            return None
+        vendor = p.get("webgl_vendor")
+        return {"vendor": vendor if isinstance(vendor, str) else "", "renderer": renderer}
+    except Exception:  # noqa: BLE001 -- a token this SDK cannot read is no mismatch
+        return None
+
+
+def gpu_source(sel, profile_json):
+    """Where the persona's GPU comes from: ``"options"`` (gpu_vendor / gpu_renderer), ``"profile"`` (an imported
+    profile carrying WebGL strings, or a library profile id) or ``"engine"`` (the engine's own rule)."""
+    if "fingerprint-gpu-vendor" in sel or "fingerprint-gpu-renderer" in sel:
+        return "options"
+    if "fingerprint-profile-id" in sel:
+        return "profile"
+    if profile_json is not None:
+        try:
+            dbg = ((json.loads(profile_json).get("webgl") or {}).get("webgl1") or {}).get("debug") or {}
+            if isinstance(dbg.get("UNMASKED_VENDOR_WEBGL"), str) or isinstance(dbg.get("UNMASKED_RENDERER_WEBGL"), str):
+                return "profile"
+        except Exception:  # noqa: BLE001 -- not JSON: the engine refuses it anyway
+            pass
+    return "engine"
+
+
+def gpu_host_mismatch(persona, host, args, source, names=None):
+    """``{"code", "message"}`` when the GPU a persona declares is not the one this machine renders on, else None.
+    ``host["gpu_vendor"]`` is the engine's answer for this launch: "nvidia", "intel", "amd", or "none" (no hardware
+    adapter WebGL renders on: software rendering, a virtual adapter, Linux headless). ``args`` are the launch's
+    switches (a canvas bridge, an adapter chosen by LUID or the real GPU strings skip the check)."""
+    from ._fingerprint import gpu_maker
+    names = names or _PY_NAMES
+    if not persona:
+        return None
+    if any((_switch(a) or ("", ""))[0] in _GPU_CHECK_SKIP_SWITCHES for a in args):
+        return None
+    maker = gpu_maker(persona["renderer"]) or gpu_maker(persona["vendor"])
+    if maker not in _HARDWARE_MAKERS:
+        return None  # a software or unknown renderer claims no card
+    hv = str(host.get("gpu_vendor") or "").lower()
+    claim = '%s GPU ("%s")' % (_MAKER_NAMES[maker], persona["renderer"])
+    why = ("Sites that send a seed and run GPU arithmetic compare the card that computes with the declared graphics "
+           "card, and report the graphics as spoofed whatever the strings say.")
+    off = " Set %s=1 to silence this." % GPU_CHECK_ENV
+    if source == "options":
+        fix = ("Remove %s / %s (the persona then claims this machine's vendor), or set them to this machine's GPU."
+               % (names["vendor"], names["renderer"]))
+        frm = "%s / %s declare" % (names["vendor"], names["renderer"])
+    elif source == "profile":
+        fix = "Use a profile captured on a machine with the same GPU vendor as this one."
+        frm = "the imported profile declares"
+    else:
+        fix = ("This engine's persona pool has no matching GPU for this vendor yet: set %s and %s to this machine's "
+               "GPU (what WebGL reports with %s)." % (names["vendor"], names["renderer"], names["spoof"]))
+        frm = "the persona declares"
+    if hv == "none":
+        return {"code": "gpu-software-host:%s" % maker,
+                "message": "this machine renders WebGL in software (no NVIDIA, Intel or AMD adapter: Remote Desktop, a "
+                           "VM or a VPS, or Linux headless without a GPU), but %s a %s. Sites that run GPU arithmetic "
+                           "see a software renderer under a graphics card's name. Run on a machine with a GPU, use the "
+                           "canvas bridge, or pass %s to show the real renderer.%s"
+                           % (frm, claim, names["spoof"], off)}
+    if hv not in _HOST_VENDOR_NAMES or hv == maker:
+        return None
+    return {"code": "gpu-vendor-host:%s:%s" % (maker, hv),
+            "message": "%s a %s, but this machine renders on %s. %s %s%s"
+                       % (frm, claim, _HOST_VENDOR_NAMES[hv], why, fix, off)}
+
+
+def warn_gpu_host_mismatch(token, host, args, sel, profile_json, quiet=False):
+    """Say a :func:`gpu_host_mismatch` once per process, unless quiet, CLEARCOTE_NO_WARN or
+    CLEARCOTE_NO_GPU_HOST_CHECK."""
+    if quiet or os.environ.get("CLEARCOTE_NO_WARN"):
+        return
+    if str(os.environ.get(GPU_CHECK_ENV) or "").strip().lower() in ("1", "true", "yes", "on"):
+        return
+    m = gpu_host_mismatch(persona_gpu_from_token(token), host, args, gpu_source(sel, profile_json))
+    if m:
+        from ._warnings import warn_once
+        warn_once(m["code"], m["message"], quiet)
+
+
+def apply(exe, args, env, lease, supports=None, runner=None, fetch=None, now=None, quiet=False):
     """``(args, env)`` for a launch of ``exe``: on an r51+ engine with a lease (the SDK's, or a run token the caller
     put in the environment), the launch gets its persona token (and a profile moves off the command line); otherwise
     both come back unchanged."""
@@ -371,6 +488,7 @@ def apply(exe, args, env, lease, supports=None, runner=None, fetch=None, now=Non
     facts = host_facts(exe, args, lease.token, runner=runner, env=env)
     token = persona_token_for(lease, sel, facts, profile_json=profile_json, fetch=fetch)
     assert_clock_for(token, "persona token", now)
+    warn_gpu_host_mismatch(token, facts, args, sel, profile_json, quiet)
     env = dict(os.environ if env is None else env)
     return args, inject_persona_token(env, token)
 

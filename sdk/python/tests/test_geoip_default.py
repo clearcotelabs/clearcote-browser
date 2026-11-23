@@ -96,6 +96,15 @@ def test_auto_failure_is_silent_when_quiet(resolver, capsys):
     assert capsys.readouterr().err == ""
 
 
+def test_strict_reports_a_webrtc_ip_it_filled_as_looked_up_and_one_the_caller_set_as_not(resolver):
+    fp = {}
+    applied = clearcote.apply_geoip_mode(fp, PROXY, "strict", quiet=True)
+    assert fp["webrtc_ip"] == "203.0.113.7" and applied.auto_webrtc_ip is True
+    kept = {"webrtc_ip": "198.51.100.9"}
+    assert clearcote.apply_geoip_mode(kept, PROXY, "strict", quiet=True).auto_webrtc_ip is False
+    assert kept["webrtc_ip"] == "198.51.100.9"
+
+
 def test_strict_still_fails_closed(resolver):
     resolver["answer"] = (None, "could not determine the exit IP", 5)
     with pytest.raises(clearcote.GeoipError):
@@ -108,22 +117,65 @@ def test_off_asks_nothing(resolver):
     assert resolver["asked"] == [] and fp == {}
 
 
-def test_drop_auto_webrtc_ip_only_on_an_open_build_launch_through_a_proxy():
-    def fp():
-        return {"timezone": "Europe/Berlin", "webrtc_ip": "203.0.113.7"}
+def _fp():
+    return {"timezone": "Europe/Berlin", "accept_language": "de-DE", "location": "52.52,13.405",
+            "webrtc_ip": "203.0.113.7"}
 
-    f = fp()
-    clearcote.drop_auto_webrtc_ip(f, (None, True), PROXY, False)
-    assert "webrtc_ip" not in f and f["timezone"] == "Europe/Berlin"
-    f = fp()
-    clearcote.drop_auto_webrtc_ip(f, (None, True), PROXY, True)
+
+SOCKS = {"server": "socks5://1.2.3.4:1080"}
+
+
+@pytest.fixture
+def fresh_warnings(monkeypatch):
+    from clearcote import _warnings
+    monkeypatch.setattr(_warnings, "_seen_notes", set())
+    monkeypatch.delenv("CLEARCOTE_NO_WARN", raising=False)
+
+
+@pytest.mark.parametrize("licensed", [True, False])
+def test_drop_auto_webrtc_ip_drops_a_looked_up_ip_behind_a_proxy_and_keeps_the_region(licensed):
+    f = _fp()
+    clearcote.drop_auto_webrtc_ip(f, (None, True), PROXY, licensed, None, True)
+    assert f == {"timezone": "Europe/Berlin", "accept_language": "de-DE", "location": "52.52,13.405"}
+
+
+def test_drop_auto_webrtc_ip_keeps_it_when_the_socks5_udp_relay_carries_udp_on_the_licensed_build_only():
+    f = _fp()
+    clearcote.drop_auto_webrtc_ip(f, (None, True), SOCKS, True, True, True)
     assert f["webrtc_ip"] == "203.0.113.7"
-    f = fp()
-    clearcote.drop_auto_webrtc_ip(f, (None, True), None, False)
+    f = _fp()  # the open build has no relay: dropped as before
+    clearcote.drop_auto_webrtc_ip(f, (None, True), SOCKS, False, True, True)
+    assert "webrtc_ip" not in f
+    f = _fp()  # a relay the proxy refused (udp_relay_or_fallback resolved it to False): dropped
+    clearcote.drop_auto_webrtc_ip(f, (None, True), SOCKS, True, False, True)
+    assert "webrtc_ip" not in f
+
+
+@pytest.mark.parametrize("licensed", [True, False])
+def test_drop_auto_webrtc_ip_keeps_it_with_no_proxy(licensed):
+    f = _fp()
+    clearcote.drop_auto_webrtc_ip(f, (None, True), None, licensed, None, True)
     assert f["webrtc_ip"] == "203.0.113.7"
-    f = fp()
-    clearcote.drop_auto_webrtc_ip(f, (None, False), PROXY, False)
+
+
+def test_drop_auto_webrtc_ip_keeps_one_the_caller_set_behind_a_proxy_and_warns_once(fresh_warnings, capsys):
+    f = _fp()
+    clearcote.drop_auto_webrtc_ip(f, (None, False), PROXY, True)
     assert f["webrtc_ip"] == "203.0.113.7"
+    clearcote.drop_auto_webrtc_ip(_fp(), (None, False), PROXY, True)  # once per process
+    err = capsys.readouterr().err
+    assert err.count("webrtc_ip 203.0.113.7 is set with a proxy") == 1
+    assert "sites that run their own STUN servers can prove it fake" in err
+
+
+def test_drop_auto_webrtc_ip_no_warning_with_the_relay_without_a_proxy_or_when_quiet(fresh_warnings, capsys,
+                                                                                      monkeypatch):
+    clearcote.drop_auto_webrtc_ip(_fp(), (None, False), SOCKS, True, True)
+    clearcote.drop_auto_webrtc_ip(_fp(), (None, False), None, True)
+    clearcote.drop_auto_webrtc_ip(_fp(), (None, False), PROXY, True, None, True)
+    monkeypatch.setenv("CLEARCOTE_NO_WARN", "1")
+    clearcote.drop_auto_webrtc_ip(_fp(), (None, False), PROXY, True)
+    assert capsys.readouterr().err == ""
 
 
 # ── wired into the launch paths ─────────────────────────────────────────────────────────────────────
@@ -147,14 +199,17 @@ def test_launch_default_fills_the_persona_from_the_egress(resolver, monkeypatch,
     assert "--timezone=Europe/Berlin" in args and "--webrtc-ip=203.0.113.7" in args
 
 
-def test_launch_open_build_through_a_proxy_keeps_no_default_webrtc_ip(resolver, monkeypatch, tmp_path):
+def test_launch_through_a_proxy_keeps_no_looked_up_webrtc_ip(resolver, monkeypatch, tmp_path):
     monkeypatch.delenv("CLEARCOTE_GEOIP", raising=False)
-    args = _prepare_args(tmp_path, proxy=PROXY)
-    assert "--timezone=Europe/Berlin" in args
-    assert not any(a.startswith("--webrtc-ip=") for a in args)
-    # licensed (the PRO build blocks non-proxied WebRTC UDP), or geoip=True: kept
-    assert "--webrtc-ip=203.0.113.7" in _prepare_args(tmp_path, proxy=PROXY, _cc_pro=("cc_lic_x", None))
-    assert "--webrtc-ip=203.0.113.7" in _prepare_args(tmp_path, proxy=PROXY, geoip=True)
+    # open build, licensed build, geoip=True: the region is filled, the WebRTC IP is not (no UDP leaves from the exit)
+    for kw in ({}, {"_cc_pro": ("cc_lic_x", None)}, {"geoip": True}):
+        args = _prepare_args(tmp_path, proxy=PROXY, **kw)
+        assert "--timezone=Europe/Berlin" in args
+        assert not any(a.startswith("--webrtc-ip=") for a in args), kw
+    # one the caller set is kept (with a warning); with no proxy the looked-up address stays
+    assert "--webrtc-ip=198.51.100.9" in _prepare_args(tmp_path, proxy=PROXY, webrtc_ip="198.51.100.9", quiet=True)
+    clearcote._reset_direct_geo_cache()
+    assert "--webrtc-ip=203.0.113.7" in _prepare_args(tmp_path, _cc_pro=("cc_lic_x", None))
 
 
 def test_launch_with_clearcote_geoip_0_asks_nothing(resolver, monkeypatch, tmp_path):
@@ -163,8 +218,7 @@ def test_launch_with_clearcote_geoip_0_asks_nothing(resolver, monkeypatch, tmp_p
     assert resolver["asked"] == [] and not any(a.startswith("--webrtc-ip=") for a in args)
 
 
-def test_docker_default_drops_the_webrtc_ip_without_a_key_and_keeps_it_with_one(resolver, monkeypatch,
-                                                                                 tmp_path):
+def test_docker_default_drops_the_webrtc_ip_behind_a_proxy_with_or_without_a_key(resolver, monkeypatch, tmp_path):
     monkeypatch.delenv("CLEARCOTE_GEOIP", raising=False)
     monkeypatch.delenv("CLEARCOTE_LICENSE_KEY", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))  # this machine's own saved key is never read
@@ -172,7 +226,9 @@ def test_docker_default_drops_the_webrtc_ip_without_a_key_and_keeps_it_with_one(
     kw = _docker.apply_geoip_before_start({"proxy": PROXY}, quiet=True)
     assert kw["timezone"] == "Europe/Berlin" and "webrtc_ip" not in kw and "geoip" not in kw
     kw = _docker.apply_geoip_before_start({"proxy": PROXY, "license_key": "cc_lic_x"}, quiet=True)
-    assert kw["webrtc_ip"] == "203.0.113.7"
+    assert kw["timezone"] == "Europe/Berlin" and "webrtc_ip" not in kw  # the container has no UDP relay either
+    kw = _docker.apply_geoip_before_start({"license_key": "cc_lic_x"}, quiet=True)
+    assert kw["webrtc_ip"] == "203.0.113.7"  # no proxy: this machine's own address
     kw = _docker.apply_geoip_before_start({"proxy": PROXY, "geoip": False}, quiet=True)
     assert "timezone" not in kw and "geoip" not in kw
 

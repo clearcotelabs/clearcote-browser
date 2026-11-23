@@ -26,6 +26,7 @@ import { pipeline } from "node:stream/promises";
 import extract from "extract-zip";
 import maxmind, { type Reader } from "maxmind";
 import { PROXIED_REQUEST_SCHEMES, proxiedRequest, toProxySpec, type ProxySpec } from "./net.js";
+import { warnOnce } from "./warnings.js";
 
 const MMDB_URL = "https://github.com/daijro/geoip-all-in-one/releases/latest/download/geoip-aio-all.mmdb.zip";
 const MMDB_MAX_AGE_DAYS = 30;
@@ -417,6 +418,7 @@ export function resetDirectGeoCache(): void { _direct = null; }
 /** What {@link applyGeoipMode} did: the geo, and whether the WebRTC IP came from the default lookup. */
 export interface GeoipApplied {
   geo?: Geo;
+  /** The WebRTC IP was filled by the lookup (default or `geoip: true`), not set by the caller. */
   autoWebrtcIp: boolean;
   /** The egress IP the lookup found (also from the no-proxy cache): with no proxy, this machine's own. */
   ip?: string;
@@ -426,14 +428,16 @@ export interface GeoipApplied {
  * Apply geoip in `mode` (see {@link geoipMode}). "auto" skips the lookup when every field it fills is
  * already set, reuses a no-proxy lookup for 10 minutes, and on failure warns once and launches.
  * "webrtc" is "auto" for the WebRTC IP alone: no lookup when the caller set one, and nothing else on
- * `fp` is touched. What comes back is the same, so the open-build drop (dropAutoWebrtcIp) and real STUN
+ * `fp` is touched. What comes back is the same, so the drop behind a proxy (dropAutoWebrtcIp) and real STUN
  * with no proxy (directStunEligible) treat the address as they treat any default lookup's.
  */
 export async function applyGeoipMode(fp: GeoFillable, proxy: unknown, mode: GeoipMode, quiet?: boolean): Promise<GeoipApplied> {
   if (mode === "off") return { autoWebrtcIp: false };
   if (mode === "strict") {
+    const hadWebrtcIp = fp.webrtcIp != null;
     const geo = await applyGeoip(fp, proxy, quiet);
-    return { geo, autoWebrtcIp: false, ip: geo?.ip };
+    // geoip: true asks for the exit's region; a WebRTC IP it filled is as automatic as the default lookup's
+    return { geo, autoWebrtcIp: !hadWebrtcIp && fp.webrtcIp != null, ip: geo?.ip };
   }
   if (mode === "webrtc") {
     if (fp.webrtcIp != null) return { autoWebrtcIp: false };
@@ -474,13 +478,6 @@ async function applyAuto(fp: GeoFillable, proxy: unknown, quiet: boolean | undef
 }
 
 /**
- * The open build (no licence) has no WebRTC UDP egress block, and a WebRTC IP there re-enables UDP that
- * does not go through the proxy: a page's own TURN server would read this machine's real address off the
- * packets. So a WebRTC IP the DEFAULT lookup filled is dropped again on an open-build launch through a
- * proxy. With no proxy the real address is the exit anyway; `geoip: true` or an explicit webrtcIp is the
- * caller's choice and is kept.
- */
-/**
  * Engine r54+ (pro-r54-06): whether this launch may send real STUN instead of fabricating the WebRTC IP.
  * Only with no proxy at all, and only when the WebRTC IP is this machine's own egress as the lookup
  * found it: a hand-set webrtcIp may name another place on purpose, and real STUN would contradict it.
@@ -489,8 +486,31 @@ export function directStunEligible(fp: GeoFillable, applied: GeoipApplied, proxy
   return !proxy && !!applied.ip && fp.webrtcIp === applied.ip;
 }
 
-export function dropAutoWebrtcIp(fp: GeoFillable, applied: GeoipApplied, proxy: unknown, licensed: boolean): void {
-  if (applied.autoWebrtcIp && proxy && !licensed) delete fp.webrtcIp;
+/**
+ * Behind a proxy, a WebRTC IP the lookup filled is dropped again unless the SOCKS5 UDP relay carries this
+ * launch's UDP (`socks5Udp` as {@link udpRelayOrFallback} resolved it, on a licensed engine).
+ *
+ * Without the relay no UDP leaves from the proxy's exit: the licensed engine drops WebRTC UDP behind a proxy,
+ * so it would report a server-reflexive candidate at the exit IP that no packet ever came from. Sites that run
+ * their own STUN/TURN servers see the claimed address but none of the traffic, and can prove it made up. With no
+ * WebRTC IP the browser gathers no candidates behind the proxy, which is what Chrome itself shows under the
+ * standard disable_non_proxied_udp policy. On the open build (no licence) a WebRTC IP would instead re-enable
+ * UDP around the proxy and show this machine's real address, so there it is dropped even with `socks5Udp`
+ * (that build has no relay). Timezone, language and location from the lookup are kept either way.
+ *
+ * A WebRTC IP the caller set is kept, with a warning (once per process) when nothing makes it true.
+ * With no proxy the address is this machine's own egress and stays.
+ */
+export function dropAutoWebrtcIp(fp: GeoFillable, applied: GeoipApplied, proxy: unknown, licensed: boolean, socks5Udp?: boolean, quiet?: boolean): void {
+  if (!proxy || fp.webrtcIp == null) return;
+  const relayed = licensed && socks5Udp === true;
+  if (relayed) return;
+  if (applied.autoWebrtcIp) { delete fp.webrtcIp; return; }
+  warnOnce("webrtc-ip-behind-proxy", `webrtcIp ${fp.webrtcIp} is set with a proxy and no SOCKS5 UDP relay: no UDP ` +
+    "leaves from that address, so the browser reports a WebRTC address no packet came from, and sites that run " +
+    "their own STUN servers can prove it fake. Leave webrtcIp unset behind a proxy (WebRTC then gathers no " +
+    "candidates, as Chrome does under its disable_non_proxied_udp policy), or use socks5Udp with a socks5:// " +
+    "proxy that relays UDP.", quiet);
 }
 
 /**

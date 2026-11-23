@@ -174,7 +174,7 @@ public static partial class Clearcote
         var egressDrift = prepared.EgressDrift;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
-        DropAutoWebrtcIp(options, prepared.Geo);  // open build + proxy: no default WebRTC IP
+        DropAutoWebrtcIp(options, prepared.Geo);  // proxy without a UDP relay: no looked-up WebRTC IP
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         NoiseMode.Apply(options, null, exe);  // one noise per profile for a new folder, the remembered mode for a known one
@@ -223,7 +223,7 @@ public static partial class Clearcote
         // engine reads them from there (see PersonaEnv). Probed once; every attempt's env gets the payload.
         // r51+: the signed persona token, fetched once; each attempt's env carries it (Persona.cs).
         var personaLaunch = await PersonaToken.PrepareAsync(exe, args.Concat(display.Args), lease,
-            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null, runTokenFile: launchToken?.File).ConfigureAwait(false);
+            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null, runTokenFile: launchToken?.File, quiet: options.Quiet).ConfigureAwait(false);
         var persona = PersonaEnv.Plan(exe, personaLaunch.Args, options.PersonaEnv);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
@@ -361,7 +361,7 @@ public static partial class Clearcote
         var egressDrift = prepared.EgressDrift;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
-        DropAutoWebrtcIp(options, prepared.Geo);  // open build + proxy: no default WebRTC IP
+        DropAutoWebrtcIp(options, prepared.Geo);  // proxy without a UDP relay: no looked-up WebRTC IP
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         NoiseMode.Apply(options, userDataDir, exe);  // one noise per profile for a new folder, the remembered mode for a known one
@@ -441,7 +441,7 @@ public static partial class Clearcote
         // reads them from there (see PersonaEnv). Probed once; every attempt's env gets the payload.
         // r51+: the signed persona token, fetched once; each attempt's env carries it (Persona.cs).
         var personaLaunch = await PersonaToken.PrepareAsync(exe, args.Concat(geometry.Args), lease,
-            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null, runTokenFile: launchToken?.File).ConfigureAwait(false);
+            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null, runTokenFile: launchToken?.File, quiet: options.Quiet).ConfigureAwait(false);
         var persona = PersonaEnv.Plan(exe, personaLaunch.Args, options.PersonaEnv);
 
         var pw = await PlaywrightAsync().ConfigureAwait(false);
@@ -529,7 +529,7 @@ public static partial class Clearcote
         var host = string.IsNullOrEmpty(options.Host) ? "127.0.0.1" : options.Host;
         var exe = await ExecutablePathAsync(options).ConfigureAwait(false);
         EnsureRunnableHere(exe);
-        DropAutoWebrtcIp(options, prepared.Geo);  // open build + proxy: no default WebRTC IP
+        DropAutoWebrtcIp(options, prepared.Geo);  // proxy without a UDP relay: no looked-up WebRTC IP
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         NoiseMode.Apply(options, string.IsNullOrEmpty(options.UserDataDir) ? null : options.UserDataDir, exe);  // one noise per profile for a new folder, the remembered mode for a known one
@@ -599,7 +599,7 @@ public static partial class Clearcote
         // engineArgs; cdpArgs never carry one and stay as they are.
         // r51+: the signed persona token (Persona.cs), fetched once before the launch.
         var personaLaunch = await PersonaToken.PrepareAsync(exe, engineArgs, lease,
-            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null, runTokenFile: launchToken?.File).ConfigureAwait(false);
+            options.LicenseThroughProxy == true ? ProxySpec.From(options.Proxy) : null, runTokenFile: launchToken?.File, quiet: options.Quiet).ConfigureAwait(false);
         var persona = PersonaEnv.Plan(exe, personaLaunch.Args, options.PersonaEnv);
 
         var proc = await License.ReleaseLeaseOnFailureAsync(lease, () => WinLaunch.WinAvRetryAsync(exePath =>
@@ -691,11 +691,13 @@ public static partial class Clearcote
         return (copy, geo.EgressDrift, geo);
     }
 
-    /// Open build + proxy: no WebRTC IP from the DEFAULT geoip lookup (<see cref="GeoIp.DropAutoWebrtcIp"/>). Licensed
-    /// = a licence key resolves (the PRO build) or offline mode (index.ts <c>!!pro || offline</c>).
+    /// Proxy without a SOCKS5 UDP relay: no WebRTC IP from the geoip lookup (<see cref="GeoIp.DropAutoWebrtcIp"/>).
+    /// Licensed = a licence key resolves (the PRO build) or offline mode (index.ts <c>!!pro || offline</c>);
+    /// <c>o.Socks5Udp</c> is already what <see cref="PrepareLaunchAsync"/> resolved.
     internal static void DropAutoWebrtcIp(LaunchOptions o, GeoIp.GeoipApplied geo)
         => GeoIp.DropAutoWebrtcIp(o, geo, o.Proxy,
-            licensed: Offline.OfflineKeyPath(o.OfflineKey) is not null || License.ResolveLicenseKey(o.LicenseKey) is not null);
+            licensed: Offline.OfflineKeyPath(o.OfflineKey) is not null || License.ResolveLicenseKey(o.LicenseKey) is not null,
+            socks5Udp: o.Socks5Udp, quiet: o.Quiet);
 
     // ── launch lane: shared steps of LaunchAsync / LaunchPersistentContextAsync / ServeAsync ──
 

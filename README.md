@@ -216,7 +216,7 @@ await browser.CloseAsync();
 | `platform` | The operating system the browser presents: `windows`, `linux`, `macos` or `android` |
 | `brand` | The browser brand in the user agent and client hints: `Chrome`, `Edge`, `Opera`, `Vivaldi` |
 | `proxy` | `{"server": "http://host:8080", "username": "u", "password": "p"}`. HTTP and SOCKS5 with a username and password both work |
-| `geoip` / `geoip` | `True` matches the timezone, languages and `Accept-Language` to the proxy's exit location (and the WebRTC IP, on the licensed build) |
+| `geoip` / `geoip` | `True` matches the timezone, languages and `Accept-Language` to the proxy's exit location. Behind a proxy WebRTC gathers no candidates, as Chrome does under its `disable_non_proxied_udp` policy |
 | `humanize` / `humanize` | Moves, clicks, drags, scrolls and types as native, trusted input with human-like paths |
 | `light_stealth` / `lightStealth` | Changes only hardware metadata (cores, memory, screen depth, pixel ratio, touch) and leaves rendering real |
 | `fingerprint_profile` / `fingerprintProfile` | Loads a real machine captured with the [collector](tools/fingerprint-collect) or from the [profile library](https://github.com/clearcotelabs/clearcote-profiles). Use it instead of `fingerprint`, not with it: a seed next to a profile adds canvas noise that strict checkers score as tampering |
@@ -308,7 +308,7 @@ docker run -d --rm -v clearcote-cache:/opt/xdg-cache --shm-size=1g -p 127.0.0.1:
 
 The CDP port gives full control of the browser. Publish it on `127.0.0.1` or a trusted network only.
 The image bakes in the signed Linux binary and the fonts a Windows persona needs.
-WebRTC reports the proxy's exit (or, without a proxy, the container's own public address), looked up at start: see
+WebRTC reports the container's own public address, looked up at start, and nothing behind a proxy: see
 [Networking and WebRTC](docker/README.md#networking-and-webrtc).
 Details: [`docker/README.md`](docker/README.md) · [deployment guide](https://www.clearcotelabs.com/docs/deployment?utm_source=github&utm_medium=readme&utm_content=run-it-in-docker).
 

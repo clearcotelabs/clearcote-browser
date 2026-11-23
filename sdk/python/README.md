@@ -225,7 +225,7 @@ Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the 
 
 On an older engine each of these is skipped with a warning; the launch still works.
 
-`fingerprint="off"` removes the persona and nothing else. The page reads this machine's own GPU (WebGL and WebGPU), speech voices, languages and timezone. No timezone, language or location is taken from the IP address: `timezone` and `accept_language` apply only when you set them or pass `geoip=True`; behind a proxy the page therefore shows this machine's timezone and language, and the SDK warns about it. The WebRTC IP is still looked up (this machine's own address, or the proxy's exit), so WebRTC gathers candidates as Chrome does; `geoip=False` skips that lookup too, and WebRTC then gathers no ICE candidates unless you set `webrtc_ip`. What the engine does on every launch stays: for example the brand list is Chromium's, and a host with no audio output device still reports a 48 kHz sample rate.
+`fingerprint="off"` removes the persona and nothing else. The page reads this machine's own GPU (WebGL and WebGPU), speech voices, languages and timezone. No timezone, language or location is taken from the IP address: `timezone` and `accept_language` apply only when you set them or pass `geoip=True`; behind a proxy the page therefore shows this machine's timezone and language, and the SDK warns about it. The WebRTC IP is still looked up without a proxy (this machine's own address), so WebRTC gathers candidates as Chrome does; behind a proxy it gathers none, as Chrome does under its `disable_non_proxied_udp` policy; `geoip=False` skips that lookup too, and WebRTC then gathers no ICE candidates unless you set `webrtc_ip`. What the engine does on every launch stays: for example the brand list is Chromium's, and a host with no audio output device still reports a 48 kHz sample rate.
 
 `stock_runtime=True` (or `CLEARCOTE_STOCK_RUNTIME=1`) gives Playwright the browser's stock DevTools behaviour back: `page.on("console")` and `page.on("pageerror")` receive events, `page.set_content()` works, and `expose_function()` / `expose_binding()` keep working after a navigation. It is off by default because pages can observe some of what it restores. It needs an engine from r32 on; an older engine launches without it and the SDK warns once. It applies to local and Docker launches, not to cloud browsers.
 
@@ -269,30 +269,29 @@ itself; nothing changes in your code. What you may notice:
 
 Engines before r51 keep deriving personas themselves; the SDK detects the engine and leaves them as they were.
 
-### Through a proxy (report the proxy's IP, not your host's)
+### Through a proxy
 
 ```python
 browser = launch(
     fingerprint="user-7423",
     proxy={"server": "http://host:8080", "username": "u", "password": "p"},  # standard Playwright option
     timezone="America/New_York",
-    webrtc_ip="203.0.113.10",       # make WebRTC report the proxy egress IP, not your host's
 )
 ```
 
-**WebRTC won't leak your real IP.** The engine *fabricates* the WebRTC server-reflexive (`srflx`) candidate at `webrtc_ip` and sends **no real STUN** from your host — so WebRTC reports the proxy IP and your real IP never leaks at the packet level. A plain candidate "relabel" doesn't stop the leak (the real STUN packet still goes out from your host); Clearcote sends none. Raw host candidates are suppressed, and the candidate set stays coherent (not empty/disabled).
+**WebRTC won't leak your real IP.** Behind a proxy the browser sends no WebRTC UDP around it (the `disable_non_proxied_udp` policy is on by default) and gathers no ICE candidates, as Chrome does under that policy: your real IP never leaks, and the page sees no public address. Leave `webrtc_ip` unset behind a proxy. Since 0.71.0 a WebRTC IP the geoip lookup found is dropped behind a proxy (timezone, languages and location are still filled): no UDP leaves from the proxy's exit, so a candidate at that address would be one no packet came from, and sites that run their own STUN servers prove such an address fake. A `webrtc_ip` you set yourself is kept, with a warning. With `socks5_udp` and a `socks5://` proxy that relays UDP, WebRTC traffic really leaves from the exit, so there the looked-up address is kept. Without a proxy the engine *fabricates* the server-reflexive (`srflx`) candidate at `webrtc_ip` (this machine's own address, from geoip) and suppresses raw host candidates.
 
 **`context.request` and `page.request` use the proxy too.** Playwright sends its request API from the driver, not the browser, through the proxy in Playwright's own options. A proxy with credentials is handed to the engine instead (credentials in Playwright's options switch on request interception for the whole context, a detectable side effect), so from 0.59.0 the SDK starts a small proxy on `127.0.0.1` for the request API: it adds your credentials and tunnels to your proxy (HTTP, HTTPS or SOCKS5; SOCKS5 resolves names at the proxy). The browser itself still connects to your proxy directly. Before 0.59.0 these calls connected from your own IP. The request API still uses the Playwright driver's TLS stack, not Chrome's, so for requests a site should see as the browser, call `fetch` inside the page (`page.evaluate("fetch(url)")`). A client attached to `serve()` over CDP runs the request API in its own process, where the SDK cannot route it.
 
 ### Auto geo-match (`geoip`)
 
-Set `geoip=True` and Clearcote resolves the **proxy's exit IP** (looked up *through* the proxy) and auto-fills any unset `timezone`, `accept_language`, `location`, **and `webrtc_ip`** so the whole identity — clock, language, geo, and WebRTC IP — matches the proxy's region:
+Set `geoip=True` and Clearcote resolves the **proxy's exit IP** (looked up *through* the proxy) and auto-fills any unset `timezone`, `accept_language` and `location`, so the clock, language and geo match the proxy's region. Without a proxy it fills `webrtc_ip` too (this machine's own address); behind one it does not, unless `socks5_udp` relays UDP (see above):
 
 ```python
 browser = launch(
     fingerprint="user-7423",
     proxy={"server": "http://host:8080", "username": "u", "password": "p"},
-    geoip=True,              # timezone, languages, location, AND WebRTC IP all auto-set to the proxy's geo
+    geoip=True,              # timezone, languages and location auto-set to the proxy's geo
 )
 ```
 
@@ -309,7 +308,7 @@ Geo data comes from the offline [geoip-all-in-one](https://github.com/daijro/geo
 
 `geoip=True` works for a Docker launch exactly as for a native one: the SDK resolves the proxy's exit IP before the container is started and hands the container the timezone and Accept-Language it resolved (any `timezone` / `accept_language` you set yourself still wins). Without `geoip` (and no `timezone` / `accept_language` of your own) the container's entrypoint builds the persona the way a native launch does: Accept-Language defaults to `en-US` and the timezone is derived from its primary tag (`en-US` -> `America/New_York`, see `_fingerprint.py`), so every such container is New York, English.
 
-A container has no WebRTC ICE candidates at all unless `webrtc_ip` is given. The value to give is the proxy's exit IP, which `geoip=True` fills in as it does for a native launch.
+A container has no WebRTC ICE candidates at all unless `webrtc_ip` is given. Without a proxy geoip fills it with this machine's address, as for a native launch; behind a proxy it stays unset (the container has no UDP relay), and the SDK tells the image not to look one up.
 
 ### Humanized input (`humanize`, `show_cursor`)
 
@@ -847,7 +846,7 @@ All optional. Anything not listed here is passed straight through to Playwright
 | `accept_language` | `--accept-lang` | `navigator.languages` + `Accept-Language` header, e.g. `"en-US,en"`. |
 | `webrtc_ip` | `--webrtc-ip` | WebRTC IP to report. The engine **fabricates** the `srflx` candidate at this IP and sends **no real STUN** from the host, so the real IP never leaks (not merely relabeled). |
 | `disable_gpu_fingerprint` | `--disable-gpu-fingerprint` | Turn off GPU/WebGL spoofing. |
-| `geoip` | _(directive)_ | `True` → resolve the proxy's exit-IP geo and auto-fill timezone/accept_language/location/**webrtc_ip**. |
+| `geoip` | _(directive)_ | `True` → resolve the proxy's exit-IP geo and auto-fill timezone/accept_language/location (and `webrtc_ip` without a proxy, or with a `socks5_udp` relay). |
 | `fingerprint_profile` | _(directive → `--fingerprint-profile`)_ | A real captured machine profile (file path / dict / JSON string); the SDK gzip+base64-encodes it. Fields present **override** the seed-derived persona; absent fields fall back to `fingerprint`. Also derives `accept_language` from the profile's `navigator.languages` when none is set. |
 | `canvas_bridge` | _(→ `--canvas-bridge-*`)_ | Forward canvas/WebGL readbacks to a remote real-GPU host so the pixels a page hashes match the GPU your persona claims. `{"url", "auth", "mode", "allow", "deny", "fallback"}`; setting `url` auto-adds `--no-sandbox`. See [docs/CANVAS-BRIDGE.md](../../docs/CANVAS-BRIDGE.md). |
 | `extensions` | _(→ `--load-extension` + `--disable-extensions-except`)_ | List of unpacked-extension directory paths to load (Chromium forces headed when extensions are present). |

@@ -191,6 +191,25 @@ export function eligible(
   return true;
 }
 
+/** Host GPU vendors a captured profile can match exactly. */
+const MATCHABLE_GPU_VENDORS: ReadonlySet<string> = new Set(["nvidia", "amd", "intel", "apple"]);
+
+/**
+ * The candidates whose GPU vendor is this host's, when the host's is known and the index has any; else all of them.
+ *
+ * The vendor is a hard filter, not only a weight: sites that send a seed and run GPU arithmetic compare the card that
+ * really computes with the declared one, so a profile of another vendor is caught however well its screen or cores
+ * fit. Scoring alone let one through whenever the top-N pool was wider than the host vendor's share of the index.
+ * When the index has none of this vendor the pool is kept as it was, and the launch says the persona's GPU does not
+ * match this machine's (persona.ts warnGpuHostMismatch).
+ */
+export function sameGpuVendor(candidates: ProfileIndexEntry[], host: HostFacts): ProfileIndexEntry[] {
+  const hv = host.gpu_vendor ?? "unknown";
+  if (!MATCHABLE_GPU_VENDORS.has(hv)) return candidates;
+  const same = candidates.filter((e) => e.gpu_vendor === hv);
+  return same.length ? same : candidates;
+}
+
 /** Stable 32-bit hash — used to map a stickiness key onto the candidate pool. */
 function keyHash(key: string): number {
   return parseInt(createHash("sha256").update(key).digest("hex").slice(0, 8), 16);
@@ -217,7 +236,7 @@ export function selectProfile(
   opts: SelectOptions = {},
 ): Selection {
   const mode: SelectMode = opts.mode ?? "rotate";
-  const candidates = index.filter((e) => eligible(e, host, opts));
+  let candidates = index.filter((e) => eligible(e, host, opts));
   if (candidates.length === 0) {
     const os = opts.os ?? host.os_family;
     throw new Error(
@@ -227,6 +246,7 @@ export function selectProfile(
     );
   }
 
+  candidates = sameGpuVendor(candidates, host);
   const scored = candidates
     .map((entry) => ({ entry, score: scoreProfile(entry, host) }))
     // tie-break by id so the ordering is deterministic across runs and machines

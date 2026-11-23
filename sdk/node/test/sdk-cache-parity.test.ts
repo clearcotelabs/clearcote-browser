@@ -54,14 +54,27 @@ describe("host.json exe key matches the Python SDK", () => {
 
   it("still reads an entry an older Node SDK keyed by the literal path", () => {
     const exe = fakeExe("Chrome-Legacy.exe");
-    writeFileSync(hostJson(), JSON.stringify({ ...(FACTS as object), _exe: exe, _at: new Date().toISOString() }));
+    writeFileSync(hostJson(), JSON.stringify({ ...(FACTS as object), _exe: exe, _at: new Date().toISOString(), _gpu: "real" }));
     expect(readCachedHost(exe)).not.toBeNull();
+  });
+});
+
+describe("host.json _gpu: the GPU read with the real strings", () => {
+  const exe = fakeExe("Chrome-Gpu.exe");
+  it("writes _gpu: real and reads only such an entry (an older one read the persona's GPU)", () => {
+    writeCachedHost(exe, FACTS);
+    expect(JSON.parse(readFileSync(hostJson(), "utf8"))._gpu).toBe("real");
+    expect(readCachedHost(exe)).not.toBeNull();
+    const old = JSON.parse(readFileSync(hostJson(), "utf8"));
+    delete old._gpu;
+    writeFileSync(hostJson(), JSON.stringify(old));
+    expect(readCachedHost(exe)).toBeNull();
   });
 });
 
 describe("host.json _at in both formats", () => {
   const exe = fakeExe("Chrome-At.exe");
-  const write = (at: unknown) => writeFileSync(hostJson(), JSON.stringify({ ...(FACTS as object), _exe: hostExeKey(exe), _at: at }));
+  const write = (at: unknown) => writeFileSync(hostJson(), JSON.stringify({ ...(FACTS as object), _exe: hostExeKey(exe), _at: at, _gpu: "real" }));
 
   it("reads the ISO time this SDK writes", () => {
     write(new Date().toISOString());

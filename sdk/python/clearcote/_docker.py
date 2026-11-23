@@ -221,17 +221,20 @@ def apply_geoip_before_start(kwargs: dict, quiet=False) -> dict:
         return kwargs
     fp = {k: kwargs[k] for k in GEOIP_FILLED if kwargs.get(k) is not None}
     applied = apply_geoip_mode(fp, kwargs.get("proxy"), mode, quiet=quiet)
-    # no key = the image's open build, which has no WebRTC UDP egress block (see drop_auto_webrtc_ip)
-    drop_auto_webrtc_ip(fp, applied, kwargs.get("proxy"), bool(resolve_license_key(kwargs.get("license_key"))))
+    # the container has no SOCKS5 UDP relay: behind a proxy a looked-up WebRTC IP is dropped (see drop_auto_webrtc_ip)
+    drop_auto_webrtc_ip(fp, applied, kwargs.get("proxy"), bool(resolve_license_key(kwargs.get("license_key"))),
+                        None, bool(kwargs.get("quiet")))
     kwargs.update(fp)
     return kwargs
 
 
-def webrtc_ip_off_env(protocol: int, geoip_off: bool, env: dict) -> dict:
-    """``{"CC_WEBRTC_IP": "off"}`` when geoip is off and no WebRTC IP was given, for an image that would otherwise
-    fill it from the egress itself (WEBRTC_IP_PROTOCOL): geoip=False means no lookup and no filled-in WebRTC IP, in
-    the container as in a launch here. Else nothing."""
-    if protocol >= WEBRTC_IP_PROTOCOL and geoip_off and "CC_WEBRTC_IP" not in env:
+def webrtc_ip_off_env(protocol: int, geoip_off: bool, env: dict, proxied: bool = False) -> dict:
+    """``{"CC_WEBRTC_IP": "off"}`` when no WebRTC IP was given and either geoip is off or the container goes through
+    a proxy, for an image that would otherwise fill it from the egress itself (WEBRTC_IP_PROTOCOL): geoip=False means
+    no lookup and no filled-in WebRTC IP, in the container as in a launch here; and behind a proxy the container has
+    no UDP relay, so a WebRTC IP at the exit would be one no packet comes from (see drop_auto_webrtc_ip). Else
+    nothing."""
+    if protocol >= WEBRTC_IP_PROTOCOL and (geoip_off or proxied) and "CC_WEBRTC_IP" not in env:
         return {"CC_WEBRTC_IP": "off"}
     return {}
 
@@ -962,7 +965,7 @@ def start_container(kwargs: dict, quiet=False) -> dict:
     sweep_stale(exe)
     image = kwargs.get("docker_image") or default_image()
     protocol = image_protocol(exe, image, quiet)
-    env.update(webrtc_ip_off_env(protocol, geoip_off, env))
+    env.update(webrtc_ip_off_env(protocol, geoip_off, env, "CC_PROXY" in env))
     secrets = {k: env.pop(k) for k in SECRET_ENV if k in env}
     expect = {"licensed": "CLEARCOTE_LICENSE_KEY" in secrets, "proxy": secrets.get("CC_PROXY")}
     if protocol >= SERVE_PROTOCOL:

@@ -69,7 +69,7 @@ headless-mode tells some detectors probe. Set `CC_HEADLESS=1` for the old pure-h
 | `CC_SECRETS_FILE` | `/tmp/clearcote-secrets.json` | images from `sdk-0.40.0`: a JSON file holding `CLEARCOTE_LICENSE_KEY` and/or `CC_PROXY`, read once at start and deleted — see [Secrets](#secrets-and-docker-inspect) |
 | `CLEARCOTE_FONT_DIRS` | `/fonts` | your own fonts, mounted into the container (e.g. a copy of a Windows machine's Fonts folder) — see [Fonts](#fonts) |
 | `CLEARCOTE_FALLBACK_FONT_DIRS` | `/usr/local/share/clearcote/fonts` (set by the image) | fonts used only for characters nothing else covers — see [Fonts](#fonts) |
-| `CC_WEBRTC_IP` | `203.0.113.7` \| `off` | the public address WebRTC reports. Unset: looked up at start through `CC_PROXY` (the proxy's exit) or, without one, the container's own; licensed engine only. `off`: none. See [Networking and WebRTC](#networking-and-webrtc) |
+| `CC_WEBRTC_IP` | `203.0.113.7` \| `off` | the public address WebRTC reports. Unset: without `CC_PROXY`, the container's own, looked up at start (licensed engine only); behind `CC_PROXY`, none. `off`: none. See [Networking and WebRTC](#networking-and-webrtc) |
 | `CC_EXTRA_ARGS` | `--lang=de` | extra Chrome switches, separated by spaces |
 | `CC_PLATFORM_VERSION`, `CC_LOCATION`, `CC_WEBRTC_MDNS`, `CC_FINGERPRINT_PROFILE`, `CC_DEVICE_MEMORY`, `CC_COLOR_DEPTH`, `CC_MAX_TOUCH_POINTS`, `CC_STORAGE_QUOTA`, `CC_DEVICE_PIXEL_RATIO`, `CC_LIGHT_STEALTH`, `CC_DISABLE_GPU_FINGERPRINT`, `CC_FINGERPRINT_NOISE`, `CC_CANVAS_NOISE`, `CC_GPU_STRING_SPOOF`, `CC_FLAT_AREA_NOISE`, `CC_WEBGL_READ_MARGIN` (r57+), `CC_NOISE_PER_PROFILE` (r60+) | `CC_DEVICE_MEMORY=8` | the SDK `launch()` option of the same name in lower case (`CC_DEVICE_MEMORY=8` is `device_memory=8`); on/off options take `1` or `0`. See [Fingerprint options](../sdk/python/README.md#fingerprint-options) |
 
@@ -154,31 +154,37 @@ docker run -d --rm -v clearcote-cache:/opt/xdg-cache --shm-size=1g -p 127.0.0.1:
 ## Networking and WebRTC
 
 WebRTC tells a page this browser's public address in its ICE candidates. The engine reports `CC_WEBRTC_IP` as
-that address. **When `CC_WEBRTC_IP` is unset, the container looks it up at start** (images from serve protocol 4),
-the same way the SDKs' geoip does for a launch of their own: through `CC_PROXY` when one is set, so it is the
-proxy's exit, otherwise the container's own public address. The log says which address it used and where it came
-from:
+that address. **When `CC_WEBRTC_IP` is unset and there is no `CC_PROXY`, the container looks up its own public
+address at start** (images from serve protocol 4), the same way the SDKs' geoip does for a launch of their own. The
+log says which address it used and where it came from:
 
 ```
-[clearcote] WebRTC IP: 203.0.113.7 (the proxy's exit, looked up at start; set CC_WEBRTC_IP to choose it)
+[clearcote] WebRTC IP: 203.0.113.7 (this container's public address, looked up at start; set CC_WEBRTC_IP to choose it)
 ```
+
+**Behind `CC_PROXY` it is left unset** (since `sdk-0.71.0`). The image has no UDP relay, so no packet leaves from the
+proxy's exit: a server-reflexive candidate at the exit IP would be an address no STUN server ever saw, and sites that
+run their own STUN servers prove such an address fake. With no address the browser gathers no candidates behind the
+proxy, which is what Chrome itself shows under its `disable_non_proxied_udp` policy. An explicit `CC_WEBRTC_IP` behind
+a proxy is still used, and the log warns about it.
 
 Measured on Docker Desktop (Windows, WSL 2) with the licensed engine and a residential proxy (http and socks5),
 gathering ICE candidates against two public STUN servers (Google's and Cloudflare's) and comparing them with the
-address the same page's HTTP requests came from:
+address the same page's HTTP requests came from (before `sdk-0.71.0`, an unset address behind a proxy was the
+looked-up exit, the second row):
 
 | `CC_PROXY` | `CC_WEBRTC_IP` | candidates the page gets |
 |---|---|---|
 | unset | unset (looked up) | one server-reflexive candidate with this machine's public IP, and a `.local` host candidate |
-| http or socks5 | unset (looked up) | one server-reflexive candidate with the proxy's exit IP, the same address the page's HTTP requests came from, and a `.local` host candidate |
+| http or socks5 | unset (before `sdk-0.71.0`: looked up) | one server-reflexive candidate with the proxy's exit IP, the same address the page's HTTP requests came from, and a `.local` host candidate; none since `sdk-0.71.0` |
 | any | an address | one server-reflexive candidate with that address, as given, and a `.local` host candidate |
 | any | `off` | none |
 
 - **Nothing leaks.** No candidate carried the container's own address (`172.17.x.x` on the default bridge) or,
   with a proxy, the real public IP of the machine running Docker. Local addresses only appear as `.local` names.
 - **With a proxy**, the entrypoint also sets Chrome's `disable_non_proxied_udp` WebRTC policy and turns QUIC off,
-  so no UDP leaves around the proxy; the server-reflexive candidate is the address above, not one a STUN server
-  saw.
+  so no UDP leaves around the proxy. A server-reflexive candidate there would be the address given, not one a STUN
+  server saw, which is why none is reported unless you set one.
 - **`CC_WEBRTC_IP=off`** (or set but empty) skips the lookup and reports no address. The browser then reports no
   candidates at all, where a regular Chrome always reports at least a `.local` host candidate, and a page can
   notice that.
@@ -187,17 +193,17 @@ address the same page's HTTP requests came from:
 - **If the lookup fails** (no answer within `CLEARCOTE_GEOIP_TIMEOUT_SECONDS`, 10 s by default), the container
   logs a warning and starts without an address. `CLEARCOTE_GEOIP_ECHO_URL` names your own IP-echo endpoint, as
   for the SDKs.
-- **The open engine** (no licence key) is not looked up for: behind a proxy it has no WebRTC UDP block of its own,
-  so an address there can let a page's TURN server see the real one, and without a proxy it never finishes ICE
-  gathering with an address set. An explicit `CC_WEBRTC_IP` is still used.
+- **The open engine** (no licence key) is not looked up for: without a proxy it never finishes ICE gathering with
+  an address set. An explicit `CC_WEBRTC_IP` is still used.
 - **Bridge or host networking: the same results.** With `--network host` there were two `.local` host
   candidates instead of one (one per network interface the browser saw). On Docker Desktop, `--network host`
   is the network of Docker's own virtual machine, not of your computer, unless host networking is turned on in
   Docker Desktop's settings; while it is off, `-p` does not apply and the CDP port cannot be reached from your
   computer.
 - **The SDKs' Docker launch** (`launch()` on macOS, or `docker=True`) does its own geoip lookup before the
-  container starts and passes the address as `CC_WEBRTC_IP` together with the matching timezone, language and
-  location. With `geoip=False` it passes `CC_WEBRTC_IP=off` to an image that would otherwise look it up.
+  container starts and passes the matching timezone, language and location, and without a proxy the address as
+  `CC_WEBRTC_IP`. With `geoip=False`, or through a proxy, it passes `CC_WEBRTC_IP=off` to an image that would
+  otherwise look it up.
 - **SOCKS5 UDP relay.** The image has no variable of its own for it: `CC_EXTRA_ARGS=--socks5-udp` turns it on
   for a `socks5://` proxy. UDP is only relayed through a proxy given as an IP address, and only by a proxy
   that accepts UDP associations (many residential SOCKS5 plans refuse them). The entrypoint does not check

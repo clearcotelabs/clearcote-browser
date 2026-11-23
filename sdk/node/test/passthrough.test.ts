@@ -252,10 +252,11 @@ describe("from the IP address: the WebRTC IP and nothing else", () => {
     expect(asked).toEqual([undefined, PROXY]);
     expect(viaProxy).toEqual({ timezone: "Europe/Berlin", webrtcIp: "203.0.113.7" });
     expect(directStunEligible(viaProxy, p, PROXY)).toBe(false);
-    dropAutoWebrtcIp(viaProxy, p, PROXY, true);
-    expect(viaProxy.webrtcIp).toBe("203.0.113.7");                   // licensed build: kept
-    dropAutoWebrtcIp(viaProxy, p, PROXY, false);
-    expect(viaProxy.webrtcIp).toBeUndefined();                       // open build: dropped, as for a persona launch
+    const relayed = { ...viaProxy };
+    dropAutoWebrtcIp(relayed, p, PROXY, true, true, true);
+    expect(relayed.webrtcIp).toBe("203.0.113.7");                    // licensed build with the SOCKS5 UDP relay: kept
+    dropAutoWebrtcIp(viaProxy, p, PROXY, true, undefined, true);
+    expect(viaProxy.webrtcIp).toBeUndefined();                       // no relay: dropped, as for a persona launch
   });
 
   it("applyGeoipMode 'webrtc' asks nothing when the caller set a WebRTC IP, and reuses the no-proxy lookup", async () => {

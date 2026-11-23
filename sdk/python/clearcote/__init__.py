@@ -521,17 +521,19 @@ class GeoipApplied(tuple):
 def apply_geoip_mode(fp, proxy, mode, quiet=False):
     """Apply geoip in ``mode`` (see :func:`clearcote.geoip.geoip_mode`) -> ``(geo, auto_webrtc_ip)``
     (a :class:`GeoipApplied`, whose ``.ip`` is the egress IP the lookup found), where
-    ``auto_webrtc_ip`` says the WebRTC IP came from the default lookup. "strict" is
+    ``auto_webrtc_ip`` says the WebRTC IP came from the lookup (the default one or geoip=True), not the caller. "strict" is
     :func:`apply_geoip`. "auto" skips the lookup when every field it fills is already set, reuses a
     no-proxy lookup for 10 minutes, and on failure warns once and launches without filling anything.
     "webrtc" is "auto" for the WebRTC IP alone: no lookup when the caller set one, and nothing else on
-    ``fp`` is touched. What comes back is the same, so the open-build drop (drop_auto_webrtc_ip) and real
+    ``fp`` is touched. What comes back is the same, so the drop behind a proxy (drop_auto_webrtc_ip) and real
     STUN with no proxy (direct_stun_eligible) treat the address as they treat any default lookup's."""
     if mode == "off":
         return GeoipApplied()
     if mode == "strict":
+        had_webrtc_ip = fp.get("webrtc_ip") is not None
         geo = apply_geoip(fp, proxy, quiet=quiet)
-        return GeoipApplied(geo, False, (geo or {}).get("ip"))
+        # geoip=True asks for the exit's region; a WebRTC IP it filled is as automatic as the default lookup's
+        return GeoipApplied(geo, not had_webrtc_ip and fp.get("webrtc_ip") is not None, (geo or {}).get("ip"))
     if mode == "webrtc":
         if fp.get("webrtc_ip") is not None:
             return GeoipApplied()
@@ -584,14 +586,35 @@ def direct_stun_eligible(fp, applied, proxy):
     return not proxy and bool(ip) and fp.get("webrtc_ip") == ip
 
 
-def drop_auto_webrtc_ip(fp, applied, proxy, licensed):
-    """The open build (no licence) has no WebRTC UDP egress block, and a WebRTC IP there re-enables UDP
-    that does not go through the proxy: a page's own TURN server would read this machine's real address
-    off the packets. So a WebRTC IP the DEFAULT lookup filled (``applied``: what :func:`apply_geoip_mode`
-    returned) is dropped again on an open-build launch through a proxy. With no proxy the real address
-    is the exit anyway; ``geoip=True`` or an explicit webrtc_ip is the caller's choice and is kept."""
-    if applied[1] and proxy and not licensed:
+def drop_auto_webrtc_ip(fp, applied, proxy, licensed, socks5_udp=None, quiet=False):
+    """Behind a proxy, a WebRTC IP the lookup filled (``applied``: what :func:`apply_geoip_mode` returned) is
+    dropped again unless the SOCKS5 UDP relay carries this launch's UDP (``socks5_udp`` as
+    :func:`udp_relay_or_fallback` resolved it, on a licensed engine).
+
+    Without the relay no UDP leaves from the proxy's exit: the licensed engine drops WebRTC UDP behind a proxy,
+    so it would report a server-reflexive candidate at the exit IP that no packet ever came from. Sites that run
+    their own STUN/TURN servers see the claimed address but none of the traffic, and can prove it made up. With
+    no WebRTC IP the browser gathers no candidates behind the proxy, which is what Chrome itself shows under the
+    standard disable_non_proxied_udp policy. On the open build (no licence) a WebRTC IP would instead re-enable
+    UDP around the proxy and show this machine's real address, so there it is dropped even with ``socks5_udp``
+    (that build has no relay). Timezone, language and location from the lookup are kept either way.
+
+    A WebRTC IP the caller set is kept, with a warning (once per process) when nothing makes it true. With no
+    proxy the address is this machine's own egress and stays."""
+    if not proxy or fp.get("webrtc_ip") is None:
+        return
+    if licensed and socks5_udp is True:
+        return
+    if applied[1]:
         fp.pop("webrtc_ip", None)
+        return
+    from ._warnings import warn_once
+    warn_once("webrtc-ip-behind-proxy",
+              "webrtc_ip %s is set with a proxy and no SOCKS5 UDP relay: no UDP leaves from that address, so the "
+              "browser reports a WebRTC address no packet came from, and sites that run their own STUN servers can "
+              "prove it fake. Leave webrtc_ip unset behind a proxy (WebRTC then gathers no candidates, as Chrome "
+              "does under its disable_non_proxied_udp policy), or use socks5_udp with a socks5:// proxy that relays "
+              "UDP." % fp.get("webrtc_ip"), quiet)
 
 
 _NO_NOISE_DIR = object()  # _cc_noise_dir absent: _prepare leaves noise_per_profile as given
@@ -695,9 +718,9 @@ def _prepare(kwargs):
     exe = _resolve_binary(exe_path, cache_dir, quiet, auto_update, pro=_cc_pro, version=version,
                           release_channel=release_channel)
     _guard(exe)
-    # open build + proxy: no default WebRTC IP (offline mode runs the licensed bundle)
+    # proxy without a UDP relay: no looked-up WebRTC IP (offline mode runs the licensed bundle)
     drop_auto_webrtc_ip(fp, geo_applied, proxy_opt,
-                        bool(_cc_pro) or isinstance(outer_lease, _offline.OfflineLease))
+                        bool(_cc_pro) or isinstance(outer_lease, _offline.OfflineLease), socks5_udp, quiet)
     # profile="auto" -> resolve a REAL captured fingerprint for this host and apply it as
     # fingerprint_profile. Deliberately does NOT set a seed: with no --fingerprint the farbling
     # machinery stays off, which is the whole reason this path survives strict scoring.
@@ -1438,6 +1461,7 @@ def launch(cloud=None, **kwargs):
 
 
 def _launch_incognito(kwargs):
+    gpu_check_quiet = bool(kwargs.get("quiet"))  # read before _prepare pops it (_persona GPU guard)
     # incognito has no profile to seed a CRLSet into (see _crlset): drop the options, warn if asked for
     if kwargs.pop("crlset", None) not in (None, False):
         print("clearcote: crlset: ephemeral_profile=False has no profile to seed a CRLSet into; "
@@ -1466,7 +1490,7 @@ def _launch_incognito(kwargs):
     # context option, so it rides on new_page/new_context.
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args, exe)
     persona_args = _with_geometry_args(args, geom)
-    launch_args = _persona.apply_to_pw_kwargs(exe, persona_args, pw_kwargs, lease)  # r51+: the signed persona token
+    launch_args = _persona.apply_to_pw_kwargs(exe, persona_args, pw_kwargs, lease, quiet=gpu_check_quiet)  # r51+: the signed persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     # Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
     # instead of no proxy at all, which sent it from this machine's IP (_reqproxy.py).
@@ -1534,6 +1558,7 @@ def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
 
 
 def _launch_persistent_context_local(user_data_dir, kwargs):
+    gpu_check_quiet = bool(kwargs.get("quiet"))  # read before _prepare pops it (_persona GPU guard)
     # Set the default strip (DEFAULT_IGNORED_ARGS) BEFORE the Widevine helper so it appends
     # --disable-component-update to it rather than replacing it (which would lose the AutomationControlled
     # strip on Widevine launches).
@@ -1576,7 +1601,7 @@ def _launch_persistent_context_local(user_data_dir, kwargs):
     if engine_decides_color_scheme(exe):  # r32+: the persona's colour scheme, not Playwright's light
         default_color_scheme(pw_kwargs)
     persona_args = _with_geometry_args(args, geom)  # carries --widevine-cdm-path when on (see _prepare)
-    launch_args = _persona.apply_to_pw_kwargs(exe, persona_args, pw_kwargs, lease)  # r51+: the signed persona token
+    launch_args = _persona.apply_to_pw_kwargs(exe, persona_args, pw_kwargs, lease, quiet=gpu_check_quiet)  # r51+: the signed persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     if crlset_plan:  # the readiness probe's port must bypass a launch proxy, so its server starts first
         launch_args = launch_args + crlset_plan.before_launch(pw_kwargs)

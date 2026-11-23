@@ -296,6 +296,7 @@ async def launch(cloud=None, **kwargs):
 
 
 async def _launch_incognito(kwargs):
+    gpu_check_quiet = bool(kwargs.get("quiet"))  # read before _prepare pops it (_persona GPU guard)
     # this launch is incognito: no profile to seed a CRLSet into (launch_persistent_context has one)
     if kwargs.pop("crlset", None) not in (None, False):
         print("clearcote: crlset: the async launch() has no profile to seed a CRLSet into; use "
@@ -319,7 +320,7 @@ async def _launch_incognito(kwargs):
     # new_page/new_context (see _geometry).
     geom = None if headed else _headless_geometry_kwargs(pw_kwargs, seed, args, exe)
     persona_args = _with_geometry_args(args, geom)
-    launch_args = await asyncio.to_thread(_persona.apply_to_pw_kwargs, exe, persona_args, pw_kwargs, lease)  # r51+ persona token
+    launch_args = await asyncio.to_thread(_persona.apply_to_pw_kwargs, exe, persona_args, pw_kwargs, lease, quiet=gpu_check_quiet)  # r51+ persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     # Credentials moved to the engine: Playwright's request API gets a local credential-less forwarder
     # instead of no proxy at all (_reqproxy.py, mirror sync).
@@ -373,6 +374,7 @@ async def launch_persistent_context(user_data_dir=None, cloud=None, **kwargs):
 
 
 async def _launch_persistent_context_local(user_data_dir, kwargs):
+    gpu_check_quiet = bool(kwargs.get("quiet"))  # read before _prepare pops it (_persona GPU guard)
     # Whether the folder already held a profile, before the seeding below writes into it (_noisemode.py).
     from ._noisemode import has_chrome_data
     kwargs["_cc_noise_dir"] = (user_data_dir, has_chrome_data(user_data_dir))
@@ -410,7 +412,7 @@ async def _launch_persistent_context_local(user_data_dir, kwargs):
     if await asyncio.to_thread(engine_decides_color_scheme, exe):  # r32+ (mirror sync)
         default_color_scheme(pw_kwargs)
     persona_args = _with_geometry_args(args, geom)  # carries --widevine-cdm-path when on (see _prepare)
-    launch_args = await asyncio.to_thread(_persona.apply_to_pw_kwargs, exe, persona_args, pw_kwargs, lease)  # r51+ persona token
+    launch_args = await asyncio.to_thread(_persona.apply_to_pw_kwargs, exe, persona_args, pw_kwargs, lease, quiet=gpu_check_quiet)  # r51+ persona token
     launch_args = _personaenv.apply_to_pw_kwargs(exe, launch_args, pw_kwargs, persona_env)
     if crlset_plan:  # the readiness probe's port must bypass a launch proxy, so its server starts first
         launch_args = launch_args + crlset_plan.before_launch(pw_kwargs)

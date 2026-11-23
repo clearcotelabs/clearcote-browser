@@ -58,8 +58,11 @@ export function hostOsFamily(): string {
 // one-off no-persona launch. That is expensive (a browser start), so the result is cached on
 // disk and keyed by the engine binary — a different build may report a different GL string.
 
-// `_at` is an ISO time when this SDK wrote it and epoch seconds when the Python or .NET SDK did.
-interface CachedHost extends HostFacts { _exe: string; _at: string | number; }
+// `_at` is an ISO time when this SDK wrote it and epoch seconds when the Python or .NET SDK did. `_gpu: "real"`: the
+// renderer was read with the real GPU strings (0.71.0+). Before, the probe read the persona's renderer, which on an
+// r51+ engine is the persona's own claim (Intel on an AMD or software-rendering host), so such an entry is re-measured.
+interface CachedHost extends HostFacts { _exe: string; _at: string | number; _gpu?: string; }
+export const HOST_CACHE_GPU = "real";
 
 function hostCachePath(): string {
   return join(cacheDir(), "host.json");
@@ -93,6 +96,7 @@ export function readCachedHost(exe: string): HostFacts | null {
     const c = JSON.parse(readFileSync(hostCachePath(), "utf8")) as CachedHost;
     // Different binary: re-measure. The literal path, as older Node SDKs wrote it, is still honoured.
     if (c._exe !== hostExeKey(exe) && c._exe !== exe) return null;
+    if (c._gpu !== HOST_CACHE_GPU) return null;  // measured through the persona's GPU strings: re-measure
     // Host hardware does not change often, but a monitor or driver swap does; a month is a
     // reasonable compromise between staleness and paying for a launch every run.
     const at = cachedAtMs(c._at);
@@ -105,7 +109,7 @@ export function readCachedHost(exe: string): HostFacts | null {
 
 export function writeCachedHost(exe: string, facts: HostFacts): void {
   try {
-    writeFileSync(hostCachePath(), JSON.stringify({ ...facts, _exe: hostExeKey(exe), _at: new Date().toISOString() }, null, 1));
+    writeFileSync(hostCachePath(), JSON.stringify({ ...facts, _exe: hostExeKey(exe), _at: new Date().toISOString(), _gpu: HOST_CACHE_GPU }, null, 1));
   } catch {
     /* a cache write failure must never fail a launch */
   }
@@ -160,8 +164,10 @@ export async function measureHost(
   const cached = readCachedHost(exe);
   if (cached) return cached;
 
-  // geoip: false -- the probe measures the host, not the egress; the default lookup would only cost time
-  const browser = await launchFn({ executablePath: exe, headless: true, quiet: true, geoip: false });
+  // geoip: false -- the probe measures the host, not the egress; the default lookup would only cost time.
+  // gpuStringSpoof: false -- WebGL reports the GPU that really renders. With the persona's strings an r51+ engine
+  // reports the persona's own claim, which is not this machine's vendor on an AMD or software-rendering host.
+  const browser = await launchFn({ executablePath: exe, headless: true, quiet: true, geoip: false, gpuStringSpoof: false });
   try {
     const ctx = await browser.newContext();
     const page = (await ctx.newPage()) as {

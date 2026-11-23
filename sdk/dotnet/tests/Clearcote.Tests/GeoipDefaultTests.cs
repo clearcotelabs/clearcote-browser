@@ -157,15 +157,6 @@ public sealed class GeoipDefaultTests : IDisposable
     }
 
     [Fact]
-    public async Task Strict_never_marks_the_WebRTC_IP_as_the_defaults()
-    {
-        var fp = new FingerprintOptions();
-        var r = await GeoIp.ApplyModeAsync(fp, Proxy, GeoipMode.Strict, quiet: true);
-        Assert.Equal("203.0.113.7", fp.WebrtcIp);
-        Assert.False(r.AutoWebrtcIp);
-    }
-
-    [Fact]
     public async Task Off_asks_nothing()
     {
         var fp = new FingerprintOptions();
@@ -174,22 +165,85 @@ public sealed class GeoipDefaultTests : IDisposable
         Assert.Null(fp.Timezone);
     }
 
-    [Fact]
-    public void DropAutoWebrtcIp_drops_a_default_filled_WebRTC_IP_only_on_an_open_build_launch_through_a_proxy()
+    private static readonly ProxyOptions Socks = new() { Server = "socks5://1.2.3.4:1080" };
+    private static FingerprintOptions DropFp() => new()
+        { Timezone = "Europe/Berlin", AcceptLanguage = "de-DE", Location = "52.52,13.405", WebrtcIp = "203.0.113.7" };
+    private static GeoIp.GeoipApplied Looked(bool auto) => new(null, auto, Task.CompletedTask);
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void DropAutoWebrtcIp_drops_a_looked_up_IP_behind_a_proxy_and_keeps_the_region(bool licensed)
     {
-        FingerprintOptions Fp() => new() { Timezone = "Europe/Berlin", WebrtcIp = "203.0.113.7" };
-        GeoIp.GeoipApplied Auto(bool auto) => new(null, auto, Task.CompletedTask);
-        var f = Fp(); GeoIp.DropAutoWebrtcIp(f, Auto(true), Proxy, licensed: false); Assert.Null(f.WebrtcIp);
+        var f = DropFp(); GeoIp.DropAutoWebrtcIp(f, Looked(true), Proxy, licensed, quiet: true);
+        Assert.Null(f.WebrtcIp);
         Assert.Equal("Europe/Berlin", f.Timezone);
-        f = Fp(); GeoIp.DropAutoWebrtcIp(f, Auto(true), Proxy, licensed: true); Assert.Equal("203.0.113.7", f.WebrtcIp);
-        f = Fp(); GeoIp.DropAutoWebrtcIp(f, Auto(true), null, licensed: false); Assert.Equal("203.0.113.7", f.WebrtcIp);
-        f = Fp(); GeoIp.DropAutoWebrtcIp(f, Auto(false), Proxy, licensed: false); Assert.Equal("203.0.113.7", f.WebrtcIp);
+        Assert.Equal("de-DE", f.AcceptLanguage);
+        Assert.Equal("52.52,13.405", f.Location);
     }
 
     [Fact]
-    public async Task A_launch_path_applies_the_default_and_the_open_build_drop_after_the_binary()
+    public void DropAutoWebrtcIp_keeps_it_when_the_SOCKS5_UDP_relay_carries_UDP_on_the_licensed_build_only()
     {
-        // PrepareLaunchAsync (every native launch path) runs the default; DropAutoWebrtcIp then judges the licence.
+        var f = DropFp(); GeoIp.DropAutoWebrtcIp(f, Looked(true), Socks, licensed: true, socks5Udp: true, quiet: true);
+        Assert.Equal("203.0.113.7", f.WebrtcIp);
+        f = DropFp(); GeoIp.DropAutoWebrtcIp(f, Looked(true), Socks, licensed: false, socks5Udp: true, quiet: true);
+        Assert.Null(f.WebrtcIp);   // the open build has no relay
+        f = DropFp(); GeoIp.DropAutoWebrtcIp(f, Looked(true), Socks, licensed: true, socks5Udp: false, quiet: true);
+        Assert.Null(f.WebrtcIp);   // a relay the proxy refused
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void DropAutoWebrtcIp_keeps_it_with_no_proxy(bool licensed)
+    {
+        var f = DropFp(); GeoIp.DropAutoWebrtcIp(f, Looked(true), null, licensed, quiet: true);
+        Assert.Equal("203.0.113.7", f.WebrtcIp);
+    }
+
+    [Fact]
+    public void DropAutoWebrtcIp_keeps_one_the_caller_set_behind_a_proxy_and_warns_once()
+    {
+        LaunchWarnings.ForgetSaid();
+        var f = DropFp(); GeoIp.DropAutoWebrtcIp(f, Looked(false), Proxy, licensed: true);
+        Assert.Equal("203.0.113.7", f.WebrtcIp);
+        GeoIp.DropAutoWebrtcIp(DropFp(), Looked(false), Proxy, licensed: true);   // once per process
+        var err = _err.ToString();
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(err, "WebrtcIp 203\\.0\\.113\\.7 is set with a proxy"));
+        Assert.Contains("sites that run their own STUN servers can prove it fake", err);
+        LaunchWarnings.ForgetSaid();
+    }
+
+    [Fact]
+    public void DropAutoWebrtcIp_does_not_warn_with_the_relay_without_a_proxy_or_when_quiet()
+    {
+        LaunchWarnings.ForgetSaid();
+        GeoIp.DropAutoWebrtcIp(DropFp(), Looked(false), Socks, licensed: true, socks5Udp: true);
+        GeoIp.DropAutoWebrtcIp(DropFp(), Looked(false), null, licensed: true);
+        GeoIp.DropAutoWebrtcIp(DropFp(), Looked(false), Proxy, licensed: true, quiet: true);
+        _sb.Env("CLEARCOTE_NO_WARN", "1");
+        GeoIp.DropAutoWebrtcIp(DropFp(), Looked(false), Proxy, licensed: true);
+        Assert.DoesNotContain("is set with a proxy", _err.ToString());
+        LaunchWarnings.ForgetSaid();
+    }
+
+    [Fact]
+    public async Task Strict_reports_a_WebRTC_IP_it_filled_as_looked_up_and_one_the_caller_set_as_not()
+    {
+        var fp = new FingerprintOptions();
+        var r = await GeoIp.ApplyModeAsync(fp, Proxy, GeoipMode.Strict, quiet: true);
+        Assert.Equal("203.0.113.7", fp.WebrtcIp);
+        Assert.True(r.AutoWebrtcIp);
+        var set = new FingerprintOptions { WebrtcIp = "198.51.100.9" };
+        Assert.False((await GeoIp.ApplyModeAsync(set, Proxy, GeoipMode.Strict, quiet: true)).AutoWebrtcIp);
+        Assert.Equal("198.51.100.9", set.WebrtcIp);
+    }
+
+    [Fact]
+    public async Task A_launch_path_applies_the_default_and_the_proxy_drop_after_the_binary()
+    {
+        // PrepareLaunchAsync (every native launch path) runs the default; DropAutoWebrtcIp then drops it behind the proxy.
         _sb.Env(GeoIp.GeoipEnv, null).Env("CLEARCOTE_LICENSE_KEY", null).Env("CLEARCOTE_OFFLINE_KEY", null);
         _sb.TempHome();   // never this machine's own saved licence key
         var prepared = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Proxy = Proxy, Quiet = true });
@@ -201,7 +255,8 @@ public sealed class GeoipDefaultTests : IDisposable
 
         var keyed = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Proxy = Proxy, Quiet = true, LicenseKey = "cc_lic_geoip_test_key_1234" });
         Clearcote.DropAutoWebrtcIp(keyed.Options, keyed.Geo);
-        Assert.Equal("203.0.113.7", keyed.Options.WebrtcIp);   // the PRO build blocks non-proxied WebRTC UDP
+        Assert.Null(keyed.Options.WebrtcIp);   // licensed too: no UDP leaves from the exit without the SOCKS5 relay
+        Assert.Equal("Europe/Berlin", keyed.Options.Timezone);
 
         var off = await Clearcote.PrepareLaunchAsync(new LaunchOptions { Proxy = Proxy, Quiet = true, Geoip = false });
         Assert.Null(off.Options.Timezone);
@@ -251,10 +306,11 @@ public sealed class GeoipDefaultTests : IDisposable
         Assert.Null(viaProxy.AcceptLanguage);
         Assert.Equal("203.0.113.7", viaProxy.WebrtcIp);
         Assert.False(GeoIp.DirectStunEligible(viaProxy, p, Proxy));
-        GeoIp.DropAutoWebrtcIp(viaProxy, p, Proxy, licensed: true);
-        Assert.Equal("203.0.113.7", viaProxy.WebrtcIp);   // licensed build: kept
-        GeoIp.DropAutoWebrtcIp(viaProxy, p, Proxy, licensed: false);
-        Assert.Null(viaProxy.WebrtcIp);                    // open build: dropped, as for a persona launch
+        var relayed = new FingerprintOptions { Timezone = viaProxy.Timezone, WebrtcIp = viaProxy.WebrtcIp };
+        GeoIp.DropAutoWebrtcIp(relayed, p, Proxy, licensed: true, socks5Udp: true, quiet: true);
+        Assert.Equal("203.0.113.7", relayed.WebrtcIp);    // licensed build with the SOCKS5 UDP relay: kept
+        GeoIp.DropAutoWebrtcIp(viaProxy, p, Proxy, licensed: true, quiet: true);
+        Assert.Null(viaProxy.WebrtcIp);                    // no relay: dropped, as for a persona launch
 
         // a WebRTC IP of the caller's needs no lookup
         var own = new FingerprintOptions { WebrtcIp = "198.51.100.4" };

@@ -4,6 +4,7 @@ import {
   applyGeoipMode, dropAutoWebrtcIp, geoipMode, geoResolver, GeoipError, resetDirectGeoCache,
   type GeoFillable, type GeoResult,
 } from "../src/geoip.js";
+import { resetSeenWarnings } from "../src/warnings.js";
 
 const GEO = { ip: "203.0.113.7", country: "DE", timezone: "Europe/Berlin", acceptLanguage: "de-DE", location: "52.52,13.405" };
 const PROXY = { server: "http://proxy.example:8080" };
@@ -74,6 +75,16 @@ describe("applyGeoipMode", () => {
     expect(out).toContain("geoip: false");
   });
 
+  it("strict (geoip: true) reports a WebRTC IP it filled as looked up, and one the caller set as not", async () => {
+    const fp: GeoFillable = {};
+    const r = await applyGeoipMode(fp, PROXY, "strict", true);
+    expect(fp.webrtcIp).toBe("203.0.113.7");
+    expect(r.autoWebrtcIp).toBe(true);
+    const set: GeoFillable = { webrtcIp: "198.51.100.9" };
+    expect((await applyGeoipMode(set, PROXY, "strict", true)).autoWebrtcIp).toBe(false);
+    expect(set.webrtcIp).toBe("198.51.100.9");
+  });
+
   it("strict (geoip: true) still fails closed", async () => {
     answer = { geo: null, reason: "could not determine the exit IP", elapsedMs: 5 };
     await expect(applyGeoipMode({}, PROXY, "strict", true)).rejects.toBeInstanceOf(GeoipError);
@@ -88,12 +99,53 @@ describe("applyGeoipMode", () => {
 });
 
 describe("dropAutoWebrtcIp", () => {
-  it("drops a default-filled WebRTC IP only on an open-build launch through a proxy", () => {
-    const fp = (): GeoFillable => ({ timezone: "Europe/Berlin", webrtcIp: "203.0.113.7" });
-    let f = fp(); dropAutoWebrtcIp(f, { autoWebrtcIp: true }, PROXY, false); expect(f.webrtcIp).toBeUndefined();
-    expect(f.timezone).toBe("Europe/Berlin");
-    f = fp(); dropAutoWebrtcIp(f, { autoWebrtcIp: true }, PROXY, true); expect(f.webrtcIp).toBe("203.0.113.7");
-    f = fp(); dropAutoWebrtcIp(f, { autoWebrtcIp: true }, undefined, false); expect(f.webrtcIp).toBe("203.0.113.7");
-    f = fp(); dropAutoWebrtcIp(f, { autoWebrtcIp: false }, PROXY, false); expect(f.webrtcIp).toBe("203.0.113.7");
+  const fp = (): GeoFillable => ({ timezone: "Europe/Berlin", acceptLanguage: "de-DE", location: "52.52,13.405", webrtcIp: "203.0.113.7" });
+  beforeEach(() => { resetSeenWarnings(); delete process.env.CLEARCOTE_NO_WARN; });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("drops a looked-up WebRTC IP behind a proxy on the licensed and the open build, and keeps the region", () => {
+    for (const licensed of [true, false]) {
+      const f = fp(); dropAutoWebrtcIp(f, { autoWebrtcIp: true }, PROXY, licensed, undefined, true);
+      expect(f).toEqual({ timezone: "Europe/Berlin", acceptLanguage: "de-DE", location: "52.52,13.405" });
+    }
+  });
+
+  it("keeps a looked-up WebRTC IP when the SOCKS5 UDP relay carries UDP, on the licensed build only", () => {
+    let f = fp(); dropAutoWebrtcIp(f, { autoWebrtcIp: true }, { server: "socks5://1.2.3.4:1080" }, true, true, true);
+    expect(f.webrtcIp).toBe("203.0.113.7");
+    // the open build has no relay: dropped as before
+    f = fp(); dropAutoWebrtcIp(f, { autoWebrtcIp: true }, { server: "socks5://1.2.3.4:1080" }, false, true, true);
+    expect(f.webrtcIp).toBeUndefined();
+    // a relay the proxy refused (udpRelayOrFallback resolved it to false): dropped
+    f = fp(); dropAutoWebrtcIp(f, { autoWebrtcIp: true }, { server: "socks5://1.2.3.4:1080" }, true, false, true);
+    expect(f.webrtcIp).toBeUndefined();
+  });
+
+  it("keeps the WebRTC IP with no proxy (this machine's own egress)", () => {
+    for (const licensed of [true, false]) {
+      const f = fp(); dropAutoWebrtcIp(f, { autoWebrtcIp: true }, undefined, licensed, undefined, true);
+      expect(f.webrtcIp).toBe("203.0.113.7");
+    }
+  });
+
+  it("keeps a WebRTC IP the caller set behind a proxy, and warns once that it can be proven fake", () => {
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const f = fp(); dropAutoWebrtcIp(f, { autoWebrtcIp: false }, PROXY, true);
+    expect(f.webrtcIp).toBe("203.0.113.7");
+    dropAutoWebrtcIp(fp(), { autoWebrtcIp: false }, PROXY, true);  // once per process
+    const out = err.mock.calls.map((c) => String(c[0])).join("");
+    expect(out.match(/webrtcIp 203\.0\.113\.7 is set with a proxy/g)).toHaveLength(1);
+    expect(out).toContain("sites that run their own STUN servers can prove it fake");
+  });
+
+  it("does not warn with the relay, without a proxy, or when quiet / CLEARCOTE_NO_WARN", () => {
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    dropAutoWebrtcIp(fp(), { autoWebrtcIp: false }, { server: "socks5://1.2.3.4:1080" }, true, true);
+    dropAutoWebrtcIp(fp(), { autoWebrtcIp: false }, undefined, true);
+    dropAutoWebrtcIp(fp(), { autoWebrtcIp: false }, PROXY, true, undefined, true);
+    process.env.CLEARCOTE_NO_WARN = "1";
+    dropAutoWebrtcIp(fp(), { autoWebrtcIp: false }, PROXY, true);
+    delete process.env.CLEARCOTE_NO_WARN;
+    expect(err).not.toHaveBeenCalled();
   });
 });

@@ -1058,12 +1058,14 @@ def geo(monkeypatch, docker):
     return state
 
 
-def test_geoip_fills_the_containers_clock_language_location_and_webrtc_ip(mac, docker, cdp, connected, geo):
+def test_geoip_fills_the_containers_clock_language_location_and_no_webrtc_ip_behind_the_proxy(mac, docker, cdp,
+                                                                                               connected, geo):
     browser = clearcote.launch(geoip=True, proxy=PROXY, fingerprint="seed-1", quiet=True)
     assert browser is connected and geo["calls"] == [PROXY]  # resolved through the proxy, once
     env = docker.call("create")["env"]
     assert env["CC_TIMEZONE"] == "Europe/Berlin" and env["CC_ACCEPT_LANGUAGE"] == "de-DE"
-    assert env["CC_LOCATION"] == "52.52,13.405" and env["CC_WEBRTC_IP"] == "203.0.113.7"
+    assert env["CC_LOCATION"] == "52.52,13.405"
+    assert "CC_WEBRTC_IP" not in env  # no UDP relay in the container: no address no packet comes from
     assert "CC_GEOIP" not in env and "geoip" not in " ".join(docker.call("create")["argv"])
     browser.close()
 
@@ -1143,9 +1145,12 @@ def test_geoip_off_keeps_a_webrtc_ip_the_caller_set(mac, docker, cdp, connected)
     assert docker.call("create")["env"]["CC_WEBRTC_IP"] == "198.51.100.9"
 
 
-def test_geoip_on_never_sends_off(mac, docker, cdp, connected, geo):
+def test_geoip_on_sends_off_only_behind_a_proxy(mac, docker, cdp, connected, geo):
     docker.labels = {"com.clearcotelabs.serve-protocol": "4"}
     clearcote.launch(geoip=True, proxy=PROXY, quiet=True)
+    assert docker.call("create")["env"]["CC_WEBRTC_IP"] == "off"
+    docker.calls = []
+    clearcote.launch(geoip=True, quiet=True)
     assert docker.call("create")["env"]["CC_WEBRTC_IP"] == "203.0.113.7"
 
 
@@ -1154,3 +1159,7 @@ def test_webrtc_ip_off_env():
     assert _docker.webrtc_ip_off_env(4, False, {}) == {}
     assert _docker.webrtc_ip_off_env(3, True, {}) == {}
     assert _docker.webrtc_ip_off_env(4, True, {"CC_WEBRTC_IP": "198.51.100.9"}) == {}
+    # behind a proxy the container has no UDP relay: off unless the caller set an address
+    assert _docker.webrtc_ip_off_env(4, False, {}, True) == {"CC_WEBRTC_IP": "off"}
+    assert _docker.webrtc_ip_off_env(3, False, {}, True) == {}
+    assert _docker.webrtc_ip_off_env(4, False, {"CC_WEBRTC_IP": "198.51.100.9"}, True) == {}

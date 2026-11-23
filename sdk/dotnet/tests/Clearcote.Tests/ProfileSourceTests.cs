@@ -217,7 +217,7 @@ public sealed class ProfileSourceTests : IDisposable
         void Write(JsonNode at) => File.WriteAllText(path, new JsonObject
         {
             ["os_family"] = "linux", ["browser_major"] = 150, ["gpu_vendor"] = "amd", ["screen_width"] = 1920, ["screen_height"] = 1080,
-            ["_exe"] = exe, ["_at"] = at,
+            ["_exe"] = exe, ["_at"] = at, ["_gpu"] = "real",
         }.ToJsonString());
         Write(DateTime.UtcNow.AddDays(-1).ToString("o"));   // Node writes an ISO time
         Assert.Equal("amd", ProfileSource.ReadCachedHost(exe)!.GpuVendor);
@@ -226,6 +226,21 @@ public sealed class ProfileSourceTests : IDisposable
         Write(DateTime.UtcNow.AddDays(-31).ToString("o"));
         Assert.Null(ProfileSource.ReadCachedHost(exe));
         Write(DateTimeOffset.UtcNow.AddDays(-31).ToUnixTimeSeconds());
+        Assert.Null(ProfileSource.ReadCachedHost(exe));
+    }
+
+    [Fact]
+    public void A_host_cache_entry_without_the_real_GPU_marker_is_re_measured()
+    {
+        // Before 0.71.0 the probe read the persona's GPU strings; such an entry has no "_gpu": "real".
+        var exe = Path.Combine(_dir, "chrome-gpu");
+        ProfileSource.WriteCachedHost(exe, Host);
+        var path = Path.Combine(_dir, "library", "host.json");
+        var o = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        Assert.Equal("real", (string?)o["_gpu"]);
+        Assert.NotNull(ProfileSource.ReadCachedHost(exe));
+        o.Remove("_gpu");
+        File.WriteAllText(path, o.ToJsonString());
         Assert.Null(ProfileSource.ReadCachedHost(exe));
     }
 

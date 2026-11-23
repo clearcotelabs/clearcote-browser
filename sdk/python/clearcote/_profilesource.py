@@ -208,6 +208,10 @@ def _cached_at(v: Any) -> Optional[float]:
     return None
 
 
+# ``_gpu: "real"``: the renderer was read with the real GPU strings (0.71.0+); an older entry read the persona's.
+HOST_CACHE_GPU = "real"
+
+
 def read_cached_host(exe: str) -> Optional[dict[str, Any]]:
     import time
 
@@ -216,6 +220,8 @@ def read_cached_host(exe: str) -> Optional[dict[str, Any]]:
             c = json.load(f)
         if not isinstance(c, dict) or c.get("_exe") != _exe_key(exe):
             return None  # different binary: re-measure
+        if c.get("_gpu") != HOST_CACHE_GPU:
+            return None  # measured through the persona's GPU strings (before 0.71.0): re-measure
         at = _cached_at(c.get("_at"))
         if at is None or time.time() - at > _HOST_CACHE_MAX_AGE:
             return None  # unreadable or stale: a miss, never a launch failure
@@ -229,7 +235,7 @@ def write_cached_host(exe: str, facts: dict[str, Any]) -> None:
 
     try:
         with open(_host_cache_path(), "w", encoding="utf-8") as f:
-            json.dump({**facts, "_exe": _exe_key(exe), "_at": time.time()}, f)
+            json.dump({**facts, "_exe": _exe_key(exe), "_at": time.time(), "_gpu": HOST_CACHE_GPU}, f)
     except OSError:
         pass  # a cache write failure must never fail a launch
 
@@ -255,7 +261,9 @@ def measure_host(launch_fn, exe: str, browser_major: int) -> dict[str, Any]:
     if cached:
         return cached
 
-    browser = launch_fn(executable_path=exe, headless=True, quiet=True)
+    # gpu_string_spoof=False: WebGL reports the GPU that really renders. With the persona's strings an r51+ engine
+    # reports the persona's own claim, which is not this machine's vendor on an AMD or software-rendering host.
+    browser = launch_fn(executable_path=exe, headless=True, quiet=True, gpu_string_spoof=False)
     try:
         page = browser.new_context().new_page()
         page.goto("about:blank")  # WebGL and screen need no origin

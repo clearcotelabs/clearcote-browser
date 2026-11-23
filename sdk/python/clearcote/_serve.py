@@ -283,7 +283,7 @@ def _serve_now(port=None, host="127.0.0.1", allow_origins=None, user_data_dir=No
     # Launched DIRECTLY (no automation framework) -> no --enable-automation -> webdriver stays false.
     # Wrap in _win_av_retry so a just-extracted binary survives the Windows SxS/AV first-launch race
     # ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
-    args, env = _persona.apply(exe, args, env, lease)  # r51+: the signed persona token (server-side personas)
+    args, env = _persona.apply(exe, args, env, lease, quiet=quiet)  # r51+: the signed persona token (server-side personas)
     args, env = _personaenv.apply(exe, args, env, persona_env)  # persona off the browser's argv (1021)
     proc = _win_av_retry(
         lambda e: subprocess.Popen([e] + args + cdp, env=env,

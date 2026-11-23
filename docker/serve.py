@@ -273,10 +273,10 @@ for _map, _cast, _what in ((_ENV_TO_OPT, str, "string"),
                   flush=True)
 
 # WebRTC IP (CC_WEBRTC_IP): the srflx address the engine reports. Unset, the engine gathers no ICE candidates at all
-# (measured with and without a proxy, bridge and host networking), which a regular Chrome never shows. So, as the
-# SDKs' geoip does for a launch of their own, an unset value is filled with the egress IP: the proxy's exit when
-# CC_PROXY is set, else this container's public address, through the SDK's own lookup; licensed engine only (the
-# open one has no WebRTC UDP block behind a proxy, and never finishes ICE gathering with a WebRTC IP without one).
+# (measured with and without a proxy, bridge and host networking), which a regular Chrome never shows without a
+# proxy. So, as the SDKs' geoip does for a launch of their own, an unset value is filled with this container's
+# public address, through the SDK's own lookup; licensed engine only (the open one never finishes ICE gathering
+# with a WebRTC IP). Not behind CC_PROXY: no UDP leaves from the exit, so an address there could be proven fake.
 # CC_WEBRTC_IP=off (or set but empty) keeps it unset. A failed lookup warns and starts without it. See webrtc_ip.py.
 _webrtc_ip_source = None
 try:

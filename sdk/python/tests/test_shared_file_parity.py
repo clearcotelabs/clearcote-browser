@@ -37,7 +37,7 @@ FACTS = {"os_family": "windows", "browser_major": 150, "gpu_vendor": "intel"}
 
 def _write_host(at):
     with open(_profilesource._host_cache_path(), "w", encoding="utf-8") as f:
-        json.dump({**FACTS, "_exe": _profilesource._exe_key(EXE), "_at": at}, f)
+        json.dump({**FACTS, "_exe": _profilesource._exe_key(EXE), "_at": at, "_gpu": "real"}, f)
 
 
 def test_host_cache_written_by_node_with_an_iso_time_is_reused(profile_dir):

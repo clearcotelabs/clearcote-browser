@@ -1,6 +1,6 @@
 ---
 name: clearcote-browser
-description: Drive the Clearcote anti-fingerprint Chromium from Python or Node with Playwright, Puppeteer or any CDP client. Use when a scraper or browser agent is blocked or flagged as a bot, when it needs a stable browser identity per account (fingerprint seed), a proxy whose timezone, language and WebRTC IP match the exit IP, human-paced input, or a stealth CDP endpoint for browser-use, Crawl4AI or Stagehand. Covers install, launch, proxies with geoip, persistent profiles, serve() and the MCP server, plus the mistakes that undo the stealth.
+description: Drive the Clearcote anti-fingerprint Chromium from Python or Node with Playwright, Puppeteer or any CDP client. Use when a scraper or browser agent is blocked or flagged as a bot, when it needs a stable browser identity per account (fingerprint seed), a proxy whose timezone and language match the exit IP, human-paced input, or a stealth CDP endpoint for browser-use, Crawl4AI or Stagehand. Covers install, launch, proxies with geoip, persistent profiles, serve() and the MCP server, plus the mistakes that undo the stealth.
 ---
 
 # Clearcote browser
@@ -54,7 +54,7 @@ await browser.close();
 browser = launch(
     fingerprint="acct-1",
     proxy={"server": "http://host:8080", "username": "u", "password": "p"},
-    geoip=True,   # timezone, languages, location and WebRTC IP follow the proxy's exit IP
+    geoip=True,   # timezone, languages and location follow the proxy's exit IP
 )
 ```
 

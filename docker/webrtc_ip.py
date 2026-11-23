@@ -9,9 +9,12 @@ IP-echo services, CLEARCOTE_GEOIP_ECHO_URL and the same proxy handling), only th
 * An explicit address is used as given.
 * ``off`` (also ``0``/``false``/``no``/``none``) or an explicit empty value keeps it unset: today's behaviour,
   no lookup. The SDKs pass ``off`` when their own geoip is off.
-* The open engine (no licence key) is not filled. Behind a proxy the SDKs leave it unset too: that engine has no
-  WebRTC UDP block of its own, so a WebRTC IP there re-enables UDP that does not go through the proxy. Without one,
-  measured in this image, the open engine with a WebRTC IP never finishes ICE gathering, so it is left as it was.
+* Behind a proxy (CC_PROXY) it is not filled: the image has no UDP relay, so no packet leaves from the proxy's exit,
+  and a WebRTC address there is one sites that run their own STUN servers can prove made up. Unset, the browser
+  gathers no candidates behind the proxy, as Chrome does under its disable_non_proxied_udp policy. The SDKs leave
+  it unset behind a proxy too. An explicit address behind a proxy is used, with a warning.
+* The open engine (no licence key) is not filled either: without a proxy, measured in this image, it never finishes
+  ICE gathering with a WebRTC IP, so it is left as it was.
 * A failed lookup warns and starts without it; it never stops the container."""
 import os
 import time
@@ -30,9 +33,11 @@ def plan(raw, proxy, licensed):
         if text.lower() in OFF:
             return "off", "CC_WEBRTC_IP=%s" % text
         return "use", text
+    if proxy:
+        return "off", ("behind the proxy: no UDP leaves from its exit, so a WebRTC address there would be one no "
+                       "packet comes from")
     if not licensed:
-        return "off", ("the open engine behind a proxy: it has no WebRTC UDP block, so a WebRTC IP would let UDP "
-                       "go around the proxy" if proxy else "the open engine: set CC_WEBRTC_IP to choose one")
+        return "off", "the open engine: set CC_WEBRTC_IP to choose one"
     return "lookup", None
 
 
@@ -62,6 +67,10 @@ def resolve(raw, proxy, licensed, lookup=egress_ip, environ=None):
     exit", "own address", "off", or "lookup failed"."""
     action, value = plan(raw, proxy, licensed)
     if action == "use":
+        if proxy:
+            return value, "env", ("[clearcote] WARNING: WebRTC IP: %s (CC_WEBRTC_IP) behind CC_PROXY: this image has "
+                                  "no UDP relay, so no packet leaves from that address, and sites that run their own "
+                                  "STUN servers can prove it fake. Leave CC_WEBRTC_IP unset behind a proxy." % value)
         return value, "env", "[clearcote] WebRTC IP: %s (CC_WEBRTC_IP)" % value
     if action == "off":
         return None, "off", "[clearcote] WebRTC IP: none (%s); the browser reports no ICE candidates" % value

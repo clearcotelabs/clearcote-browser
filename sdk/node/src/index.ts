@@ -1187,7 +1187,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
   const pro = offline ? undefined : proSelector(licenseKey, licenseApiBase);
   const exe = await executablePath(offline ? { executablePath: exeOption, quiet } : { executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro });  // capability-gated proxy route
   ensureRunnableHere(exe);
-  dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline);  // open build + proxy: no default WebRTC IP
+  dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline, socks5Udp, quiet);  // proxy without a UDP relay: no looked-up WebRTC IP
   // Before the warnings below, so they judge the persona that will actually run (as in Python).
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
   // One noise per profile for a new profile folder, the remembered mode for a known one (./noisemode.ts).
@@ -1249,7 +1249,7 @@ async function launchIncognito(options: LaunchOptions = {}): Promise<Browser> {
     : applyHeadlessGeometry({ ...(pwOptions as Record<string, unknown>) }, fingerprint.fingerprint, engineArgs, fingerprint, exe);
   const launchArgs = [...engineArgs, ...(geom?.args ?? []), ...widevineCdm];
   // r51+: the signed persona token, fetched once before the launch; every attempt's env carries it.
-  const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env: runtimeEnv() });
+  const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env: runtimeEnv(), quiet });
   const browser = await releaseLeaseOnFailure(lease, () => retryOnStaleHostVendor(personaLaunch, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
     // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
     const { args: finalArgs, env } = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(runtimeEnv()), personaEnv);
@@ -1358,7 +1358,7 @@ async function launchLocalPersistentContextNow(
   const pro = offline ? undefined : proSelector(licenseKey, licenseApiBase);
   const exe = await executablePath(offline ? { executablePath: exeOption, quiet } : { executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro });  // capability-gated proxy route
   ensureRunnableHere(exe);
-  dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline);  // open build + proxy: no default WebRTC IP
+  dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline, socks5Udp, quiet);  // proxy without a UDP relay: no looked-up WebRTC IP
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
   // One noise per profile for a new profile folder, the remembered mode for a known one (./noisemode.ts).
   fingerprint.noisePerProfile = resolveNoisePerProfile(fingerprint.noisePerProfile, userDataDir,
@@ -1454,7 +1454,7 @@ async function launchLocalPersistentContextNow(
   let context: BrowserContext;
   try {
     // r51+: the signed persona token, fetched once before the launch; every attempt's env carries it.
-    const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env: runtimeEnv() });
+    const personaLaunch = await preparePersonaLaunch(exe, launchArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env: runtimeEnv(), quiet });
     context = await releaseLeaseOnFailure(lease, () => retryOnStaleHostVendor(personaLaunch, () => retryOnStaleRunToken(lease, () => winAvRetry((exePath) => {
       // Last step on both: on a 1021 engine the persona leaves the command line for the env (./personaenv.ts).
       const { args: finalArgs, env } = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(runtimeEnv()), personaEnv);
@@ -1729,7 +1729,7 @@ async function serveNow(options: ServeOptions = {}): Promise<Server> {
   const pro = offline ? undefined : proSelector(licenseKey, licenseApiBase);
   const exe = await executablePath(offline ? { executablePath: exeOption, quiet } : { executablePath: exeOption, version, autoUpdate, cacheDir, quiet, releaseChannel, pro });  // capability-gated proxy route
   ensureRunnableHere(exe);
-  dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline);  // open build + proxy: no default WebRTC IP
+  dropAutoWebrtcIp(fingerprint, geoApplied, proxyOpt, !!pro || offline, socks5Udp, quiet);  // proxy without a UDP relay: no looked-up WebRTC IP
   await applyProfileAuto(profile, fingerprint, exe, { quiet, licenseKey, licenseApiBase, profileSelect });
   // One noise per profile for a new profile folder, the remembered mode for a known one (./noisemode.ts).
   fingerprint.noisePerProfile = resolveNoisePerProfile(fingerprint.noisePerProfile, uddOption ?? null,
@@ -1807,7 +1807,7 @@ async function serveNow(options: ServeOptions = {}): Promise<Server> {
   // Wrap in winAvRetry so a just-extracted binary survives the Windows SxS/AV first-launch race
   // ("spawn UNKNOWN"), same as launch(): warm + back off + retry, then recover from a fresh copy.
   // r51+ persona token; `env` so a caller's own CLEARCOTE_RUN_TOKEN (the hosted gateway) counts as the lease.
-  const personaLaunch = await preparePersonaLaunch(exe, engineArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env });
+  const personaLaunch = await preparePersonaLaunch(exe, engineArgs, lease, licenseThroughProxy ? proxyOpt : undefined, { env, quiet });
   const persona = applyPersonaEnv(exe, personaLaunch.args, personaLaunch.env(env), personaEnv);  // persona off the browser's argv (1021)
   const proc = await releaseLeaseOnFailure(lease, () => winAvRetry(
     (exePath) => new Promise<ChildProcess>((resolve, reject) => {

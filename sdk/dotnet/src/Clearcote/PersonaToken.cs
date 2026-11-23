@@ -266,7 +266,7 @@ internal static class PersonaToken
     /// <paramref name="e"/> is anything else.</summary>
     public static async Task<Plan?> HealStaleHostVendorAsync(string exe, IEnumerable<string> args, LeaseSession? lease, ProxySpec? proxy, Exception e,
         Func<string?, string, bool>? supports = null, FactsRunner? runner = null, Fetcher? fetch = null, string? runTokenFile = null,
-        double? now = null)
+        double? now = null, bool quiet = false)
     {
         if (StaleHostVendor(e) is not { } stale) return null;
         var (was, vendor) = stale;
@@ -274,7 +274,7 @@ internal static class PersonaToken
         var (key, _) = FactsKey(exe, Selector(list).Args);
         lock (Lock) Facts[key] = new Dictionary<string, string> { ["gpu_vendor"] = vendor };
         Console.Error.WriteLine($"clearcote: the GPU this machine renders on changed ({was} -> {vendor}); fetched a persona for it and launching once more");
-        return await PrepareAsync(exe, list, lease, proxy, supports, runner, fetch, runTokenFile, now).ConfigureAwait(false);
+        return await PrepareAsync(exe, list, lease, proxy, supports, runner, fetch, runTokenFile, now, quiet).ConfigureAwait(false);
     }
 
     /// <summary>Run <paramref name="start"/>; if <paramref name="heal"/> says the failure was a persona generated for
@@ -363,7 +363,7 @@ internal static class PersonaToken
     /// <summary>Prepare a launch of <paramref name="exe"/>: on an r51+ engine with a lease, fetch the persona token; otherwise the args come back unchanged and <see cref="Plan.Env"/> is the identity.</summary>
     public static async Task<Plan> PrepareAsync(string exe, IEnumerable<string> args, LeaseSession? lease, ProxySpec? proxy,
         Func<string?, string, bool>? supports = null, FactsRunner? runner = null, Fetcher? fetch = null, string? runTokenFile = null,
-        double? now = null)
+        double? now = null, bool quiet = false)
     {
         var list = args.ToList();
         if (lease is null || string.IsNullOrEmpty(lease.Token) || !EngineWantsToken(exe, supports)) return new Plan(list, new Dictionary<string, string>());
@@ -373,8 +373,125 @@ internal static class PersonaToken
         var host = HostFacts(exe, outArgs, lease.Token, runner, runTokenFile);
         var token = await TokenForAsync(lease, sel, host, profileJson, proxy, fetch).ConfigureAwait(false);
         ClockCheck.AssertFor(token, "persona token", now);
+        WarnGpuHostMismatch(token, host, outArgs, sel, profileJson, quiet);
         return new Plan(outArgs, TokenVars(token),
-            e => HealStaleHostVendorAsync(exe, list, lease, proxy, e, supports, runner, fetch, runTokenFile, now));
+            e => HealStaleHostVendorAsync(exe, list, lease, proxy, e, supports, runner, fetch, runTokenFile, now, quiet));
+    }
+
+
+    // ── GPU vendor guard ─────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // Sites can send a seed, run seeded arithmetic on the GPU and compare what the computing GPU's class (its vendor and
+    // graphics backend, e.g. NVIDIA on Direct3D 11) returns with the WebGL renderer the page declares. A persona that
+    // names another vendor than the GPU that really computes ("the card that computes is not the declared graphics
+    // card"), or a graphics card's name over a software renderer (SwiftShader / WARP on Remote Desktop, a VM or a VPS),
+    // is caught by that check whatever the strings say. The engine matches the persona to this machine's vendor by
+    // itself on NVIDIA and Intel hosts; explicit GpuVendor / GpuRenderer, an imported profile, an AMD host or a
+    // software-rendering host can still end up with another vendor. After the persona token is fetched, the GPU it
+    // declares (the token's payload is the generator's own output) is compared with the vendor the engine reports for
+    // this machine at this launch (read fresh every process, see HostFacts), and a mismatch is said once per process.
+    // CLEARCOTE_NO_GPU_HOST_CHECK=1 silences it (as do Quiet and CLEARCOTE_NO_WARN). Mirrors persona.ts.
+
+    public const string GpuCheckEnv = "CLEARCOTE_NO_GPU_HOST_CHECK";
+    private static readonly HashSet<string> GpuCheckSkipSwitches = new(StringComparer.Ordinal)
+    {
+        "canvas-bridge-url", "use-adapter-luid", "disable-gpu-string-spoof", "disable-gpu-fingerprint", "fingerprint-passthrough",
+    };
+    private static readonly HashSet<string> HardwareMakers = new(StringComparer.Ordinal) { "nvidia", "intel", "amd", "apple", "qualcomm", "arm" };
+    private static readonly Dictionary<string, string> HostVendorNames = new(StringComparer.Ordinal)
+        { ["nvidia"] = "NVIDIA", ["intel"] = "Intel", ["amd"] = "AMD" };
+    private static readonly Dictionary<string, string> MakerNames = new(StringComparer.Ordinal)
+        { ["nvidia"] = "NVIDIA", ["intel"] = "Intel", ["amd"] = "AMD", ["apple"] = "Apple", ["qualcomm"] = "Qualcomm", ["arm"] = "ARM" };
+
+    /// <summary>The WebGL vendor and renderer a persona token declares (its payload <c>p</c> is the generator's codec
+    /// JSON), or null.</summary>
+    public static (string Vendor, string Renderer)? PersonaGpuFromToken(string token)
+    {
+        try
+        {
+            var body = token.Split('.')[0].Replace('-', '+').Replace('_', '/');
+            body += new string('=', (4 - body.Length % 4) % 4);
+            using var doc = JsonDocument.Parse(Convert.FromBase64String(body));
+            if (!doc.RootElement.TryGetProperty("p", out var p) || p.ValueKind != JsonValueKind.Object
+                || !p.TryGetProperty("persona", out var persona) || persona.ValueKind != JsonValueKind.Object) return null;
+            if (!persona.TryGetProperty("webgl_renderer", out var r) || r.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(r.GetString())) return null;
+            var v = persona.TryGetProperty("webgl_vendor", out var ve) && ve.ValueKind == JsonValueKind.String ? ve.GetString() ?? "" : "";
+            return (v, r.GetString()!);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Where the persona's GPU comes from: "options" (GpuVendor / GpuRenderer), "profile" (an imported profile
+    /// carrying WebGL strings, or a library profile id) or "engine" (the engine's own rule).</summary>
+    public static string GpuSource(IReadOnlyDictionary<string, string> sel, string? profileJson)
+    {
+        if (sel.ContainsKey("fingerprint-gpu-vendor") || sel.ContainsKey("fingerprint-gpu-renderer")) return "options";
+        if (sel.ContainsKey("fingerprint-profile-id")) return "profile";
+        if (profileJson is not null)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(profileJson);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object
+                    && doc.RootElement.TryGetProperty("webgl", out var w) && w.ValueKind == JsonValueKind.Object
+                    && w.TryGetProperty("webgl1", out var w1) && w1.ValueKind == JsonValueKind.Object
+                    && w1.TryGetProperty("debug", out var dbg) && dbg.ValueKind == JsonValueKind.Object
+                    && ((dbg.TryGetProperty("UNMASKED_VENDOR_WEBGL", out var uv) && uv.ValueKind == JsonValueKind.String)
+                        || (dbg.TryGetProperty("UNMASKED_RENDERER_WEBGL", out var ur) && ur.ValueKind == JsonValueKind.String)))
+                    return "profile";
+            }
+            catch { /* not JSON: the engine refuses it anyway */ }
+        }
+        return "engine";
+    }
+
+    /// <summary>The mismatch between the GPU a persona declares and the one this machine renders on, or null when they
+    /// agree or the launch has nothing to compare. <paramref name="host"/>'s gpu_vendor is the engine's answer for this
+    /// launch: "nvidia", "intel", "amd", or "none" (no hardware adapter WebGL renders on: software rendering, a virtual
+    /// adapter, Linux headless).</summary>
+    public static (string Code, string Message)? GpuHostMismatch((string Vendor, string Renderer)? persona,
+        IReadOnlyDictionary<string, string> host, IEnumerable<string> args, string source)
+    {
+        if (persona is not { } pg) return null;
+        if (args.Any(a => Switch(a) is { } s && GpuCheckSkipSwitches.Contains(s.Name))) return null;
+        var maker = Fingerprint.GpuMaker(pg.Renderer) ?? Fingerprint.GpuMaker(pg.Vendor);
+        if (maker is null || !HardwareMakers.Contains(maker)) return null;   // a software or unknown renderer claims no card
+        var hv = (host.TryGetValue("gpu_vendor", out var h) ? h : "").ToLowerInvariant();
+        var claim = $"{MakerNames[maker]} GPU (\"{pg.Renderer}\")";
+        const string why = "Sites that send a seed and run GPU arithmetic compare the card that computes with the declared " +
+            "graphics card, and report the graphics as spoofed whatever the strings say.";
+        var off = $" Set {GpuCheckEnv}=1 to silence this.";
+        var (fix, from) = source switch
+        {
+            "options" => ("Remove GpuVendor / GpuRenderer (the persona then claims this machine's vendor), or set them to this machine's GPU.",
+                "GpuVendor / GpuRenderer declare"),
+            "profile" => ("Use a profile captured on a machine with the same GPU vendor as this one.", "the imported profile declares"),
+            _ => ("This engine's persona pool has no matching GPU for this vendor yet: set GpuVendor and GpuRenderer to this " +
+                  "machine's GPU (what WebGL reports with GpuStringSpoof = false).", "the persona declares"),
+        };
+        if (hv == "none")
+            return ($"gpu-software-host:{maker}",
+                "this machine renders WebGL in software (no NVIDIA, Intel or AMD adapter: Remote Desktop, a VM or a VPS, " +
+                $"or Linux headless without a GPU), but {from} a {claim}. Sites that run GPU arithmetic see a software renderer " +
+                "under a graphics card's name. Run on a machine with a GPU, use the canvas bridge, or pass GpuStringSpoof = false " +
+                $"to show the real renderer.{off}");
+        if (!HostVendorNames.TryGetValue(hv, out var hostName) || hv == maker) return null;
+        return ($"gpu-vendor-host:{maker}:{hv}", $"{from} a {claim}, but this machine renders on {hostName}. {why} {fix}{off}");
+    }
+
+    /// <summary>Say a <see cref="GpuHostMismatch"/> once per process, unless quiet, CLEARCOTE_NO_WARN or
+    /// CLEARCOTE_NO_GPU_HOST_CHECK.</summary>
+    internal static void WarnGpuHostMismatch(string token, IReadOnlyDictionary<string, string> host, IEnumerable<string> args,
+        IReadOnlyDictionary<string, string> sel, string? profileJson, bool quiet)
+    {
+        if (quiet) return;
+        var opt = (Environment.GetEnvironmentVariable(GpuCheckEnv) ?? "").Trim().ToLowerInvariant();
+        if (opt is "1" or "true" or "yes" or "on") return;
+        if (GpuHostMismatch(PersonaGpuFromToken(token), host, args, GpuSource(sel, profileJson)) is { } m)
+            LaunchWarnings.EmitOnce(new[] { new LaunchWarnings.Warning(m.Code, m.Message) }, quiet);
     }
 
     internal static void ClearCaches() { lock (Lock) { Tokens.Clear(); Facts.Clear(); } }

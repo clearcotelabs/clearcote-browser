@@ -44,18 +44,25 @@ await browser.CloseAsync();
 proxy is set, the Privacy-Sandbox APIs are turned off, and WebRTC defaults to deny-non-proxied-UDP — all
 automatically.
 
-## Through a proxy (report the proxy's IP, not your host's)
+## Through a proxy
 
 ```csharp
 var browser = await Clearcote.Clearcote.LaunchAsync(new LaunchOptions
 {
     Fingerprint = "seed-123",
     Proxy       = new ProxyOptions { Server = "http://host:8080", Username = "u", Password = "p" },
-    WebrtcIp    = "203.0.113.10",   // WebRTC reports the proxy egress IP, not your host's
     Timezone    = "America/New_York",
     AcceptLanguage = "en-US,en",
 });
 ```
+
+Behind a proxy the browser sends no WebRTC UDP around it and gathers no ICE candidates, as Chrome does under its
+`disable_non_proxied_udp` policy: your real IP never leaks, and the page sees no public address. Leave `WebrtcIp`
+unset behind a proxy. Since 0.71.0 a WebRTC IP the geoip lookup found is dropped behind a proxy (timezone, languages
+and location are still filled): no UDP leaves from the proxy's exit, so a candidate at that address would be one no
+packet came from, and sites that run their own STUN servers prove such an address fake. A `WebrtcIp` you set yourself
+is kept, with a warning. With `Socks5Udp` and a `socks5://` proxy that relays UDP, WebRTC traffic really leaves from the
+exit, so there the looked-up address is kept.
 
 In Docker (`Docker = true`), geoip works exactly as for a native launch (on by default): the SDK resolves the proxy's
 exit IP (or this machine's own IP without a proxy) before the container is started and hands the container the
@@ -63,10 +70,9 @@ timezone and Accept-Language it resolved (any `Timezone` / `AcceptLanguage` you 
 `Geoip = false` or `CLEARCOTE_GEOIP=0` (and no `Timezone` / `AcceptLanguage` of your own) the container's entrypoint
 builds the persona the way a native launch does: Accept-Language defaults to `en-US` and the timezone is derived from
 its primary tag (`en-US` -> `America/New_York`), so every such container is New York, English. A container has no
-WebRTC ICE candidates at all unless `WebrtcIp` is given; the value to give is the proxy's exit IP, which geoip fills in
-as it does for a native launch. Without a licence key (the image's open build) a launch through a proxy keeps no WebRTC
-IP from the default lookup, since the open build would send WebRTC UDP outside the proxy; `Geoip = true` or an
-explicit `WebrtcIp` is kept.
+WebRTC ICE candidates at all unless `WebrtcIp` is given; without a proxy geoip fills it with this machine's address, as
+for a native launch. Behind a proxy it stays unset (the container has no UDP relay), and the SDK tells the image not to
+look one up; an explicit `WebrtcIp` is kept, with a warning.
 
 Credentials stay off Playwright: a SOCKS5 proxy's always, and an http(s) proxy's on an engine with
 `--proxy-auth` (r19+), go to the browser's own switches, because credentials handed to Playwright make it turn
@@ -610,8 +616,8 @@ the in-browser AI agent and the render-coherence check. Only the command-line to
 
 Also available (0.29.0; on by default since 0.66.0): geoip (through the proxy, incl. SOCKS5, or this machine's own IP
 without a proxy; one `CLEARCOTE_GEOIP_TIMEOUT_SECONDS` deadline. Left unset, it fills only what you did not set,
-runs within 10 s, warns and launches when the lookup fails, and keeps no WebRTC IP on an open-build launch through a
-proxy; `Geoip = false` or `CLEARCOTE_GEOIP=0` turns it off. `Geoip = true` throws `GeoipException` before launch if
+runs within 10 s, warns and launches when the lookup fails, and keeps no WebRTC IP behind a proxy unless
+`Socks5Udp` relays UDP; `Geoip = false` or `CLEARCOTE_GEOIP=0` turns it off. `Geoip = true` throws `GeoipException` before launch if
 unresolved unless `Timezone` and `AcceptLanguage` are both set; the exit IP comes from an IP echo through the proxy, its geo from the
 offline geoip-all-in-one database shared with the Python and Node SDKs, downloaded on first use;
 `CLEARCOTE_GEOIP_ECHO_URL` points the echo at your own endpoint(s), and `CLEARCOTE_GEOIP_IPAPI=1` also asks
@@ -623,8 +629,9 @@ as in Chrome; `AllowThirdPartyCookies = false` blocks them (an engine before 152
 `Fingerprint = "off"` removes the persona and nothing else. The page reads this machine's own GPU (WebGL and WebGPU),
 speech voices, languages and timezone. No timezone, language or location is taken from the IP address: `Timezone` and
 `AcceptLanguage` apply only when you set them or pass `Geoip = true`; behind a proxy the page therefore shows this
-machine's timezone and language, and the SDK warns about it. The WebRTC IP is still looked up (this machine's
-own address, or the proxy's exit), so WebRTC gathers candidates as Chrome does; `Geoip = false` skips that lookup too,
+machine's timezone and language, and the SDK warns about it. The WebRTC IP is still looked up without a proxy
+(this machine's own address), so WebRTC gathers candidates as Chrome does; behind a proxy it gathers none, as Chrome does
+under its `disable_non_proxied_udp` policy; `Geoip = false` skips that lookup too,
 and WebRTC then gathers no ICE candidates unless you set `WebrtcIp`. What the engine does on every launch stays: for
 example the brand list is Chromium's, and a host with no audio output device still reports a 48 kHz sample rate.
 

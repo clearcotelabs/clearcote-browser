@@ -448,7 +448,7 @@ public static class GeoIp
     /// Tests: forget the cached no-proxy lookup.
     internal static void ResetDirectCache() => _direct = null;
 
-    /// What <see cref="ApplyModeAsync"/> did: the geo, whether the WebRTC IP came from the DEFAULT lookup, the
+    /// What <see cref="ApplyModeAsync"/> did: the geo, whether the WebRTC IP came from the lookup (the default one or Geoip = true), the
     /// egress-drift check it started (the launch awaits it before it returns), and <c>Ip</c>: the egress IP the lookup
     /// found (also from the no-proxy cache), with no proxy this machine's own.
     internal sealed record GeoipApplied(GeoInfo? Geo, bool AutoWebrtcIp, Task EgressDrift, string? Ip = null)
@@ -459,7 +459,7 @@ public static class GeoIp
     /// Apply geoip in <paramref name="mode"/> (see <see cref="Mode"/>). Auto skips the lookup when every field it
     /// fills is already set, reuses a no-proxy lookup for 10 minutes, and on failure warns once and launches.
     /// WebrtcOnly is Auto for the WebRTC IP alone: no lookup when the caller set one, and nothing else on
-    /// <paramref name="fp"/> is touched. What comes back is the same, so the open-build drop
+    /// <paramref name="fp"/> is touched. What comes back is the same, so the drop behind a proxy
     /// (<see cref="DropAutoWebrtcIp"/>) and real STUN with no proxy (<see cref="DirectStunEligible"/>) treat the
     /// address as they treat any default lookup's. <paramref name="webrtcOnly"/> (set by that mode only): the warning
     /// of a failed lookup says what a pass-through launch goes without.
@@ -486,8 +486,10 @@ public static class GeoIp
                 found = r.Geo;
                 return r;
             };
+            var hadWebrtcIpStrict = !string.IsNullOrEmpty(fp.WebrtcIp);
             var strictDrift = await ApplyForLaunchAsync(fp, proxy, quiet, resolver: recordingStrict).ConfigureAwait(false);
-            return new GeoipApplied(null, false, strictDrift, NonEmpty(found?.Ip));
+            // Geoip = true asks for the exit's region; a WebRTC IP it filled is as automatic as the default lookup's.
+            return new GeoipApplied(null, !hadWebrtcIpStrict && !string.IsNullOrEmpty(fp.WebrtcIp), strictDrift, NonEmpty(found?.Ip));
         }
         if (!string.IsNullOrEmpty(fp.Timezone) && !string.IsNullOrEmpty(fp.AcceptLanguage) &&
             !string.IsNullOrEmpty(fp.Location) && !string.IsNullOrEmpty(fp.WebrtcIp)) return GeoipApplied.None;
@@ -534,14 +536,31 @@ public static class GeoIp
         }
     }
 
-    /// The open build (no licence) has no WebRTC UDP egress block, and a WebRTC IP there re-enables UDP that does
-    /// not go through the proxy: a page's own TURN server would read this machine's real address off the packets.
-    /// So a WebRTC IP the DEFAULT lookup filled is dropped again on an open-build launch through a proxy. With no
-    /// proxy the real address is the exit anyway; <c>Geoip = true</c> or an explicit WebrtcIp is the caller's
-    /// choice and is kept.
-    internal static void DropAutoWebrtcIp(FingerprintOptions fp, GeoipApplied applied, ProxyOptions? proxy, bool licensed)
+    /// Behind a proxy, a WebRTC IP the lookup filled is dropped again unless the SOCKS5 UDP relay carries this
+    /// launch's UDP (<paramref name="socks5Udp"/> as <see cref="LaunchOpts.UdpRelayOrFallbackAsync"/> resolved it, on a
+    /// licensed engine).
+    ///
+    /// Without the relay no UDP leaves from the proxy's exit: the licensed engine drops WebRTC UDP behind a proxy, so
+    /// it would report a server-reflexive candidate at the exit IP that no packet ever came from. Sites that run their
+    /// own STUN/TURN servers see the claimed address but none of the traffic, and can prove it made up. With no WebRTC
+    /// IP the browser gathers no candidates behind the proxy, which is what Chrome itself shows under the standard
+    /// disable_non_proxied_udp policy. On the open build (no licence) a WebRTC IP would instead re-enable UDP around
+    /// the proxy and show this machine's real address, so there it is dropped even with Socks5Udp (that build has no
+    /// relay). Timezone, language and location from the lookup are kept either way.
+    ///
+    /// A WebRTC IP the caller set is kept, with a warning (once per process) when nothing makes it true. With no proxy
+    /// the address is this machine's own egress and stays.
+    internal static void DropAutoWebrtcIp(FingerprintOptions fp, GeoipApplied applied, ProxyOptions? proxy, bool licensed,
+        bool? socks5Udp = null, bool quiet = false)
     {
-        if (applied.AutoWebrtcIp && !string.IsNullOrEmpty(proxy?.Server) && !licensed) fp.WebrtcIp = null;
+        if (string.IsNullOrEmpty(proxy?.Server) || string.IsNullOrEmpty(fp.WebrtcIp)) return;
+        if (licensed && socks5Udp == true) return;
+        if (applied.AutoWebrtcIp) { fp.WebrtcIp = null; return; }
+        LaunchWarnings.EmitOnce(new[] { new LaunchWarnings.Warning("webrtc-ip-behind-proxy",
+            $"WebrtcIp {fp.WebrtcIp} is set with a proxy and no SOCKS5 UDP relay: no UDP leaves from that address, so the " +
+            "browser reports a WebRTC address no packet came from, and sites that run their own STUN servers can prove it " +
+            "fake. Leave WebrtcIp unset behind a proxy (WebRTC then gathers no candidates, as Chrome does under its " +
+            "disable_non_proxied_udp policy), or use Socks5Udp with a socks5:// proxy that relays UDP.") }, quiet);
     }
 
     private static string? NonEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;

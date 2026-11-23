@@ -1,10 +1,11 @@
 """docker/webrtc_ip.py: the WebRTC IP the Docker image's browser reports when CC_WEBRTC_IP is unset.
 
-Measured in the image (bridge and host networking, with and without a proxy): with no WebRTC IP the engine gathers
-no ICE candidates at all, which a regular Chrome never does. So the entrypoint fills an unset value with the egress
-IP, as the SDKs' geoip does for a launch of their own: the proxy's exit when CC_PROXY is set, else the container's
-own public address, through the SDK's own lookup. Loaded from the repository's docker/ directory; skipped when the
-tree does not have it."""
+Measured in the image (bridge and host networking): with no WebRTC IP the engine gathers no ICE candidates at all,
+which a regular Chrome never does without a proxy. So the entrypoint fills an unset value with the container's own
+public address, through the SDK's own lookup. Behind CC_PROXY it stays unset: the image has no UDP relay, so an
+address at the exit would be one no packet comes from (sites that run their own STUN servers prove it fake), and no
+candidates is what Chrome shows behind a proxy under disable_non_proxied_udp. Loaded from the repository's docker/
+directory; skipped when the tree does not have it."""
 import importlib.util
 import os
 import socketserver
@@ -28,17 +29,25 @@ def wip():
 
 
 # ---------------------------------------------------------------- what to do
-@pytest.mark.parametrize("proxy", [None, PROXY])
-def test_unset_is_looked_up_on_the_licensed_engine(wip, proxy):
-    assert wip.plan(None, proxy, True) == ("lookup", None)
+def test_unset_is_looked_up_on_the_licensed_engine_without_a_proxy(wip):
+    assert wip.plan(None, None, True) == ("lookup", None)
 
 
-@pytest.mark.parametrize("proxy, why", [(PROXY, "UDP go around the proxy"), (None, "set CC_WEBRTC_IP")])
-def test_the_open_engine_is_left_unset(wip, proxy, why):
-    action, reason = wip.plan(None, proxy, False)
-    assert action == "off" and "open engine" in reason and why in reason
+@pytest.mark.parametrize("licensed", [True, False])
+def test_unset_behind_a_proxy_stays_unset_with_no_lookup(wip, licensed):
+    action, reason = wip.plan(None, PROXY, licensed)
+    assert action == "off" and "behind the proxy" in reason and "no packet" in reason
     calls = []
-    assert wip.resolve(None, proxy, False, lookup=lambda *a: calls.append(a))[:2] == (None, "off") and calls == []
+    ip, source, line = wip.resolve(None, PROXY, licensed, lookup=lambda *a: calls.append(a) or "203.0.113.7")
+    assert (ip, source, calls) == (None, "off", [])
+    assert line.startswith("[clearcote] WebRTC IP: none (behind the proxy")
+
+
+def test_the_open_engine_is_left_unset(wip):
+    action, reason = wip.plan(None, None, False)
+    assert action == "off" and "open engine" in reason and "set CC_WEBRTC_IP" in reason
+    calls = []
+    assert wip.resolve(None, None, False, lookup=lambda *a: calls.append(a))[:2] == (None, "off") and calls == []
 
 
 @pytest.mark.parametrize("raw", ["", "  ", "off", "OFF", "0", "false", "no", "none"])
@@ -50,21 +59,21 @@ def test_off_or_an_explicit_empty_value_keeps_todays_behaviour(wip, raw):
     assert line.startswith("[clearcote] WebRTC IP: none")
 
 
-@pytest.mark.parametrize("proxy, licensed", [(None, True), (PROXY, True), (PROXY, False)])
-def test_an_explicit_address_is_used_as_given_without_a_lookup(wip, proxy, licensed):
+@pytest.mark.parametrize("licensed", [True, False])
+def test_an_explicit_address_is_used_as_given_without_a_lookup(wip, licensed):
     calls = []
-    ip, source, line = wip.resolve(" 198.51.100.9 ", proxy, licensed, lookup=lambda *a: calls.append(a))
+    ip, source, line = wip.resolve(" 198.51.100.9 ", None, licensed, lookup=lambda *a: calls.append(a))
     assert (ip, source, calls) == ("198.51.100.9", "env", [])
     assert line == "[clearcote] WebRTC IP: 198.51.100.9 (CC_WEBRTC_IP)"
 
 
-def test_unset_with_a_proxy_is_the_proxys_exit(wip):
+@pytest.mark.parametrize("licensed", [True, False])
+def test_an_explicit_address_behind_a_proxy_is_used_with_a_warning(wip, licensed):
     calls = []
-    ip, source, line = wip.resolve(None, PROXY, True, lookup=lambda p, t: calls.append((p, t)) or "203.0.113.7",
-                                   environ={})
-    assert (ip, source) == ("203.0.113.7", "proxy exit")
-    assert calls == [(PROXY, wip.DEFAULT_TIMEOUT_S)]  # through the proxy, login included
-    assert line.startswith("[clearcote] WebRTC IP: 203.0.113.7 (the proxy's exit")
+    ip, source, line = wip.resolve("198.51.100.9", PROXY, licensed, lookup=lambda *a: calls.append(a))
+    assert (ip, source, calls) == ("198.51.100.9", "env", [])
+    assert line.startswith("[clearcote] WARNING: WebRTC IP: 198.51.100.9 (CC_WEBRTC_IP) behind CC_PROXY")
+    assert "STUN servers can prove it fake" in line
 
 
 def test_unset_without_a_proxy_is_the_containers_own_address(wip):
@@ -74,7 +83,7 @@ def test_unset_without_a_proxy_is_the_containers_own_address(wip):
     assert "this container's public address" in line
 
 
-@pytest.mark.parametrize("proxy, what", [(PROXY, "proxy's exit IP"), (None, "container's public IP")])
+@pytest.mark.parametrize("proxy, what", [(None, "container's public IP")])
 def test_a_failed_lookup_warns_and_starts_without_it(wip, proxy, what):
     ip, source, line = wip.resolve(None, proxy, True, lookup=lambda p, t: None, environ={})
     assert ip is None and source == "lookup failed"

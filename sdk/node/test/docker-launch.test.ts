@@ -894,7 +894,7 @@ describe("geoip on the Docker path", () => {
   });
   afterEach(() => { geoResolver.resolve = realResolve; });
 
-  it("fills the container's clock, language, location and WebRTC IP", async () => {
+  it("fills the container's clock, language and location, and no WebRTC IP behind the proxy", async () => {
     const spy = vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fakeBrowser() as never);
     const stub = await cdpStub();
     try {
@@ -905,7 +905,7 @@ describe("geoip on the Docker path", () => {
       expect(env.CC_TIMEZONE).toBe("Europe/Berlin");
       expect(env.CC_ACCEPT_LANGUAGE).toBe("de-DE");
       expect(env.CC_LOCATION).toBe("52.52,13.405");
-      expect(env.CC_WEBRTC_IP).toBe("203.0.113.7");
+      expect(env.CC_WEBRTC_IP).toBeUndefined();  // no UDP relay in the container: no address no packet comes from
       expect(Object.keys(env).some((k) => k.includes("GEOIP"))).toBe(false);
       await browser.close();
     } finally {
@@ -976,7 +976,7 @@ describe("geoip on the Docker path", () => {
     }, 60_000);
   }
 
-  it("geoip off keeps a WebRTC IP the caller set; geoip on never sends off", async () => {
+  it("geoip off keeps a WebRTC IP the caller set; geoip on sends off only behind a proxy", async () => {
     docker.labels = { "com.clearcotelabs.serve-protocol": "4" };
     const spy = vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(fakeBrowser() as never);
     const stub = await cdpStub();
@@ -988,6 +988,10 @@ describe("geoip on the Docker path", () => {
       docker.calls = [];
       docker.marks = [serveState("open", PROXY.server)];
       await onMac(() => launch({ geoip: true, proxy: PROXY, quiet: true }));
+      expect(docker.call("create").env.CC_WEBRTC_IP).toBe("off");
+      docker.calls = [];
+      docker.marks = [serveState("open", null)];
+      await onMac(() => launch({ geoip: true, quiet: true }));
       expect(docker.call("create").env.CC_WEBRTC_IP).toBe("203.0.113.7");
     } finally {
       spy.mockRestore();
@@ -1000,6 +1004,10 @@ describe("geoip on the Docker path", () => {
     expect(webrtcIpOffEnv(4, false, {})).toEqual({});
     expect(webrtcIpOffEnv(3, true, {})).toEqual({});
     expect(webrtcIpOffEnv(4, true, { CC_WEBRTC_IP: "198.51.100.9" })).toEqual({});
+    // behind a proxy the container has no UDP relay: off unless the caller set an address
+    expect(webrtcIpOffEnv(4, false, {}, true)).toEqual({ CC_WEBRTC_IP: "off" });
+    expect(webrtcIpOffEnv(3, false, {}, true)).toEqual({});
+    expect(webrtcIpOffEnv(4, false, { CC_WEBRTC_IP: "198.51.100.9" }, true)).toEqual({});
   });
 
   it("geoip is an option the image takes", () => {

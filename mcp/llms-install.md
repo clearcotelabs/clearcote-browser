@@ -41,7 +41,7 @@ Put these under `"env"` in the same entry. Leave them out by default.
 | `CLEARCOTE_FINGERPRINT` | a seed such as `acct-1`: the same seed gives the same browser identity every run |
 | `CLEARCOTE_PLATFORM` | `windows`, `linux`, `macos` or `android` |
 | `CLEARCOTE_PROXY` | `http://user:pass@host:port`; ask the user for it, never invent one |
-| `CLEARCOTE_GEOIP` | `1` to match timezone, locale and WebRTC IP to the proxy exit |
+| `CLEARCOTE_GEOIP` | `1` to match timezone and locale to the proxy exit |
 | `CLEARCOTE_HEADLESS` | `0` to show the browser window (default is headless) |
 | `CLEARCOTE_LICENSE_KEY` | a Clearcote licence key, only if the user has one |
 

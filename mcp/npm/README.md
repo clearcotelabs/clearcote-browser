@@ -59,7 +59,7 @@ The **persona lives in the environment**, so the tool surface stays clean:
 | `CLEARCOTE_PLATFORM` | `windows` \| `linux` \| `macos` \| `android` |
 | `CLEARCOTE_BRAND` | `Chrome` \| `Edge` \| `Opera` \| `Vivaldi` |
 | `CLEARCOTE_PROXY` | `http://user:pass@host:port` (routes all traffic) |
-| `CLEARCOTE_GEOIP` | `1` → derive timezone/locale/WebRTC IP from the proxy exit IP |
+| `CLEARCOTE_GEOIP` | `1` → derive timezone/locale from the proxy exit IP |
 | `CLEARCOTE_TIMEZONE` / `CLEARCOTE_ACCEPT_LANGUAGE` | explicit overrides |
 | `CLEARCOTE_HEADLESS` | `0` for a visible window (default headless) |
 | `CLEARCOTE_BINARY` | path to a specific Clearcote binary (optional) |

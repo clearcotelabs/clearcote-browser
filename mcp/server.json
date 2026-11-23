@@ -22,7 +22,7 @@
         { "name": "CLEARCOTE_FINGERPRINT", "description": "Seed for one stable identity (the same seed is the same device on every run)", "isRequired": false },
         { "name": "CLEARCOTE_PLATFORM", "description": "Platform persona", "choices": ["windows", "linux", "macos", "android"], "isRequired": false },
         { "name": "CLEARCOTE_PROXY", "description": "Proxy for all traffic, http://user:pass@host:port", "isSecret": true, "isRequired": false },
-        { "name": "CLEARCOTE_GEOIP", "description": "1: timezone, locale and WebRTC IP follow the proxy's exit IP", "choices": ["0", "1"], "default": "0", "isRequired": false },
+        { "name": "CLEARCOTE_GEOIP", "description": "1: timezone and locale follow the proxy's exit IP", "choices": ["0", "1"], "default": "0", "isRequired": false },
         { "name": "CLEARCOTE_CLOUD", "description": "1: the browser is a hosted Clearcote session (needs CLEARCOTE_API_KEY)", "choices": ["0", "1"], "default": "0", "isRequired": false },
         { "name": "CLEARCOTE_API_KEY", "description": "API key for cloud mode and the run_task tool", "isSecret": true, "isRequired": false }
       ]
@@ -38,7 +38,7 @@
         { "name": "CLEARCOTE_FINGERPRINT", "description": "Seed for one stable identity (the same seed is the same device on every run)", "isRequired": false },
         { "name": "CLEARCOTE_PLATFORM", "description": "Platform persona", "choices": ["windows", "linux", "macos", "android"], "isRequired": false },
         { "name": "CLEARCOTE_PROXY", "description": "Proxy for all traffic, http://user:pass@host:port", "isSecret": true, "isRequired": false },
-        { "name": "CLEARCOTE_GEOIP", "description": "1: timezone, locale and WebRTC IP follow the proxy's exit IP", "choices": ["0", "1"], "default": "0", "isRequired": false },
+        { "name": "CLEARCOTE_GEOIP", "description": "1: timezone and locale follow the proxy's exit IP", "choices": ["0", "1"], "default": "0", "isRequired": false },
         { "name": "CLEARCOTE_CLOUD", "description": "1: the browser is a hosted Clearcote session (needs CLEARCOTE_API_KEY)", "choices": ["0", "1"], "default": "0", "isRequired": false },
         { "name": "CLEARCOTE_API_KEY", "description": "API key for cloud mode and the run_task tool", "isSecret": true, "isRequired": false }
       ]

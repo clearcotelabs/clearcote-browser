@@ -203,12 +203,13 @@ function proxyUrl(proxy: unknown): string {
 /** The CC_* (and licence) variables the image is started with. Throws naming the first option the
  * image cannot take. */
 /**
- * `{ CC_WEBRTC_IP: "off" }` when geoip is off and no WebRTC IP was given, for an image that would otherwise fill it
- * from the egress itself (WEBRTC_IP_PROTOCOL): geoip: false means no lookup and no filled-in WebRTC IP, in the
- * container as in a launch here. Else nothing.
+ * `{ CC_WEBRTC_IP: "off" }` when no WebRTC IP was given and either geoip is off or the container goes through a
+ * proxy, for an image that would otherwise fill it from the egress itself (WEBRTC_IP_PROTOCOL): geoip: false means
+ * no lookup and no filled-in WebRTC IP, in the container as in a launch here; and behind a proxy the container has
+ * no UDP relay, so a WebRTC IP at the exit would be one no packet comes from (see dropAutoWebrtcIp). Else nothing.
  */
-export function webrtcIpOffEnv(protocol: number, geoipOff: boolean, env: Record<string, string>): Record<string, string> {
-  return protocol >= WEBRTC_IP_PROTOCOL && geoipOff && env.CC_WEBRTC_IP === undefined ? { CC_WEBRTC_IP: "off" } : {};
+export function webrtcIpOffEnv(protocol: number, geoipOff: boolean, env: Record<string, string>, proxied = false): Record<string, string> {
+  return protocol >= WEBRTC_IP_PROTOCOL && (geoipOff || proxied) && env.CC_WEBRTC_IP === undefined ? { CC_WEBRTC_IP: "off" } : {};
 }
 
 export function containerEnv(options: Record<string, unknown>): Record<string, string> {
@@ -840,8 +841,8 @@ export async function applyGeoipBeforeStart(options: Record<string, unknown>): P
   const fp: GeoFillable = {};
   for (const k of GEOIP_FILLED) if (options[k] != null) (fp as Record<string, unknown>)[k] = options[k];
   const applied = await applyGeoipMode(fp, options.proxy, mode, !!options.quiet);
-  // no key = the image's open build, which has no WebRTC UDP egress block (see dropAutoWebrtcIp)
-  dropAutoWebrtcIp(fp, applied, options.proxy, !!resolveLicenseKey(options.licenseKey as string | undefined));
+  // the container has no SOCKS5 UDP relay: behind a proxy a looked-up WebRTC IP is dropped (see dropAutoWebrtcIp)
+  dropAutoWebrtcIp(fp, applied, options.proxy, !!resolveLicenseKey(options.licenseKey as string | undefined), undefined, !!options.quiet);
   Object.assign(options, fp);
 }
 
@@ -854,7 +855,7 @@ export async function startContainer(options: Record<string, unknown>): Promise<
   await sweepStale(exe);
   const image = (options.dockerImage as string | undefined) || defaultImage();
   const protocol = await imageProtocol(exe, image, !!options.quiet);
-  Object.assign(env, webrtcIpOffEnv(protocol, geoipOff, env));
+  Object.assign(env, webrtcIpOffEnv(protocol, geoipOff, env, !!env.CC_PROXY));
   const secrets: Record<string, string> = {};
   for (const k of SECRET_ENV) if (env[k] !== undefined) { secrets[k] = env[k]; delete env[k]; }
   const expect = { licensed: secrets.CLEARCOTE_LICENSE_KEY !== undefined, proxy: secrets.CC_PROXY ?? null };

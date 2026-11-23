@@ -199,10 +199,11 @@ def test_apply_geoip_mode_webrtc_fills_the_webrtc_ip_alone_and_reports_it_like_t
     assert resolver == [None, PROXY]
     assert via_proxy == {"timezone": "Europe/Berlin", "webrtc_ip": "203.0.113.7"}
     assert clearcote.direct_stun_eligible(via_proxy, p, PROXY) is False
-    clearcote.drop_auto_webrtc_ip(via_proxy, p, PROXY, True)
-    assert via_proxy["webrtc_ip"] == "203.0.113.7"  # licensed build: kept
-    clearcote.drop_auto_webrtc_ip(via_proxy, p, PROXY, False)
-    assert "webrtc_ip" not in via_proxy  # open build: dropped, as for a persona launch
+    relayed = dict(via_proxy)
+    clearcote.drop_auto_webrtc_ip(relayed, p, PROXY, True, True, True)
+    assert relayed["webrtc_ip"] == "203.0.113.7"  # licensed build with the SOCKS5 UDP relay: kept
+    clearcote.drop_auto_webrtc_ip(via_proxy, p, PROXY, True, None, True)
+    assert "webrtc_ip" not in via_proxy  # no relay: dropped, as for a persona launch
 
 
 def test_apply_geoip_mode_webrtc_asks_nothing_when_the_caller_set_one_and_reuses_the_no_proxy_lookup(resolver):
