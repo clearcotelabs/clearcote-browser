@@ -217,6 +217,7 @@ Windows: when a cached build cannot start from the cache (`spawn UNKNOWN`, "the 
 | Option | Effect |
 |---|---|
 | `fingerprint="off"` | Pass-through: no persona, for telling whether a problem comes from the spoofing or from your environment. See below. |
+| `persona_schema` | Which identity model a seed derives (`--fingerprint-schema`). Unset: 8 for a new profile (a throwaway launch, or a profile folder's first launch on an engine that takes its persona from the persona service, 156 r51+), the folder's own schema for a profile made earlier (7, so its screen, memory and touch never change); the folder remembers it in `clearcote.json`. 8 = the machine model re-weighted on real Windows traffic (screens and scaling, memory, CPU/memory pairs, touchscreens). Set it (or pass `--fingerprint-schema=N` in `args`) to pin one; that becomes the folder's schema. |
 | `noise_per_profile` | One canvas and WebGL noise per profile on every site (`True`), or one per site (`False`). Unset: on for a new profile (a throwaway launch, or a profile folder's first launch), off for a folder that already had a profile, so its canvas does not change; the folder remembers its mode in `clearcote.json`. Engine r60+; no effect with the noise off. |
 | `fingerprint_voices=False` | Keep the host's own `speechSynthesis` voices under a persona. |
 | `allow_third_party_cookies=False` | Block third-party cookies. Since 0.45.0 they are allowed by default, as in Chrome; embedded sign-in, payment and captcha frames rely on them. |

@@ -714,6 +714,8 @@ export function warnUnsupportedEngineOptions(exe: string | undefined, fingerprin
       out.push("clearcote: personaSchema: 5 (engine 155 r45+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
     if (schema === "7" && !engineSupportsSwitch(exe, PERSONA_SERVICE_MARKER))
       out.push("clearcote: personaSchema: 7 (engine 156 r51+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
+    if (schema === "8" && !engineSupportsSwitch(exe, PERSONA_SERVICE_MARKER))
+      out.push("clearcote: personaSchema: 8 (engine 156 r51+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
     if (fingerprint.realGpuHost && !engineSupportsSwitch(exe, "fingerprint-gpu-backend-real"))
       out.push("clearcote: realGpuHost (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
     const { server, username, password } = proxy ? proxyCredentials(proxy) : { server: "", username: "", password: "" };

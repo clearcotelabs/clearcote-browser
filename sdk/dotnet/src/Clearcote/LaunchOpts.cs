@@ -1015,6 +1015,8 @@ public static class LaunchOpts
                 outList.Add("clearcote: PersonaSchema = 5 (engine 155 r45+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
             if (schema == "7" && !EngineSupportsSwitch(exe, PersonaServiceMarker))
                 outList.Add("clearcote: PersonaSchema = 7 (engine 156 r51+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
+            if (schema == "8" && !EngineSupportsSwitch(exe, PersonaServiceMarker))
+                outList.Add("clearcote: PersonaSchema = 8 (engine 156 r51+) is not supported by this engine build, which derives its own newest identity model instead; upgrade the engine to use it.");
             if (fingerprint?.RealGpuHost == true && !EngineSupportsSwitch(exe, "fingerprint-gpu-backend-real"))
                 outList.Add("clearcote: RealGpuHost (engine r19+) is not supported by this engine build and is ignored; upgrade the engine to use it.");
             var (server, user, pass) = proxy is null ? ("", "", "") : ProxyCredentials(proxy);

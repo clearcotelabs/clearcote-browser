@@ -178,6 +178,7 @@ public static partial class Clearcote
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         NoiseMode.Apply(options, null, exe);  // one noise per profile for a new folder, the remembered mode for a known one
+        SchemaMode.Apply(options, null, exe);  // persona schema 8 for a new folder, the remembered schema for a known one
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
         Crlset.WarnNoProfile(options, "LaunchAsync");  // incognito: no profile to seed a CRLSet into
 
@@ -364,6 +365,7 @@ public static partial class Clearcote
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         NoiseMode.Apply(options, userDataDir, exe);  // one noise per profile for a new folder, the remembered mode for a known one
+        SchemaMode.Apply(options, userDataDir, exe);  // persona schema 8 for a new folder, the remembered schema for a known one
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
 
         // Widevine ASKED FOR (Widevine = true or CLEARCOTE_WIDEVINE=1): seed the CDM into this profile and let the
@@ -531,6 +533,7 @@ public static partial class Clearcote
         // LocalProfile = "auto": a captured fingerprint for this host, once the binary is known (ProfileAuto.ApplyAsync).
         await ProfileAuto.ApplyAsync(options, exe).ConfigureAwait(false);
         NoiseMode.Apply(options, string.IsNullOrEmpty(options.UserDataDir) ? null : options.UserDataDir, exe);  // one noise per profile for a new folder, the remembered mode for a known one
+        SchemaMode.Apply(options, string.IsNullOrEmpty(options.UserDataDir) ? null : options.UserDataDir, exe);  // persona schema 8 for a new folder, the remembered schema for a known one
         var fontDirs = Fonts.CheckFontDirs(options.FontDirs);  // Linux fontconfig dirs: a typo throws before the lease
         Crlset.WarnNoProfile(options, "ServeAsync");  // a raw CDP endpoint: no readiness wait to hold it
 

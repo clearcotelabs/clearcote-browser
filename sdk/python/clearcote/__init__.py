@@ -109,6 +109,7 @@ from ._widevine import (  # noqa: F401  (widevine_cdm_args re-exported for tests
 from ._crlset import apply_crlset_launch, fetch_crlset, install_crlset
 from ._autofillpref import apply_autofill_prefs
 from ._noisemode import has_chrome_data, resolve_noise_per_profile
+from ._schemamode import resolve_persona_schema
 from . import _offline
 from ._offline import OfflineKeyError
 from ._license import (
@@ -717,6 +718,11 @@ def _prepare(kwargs):
                                         quiet=quiet, had_chrome_data=noise_dir[1])
         if npp is not None:
             fp["noise_per_profile"] = npp
+        # Persona schema 8 for a new profile folder, the remembered schema for a known one (_schemamode.py).
+        ps = resolve_persona_schema(fp.get("persona_schema"), noise_dir[0], exe=exe, args=extra_args,
+                                    passthrough=passthrough, quiet=quiet, had_chrome_data=noise_dir[1])
+        if ps is not None:
+            fp["persona_schema"] = ps
     # Fonts are the most identifying surface measured -- 9.45 bits of entropy, and 35% of real
     # machines carry a font set nobody else has. A seeded persona with no profile used to fall
     # back to the engine's canonical per-OS list, which is byte-identical on every install: zero

@@ -104,6 +104,7 @@ describe("fingerprintArgs", () => {
     expect(fingerprintArgs({ personaSchema: 2, realGpuHost: false })).not.toContain("--fingerprint-gpu-backend-real");
     expect(fingerprintArgs({ personaSchema: 5 })).toContain("--fingerprint-schema=5");
     expect(fingerprintArgs({ personaSchema: 7 })).toContain("--fingerprint-schema=7");
+    expect(fingerprintArgs({ personaSchema: 8 })).toContain("--fingerprint-schema=8");
   });
 
   it("disables farble noise only when fingerprintNoise === false", () => {

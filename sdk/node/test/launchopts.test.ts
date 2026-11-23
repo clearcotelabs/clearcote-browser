@@ -245,6 +245,8 @@ describe("resolveProxy", () => {
     expect(warns(r37, 7).some((m) => m.includes("personaSchema: 7 (engine 156 r51+)"))).toBe(true);
     expect(warns(r51, 5)).toEqual([]);
     expect(warns(r51, 7)).toEqual([]);
+    expect(warns(r37, 8).some((m) => m.includes("personaSchema: 8 (engine 156 r51+)"))).toBe(true);
+    expect(warns(r51, 8)).toEqual([]);
     expect(SCHEMA4_ENGINE_MARKER).toContain("Arc(TM) Graphics (0x00007D55)");
     fs.rmSync(dir, { recursive: true, force: true });
   });

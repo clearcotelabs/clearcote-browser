@@ -160,10 +160,14 @@ export interface FingerprintOptions {
    * re-drawn from real Windows Chrome traffic and Intel or AMD integrated graphics on a host without
    * a GPU vendor (154 r37); 5 = the identities of r45 to r51 (frozen); 7 = the machine model, where the
    * graphics card sets device class, processor, threads, memory and screen (r51+ engines, via the persona
-   * service). There is no schema 6. A seed's identity under a given schema never changes; each higher
-   * schema is a separate identity space.
+   * service); 8 = the machine model re-weighted on the 2026-11 corpus (screens and scaling, memory, CPU/memory
+   * pairs, touchscreens; Windows personas, persona service gen-156-s8b+). There is no schema 6. A seed's identity
+   * under a given schema never changes; each higher schema is a separate identity space. Unset (since 0.70.6):
+   * 8 for a new profile (a throwaway launch, or a profile folder's first launch on an r51+ engine), the
+   * folder's own schema for a profile made earlier (7, so its machine does not change); the folder remembers
+   * it in `clearcote.json`, and setting this option changes it.
    */
-  personaSchema?: 1 | 2 | 3 | 4 | 5 | 7;
+  personaSchema?: 1 | 2 | 3 | 4 | 5 | 7 | 8;
   /**
    * Declare that this host renders with a real GPU (or a canvas bridge backs the pixels), so a
    * schema-2 persona may claim a discrete GPU class. Off by default: on a software rasteriser the

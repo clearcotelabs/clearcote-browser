@@ -736,6 +736,8 @@ _ENGINE_OPTION_SWITCHES = (
     ("persona_schema", "4", SCHEMA4_ENGINE_MARKER, "persona_schema=4 (engine 154 r37+)"),
     ("persona_schema", "5", SCHEMA4_ENGINE_MARKER, "persona_schema=5 (engine 155 r45+)"),
     ("persona_schema", "7", "cc-persona-host-facts", "persona_schema=7 (engine 156 r51+)"),
+    # 8 is drawn by the persona service (gen-156-s8b, 2026-11-23); any engine that takes its persona from it serves it.
+    ("persona_schema", "8", "cc-persona-host-facts", "persona_schema=8 (engine 156 r51+)"),
     ("real_gpu_host", None, "fingerprint-gpu-backend-real", "real_gpu_host (engine r19+)"),
 )
 

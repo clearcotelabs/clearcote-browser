@@ -483,7 +483,7 @@ var r = Clearcote.Clearcote.FontReportFor("/opt/clearcote/chrome");
 | `Timezone` / `AcceptLanguage` | IANA tz + `navigator.languages` (+ coherent `Intl` locale) |
 | `WebrtcIp` | WebRTC egress IP (fabricated srflx; no real STUN leaks) |
 | `DisableGpuFingerprint` | report the host's real GPU (most coherent vs strict classifiers) |
-| `PersonaSchema` | `--fingerprint-schema` — which identity model a seed derives: 7 (the default since 2026-10-26, engine 156 r51+ via the persona service), 5 (r45 to r51), 4 (154 r37 to 155 r44), 3 (154 r36), 2 (153 r29 to 154 r35), 1 (before r29); there is no 6; a seed's identity under a schema never changes |
+| `PersonaSchema` | `--fingerprint-schema` — which identity model a seed derives: 7 (the default since 2026-10-26, engine 156 r51+ via the persona service), 5 (r45 to r51), 4 (154 r37 to 155 r44), 3 (154 r36), 2 (153 r29 to 154 r35), 1 (before r29); there is no 6; a seed's identity under a schema never changes Unset (since 0.70.6): 8 for a new profile (a throwaway launch, or a profile folder's first launch on an r51+ engine), the folder's own schema for a profile made earlier (7); the folder remembers it in `clearcote.json`. 8 = the machine model re-weighted on real Windows traffic (screens and scaling, memory, CPU/memory pairs, touchscreens). |
 | `RealGpuHost` | `--fingerprint-gpu-backend-real` — this host renders on a real GPU, so a schema-2 persona may claim a dedicated card |
 | `FingerprintNoise = false` | turn OFF farbling noise (canvas and WebGL; audio and client rects never get noise) |
 | `NoisePerProfile` | `--fingerprint-noise-per-profile` — `true`: one canvas/WebGL noise result per profile on every site; `false`: one per site. Unset: on for a new profile (a throwaway launch, or a profile folder's first launch), off for a folder that already had a profile, remembered in `clearcote.json` (`NoiseMode`); engine r60+ (set explicitly on an older engine it is dropped with a warning); no effect with the noise off |
@@ -504,7 +504,7 @@ var r = Clearcote.Clearcote.FontReportFor("/opt/clearcote/chrome");
 
 An HTTP(S) proxy with a username and password goes to the engine's own `--proxy-auth` (r19+) instead of
 Playwright's request interception, which pages can notice; SOCKS5 credentials go to `--socks5-credentials`. An
-option the engine is too old for (`PersonaSchema` 2-5 and 7, `RealGpuHost`, SOCKS5 credentials) warns and is ignored.
+option the engine is too old for (`PersonaSchema` 2-5, 7 and 8, `RealGpuHost`, SOCKS5 credentials) warns and is ignored.
 
 ## Window geometry
 
