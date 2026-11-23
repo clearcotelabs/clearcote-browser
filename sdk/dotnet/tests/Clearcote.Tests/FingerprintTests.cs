@@ -77,7 +77,8 @@ public class FingerprintTests
         Assert.Contains("--fingerprint-schema=5", Fingerprint.Args(new FingerprintOptions { PersonaSchema = 5 }));
         Assert.Contains("--fingerprint-schema=7", Fingerprint.Args(new FingerprintOptions { PersonaSchema = 7 }));
         Assert.Contains("PersonaSchema", Assert.Throws<ArgumentException>(() => Fingerprint.Args(new FingerprintOptions { PersonaSchema = 6 })).Message);
-        Assert.Contains("PersonaSchema", Assert.Throws<ArgumentException>(() => Fingerprint.Args(new FingerprintOptions { PersonaSchema = 8 })).Message);
+        Assert.Contains("--fingerprint-schema=8", Fingerprint.Args(new FingerprintOptions { PersonaSchema = 8 }));
+        Assert.Contains("PersonaSchema", Assert.Throws<ArgumentException>(() => Fingerprint.Args(new FingerprintOptions { PersonaSchema = 9 })).Message);
         Assert.Contains("PersonaSchema", Assert.Throws<ArgumentException>(() => Fingerprint.Args(new FingerprintOptions { PersonaSchema = 0 })).Message);
     }
 
