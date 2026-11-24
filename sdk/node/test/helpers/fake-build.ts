@@ -152,6 +152,9 @@ export async function startFakeBuild(
     res.statusCode = 404;
     res.end();
   });
+  // Node closes an idle keep-alive socket after 5 s; a request sent on it at that moment can be resent by fetch and
+  // reach the route twice, which made "one request per machine" counts flaky on slow CI runners.
+  server.keepAliveTimeout = 120_000;
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   return {
