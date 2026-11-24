@@ -1198,6 +1198,94 @@ def _ver_key(v):
     return tuple(int(x) for x in re.findall(r"\d+", v or "")[:4])
 
 
+# ── One request per machine ──────────────────────────────────────────────────
+# The site's host (Vercel) answers a burst of requests from one address with a 403 challenge page and keeps
+# challenging that address for minutes (a customer starting ~25 browsers 1-2 s apart was cut off for 3-4
+# minutes; with a PRO licence that failed the launches). Every launch that needs the catalog or the PRO answer
+# and finds none kept first takes ~/.clearcote/<name>.lock: the process holding it asks the site, the others
+# wait (at most _FLIGHT_WAIT seconds) for the answer it keeps. When the holder's request failed (it leaves
+# <name>.failed), the others do not ask again for _FLIGHT_FAILED_QUIET seconds and use their fall-back.
+_FLIGHT_WAIT = 45.0
+_FLIGHT_STALE = 60.0  # a lock this old belongs to a process that died while asking: taken over
+_FLIGHT_FAILED_QUIET = 30.0
+
+
+class _PeerFailed(Exception):
+    """Another process on this machine just asked and failed: do not ask again right now."""
+
+
+def _flight_take(lock_path):
+    """True when this process took the lock, False while another process holds a live one. A lock that
+    can't be made (read-only home) is no reason to fail: True, and this process just asks."""
+    for _ in range(3):
+        try:
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age = time.time() - os.path.getmtime(lock_path)
+            except OSError:
+                continue  # just released: try again
+            if abs(age) < _FLIGHT_STALE:  # just made can read a hair ahead of this clock: live
+                return False
+            with contextlib.suppress(OSError):
+                os.remove(lock_path)
+            continue
+        except OSError:
+            return True
+        with contextlib.suppress(OSError):
+            os.write(fd, str(os.getpid()).encode("ascii"))
+        os.close(fd)
+        return True
+    return True
+
+
+def _recently_failed(failed_path):
+    try:
+        age = time.time() - os.path.getmtime(failed_path)
+    except OSError:
+        return False
+    return abs(age) < _FLIGHT_FAILED_QUIET
+
+
+def _single_flight(name, read_kept, ask, transient=lambda exc: True):
+    """``read_kept()`` when an answer is kept, else ``ask()`` from at most one process on this machine at a
+    time; raises _PeerFailed when another process asked within _FLIGHT_FAILED_QUIET seconds and failed with an
+    error ``transient`` accepts (a licence verdict is not one: each process hears it for itself)."""
+    import random
+
+    base = os.path.join(str(pathlib.Path.home()), ".clearcote", name)
+    lock_path, failed_path = base + ".lock", base + ".failed"
+    deadline = time.monotonic() + _FLIGHT_WAIT
+    while True:
+        if _flight_take(lock_path):
+            try:
+                kept = read_kept()  # a peer may have finished between the caller's look and the lock
+                if kept is not None:
+                    return kept
+                if _recently_failed(failed_path):
+                    raise _PeerFailed(name)
+                try:
+                    got = ask()
+                except Exception as exc:
+                    if transient(exc):
+                        with contextlib.suppress(OSError), open(failed_path, "w", encoding="ascii"):
+                            pass
+                    raise
+                with contextlib.suppress(OSError):
+                    os.remove(failed_path)
+                return got
+            finally:
+                with contextlib.suppress(OSError):
+                    os.remove(lock_path)
+        kept = read_kept()
+        if kept is not None:
+            return kept
+        if time.monotonic() >= deadline:
+            return ask()  # the holder is stuck: ask anyway
+        time.sleep(0.2 + random.uniform(0, 0.3))  # noqa: S311 (timing spread, not a secret)
+
+
 # ── Version catalog cache ────────────────────────────────────────────────────
 # The catalog answer is kept in this process and in ~/.clearcote/catalog.json as {at, url, catalog} (`at` in
 # epoch seconds), so many launches from one machine ask the site once per _CATALOG_TTL and not once each. A
@@ -1278,11 +1366,23 @@ def _fetch_catalog(quiet=False):
     kept = _kept_catalog(CATALOG_URL, _catalog_ttl())
     if kept is not None:
         return kept
-    try:
+
+    def ask():
         data = json.loads(_http_get(CATALOG_URL).decode("utf-8"))
-        if isinstance(data, dict) and data.get("builds"):
-            _keep_catalog(CATALOG_URL, data)
-            return data
+        if not (isinstance(data, dict) and data.get("builds")):
+            raise ValueError("the catalog answer names no builds")
+        _keep_catalog(CATALOG_URL, data)
+        return data
+
+    try:
+        return _single_flight("catalog", lambda: _kept_catalog(CATALOG_URL, _catalog_ttl()), ask)
+    except _PeerFailed:
+        exc = "another launch on this machine just failed to reach it"
+        stale = _kept_catalog(CATALOG_URL, _CATALOG_STALE_MAX)
+        if stale is not None:
+            return stale  # said once, by the launch that failed
+        _log(quiet, f"version catalog unreachable ({exc}); using the bundled snapshot")
+        return CATALOG_FALLBACK
     except Exception as exc:  # noqa: BLE001
         stale = _kept_catalog(CATALOG_URL, _CATALOG_STALE_MAX)
         if stale is not None:
@@ -1290,8 +1390,6 @@ def _fetch_catalog(quiet=False):
             return stale
         _log(quiet, f"version catalog unreachable ({exc}); using the bundled snapshot")
         return CATALOG_FALLBACK
-    stale = _kept_catalog(CATALOG_URL, _CATALOG_STALE_MAX)
-    return stale if stale is not None else CATALOG_FALLBACK
 
 
 def _catalog_available(catalog, plat):
@@ -1491,7 +1589,40 @@ def list_cached_builds(cache_dir=None):
 # How long (seconds) a PRO download answer is reused, by this process and others on the machine, for the
 # build it names while that build is installed and passes its check: one request less per launch.
 _PRO_META_TTL = 600
+# Each process adds its own 0-300 s (as the catalog does), so processes started together do not all ask again
+# at the same moment.
+_PRO_META_TTL_SPREAD = 300
+# When the site can't give an answer (its host's challenge page, a 5xx, a 429, no connection), an answer this
+# old is still used for the build it names while that build is installed and passes its check. A licence
+# verdict (the route's own JSON 401/403/...) is never overridden: the lease checkout at launch enforces it too.
+_PRO_META_STALE_MAX = 7 * 86400
 _pro_meta_memo = {}  # cache key -> {"at": epoch seconds, "meta": the parsed answer}
+_pro_meta_spread = None
+
+
+def _pro_meta_ttl():
+    global _pro_meta_spread
+    if _pro_meta_spread is None:
+        import random
+
+        _pro_meta_spread = random.uniform(0, _PRO_META_TTL_SPREAD)  # noqa: S311 (timing spread, not a secret)
+    return _PRO_META_TTL + _pro_meta_spread
+
+
+class _ProSiteBusy(RuntimeError):
+    """The PRO answer could not be had for a reason that is not a licence verdict."""
+
+
+def _is_licence_verdict(status, headers, body):
+    """The route's own refusal (JSON) for a client error, not the host's challenge page or a server error."""
+    if status in (408, 425, 429) or status >= 500:
+        return False
+    if headers is not None and headers.get("x-vercel-mitigated"):
+        return False
+    try:
+        return isinstance(json.loads(body), dict)
+    except ValueError:
+        return False
 
 
 def _pro_meta_key(license_key, url):
@@ -1503,25 +1634,27 @@ def _pro_meta_path(cache_key):
     return os.path.join(str(pathlib.Path.home()), ".clearcote", f"pro-meta-{cache_key}.json")
 
 
-def _fresh_pro_meta(entry):
-    """The answer in a ``{at, meta}`` entry younger than _PRO_META_TTL, else None (an unreadable entry too)."""
+def _fresh_pro_meta(entry, max_age=None):
+    """The answer in a ``{at, meta}`` entry younger than ``max_age`` (default: this process's TTL), else None
+    (an unreadable entry too)."""
     try:
         age = time.time() - float(entry["at"])
         meta = entry["meta"]
     except (TypeError, KeyError, ValueError):
         return None
-    return meta if isinstance(meta, dict) and 0 <= age < _PRO_META_TTL else None
+    limit = _pro_meta_ttl() if max_age is None else max_age
+    return meta if isinstance(meta, dict) and 0 <= age < limit else None
 
 
-def _kept_pro_meta(cache_key):
+def _kept_pro_meta(cache_key, max_age=None):
     """The PRO download answer an earlier call kept for this key + request (this process first, then the
     file another process may have written), or None."""
-    meta = _fresh_pro_meta(_pro_meta_memo.get(cache_key))
+    meta = _fresh_pro_meta(_pro_meta_memo.get(cache_key), max_age)
     if meta is not None:
         return meta
     try:
         with open(_pro_meta_path(cache_key), encoding="utf-8") as f:
-            return _fresh_pro_meta(json.load(f))
+            return _fresh_pro_meta(json.load(f), max_age)
     except (OSError, ValueError):
         return None  # missing or corrupt: a miss
 
@@ -1716,40 +1849,80 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     url = pro_download_url(base_url, plat, version, channel)
     root = cache_dir or _cache_root()
     meta_key = _pro_meta_key(license_key, url)
+
+    def installed(m):
+        """The chrome path of the build ``m`` names when it is installed and passes its check, else None."""
+        try:
+            r = _pro_release(m, plat)
+        except (RuntimeError, KeyError, TypeError):
+            return None
+        if not r:
+            return None
+        return _cached(os.path.join(root, r["tag"]), r["binary"], quiet, repair=False,
+                       integrity=_launch_integrity(r))
+
+    # Taken before the first look: an answer a peer keeps after this moment counts as fresh for this call.
+    asked_at = time.time()
     meta = _kept_pro_meta(meta_key)
     if meta is not None:
         # Never used to download (its signed URL may have expired): only for a build already installed.
-        try:
-            rel = _pro_release(meta, plat)
-        except (RuntimeError, KeyError, TypeError):
-            rel = None
-        if rel:
-            cached = _cached(os.path.join(root, rel["tag"]), rel["binary"], quiet, repair=False,
-                             integrity=_launch_integrity(rel))
-            if cached:
-                _log_resolved_channel(meta, channel, plat, quiet)
-                return cached
+        cached = installed(meta)
+        if cached:
+            _log_resolved_channel(meta, channel, plat, quiet)
+            return cached
 
     # Named with the SDK version (clearcote-sdk-python/<v>): since 156-r51 a build can need a minimum
     # client (the persona token), and the route holds back a client that names no version.
     from ._license import _user_agent
-    req = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {license_key}", "User-Agent": _user_agent()})
+
+    def ask():
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {license_key}", "User-Agent": _user_agent()})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+                got = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")
+            if _is_licence_verdict(e.code, e.headers, body):
+                raise RuntimeError(
+                    f"Clearcote PRO download not authorized (HTTP {e.code}): {body[:200]}\n"
+                    "Check your license key and that your plan is active.") from None
+            what = "a challenge page from the site's host" if e.headers.get("x-vercel-mitigated") else body[:120]
+            raise _ProSiteBusy(f"HTTP {e.code}: {what}") from None
+        except (OSError, ValueError) as e:  # URLError, a timeout, a reset, an answer that is not JSON
+            raise _ProSiteBusy(str(e) or type(e).__name__) from None
+        if not isinstance(got, dict):
+            raise _ProSiteBusy("the answer is not a JSON object")
+        try:
+            _pro_release(got, plat)
+        except (RuntimeError, KeyError, TypeError):
+            return got  # "nothing published" is not kept: asked again next time (and raised below)
+        _keep_pro_meta(meta_key, got)
+        return got
+
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
-            meta = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")[:200]
+        # Only an answer a peer got while this call waited counts: a download always follows a fresh answer.
+        meta = _single_flight(f"pro-meta-{meta_key}", lambda: _kept_pro_meta(meta_key, time.time() - asked_at), ask,
+                              transient=lambda exc: isinstance(exc, _ProSiteBusy))
+    except (_ProSiteBusy, _PeerFailed) as e:
+        why = "another launch on this machine just failed to reach it" if isinstance(e, _PeerFailed) else str(e)
+        stale = _kept_pro_meta(meta_key, _PRO_META_STALE_MAX)
+        cached = installed(stale) if stale is not None else None
+        if cached:
+            if not isinstance(e, _PeerFailed):  # said once per failure, by the launch that asked
+                sys.stderr.write(f"[clearcote] the PRO build lookup at {base_url} failed ({why}); launching the "
+                                 "installed build the last answer named.\n")
+                sys.stderr.flush()
+            return cached
         raise RuntimeError(
-            f"Clearcote PRO download not authorized (HTTP {e.code}): {body}\n"
-            "Check your license key and that your plan is active.") from None
+            f"Clearcote PRO: the build lookup at {base_url} failed ({why}) and no earlier answer names an "
+            "installed build. Try again in a few minutes; if it keeps failing, contact support.") from None
 
     _log_resolved_channel(meta, channel, plat, quiet)
     if meta.get("notice"):
         # The route served an older build than the current one because this SDK is too old for it.
         _log(quiet, str(meta["notice"]))
     rel = _pro_release(meta, plat)
-    _keep_pro_meta(meta_key, meta)
     dst = os.path.join(root, rel["tag"])
     cached = _cached(dst, rel["binary"], quiet, repair=False, integrity=_launch_integrity(rel))
     if cached:

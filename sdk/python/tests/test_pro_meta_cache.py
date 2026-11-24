@@ -88,6 +88,7 @@ def test_a_build_that_fails_its_check_asks_again(home, tmp_path):
 def test_an_expired_entry_asks_again(home, tmp_path, monkeypatch):
     assert download._PRO_META_TTL == 600
     monkeypatch.setattr(download, "_PRO_META_TTL", 0.3)
+    monkeypatch.setattr(download, "_pro_meta_spread", 0.0)  # this process's own 0-300 s
     cache = str(tmp_path / "cache")
     with FakeBuildServer() as srv:
         ensure(srv, cache)

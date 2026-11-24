@@ -48,6 +48,10 @@ internal sealed class FakeBuildServer : LocalServer
     public int MetaHits => Volatile.Read(ref _asked);
     /// The download route's status: anything but 200 answers a JSON error instead of the metadata.
     public int MetaStatus { get; set; } = 200;
+    /// True: the route answers a 403 challenge page, as the site's host answers a burst from one address.
+    public bool MetaChallenge { get; set; }
+    /// How long the route takes to answer, so that a burst of launches arrives while the first one asks.
+    public int MetaDelayMs { get; set; }
     /// The tag and version the download route names (default <see cref="Tag"/>, 0.0.0).
     public string MetaTag { get; set; } = Tag;
     public string MetaVersion { get; set; } = "0.0.0";
@@ -104,6 +108,16 @@ internal sealed class FakeBuildServer : LocalServer
             MetaSeen.TrySetResult();
             if (Interlocked.Increment(ref _asked) >= _metaBarrier) _allAsked.TrySetResult();
             await Task.WhenAny(_allAsked.Task, Task.Delay(30_000, ct));
+            if (MetaDelayMs > 0) await Task.Delay(MetaDelayMs, ct);
+            if (MetaChallenge) // what the site's host answers a burst from one address
+            {
+                var page = Encoding.UTF8.GetBytes("<!DOCTYPE html><title>Vercel Security Checkpoint</title>");
+                await s.WriteAsync(Encoding.ASCII.GetBytes(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html; charset=utf-8\r\nx-vercel-mitigated: challenge\r\n" +
+                    $"Retry-After: 30\r\nContent-Length: {page.Length}\r\nConnection: close\r\n\r\n"), ct);
+                await s.WriteAsync(page, ct);
+                return;
+            }
             if (MetaStatus != 200)
             {
                 var err = Encoding.UTF8.GetBytes("{\"error\":\"unavailable\"}");

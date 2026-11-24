@@ -21,12 +21,14 @@ public class ProMetaCacheTests : IDisposable
     {
         _home = _sandbox.TempHome();
         Download.ForgetProMeta();
+        Download.ProMetaSpreadSeconds = 0; // this process's own 0-300 s: the ages below are exact
     }
 
     public void Dispose()
     {
         _sandbox.Dispose();
         Download.ForgetProMeta();
+        Download.ProMetaSpreadSeconds = null;
         foreach (var dir in _temp) TestTemp.Remove(dir);
     }
 
@@ -170,7 +172,9 @@ public class ProMetaCacheTests : IDisposable
     public async Task An_error_answer_is_never_cached()
     {
         if (OperatingSystem.IsMacOS()) return;
-        await using var srv = new FakeBuildServer { MetaStatus = 503 };
+        // A licence verdict (the route's own JSON 403): a 5xx is a site failure, which keeps the other launches
+        // from asking for 30 s (SiteBurstTests).
+        await using var srv = new FakeBuildServer { MetaStatus = 403 };
         var cache = Cache();
         await Assert.ThrowsAnyAsync<Exception>(() => Ensure(srv, cache));
         Assert.Empty(MetaFiles());

@@ -53,6 +53,7 @@ class FakeBuildServer:
         self.archive_hits = 0
         self.meta_hits = 0  # requests to the download route
         self.meta_status = 200  # set to an error status to make the route refuse
+        self.meta_challenge = False  # True: a 403 challenge page like the site's host sends a burst
         self.archive_status = 200  # likewise for the archive, with a Retry-After header when retry_after is set
         self.retry_after = None
         self.user_agents = []  # the User-Agent of each archive download
@@ -78,6 +79,16 @@ class FakeBuildServer:
                             server._barrier.wait(30)
                         except threading.BrokenBarrierError:
                             pass
+                    if server.meta_challenge:  # what the site's host answers a burst from one address
+                        body = b"<!DOCTYPE html><title>Vercel Security Checkpoint</title>"
+                        self.send_response(403)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("x-vercel-mitigated", "challenge")
+                        self.send_header("Retry-After", "30")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
                     if server.meta_status != 200:
                         body = json.dumps({"error": "Licence not active."}).encode()
                         self.send_response(server.meta_status)

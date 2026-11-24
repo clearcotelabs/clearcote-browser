@@ -3,6 +3,8 @@
 // The archive is a small zip holding every file a healthy install must have (no real browser). The server
 // counts archive downloads, and can hold the route's answer until `metaBarrier` clients have asked, so that
 // several installers reach the cache check at the same moment.
+// `metaStatus` makes the route refuse with its own JSON error, and `metaChallenge` answers like the site's
+// host answers a burst from one address (a 403 HTML challenge page with x-vercel-mitigated).
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -86,6 +88,12 @@ export interface FakeBuild {
   sha: string;
   /** Archive downloads served so far. */
   readonly archiveHits: number;
+  /** Requests to the download route so far. */
+  readonly metaHits: number;
+  /** Set to an error status to make the route refuse with its own JSON error. */
+  metaStatus: number;
+  /** True: a 403 challenge page like the site's host sends a burst from one address. */
+  metaChallenge: boolean;
   /** Resolves on the first request to the download route. */
   metaSeen: Promise<void>;
   close(): Promise<void>;
@@ -98,6 +106,8 @@ export async function startFakeBuild(
   const sha = opts.sha ?? createHash("sha256").update(archive).digest("hex");
   const codeSha = createHash("sha256").update(Buffer.alloc(64, "x")).digest("hex");
   let archiveHits = 0;
+  let metaHits = 0;
+  const control = { metaStatus: 200, metaChallenge: false };
   let seen!: () => void;
   const metaSeen = new Promise<void>((r) => { seen = r; });
   const waiting: Array<() => void> = [];
@@ -108,7 +118,18 @@ export async function startFakeBuild(
   const server = createServer((req, res) => {
     if (req.url?.startsWith("/api/v1/download/pro")) {
       seen();
+      metaHits++;
       const answer = () => {
+        if (control.metaChallenge) { // what the site's host answers a burst from one address
+          res.writeHead(403, { "content-type": "text/html; charset=utf-8", "x-vercel-mitigated": "challenge", "retry-after": "30" });
+          res.end("<!DOCTYPE html><title>Vercel Security Checkpoint</title>");
+          return;
+        }
+        if (control.metaStatus !== 200) {
+          res.writeHead(control.metaStatus, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "Licence not active." }));
+          return;
+        }
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ tag: TAG, version: "0.0.0", url: `${url}/fake.zip`, sha256: sha,
           exe_sha256: opts.exeSha ?? codeSha, chrome_dll_sha256: codeSha,
@@ -137,6 +158,11 @@ export async function startFakeBuild(
     url,
     sha,
     get archiveHits() { return archiveHits; },
+    get metaHits() { return metaHits; },
+    get metaStatus() { return control.metaStatus; },
+    set metaStatus(v: number) { control.metaStatus = v; },
+    get metaChallenge() { return control.metaChallenge; },
+    set metaChallenge(v: boolean) { control.metaChallenge = v; },
     metaSeen,
     close: () => new Promise<void>((r) => { clearTimeout(fallback); server.closeAllConnections(); server.close(() => r()); }),
   };

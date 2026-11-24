@@ -20,6 +20,7 @@ const servers: Server[] = [];
 
 afterEach(async () => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   for (const s of servers.splice(0)) {
     s.closeAllConnections();
     await new Promise((r) => s.close(r));
@@ -136,6 +137,7 @@ describe.runIf(proPlatform)("PRO download metadata cache", () => {
   }, 30_000);
 
   it("an answer older than 10 minutes is asked for again", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0); // no 0-300 s spread of this process's own
     const { home, cache, dl } = await setup();
     const r = await route();
     verifiedTree(path.join(cache, TAG));

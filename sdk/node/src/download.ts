@@ -1333,6 +1333,119 @@ function verCmp(a: string, b: string): number {
   return 0;
 }
 
+// ── One request per machine ──────────────────────────────────────────────────
+// The site's host (Vercel) answers a burst of requests from one address with a 403 challenge page and keeps
+// challenging that address for minutes (a customer starting ~25 browsers 1-2 s apart was cut off for 3-4
+// minutes; with a PRO licence that failed the launches). Every launch that needs the catalog or the PRO answer
+// and finds none kept first takes ~/.clearcote/<name>.lock: the process holding it asks the site, the others
+// wait (at most waitSec) for the answer it keeps. When the holder's request failed (it leaves <name>.failed),
+// the others do not ask again for failedQuietSec and use their fall-back. The same files as the Python and
+// .NET SDKs, so processes of every SDK on one machine share them. Async callers in one process share them
+// too: the lock is a file, and a waiter awaits a timer between looks.
+/** @internal exported for tests: the single-flight timings, in seconds. */
+export const flightTiming = {
+  waitSec: 45,
+  staleSec: 60, // a lock this old belongs to a process that died while asking: taken over
+  failedQuietSec: 30,
+};
+
+/** Another process on this machine just asked and failed: do not ask again right now. */
+class PeerFailed extends Error {}
+
+/** True when this caller took the lock, false while another holds a live one. A lock that can't be made
+ * (read-only home) is no reason to fail: true, and this caller just asks. */
+function flightTake(lockPath: string): boolean {
+  for (let i = 0; i < 3; i++) {
+    let fd: number;
+    try {
+      mkdirSync(path.dirname(lockPath), { recursive: true });
+      fd = openSync(lockPath, "wx");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") return true;
+      let age: number;
+      try {
+        age = Date.now() / 1000 - statSync(lockPath).mtimeMs / 1000;
+      } catch {
+        continue; // just released: try again
+      }
+      if (Math.abs(age) < flightTiming.staleSec) return false; // just made can read a hair ahead of this clock: live
+      try {
+        rmSync(lockPath, { force: true });
+      } catch {
+        /* another taker got there first */
+      }
+      continue;
+    }
+    try {
+      writeSync(fd, String(process.pid));
+    } catch {
+      /* the pid is only for a person looking at the file */
+    } finally {
+      closeSync(fd);
+    }
+    return true;
+  }
+  return true;
+}
+
+function recentlyFailed(failedPath: string): boolean {
+  try {
+    const age = Date.now() / 1000 - statSync(failedPath).mtimeMs / 1000;
+    return Math.abs(age) < flightTiming.failedQuietSec;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `readKept()` when an answer is kept, else `ask()` from at most one caller on this machine at a time. Throws
+ * PeerFailed when another caller asked within failedQuietSec and failed with an error `transient` accepts (a
+ * licence verdict is not one: each caller hears it for itself).
+ */
+async function singleFlight<T>(name: string, readKept: () => T | null, ask: () => Promise<T>,
+  transient: (e: unknown) => boolean = () => true): Promise<T> {
+  const base = path.join(os.homedir(), ".clearcote", name);
+  const lockPath = `${base}.lock`;
+  const failedPath = `${base}.failed`;
+  const deadline = performance.now() + flightTiming.waitSec * 1000;
+  for (;;) {
+    if (flightTake(lockPath)) {
+      try {
+        const kept = readKept(); // a peer may have finished between the caller's look and the lock
+        if (kept !== null) return kept;
+        if (recentlyFailed(failedPath)) throw new PeerFailed(name);
+        let got: T;
+        try {
+          got = await ask();
+        } catch (e) {
+          if (transient(e)) {
+            try {
+              writeFileSync(failedPath, "");
+              const now = new Date();
+              utimesSync(failedPath, now, now); // a rewrite of an empty file need not move its mtime
+            } catch {
+              /* best-effort: the others then just ask */
+            }
+          }
+          throw e;
+        }
+        rmSync(failedPath, { force: true });
+        return got;
+      } finally {
+        try {
+          rmSync(lockPath, { force: true });
+        } catch {
+          /* a stale lock is taken over after staleSec */
+        }
+      }
+    }
+    const kept = readKept();
+    if (kept !== null) return kept;
+    if (performance.now() >= deadline) return ask(); // the holder is stuck: ask anyway
+    await sleep(200 + Math.random() * 300);
+  }
+}
+
 // ── Version catalog cache ────────────────────────────────────────────────────
 // The catalog answer is kept in this process and in ~/.clearcote/catalog.json as {at, url, catalog} (`at` in
 // epoch seconds), so many launches from one machine ask the site once per CATALOG_TTL_SEC and not once each. A
@@ -1404,24 +1517,26 @@ function keepCatalog(url: string, catalog: Catalog): void {
 export async function fetchCatalog(quiet?: boolean): Promise<Catalog> {
   const kept = keptCatalog(CATALOG_URL, catalogTtlSec());
   if (kept) return kept;
-  let why = "";
-  try {
+  const ask = async (): Promise<Catalog> => {
     const res = await fetch(CATALOG_URL, { redirect: "follow", headers: { "User-Agent": "clearcote-sdk" }, signal: AbortSignal.timeout(30_000) });
-    if (res.ok) {
-      const data = (await res.json()) as Catalog;
-      if (data && Array.isArray(data.builds) && data.builds.length) {
-        keepCatalog(CATALOG_URL, data);
-        return data;
-      }
-    } else {
-      why = `HTTP ${res.status}`;
-    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as Catalog;
+    if (!(data && Array.isArray(data.builds) && data.builds.length)) throw new Error("the catalog answer names no builds");
+    keepCatalog(CATALOG_URL, data);
+    return data;
+  };
+  try {
+    return await singleFlight("catalog", () => keptCatalog(CATALOG_URL, catalogTtlSec()), ask);
   } catch (e) {
-    why = (e as Error).message;
+    const stale = keptCatalog(CATALOG_URL, CATALOG_STALE_MAX_SEC);
+    if (e instanceof PeerFailed) {
+      if (stale) return stale; // said once, by the launch that failed
+      log(quiet, "version catalog unreachable (another launch on this machine just failed to reach it); using the bundled snapshot");
+      return CATALOG_FALLBACK;
+    }
+    log(quiet, `version catalog unreachable (${(e as Error)?.message ?? e}); using ${stale ? "the last answer kept on this machine" : "the bundled snapshot"}`);
+    return stale ?? CATALOG_FALLBACK;
   }
-  const stale = keptCatalog(CATALOG_URL, CATALOG_STALE_MAX_SEC);
-  if (why) log(quiet, `version catalog unreachable (${why}); using ${stale ? "the last answer kept on this machine" : "the bundled snapshot"}`);
-  return stale ?? CATALOG_FALLBACK;
 }
 
 function catalogAvailable(cat: Catalog, plat: "windows" | "linux" | "macos"): string {
@@ -1605,21 +1720,62 @@ interface ProMeta {
 // and passes the cached-build check (which re-hashes the protected files with the cached hashes) is
 // launched from it: a download always follows a fresh answer, whose signed url has not expired.
 const PRO_META_TTL_SEC = 600;
+// Each process adds its own 0-300 s (as the catalog does), so processes started together do not all ask again
+// at the same moment.
+const PRO_META_TTL_SPREAD_SEC = 300;
+// When the site can't give an answer (its host's challenge page, a 5xx, a 429, no connection), an answer this
+// old is still used for the build it names while that build is installed and passes its check. A licence
+// verdict (the route's own JSON 401/403/...) is never overridden: the lease checkout at launch enforces it too.
+const PRO_META_STALE_MAX_SEC = 7 * 86400;
 const proMetaMemo = new Map<string, { at: number; meta: ProMeta }>();
+let proMetaSpreadSec: number | null = null;
 
-function proMetaPath(licenseKey: string, proUrl: string): string {
-  const id = createHash("sha256").update(`${licenseKey}\n${proUrl}`).digest("hex").slice(0, 16);
-  return path.join(os.homedir(), ".clearcote", `pro-meta-${id}.json`);
+function proMetaTtlSec(): number {
+  if (proMetaSpreadSec === null) proMetaSpreadSec = Math.random() * PRO_META_TTL_SPREAD_SEC;
+  return PRO_META_TTL_SEC + proMetaSpreadSec;
 }
 
-/** The cached answer for this key and request, while younger than the TTL; null otherwise (unreadable = none). */
-function readProMeta(licenseKey: string, proUrl: string): ProMeta | null {
+/** 16 hex of sha256(key + "\n" + request url): names the kept answer and its single-flight files. */
+function proMetaId(licenseKey: string, proUrl: string): string {
+  return createHash("sha256").update(`${licenseKey}\n${proUrl}`).digest("hex").slice(0, 16);
+}
+
+function proMetaPath(licenseKey: string, proUrl: string): string {
+  return path.join(os.homedir(), ".clearcote", `pro-meta-${proMetaId(licenseKey, proUrl)}.json`);
+}
+
+/** The PRO answer could not be had for a reason that is not a licence verdict. */
+class ProSiteBusy extends Error {}
+
+/** The route's own refusal (JSON) for a client error, not the host's challenge page or a server error. */
+function isLicenceVerdict(status: number, headers: Headers, body: string): boolean {
+  if (status === 408 || status === 425 || status === 429 || status >= 500) return false;
+  if (headers.get("x-vercel-mitigated")) return false;
+  try {
+    const d: unknown = JSON.parse(body);
+    return !!d && typeof d === "object" && !Array.isArray(d);
+  } catch {
+    return false;
+  }
+}
+
+/** "fetch failed (ECONNREFUSED)": undici puts the reason in `cause`. */
+function fetchErrorText(e: unknown): string {
+  const err = e as { name?: string; message?: string; cause?: { code?: string; message?: string } } | undefined;
+  const why = err?.cause?.code || err?.cause?.message;
+  const msg = err?.message || err?.name || String(e);
+  return why ? `${msg} (${why})` : msg;
+}
+
+/** The cached answer for this key and request, while younger than `maxAgeSec` (default: this process's TTL);
+ * null otherwise (unreadable = none). */
+function readProMeta(licenseKey: string, proUrl: string, maxAgeSec: number = proMetaTtlSec()): ProMeta | null {
   const p = proMetaPath(licenseKey, proUrl);
   const fresh = (e: unknown): e is { at: number; meta: ProMeta } => {
     const d = e as { at?: unknown; meta?: unknown } | null | undefined;
     if (!d || typeof d.at !== "number" || !d.meta || typeof d.meta !== "object") return false;
     const age = Date.now() / 1000 - d.at;
-    return age >= 0 && age < PRO_META_TTL_SEC; // a time ahead of this clock is no proof of age
+    return age >= 0 && age < maxAgeSec; // a time ahead of this clock is no proof of age
   };
   const mem = proMetaMemo.get(p);
   if (fresh(mem)) return mem.meta;
@@ -1742,9 +1898,11 @@ function proMetaUsable(meta: ProMeta, plat: "windows" | "linux" | "macos"): bool
  * `GET /api/v1/download/pro` with the license key, gets back an unguessable, short-lived
  * blob URL + sha256, then reuses the SAME verify+extract path as the free binary
  * ({@link fetchAndVerify}, sha256-only — no GPG, exactly like the free pin). Cached per PRO
- * tag; the answer itself is reused for 10 minutes while its build is installed. Throws on any
- * failure — a licensed caller must get the PRO build, never a silent free fall-back (that would
- * launch a binary the engine gate then refuses).
+ * tag; the answer itself is reused for 10-15 minutes while its build is installed, and one process
+ * per machine asks at a time. When the site can't answer (its host's challenge page, a 5xx, no
+ * connection), the installed build the last answer (up to a week old) named is launched. Throws on
+ * any other failure — a licensed caller must get the PRO build, never a silent free fall-back (that
+ * would launch a binary the engine gate then refuses).
  */
 export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptions = {}): Promise<string> {
   const baseUrl = (opts.apiBase || process.env.CLEARCOTE_LICENSE_API || "https://www.clearcotelabs.com").replace(/\/$/, "");
@@ -1753,38 +1911,89 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
 
   const channel = resolveReleaseChannel(opts.releaseChannel);
   const proUrl = proDownloadUrl(baseUrl, plat, opts.version, channel);
+  const cacheRoot = opts.cacheDir || defaultCacheRoot();
+  /** The chrome path of the build `m` names when it is installed and passes its check, else null. */
+  const installed = (m: ProMeta | null): string | null => {
+    if (!m || !proMetaUsable(m, plat)) return null;
+    const r = proRelease(m, plat);
+    return cachedBinary(path.join(cacheRoot, r.tag), r.binary || "chrome.exe", opts.quiet, false, undefined, launchIntegrity(r));
+  };
+  // Taken before the first look: an answer a peer keeps after this moment counts as fresh for this call.
+  const askedAt = Date.now() / 1000;
   const known = readProMeta(licenseKey, proUrl);
-  if (known && proMetaUsable(known, plat)) {
-    // Launched only when its build is installed and its protected files still hash to these values.
-    const rel = proRelease(known, plat);
-    const cached = cachedBinary(path.join(opts.cacheDir || defaultCacheRoot(), rel.tag), rel.binary || "chrome.exe",
-      opts.quiet, false, undefined, launchIntegrity(rel));
+  if (known) {
+    // Never used to download (its signed URL may have expired): only for a build already installed whose
+    // protected files still hash to these values.
+    const cached = installed(known);
     if (cached) {
       logResolvedChannel(known, plat, channel, opts.quiet);
       return cached;
     }
   }
-  // Named with the SDK version (clearcote-sdk-node/<v>): since 156-r51 a build can need a minimum
-  // client (the persona token), and the route holds back a client that names no version.
-  const res = await fetch(proUrl, {
-    redirect: "follow",
-    headers: { authorization: `Bearer ${licenseKey}`, "User-Agent": licenseUserAgent() },
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!res.ok) {
-    const body = (await res.text().catch(() => "")).slice(0, 200);
+
+  const ask = async (): Promise<ProMeta> => {
+    let res: Response;
+    try {
+      // Named with the SDK version (clearcote-sdk-node/<v>): since 156-r51 a build can need a minimum
+      // client (the persona token), and the route holds back a client that names no version.
+      res = await fetch(proUrl, {
+        redirect: "follow",
+        headers: { authorization: `Bearer ${licenseKey}`, "User-Agent": licenseUserAgent() },
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (e) {
+      throw new ProSiteBusy(fetchErrorText(e)); // no connection, a reset, a timeout
+    }
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      if (isLicenceVerdict(res.status, res.headers, body)) {
+        throw new Error(
+          `Clearcote PRO download not authorized (HTTP ${res.status}): ${body.slice(0, 200)}\n` +
+            "Check your license key and that your plan is active.",
+        );
+      }
+      const what = res.headers.get("x-vercel-mitigated") ? "a challenge page from the site's host" : body.slice(0, 120);
+      throw new ProSiteBusy(`HTTP ${res.status}: ${what}`);
+    }
+    let got: unknown;
+    try {
+      got = JSON.parse(await res.text());
+    } catch (e) {
+      throw new ProSiteBusy(fetchErrorText(e)); // cut off mid-answer, or an answer that is not JSON
+    }
+    if (!got || typeof got !== "object" || Array.isArray(got)) throw new ProSiteBusy("the answer is not a JSON object");
+    // Only an answer naming a download is kept: "nothing published" is asked again next time.
+    if (proMetaUsable(got as ProMeta, plat)) writeProMeta(licenseKey, proUrl, got as ProMeta);
+    return got as ProMeta;
+  };
+
+  let meta: ProMeta;
+  try {
+    // Only an answer a peer got while this call waited counts: a download always follows a fresh answer.
+    meta = await singleFlight(`pro-meta-${proMetaId(licenseKey, proUrl)}`,
+      () => readProMeta(licenseKey, proUrl, Date.now() / 1000 - askedAt), ask, (e) => e instanceof ProSiteBusy);
+  } catch (e) {
+    if (!(e instanceof ProSiteBusy || e instanceof PeerFailed)) throw e;
+    const why = e instanceof PeerFailed ? "another launch on this machine just failed to reach it" : e.message;
+    const cached = installed(readProMeta(licenseKey, proUrl, PRO_META_STALE_MAX_SEC));
+    if (cached) {
+      if (!(e instanceof PeerFailed)) {
+        // Said once per failure, by the launch that asked; always, even when quiet: the launch did not get
+        // the site's current answer.
+        process.stderr.write(`[clearcote] the PRO build lookup at ${baseUrl} failed (${why}); launching the ` +
+          "installed build the last answer named.\n");
+      }
+      return cached;
+    }
     throw new Error(
-      `Clearcote PRO download not authorized (HTTP ${res.status}): ${body}\n` +
-        "Check your license key and that your plan is active.",
+      `Clearcote PRO: the build lookup at ${baseUrl} failed (${why}) and no earlier answer names an ` +
+        "installed build. Try again in a few minutes; if it keeps failing, contact support.",
     );
   }
-  const meta = (await res.json()) as ProMeta;
   logResolvedChannel(meta, plat, channel, opts.quiet);
   if (meta.notice) log(opts.quiet, String(meta.notice));
   const rel = proRelease(meta, plat);
-  writeProMeta(licenseKey, proUrl, meta);
 
-  const cacheRoot = opts.cacheDir || defaultCacheRoot();
   const base = path.join(cacheRoot, rel.tag);
   {
     const cached = cachedBinary(base, rel.binary || "chrome.exe", opts.quiet, false, undefined, launchIntegrity(rel));

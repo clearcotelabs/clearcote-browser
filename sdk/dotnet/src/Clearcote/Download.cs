@@ -1277,9 +1277,43 @@ public static class Download
 
     /// How long a PRO metadata answer is reused.
     internal static readonly TimeSpan ProMetaTtl = TimeSpan.FromSeconds(600);
+    /// Each process adds its own 0-300 s (as the catalog does), so processes started together do not all ask again
+    /// at the same moment.
+    internal const double ProMetaTtlSpreadSeconds = 300;
+    /// This process's share of the spread, in seconds (tests set it).
+    internal static double? ProMetaSpreadSeconds;
+    /// When the site can't give an answer (its host's challenge page, a 5xx, a 429, no connection), an answer this
+    /// old is still used for the build it names while that build is installed and passes its check. A licence
+    /// verdict (the route's own JSON 401/403/...) is never overridden: the lease checkout at launch enforces it too.
+    internal static readonly TimeSpan ProMetaStaleMax = TimeSpan.FromDays(7);
     /// <summary>The User-Agent of the download-route (metadata) request: this SDK and its version.</summary>
     public static readonly string ProMetaUserAgent = $"clearcote-sdk-dotnet/{Clearcote.Version}";
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (double At, string Meta)> ProMetaMemo = new();
+
+    private static double ProMetaTtlSeconds()
+    {
+        ProMetaSpreadSeconds ??= Random.Shared.NextDouble() * ProMetaTtlSpreadSeconds;
+        return ProMetaTtl.TotalSeconds + ProMetaSpreadSeconds.Value;
+    }
+
+    /// The PRO answer could not be had for a reason that is not a licence verdict.
+    internal sealed class ProSiteBusyException : Exception
+    {
+        public ProSiteBusyException(string why) : base(why) { }
+    }
+
+    /// The route's own refusal (JSON) for a client error, not the host's challenge page or a server error.
+    internal static bool IsLicenceVerdict(int status, bool mitigated, string body)
+    {
+        if (status is 408 or 425 or 429 || status >= 500) return false;
+        if (mitigated) return false;
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            return doc.RootElement.ValueKind == JsonValueKind.Object;
+        }
+        catch (JsonException) { return false; }
+    }
 
     /// Forget this process's PRO metadata (tests).
     internal static void ForgetProMeta() => ProMetaMemo.Clear();
@@ -1291,12 +1325,14 @@ public static class Download
 
     private static string ProMetaPath(string id) => Path.Combine(Native.ClearcoteDir, $"pro-meta-{id}.json");
 
-    /// A metadata answer younger than <see cref="ProMetaTtl"/>, or null. An unreadable file is a miss.
-    private static string? RecentProMeta(string id)
+    /// A metadata answer younger than <paramref name="maxAgeSeconds"/> (default: this process's TTL), or null. An
+    /// unreadable file is a miss.
+    private static string? RecentProMeta(string id, double? maxAgeSeconds = null)
     {
-        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        var now = NowSec();
+        var limit = maxAgeSeconds ?? ProMetaTtlSeconds();
         // A time ahead of this clock is no proof of age: a miss.
-        bool Fresh(double at) => now - at >= 0 && now - at < ProMetaTtl.TotalSeconds;
+        bool Fresh(double at) => now - at >= 0 && now - at < limit;
         if (ProMetaMemo.TryGetValue(ProMetaPath(id), out var memo) && Fresh(memo.At)) return memo.Meta;
         try
         {
@@ -1372,7 +1408,9 @@ public static class Download
     /// Download + verify the PRO (license-gated) browser and return its chrome path. Throws on any
     /// failure — a licensed caller must get the PRO build, never a silent free fall-back. A failed download of
     /// a new PRO build launches the newest installed PRO build of the same Chromium major instead (unless the
-    /// caller pinned an exact revision), and pauses that download for a while (see the backoff section below).
+    /// caller pinned an exact revision), and pauses that download for a while (see the backoff section below). A
+    /// lookup the site can't answer (its host's challenge page, a 5xx, no connection; not a licence verdict)
+    /// launches the installed build the last answer (up to a week old) named.
     public static async Task<string> ProEnsureBinaryAsync(string licenseKey, ProDownloadOptions? opts = null)
     {
         opts ??= new ProDownloadOptions();
@@ -1384,43 +1422,107 @@ public static class Download
         var cacheRoot = opts.CacheDir ?? Native.CacheRoot();
         var proUrl = ProDownloadUrl(baseUrl, plat, opts.Version, channel);
         var metaId = ProMetaId(licenseKey, proUrl);
-        // A recent answer saves the request when the build it names is installed and passes the cached-build
-        // check with it, protected-code hashes included.
-        if (RecentProMeta(metaId) is { } recent)
+        // Taken before the first look at a kept answer: a peer's answer written between that look and the request
+        // below counts as fresh, so this call does not ask again.
+        var askedAt = NowSec();
+
+        // The chrome path of the build an answer names when it is installed and passes the cached-build check with
+        // it, protected-code hashes included; else null.
+        string? Installed(string metaJson)
         {
             try
             {
-                using var recentDoc = JsonDocument.Parse(recent);
-                var recentRel = ProRelease(recentDoc.RootElement, plat);
-                var hit = Cached(Path.Combine(cacheRoot, recentRel.Tag), recentRel.Binary, opts.Quiet, repair: false, integrity: recentRel);
-                if (hit is not null)
-                {
-                    LogResolvedChannel(recentDoc.RootElement, channel, plat, opts.Quiet);
-                    return hit;
-                }
+                using var d = JsonDocument.Parse(metaJson);
+                var r = ProRelease(d.RootElement, plat);
+                return Cached(Path.Combine(cacheRoot, r.Tag), r.Binary, opts.Quiet, repair: false, integrity: r);
             }
-            catch { /* unusable: ask the server */ }
+            catch { return null; }
         }
 
-        using var client = SdkHttp.Create();
-        var req = new HttpRequestMessage(HttpMethod.Get, proUrl);
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", licenseKey);
-        // Named with the SDK version (clearcote-sdk-dotnet/<v>): since 156-r51 a build can need a minimum
-        // client (the persona token), and the route holds back a client that names no version.
-        req.Headers.UserAgent.ParseAdd(ProMetaUserAgent);
-        using var res = await client.SendAsync(req).ConfigureAwait(false);
-        if (!res.IsSuccessStatusCode)
+        // A recent answer saves the request when the build it names is installed. Never used to download (its
+        // signed URL may have expired): only for a build already installed.
+        if (RecentProMeta(metaId) is { } recent && Installed(recent) is { } hit)
         {
-            var body = (await res.Content.ReadAsStringAsync().ConfigureAwait(false));
-            if (body.Length > 200) body = body[..200];
-            throw new Exception($"Clearcote PRO download not authorized (HTTP {(int)res.StatusCode}): {body}\n" +
-                                "Check your license key and that your plan is active.");
+            using var recentDoc = JsonDocument.Parse(recent);
+            LogResolvedChannel(recentDoc.RootElement, channel, plat, opts.Quiet);
+            return hit;
         }
-        using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync().ConfigureAwait(false));
+
+        async Task<string> Ask()
+        {
+            using var client = SdkHttp.Create();
+            // Well under the 60 s after which the other launches take the machine's lock over.
+            client.Timeout = TimeSpan.FromSeconds(30);
+            using var req = new HttpRequestMessage(HttpMethod.Get, proUrl);
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", licenseKey);
+            // Named with the SDK version (clearcote-sdk-dotnet/<v>): since 156-r51 a build can need a minimum
+            // client (the persona token), and the route holds back a client that names no version.
+            req.Headers.UserAgent.ParseAdd(ProMetaUserAgent);
+            HttpResponseMessage? res = null;
+            string body;
+            try
+            {
+                res = await client.SendAsync(req).ConfigureAwait(false);
+                body = await res.Content.ReadAsStringAsync().ConfigureAwait(false);
+            }
+            catch (Exception e) when (e is HttpRequestException or OperationCanceledException or IOException)
+            {
+                // No connection, a timeout, a reset.
+                res?.Dispose();
+                throw new ProSiteBusyException(string.IsNullOrEmpty(e.Message) ? e.GetType().Name : e.Message);
+            }
+            using (res)
+            {
+                if (!res.IsSuccessStatusCode)
+                {
+                    var status = (int)res.StatusCode;
+                    var mitigated = res.Headers.Contains("x-vercel-mitigated");
+                    if (IsLicenceVerdict(status, mitigated, body))
+                        throw new Exception($"Clearcote PRO download not authorized (HTTP {status}): {body[..Math.Min(body.Length, 200)]}\n" +
+                                            "Check your license key and that your plan is active.");
+                    var what = mitigated ? "a challenge page from the site's host" : body[..Math.Min(body.Length, 120)];
+                    throw new ProSiteBusyException($"HTTP {status}: {what}");
+                }
+                JsonDocument got;
+                try { got = JsonDocument.Parse(body); }
+                catch (JsonException e) { throw new ProSiteBusyException(e.Message); }
+                using (got)
+                {
+                    if (got.RootElement.ValueKind != JsonValueKind.Object) throw new ProSiteBusyException("the answer is not a JSON object");
+                    ProRelease(got.RootElement, plat); // throws when it names no usable download
+                    var raw = got.RootElement.GetRawText();
+                    KeepProMeta(metaId, raw); // only an answer that names a usable build
+                    return raw;
+                }
+            }
+        }
+
+        string metaJson;
+        try
+        {
+            // Only an answer a peer got while this call waited counts: a download always follows a fresh answer.
+            metaJson = await SingleFlightAsync($"pro-meta-{metaId}", () => RecentProMeta(metaId, NowSec() - askedAt), Ask,
+                                               e => e is ProSiteBusyException).ConfigureAwait(false);
+        }
+        catch (Exception e) when (e is ProSiteBusyException or PeerFailedException)
+        {
+            var why = e is PeerFailedException ? "another launch on this machine just failed to reach it" : e.Message;
+            var stale = RecentProMeta(metaId, ProMetaStaleMax.TotalSeconds);
+            if (stale is not null && Installed(stale) is { } kept)
+            {
+                if (e is not PeerFailedException) // said once per failure, by the launch that asked
+                    Console.Error.WriteLine($"[clearcote] the PRO build lookup at {baseUrl} failed ({why}); launching the " +
+                                            "installed build the last answer named.");
+                return kept;
+            }
+            throw new Exception($"Clearcote PRO: the build lookup at {baseUrl} failed ({why}) and no earlier answer names an " +
+                                "installed build. Try again in a few minutes; if it keeps failing, contact support.");
+        }
+
+        using var doc = JsonDocument.Parse(metaJson);
         var meta = doc.RootElement;
         LogResolvedChannel(meta, channel, plat, opts.Quiet);
         var rel = ProRelease(meta, plat);
-        KeepProMeta(metaId, meta.GetRawText()); // only an answer that names a usable build
 
         var @base = Path.Combine(cacheRoot, rel.Tag);
         {
@@ -1593,6 +1695,115 @@ public static class Download
         return 0;
     }
 
+    // ── One request per machine ──────────────────────────────────────────────
+    // The site's host (Vercel) answers a burst of requests from one address with a 403 challenge page and keeps
+    // challenging that address for minutes (a customer starting ~25 browsers 1-2 s apart was cut off for 3-4
+    // minutes; with a PRO licence that failed the launches). Every launch that needs the catalog or the PRO answer
+    // and finds none kept first takes ~/.clearcote/<name>.lock: the process holding it asks the site, the others
+    // wait (at most FlightWaitSeconds) for the answer it keeps. When the holder's request failed (it leaves
+    // <name>.failed), the others do not ask again for FlightFailedQuietSeconds and use their fall-back. The file
+    // names and times are the ones the Python and Node SDKs use, so processes of every SDK on a machine share them.
+
+    /// How long a launch waits for the holder's answer before it asks itself (tests shorten it).
+    internal static double FlightWaitSeconds = 45;
+    /// A lock this old belongs to a process that died while asking: taken over.
+    internal const double FlightStaleSeconds = 60;
+    /// How long after a failed request the other launches use their fall-back instead of asking again.
+    internal const double FlightFailedQuietSeconds = 30;
+
+    /// Another process on this machine just asked and failed: do not ask again right now.
+    internal sealed class PeerFailedException : Exception
+    {
+        public PeerFailedException(string name) : base($"another launch on this machine just failed to ask for {name}") { }
+    }
+
+    private static double NowSec() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+
+    /// True when this process took the lock, false while another process holds a live one. A lock that can't be
+    /// made (read-only home) is no reason to fail: true, and this process just asks.
+    private static bool FlightTake(string lockPath)
+    {
+        for (var i = 0; i < 3; i++)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(lockPath)!);
+                using var fs = new FileStream(lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
+                try { fs.Write(System.Text.Encoding.ASCII.GetBytes(Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture))); }
+                catch { /* the pid is only for a person looking */ }
+                return true;
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                var lockFile = new FileInfo(lockPath);
+                if (!lockFile.Exists) continue; // just released (or it can't be made): try again
+                // A file made a moment ago can carry a time a little after this clock's reading: a small negative
+                // age is a live lock, not a stale one.
+                var age = (DateTime.UtcNow - lockFile.LastWriteTimeUtc).TotalSeconds;
+                if (Math.Abs(age) < FlightStaleSeconds) return false;
+                TryDelete(lockPath);
+            }
+            catch { return true; }
+        }
+        return true;
+    }
+
+    private static bool RecentlyFailed(string failedPath)
+    {
+        var failed = new FileInfo(failedPath);
+        if (!failed.Exists) return false;
+        var age = (DateTime.UtcNow - failed.LastWriteTimeUtc).TotalSeconds;
+        return Math.Abs(age) < FlightFailedQuietSeconds; // a small negative age: just written, as for the lock
+    }
+
+    /// <paramref name="readKept"/>() when an answer is kept, else <paramref name="ask"/>() from at most one process
+    /// on this machine at a time. Throws <see cref="PeerFailedException"/> when another process asked within
+    /// FlightFailedQuietSeconds and failed with an error <paramref name="transient"/> accepts (a licence verdict is
+    /// not one: each process hears it for itself).
+    internal static async Task<T> SingleFlightAsync<T>(string name, Func<T?> readKept, Func<Task<T>> ask, Func<Exception, bool>? transient = null)
+        where T : class
+    {
+        var @base = Path.Combine(Native.ClearcoteDir, name);
+        string lockPath = @base + ".lock", failedPath = @base + ".failed";
+        var deadline = DateTime.UtcNow.AddSeconds(FlightWaitSeconds);
+        while (true)
+        {
+            if (FlightTake(lockPath))
+            {
+                try
+                {
+                    if (readKept() is { } kept) return kept; // a peer may have finished between the caller's look and the lock
+                    if (RecentlyFailed(failedPath)) throw new PeerFailedException(name);
+                    T got;
+                    try
+                    {
+                        got = await ask().ConfigureAwait(false);
+                    }
+                    catch (Exception e) when (transient?.Invoke(e) ?? true)
+                    {
+                        try
+                        {
+                            Directory.CreateDirectory(Native.ClearcoteDir);
+                            File.WriteAllBytes(failedPath, Array.Empty<byte>());
+                            File.SetLastWriteTimeUtc(failedPath, DateTime.UtcNow); // an existing file: its time moves
+                        }
+                        catch { /* best-effort: the others just ask */ }
+                        throw;
+                    }
+                    TryDelete(failedPath);
+                    return got;
+                }
+                finally
+                {
+                    TryDelete(lockPath);
+                }
+            }
+            if (readKept() is { } peer) return peer;
+            if (DateTime.UtcNow >= deadline) return await ask().ConfigureAwait(false); // the holder is stuck: ask anyway
+            await Task.Delay(200 + Random.Shared.Next(0, 300)).ConfigureAwait(false); // timing spread, not a secret
+        }
+    }
+
     // ── Version catalog cache ────────────────────────────────────────────────
     // The catalog answer is kept in this process and in ~/.clearcote/catalog.json as {at, url, catalog} (at in
     // epoch seconds), so many launches from one machine ask the site once per CatalogTtl and not once each. A
@@ -1678,23 +1889,31 @@ public static class Download
     {
         var url = Release.CatalogUrl;
         if (KeptCatalog(url, CatalogTtlSeconds()) is { } kept) return kept;
-        string? why = null;
-        try
+
+        async Task<Catalog> Ask()
         {
             var json = await FetchTextAsync(url).ConfigureAwait(false);
-            if (ParseCatalog(json) is { } cat)
-            {
-                KeepCatalog(url, cat, json);
-                return cat;
-            }
+            var cat = ParseCatalog(json) ?? throw new Exception("the catalog answer names no builds");
+            KeepCatalog(url, cat, json);
+            return cat;
+        }
+
+        string why;
+        try
+        {
+            return await SingleFlightAsync("catalog", () => KeptCatalog(url, CatalogTtlSeconds()), Ask).ConfigureAwait(false);
+        }
+        catch (PeerFailedException)
+        {
+            if (KeptCatalog(url, CatalogStaleMax.TotalSeconds) is { } peerStale) return peerStale; // said once, by the launch that failed
+            why = "another launch on this machine just failed to reach it";
         }
         catch (Exception e)
         {
             why = e.Message;
         }
         var stale = KeptCatalog(url, CatalogStaleMax.TotalSeconds);
-        if (why != null)
-            Log(quiet, $"version catalog unreachable ({why}); using {(stale != null ? "the last answer kept on this machine" : "the bundled snapshot")}");
+        Log(quiet, $"version catalog unreachable ({why}); using {(stale != null ? "the last answer kept on this machine" : "the bundled snapshot")}");
         return stale ?? Release.CatalogFallback;
     }
 

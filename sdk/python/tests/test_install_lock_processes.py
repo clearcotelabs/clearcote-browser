@@ -44,7 +44,9 @@ def _finish(child):
 
 def test_two_processes_install_one_build_once(tmp_path):
     cache = str(tmp_path / "cache")
-    with FakeBuildServer(meta_barrier=2, archive_delay=1.0) as srv:  # both reach the cache check together
+    # One process asks the route (one request per machine); the other uses its answer as soon as it is kept and
+    # reaches the cache check while the first still downloads.
+    with FakeBuildServer(archive_delay=1.0) as srv:
         children = [_start(srv.url, cache) for _ in range(2)]
         paths = [_finish(c) for c in children]
     assert paths[0] == paths[1] and os.path.isfile(paths[0])

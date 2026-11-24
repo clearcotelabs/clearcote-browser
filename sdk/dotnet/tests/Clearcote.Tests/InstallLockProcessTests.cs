@@ -67,7 +67,9 @@ public class InstallLockProcessTests : IDisposable
     {
         if (OperatingSystem.IsMacOS()) return; // the PRO route serves Windows and Linux
         var cache = Cache();
-        await using var srv = new FakeBuildServer(metaBarrier: 2, archiveDelayMs: 1000); // both reach the cache check together
+        // One process asks the route (one request per machine); the other uses its answer as soon as it is kept and
+        // reaches the cache check while the first still downloads.
+        await using var srv = new FakeBuildServer(archiveDelayMs: 1000);
         var results = await Task.WhenAll(RunChildAsync(srv.Url, cache), RunChildAsync(srv.Url, cache));
         foreach (var r in results) Assert.True(r.Code == 0, $"installer exited {r.Code}:\n{r.Err}");
         Assert.NotNull(results[0].Path);

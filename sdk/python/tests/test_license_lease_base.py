@@ -249,7 +249,7 @@ def test_an_explicit_base_is_used_alone(lic, monkeypatch, how):
 def test_the_lease_base_does_not_move_the_pro_download(monkeypatch):
     monkeypatch.delenv("CLEARCOTE_LICENSE_API", raising=False)
     monkeypatch.setenv("CLEARCOTE_LEASE_API", "https://lease-env.test")
-    monkeypatch.setattr(dl, "_kept_pro_meta", lambda key: None)
+    monkeypatch.setattr(dl, "_kept_pro_meta", lambda key, max_age=None: None)
     seen = {}
 
     def capture(req, timeout=0):

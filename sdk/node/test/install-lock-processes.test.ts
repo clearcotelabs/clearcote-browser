@@ -39,7 +39,9 @@ function pidNamespace(): string | null {
 describe.runIf(proPlatform)("install lock across processes", () => {
   it("two processes install one build once", async () => {
     const cache = tempDir("cc-lockp-");
-    const srv = await startFakeBuild({ metaBarrier: 2, archiveDelayMs: 1000 }); // both reach the cache check together
+    // One process asks the route (one request per machine); the other uses its answer as soon as it is kept and
+    // reaches the cache check while the first still downloads.
+    const srv = await startFakeBuild({ archiveDelayMs: 1000 });
     try {
       const results = await Promise.all([startInstallChild(srv.url, cache), startInstallChild(srv.url, cache)]);
       for (const r of results) expect(r.code, r.err).toBe(0);
