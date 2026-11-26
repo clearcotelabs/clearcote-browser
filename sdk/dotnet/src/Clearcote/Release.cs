@@ -146,8 +146,7 @@ public static class Release
     public static readonly IReadOnlyDictionary<string, string> ProReleaseKeys =
         new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            // Empty for now: the release key is pinned here when the first signed release ships. Until then
-            // no manifest can pass, so this SDK refuses every PRO build.
+            ["pro-2026a"] = "5f8ad6af5350ade5d18006ae7443472a09550b68967055146d33ae0006624ff1",
         });
 
     // ── Version catalog ──────────────────────────────────────────────────────

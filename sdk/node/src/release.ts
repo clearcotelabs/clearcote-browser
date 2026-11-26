@@ -147,11 +147,11 @@ export const SIGNING_KEY_FPR = "CA96F185F96A693AEDB3AC1FCB00D851B7A86B0F";
  * halves are kept off every server. More than one key can be pinned, so a new key can ship here before it
  * signs anything.
  *
- * EMPTY for now: the release key is pinned here when the first signed Pro release ships. Until then this SDK
- * refuses every Pro build. Nothing else adds a key or skips the check: no environment variable, no option,
- * no file.
+ * Nothing else adds a key or skips the check: no environment variable, no option, no file.
  */
-export const PRO_RELEASE_KEYS: Record<string, string> = {};
+export const PRO_RELEASE_KEYS: Record<string, string> = {
+  "pro-2026a": "5f8ad6af5350ade5d18006ae7443472a09550b68967055146d33ae0006624ff1",
+};
 
 // ── Version catalog ──────────────────────────────────────────────────────────
 // Source of truth for "which browser majors exist and what tier each is". Fetched at runtime so a NEW
