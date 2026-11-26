@@ -11,6 +11,9 @@ namespace Clearcote.Tests;
 /// The archive is a small zip holding every file a healthy install must have (no real browser). The server
 /// counts archive downloads, and can hold the route's answer until <c>metaBarrier</c> clients have asked, so
 /// that several installers reach the cache check at the same moment.
+///
+/// Every answer carries a release manifest for the build it names, signed with the TEST key
+/// (<see cref="TestReleaseKey"/>), as the real route signs with the release key.
 internal sealed class FakeBuildServer : LocalServer
 {
     public static readonly string Binary = OperatingSystem.IsWindows() ? "chrome.exe" : "chrome";
@@ -55,6 +58,14 @@ internal sealed class FakeBuildServer : LocalServer
     /// The tag and version the download route names (default <see cref="Tag"/>, 0.0.0).
     public string MetaTag { get; set; } = Tag;
     public string MetaVersion { get; set; } = "0.0.0";
+    /// The revision the route names: the "r1" at the end of <see cref="MetaTag"/>.
+    public string MetaRevision => System.Text.RegularExpressions.Regex.Match(MetaTag, @"-(r\d+)$") is { Success: true } m ? m.Groups[1].Value : "r0";
+    /// True: the answer carries no manifest, as the route answered before releases were signed.
+    public bool Unsigned { get; set; }
+    /// Set: the manifest is a correctly signed one for this revision, not for the revision the answer names.
+    public string? ManifestRevision { get; set; }
+    /// True: the archive served has one byte changed (same length); the answer and its manifest name the real one.
+    public bool AlterArchive { get; set; }
     /// The archive's status: anything but 200 answers a JSON error (with <see cref="RetryAfter"/>, when set).
     public int ArchiveStatus { get; set; } = 200;
     public string? RetryAfter { get; set; }
@@ -126,12 +137,22 @@ internal sealed class FakeBuildServer : LocalServer
                 await s.WriteAsync(err, ct);
                 return;
             }
-            body = JsonSerializer.SerializeToUtf8Bytes(new
+            var platform = Release.ProPlatformKey() ?? "linux";
+            var answer = new Dictionary<string, object>
             {
-                tag = MetaTag, version = MetaVersion, url = $"{Url}/fake.zip", sha256 = Sha, exe_sha256 = _exeSha,
-                chrome_dll_sha256 = _dllSha, asset = "fake.zip",
-                archive = "zip", binary = Binary, size = _archive.Length,
-            });
+                ["tag"] = MetaTag, ["version"] = MetaVersion, ["revision"] = MetaRevision, ["platform"] = platform,
+                ["url"] = $"{Url}/fake.zip", ["sha256"] = Sha, ["exe_sha256"] = _exeSha!,
+                ["chrome_dll_sha256"] = _dllSha, ["asset"] = "fake.zip",
+                ["archive"] = "zip", ["binary"] = Binary, ["size"] = _archive.Length,
+            };
+            if (!Unsigned)
+            {
+                var binaries = new Dictionary<string, string> { [Binary] = _exeSha! };
+                if (platform == "windows") binaries["chrome.dll"] = _dllSha;
+                answer["manifest"] = TestReleaseKey.Manifest(MetaVersion, ManifestRevision ?? MetaRevision, platform, "fake.zip",
+                                                             Sha, _archive.Length, binaries);
+            }
+            body = JsonSerializer.SerializeToUtf8Bytes(answer);
             type = "application/json";
         }
         else if (target == "/fake.zip")
@@ -153,6 +174,11 @@ internal sealed class FakeBuildServer : LocalServer
             _onArchive?.Invoke(); // e.g. another installer finishes while this one downloads
             await Task.Delay(_archiveDelayMs, ct); // long enough for a second installer to arrive meanwhile
             body = _archive;
+            if (AlterArchive)
+            {
+                body = (byte[])_archive.Clone();
+                body[^1] ^= 0x01;
+            }
             type = "application/zip";
         }
         else

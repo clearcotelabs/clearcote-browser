@@ -27,6 +27,7 @@ download = importlib.import_module("clearcote.download")  # the module: `clearco
 
 BINARY = "chrome.exe" if sys.platform == "win32" else "chrome"
 needs_pro_platform = pytest.mark.skipif(sys.platform == "darwin", reason="the PRO route serves Windows and Linux")
+pytestmark = pytest.mark.usefixtures("pro_test_key")  # the fake route signs its answers with the test key
 
 
 @pytest.fixture(autouse=True)

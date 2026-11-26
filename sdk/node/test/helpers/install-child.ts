@@ -31,6 +31,7 @@ export function startInstallChild(apiBase: string, cacheDir: string, timeoutMs =
 
 if (process.env.INSTALL_CHILD === "1") {
   const { proEnsureBinary } = await import("../../src/download.js");
+  await (await import("./fake-build.js")).pinTestReleaseKey(); // the fake PRO route signs with the test key
   const p = await proEnsureBinary("test-key", { apiBase: process.env.INSTALL_API, cacheDir: process.env.INSTALL_CACHE, quiet: true });
   process.stdout.write(JSON.stringify({ path: p }) + "\n");
 }

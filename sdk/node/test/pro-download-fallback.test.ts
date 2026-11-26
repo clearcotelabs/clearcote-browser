@@ -9,7 +9,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
-import { BINARY, fakeArchive, verifiedTree } from "./helpers/fake-build.js";
+import { BINARY, fakeArchive, pinTestReleaseKey, signedAnswer, verifiedTree } from "./helpers/fake-build.js";
 import { tempDir } from "./helpers/temp.js";
 
 const proPlatform = process.platform === "win32" || process.platform === "linux"; // the PRO route serves these
@@ -45,7 +45,9 @@ async function setup() {
     stderr.push(String(s));
     return true;
   });
-  return { cache: tempDir("cc-dlfb-cache-"), dl: await import("../src/download.js"), stderr };
+  const dl = await import("../src/download.js");
+  await pinTestReleaseKey(); // the route below signs its answers with the test key
+  return { cache: tempDir("cc-dlfb-cache-"), dl, stderr };
 }
 
 /** The route answers NEW; the archive answers `archiveStatus` (with `retryAfter`, when set) or the build. */
@@ -67,8 +69,10 @@ async function route() {
       state.metaUserAgents.push(String(req.headers["user-agent"] ?? ""));
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        tag: NEW, version: "155.0.8059.39", url: `${base}/a.zip`, sha256: createHash("sha256").update(archive).digest("hex"),
-        exe_sha256: codeSha, chrome_dll_sha256: codeSha, asset: "fake.zip", archive: "zip", binary: BINARY, size: archive.length,
+        ...signedAnswer({
+          tag: NEW, version: "155.0.8059.39", url: `${base}/a.zip`, sha256: createHash("sha256").update(archive).digest("hex"),
+          exe_sha256: codeSha, chrome_dll_sha256: codeSha, asset: "fake.zip", archive: "zip", binary: BINARY, size: archive.length,
+        }),
         ...state.metaExtra,
       }));
       return;

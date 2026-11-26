@@ -133,6 +133,13 @@ REPO = "clearcotelabs/clearcote-browser"
 # before the binary is trusted. (Pinned mode trusts the baked-in sha256 instead.)
 SIGNING_KEY_FPR = "CA96F185F96A693AEDB3AC1FCB00D851B7A86B0F"
 
+# Release keys for the signed Pro release manifest (docs/PRO-RELEASE-MANIFEST.md): key id -> the raw 32-byte
+# Ed25519 public key, as hex. A Pro build is used only when its manifest verifies under one of these.
+# EMPTY until the first signed release ships: the release key is pinned here then. More than one key may be
+# listed, so a new key can ship before it signs anything. Nothing else adds a key or skips the check: no
+# environment variable, no option, no file.
+PRO_RELEASE_KEYS = {}
+
 
 # ── Version catalog ──────────────────────────────────────────────────────────
 # The catalog is the source of truth for "which browser majors exist and what tier each is". The SDK

@@ -15,11 +15,16 @@ import time
 import pytest
 
 from _fake_build import FakeBuildServer, TAG, verified_tree
+from _manifest_signer import KEY_ID, PUBLIC_KEY_HEX
 
 pytestmark = pytest.mark.skipif(sys.platform == "darwin", reason="the PRO route serves Windows and Linux")
 
+# The child pins the TEST release key for itself (a fixture cannot reach another process): the fake route
+# signs its answers with it.
 CHILD = """
 import json, sys
+from clearcote import release
+release.PRO_RELEASE_KEYS[sys.argv[3]] = sys.argv[4]
 from clearcote.download import pro_ensure_binary
 print(json.dumps({"path": pro_ensure_binary("test-key", api_base=sys.argv[1], cache_dir=sys.argv[2], quiet=True)}))
 """
@@ -27,7 +32,7 @@ print(json.dumps({"path": pro_ensure_binary("test-key", api_base=sys.argv[1], ca
 
 def _start(api, cache):
     home = os.path.join(os.path.dirname(cache), "home")  # pro_ensure_binary keeps the download answer in ~/.clearcote
-    return subprocess.Popen([sys.executable, "-c", CHILD, api, cache],
+    return subprocess.Popen([sys.executable, "-c", CHILD, api, cache, KEY_ID, PUBLIC_KEY_HEX],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             env={**os.environ, "HOME": home, "USERPROFILE": home})
 

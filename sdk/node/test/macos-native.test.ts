@@ -19,7 +19,7 @@ import {
 import { engineSupportsSwitch, macosKeychainArgs } from "../src/launchopts.js";
 import { hostArch, platformRelease, proPlatformKey } from "../src/release.js";
 import { coherenceWarnings } from "../src/warnings.js";
-import { storedZip } from "./helpers/fake-build.js";
+import { pinTestReleaseKey, signedAnswer, storedZip } from "./helpers/fake-build.js";
 
 const APP_EXE = path.join("Chromium.app", "Contents", "MacOS", "Chromium");
 const FRAMEWORK = path.join("Chromium.app", "Contents", "Frameworks", "Chromium Framework.framework");
@@ -154,6 +154,7 @@ describe("the bundle", () => {
 describe("PRO download on a Mac", () => {
   it("asks for platform=macos, unpacks with ditto and clears the quarantine flag", async () => {
     on("darwin", "arm64");
+    await pinTestReleaseKey(); // the answer below is signed with the test key
     const files = fakeApp(path.join(tmp, "src"));
     const zip = storedZip(Object.fromEntries(Object.entries(files).map(([k, v]) => [k.split(path.sep).join("/"), v])));
     const sha = createHash("sha256").update(zip).digest("hex");
@@ -163,11 +164,11 @@ describe("PRO download on a Mac", () => {
       urls.push(String(url));
       if (String(url).includes("/api/v1/download/pro")) {
         // the route's reply for macOS, minus "binary": the SDK's macOS default must be the bundle's
-        return new Response(JSON.stringify({
+        return new Response(JSON.stringify(signedAnswer({
           version: "155.0.8059.39", tag: "pro-155.0.8059.39-r42", platform: "macos",
           asset: "clearcote-pro-155.0.8059.39-macos-arm64.zip", archive: "zip", url: "https://blob.test/mac.zip",
           sha256: sha, exe_sha256: exeSha, size: zip.length,
-        }), { status: 200 });
+        }, "macos")), { status: 200 });
       }
       return new Response(zip, { status: 200, headers: { "content-length": String(zip.length) } });
     }) as typeof fetch);

@@ -140,6 +140,16 @@ public static class Release
     /// Clearcote's release-signing key fingerprint, pinned out-of-band (durable autoUpdate trust anchor).
     public const string SigningKeyFpr = "CA96F185F96A693AEDB3AC1FCB00D851B7A86B0F";
 
+    /// The release keys a PRO release manifest may be signed with (docs/PRO-RELEASE-MANIFEST.md): key id -> the
+    /// raw 32-byte Ed25519 public key, as hex. More than one key can be listed, so a new key can ship in the SDK
+    /// before it signs anything. No environment variable, option or file adds a key or turns the check off.
+    public static readonly IReadOnlyDictionary<string, string> ProReleaseKeys =
+        new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            // Empty for now: the release key is pinned here when the first signed release ships. Until then
+            // no manifest can pass, so this SDK refuses every PRO build.
+        });
+
     // ── Version catalog ──────────────────────────────────────────────────────
     // Source of truth for "which browser majors exist and what tier each is". Fetched at runtime so a
     // NEW release becomes switchable (LaunchAsync(new(){ Version = "150" })) without an SDK bump. FREE

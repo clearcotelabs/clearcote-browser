@@ -5,8 +5,13 @@
 // several installers reach the cache check at the same moment.
 // `metaStatus` makes the route refuse with its own JSON error, and `metaChallenge` answers like the site's
 // host answers a burst from one address (a 403 HTML challenge page with x-vercel-mitigated).
-import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+//
+// Every answer carries a release manifest (docs/PRO-RELEASE-MANIFEST.md) signed with the TEST key of
+// sdk/testdata/pro_manifest_vectors.json, for exactly what the answer says. That key is pinned nowhere in the
+// SDK: a test pins it with pinTestReleaseKey(), which writes into the release.ts instance the code under test
+// uses. `answer` changes the answer after it was signed and `archiveBody` serves other bytes than were hashed.
+import { createHash, createPrivateKey, sign, type KeyObject } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
@@ -14,6 +19,65 @@ import { writeManifest } from "../../src/download.js";
 
 export const BINARY = process.platform === "win32" ? "chrome.exe" : "chrome";
 export const TAG = "pro-0.0.0-r1";
+/** The /download/pro `platform` of this OS. */
+export const PRO_PLATFORM = process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux";
+
+// ── The test release key ─────────────────────────────────────────────────────────────────────────────────
+const VECTORS = JSON.parse(readFileSync(new URL("../../../testdata/pro_manifest_vectors.json", import.meta.url), "utf8")) as {
+  key_id: string; public_key_hex: string; private_seed_hex: string;
+};
+export const TEST_KEY_ID = VECTORS.key_id;
+export const TEST_PUBLIC_KEY_HEX = VECTORS.public_key_hex;
+
+/** An Ed25519 private key from its 32-byte seed (PKCS#8 header + seed). */
+export function ed25519PrivateKey(seedHex: string): KeyObject {
+  return createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.from(seedHex, "hex")]), format: "der", type: "pkcs8" });
+}
+const TEST_PRIVATE_KEY = ed25519PrivateKey(VECTORS.private_seed_hex);
+
+/**
+ * Pin the test key in PRO_RELEASE_KEYS. Call it AFTER vi.resetModules() + import("../src/download.js"): the
+ * import below then resolves to the release.ts instance that download.ts uses. Not part of the package: the
+ * SDK itself has no way to add a key.
+ */
+export async function pinTestReleaseKey(): Promise<void> {
+  const release = await import("../../src/release.js");
+  release.PRO_RELEASE_KEYS[TEST_KEY_ID] = TEST_PUBLIC_KEY_HEX;
+}
+
+/** base64url(payload) "." base64url(Ed25519 signature over the ASCII of the first part). */
+export function signProManifest(payload: unknown, key: KeyObject = TEST_PRIVATE_KEY): string {
+  const text = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  return `${text}.${sign(null, Buffer.from(text, "ascii"), key).toString("base64url")}`;
+}
+
+export interface ProAnswer {
+  tag?: string; version?: string; revision?: string; asset?: string; binary?: string;
+  sha256?: string; exe_sha256?: string; chrome_dll_sha256?: string; size?: number;
+  [more: string]: unknown;
+}
+
+/** The manifest payload a release would sign for this answer. The revision is the answer's, else its tag's "-rN". */
+export function manifestPayload(answer: ProAnswer, platform: string = PRO_PLATFORM): Record<string, unknown> {
+  const binary = answer.binary ?? (platform === "windows" ? "chrome.exe" : platform === "macos" ? "Chromium" : "chrome");
+  return {
+    v: 1,
+    product: "clearcote-pro",
+    version: answer.version,
+    revision: answer.revision ?? /-(r\d+)$/.exec(answer.tag ?? "")?.[1],
+    platform,
+    archive: { name: answer.asset, sha256: answer.sha256, size: answer.size },
+    binaries: { [binary]: answer.exe_sha256, ...(platform === "windows" ? { "chrome.dll": answer.chrome_dll_sha256 } : {}) },
+    key: TEST_KEY_ID,
+    issued: "2026-11-26",
+  };
+}
+
+/** The answer as a signing release serves it: with `revision`, `platform` and a manifest for exactly its values. */
+export function signedAnswer<T extends ProAnswer>(answer: T, platform: string = PRO_PLATFORM): T & { revision?: string; platform: string; manifest: string } {
+  const payload = manifestPayload(answer, platform);
+  return { ...answer, revision: payload.revision as string | undefined, platform, manifest: signProManifest(payload) };
+}
 const CRITICAL = process.platform === "win32"
   ? ["chrome.exe", "chrome.dll", "chrome_elf.dll", "icudtl.dat", "snapshot_blob.bin", "resources.pak"]
   : ["icudtl.dat", "snapshot_blob.bin", "resources.pak"];
@@ -100,7 +164,13 @@ export interface FakeBuild {
 }
 
 export async function startFakeBuild(
-  opts: { metaBarrier?: number; archiveDelayMs?: number; sha?: string; exeSha?: string; onArchive?: () => void } = {},
+  opts: {
+    metaBarrier?: number; archiveDelayMs?: number; sha?: string; exeSha?: string; onArchive?: () => void;
+    /** Change the answer after it was signed (drop the manifest, swap it, edit a hash). */
+    answer?: (signed: ProAnswer) => unknown;
+    /** Serve these bytes as the archive; the answer and its manifest still name the real archive's hash. */
+    archiveBody?: Buffer;
+  } = {},
 ): Promise<FakeBuild> {
   const archive = fakeArchive();
   const sha = opts.sha ?? createHash("sha256").update(archive).digest("hex");
@@ -131,9 +201,12 @@ export async function startFakeBuild(
           return;
         }
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ tag: TAG, version: "0.0.0", url: `${url}/fake.zip`, sha256: sha,
+        // Signed for what it says, also when `sha` / `exeSha` name hashes the archive does not have: the
+        // manifest check passes and the archive / launcher hash checks behind it are the ones that refuse.
+        const signed = signedAnswer({ tag: TAG, version: "0.0.0", url: `${url}/fake.zip`, sha256: sha,
           exe_sha256: opts.exeSha ?? codeSha, chrome_dll_sha256: codeSha,
-          asset: "fake.zip", archive: "zip", binary: BINARY, size: archive.length }));
+          asset: "fake.zip", archive: "zip", binary: BINARY, size: archive.length });
+        res.end(JSON.stringify(opts.answer ? opts.answer(signed) : signed));
       };
       waiting.push(answer);
       if (waiting.length >= (opts.metaBarrier ?? 1)) releaseAll();
@@ -143,9 +216,10 @@ export async function startFakeBuild(
       archiveHits++;
       opts.onArchive?.(); // e.g. another installer finishes while this one downloads
       setTimeout(() => { // long enough for a second installer to arrive meanwhile
+        const body = opts.archiveBody ?? archive;
         res.setHeader("content-type", "application/zip");
-        res.setHeader("content-length", String(archive.length));
-        res.end(archive);
+        res.setHeader("content-length", String(body.length));
+        res.end(body);
       }, opts.archiveDelayMs ?? 0);
       return;
     }

@@ -2,7 +2,11 @@
 
 The archive is a small zip holding every file a healthy install must have (no real browser). The server
 counts archive downloads, and can hold the route's answer until ``meta_barrier`` clients have asked, so
-that several installers reach the cache check at the same moment."""
+that several installers reach the cache check at the same moment.
+
+The answer carries the signed release manifest for exactly what it says (docs/PRO-RELEASE-MANIFEST.md),
+signed with the TEST key (_manifest_signer.py). A test that downloads through it pins that key with the
+``pro_test_key`` fixture; ``signed``, ``manifest_over`` and ``served_archive`` make the server misbehave."""
 import hashlib
 import importlib
 import io
@@ -14,10 +18,13 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import zipfile
 
+from _manifest_signer import signed_answer
+
 download = importlib.import_module("clearcote.download")  # the module: `clearcote.download` is also a function
 
 BINARY = "chrome.exe" if sys.platform == "win32" else "chrome"
 TAG = "pro-0.0.0-r1"
+PLATFORM = {"win32": "windows", "darwin": "macos"}.get(sys.platform, "linux")  # the route's ``platform`` key
 NAMES = sorted({BINARY, *download.CRITICAL_FILES["win32" if sys.platform == "win32" else "other"]})
 
 
@@ -47,6 +54,10 @@ class FakeBuildServer:
                  version="0.0.0"):
         self.archive = fake_archive()
         self.tag, self.version = tag, version  # the build the route names
+        self.revision = tag.rsplit("-", 1)[-1]  # "pro-0.0.0-r1" -> "r1"
+        self.signed = True  # False: the answer carries no manifest, like a site from before the manifest
+        self.manifest_over = {}  # manifest fields replaced before signing, e.g. {"revision": "r2"}
+        self.served_archive = None  # bytes sent in place of the archive the answer and the manifest name
         self.sha = hashlib.sha256(self.archive).hexdigest()
         self.code_sha = hashlib.sha256(b"x" * 64).hexdigest()
         self.exe_sha256 = exe_sha256 or self.code_sha
@@ -97,11 +108,7 @@ class FakeBuildServer:
                         self.end_headers()
                         self.wfile.write(body)
                         return
-                    body = json.dumps({"tag": server.tag, "version": server.version, "url": f"{server.url}/fake.zip",
-                                       "sha256": server.sha, "exe_sha256": server.exe_sha256,
-                                       "chrome_dll_sha256": server.code_sha, "asset": "fake.zip",
-                                       "archive": "zip", "binary": BINARY, "size": len(server.archive),
-                                       **server.meta_extra}).encode()
+                    body = json.dumps(server.answer()).encode()
                     ctype = "application/json"
                 elif self.path == "/fake.zip":
                     with server._count:
@@ -120,7 +127,8 @@ class FakeBuildServer:
                     if on_archive:
                         on_archive()  # e.g. another installer finishes while this one downloads
                     time.sleep(archive_delay)  # long enough for a second installer to arrive meanwhile
-                    body, ctype = server.archive, "application/zip"
+                    body = server.archive if server.served_archive is None else server.served_archive
+                    ctype = "application/zip"
                 else:
                     self.send_error(404)
                     return
@@ -135,6 +143,16 @@ class FakeBuildServer:
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self._thread.start()
+
+    def answer(self):
+        """What the route answers: the build, and (while ``signed``) the release manifest for exactly that."""
+        meta = {"tag": self.tag, "version": self.version, "revision": self.revision, "platform": PLATFORM,
+                "url": f"{self.url}/fake.zip", "sha256": self.sha, "exe_sha256": self.exe_sha256,
+                "chrome_dll_sha256": self.code_sha, "asset": "fake.zip", "archive": "zip", "binary": BINARY,
+                "size": len(self.archive)}
+        if self.signed:
+            meta = signed_answer(meta, PLATFORM, self.manifest_over)
+        return {**meta, **self.meta_extra}
 
     def close(self):
         self.httpd.shutdown()

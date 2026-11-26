@@ -17,7 +17,8 @@ from _fake_build import BINARY, TAG, FakeBuildServer
 
 download = importlib.import_module("clearcote.download")  # the module: `clearcote.download` is also a function
 
-pytestmark = pytest.mark.skipif(sys.platform == "darwin", reason="the PRO route serves Windows and Linux")
+pytestmark = [pytest.mark.skipif(sys.platform == "darwin", reason="the PRO route serves Windows and Linux"),
+              pytest.mark.usefixtures("pro_test_key")]  # the fake route signs its answers with the test key
 
 
 @pytest.fixture

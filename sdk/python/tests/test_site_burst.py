@@ -126,6 +126,7 @@ def test_a_stuck_holder_is_waited_for_at_most_the_flight_wait(home, monkeypatch)
 # ── PRO build lookup ─────────────────────────────────────────────────────────────────────────────────────
 
 pro = pytest.mark.skipif(sys.platform == "darwin", reason="the PRO route serves Windows and Linux")
+pytestmark = pytest.mark.usefixtures("pro_test_key")  # the fake route signs its answers with the test key
 
 
 def ensure(srv, cache, **kw):

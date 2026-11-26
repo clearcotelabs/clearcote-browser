@@ -308,9 +308,11 @@ def _resolve_binary(executable_path=None, cache_dir=None, quiet=False, auto_upda
 
         kind, payload = resolve_version(version, has_license=bool(pro and pro[0]), quiet=quiet)
         if kind == "pro":
+            # The route is asked for the version the catalog names; the release manifest is held to what
+            # the caller wrote (an exact version is a pin, a major or "latest" is not).
             return pro_ensure_binary(pro[0], api_base=(pro[1] if pro else None),
                                      cache_dir=cache_dir, quiet=quiet, version=payload,
-                                     release_channel=channel)
+                                     release_channel=channel, pinned=version)
         rel = payload  # free build resolved from the catalog
         base = os.path.join(cache_dir or _cache_root(), rel["tag"])
         cached = _cached(base, rel["binary"], quiet, repair=False)

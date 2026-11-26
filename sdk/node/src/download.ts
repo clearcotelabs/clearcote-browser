@@ -26,6 +26,7 @@ import { Worker } from "node:worker_threads";
 import extract from "extract-zip";
 import { RELEASE, REPO, SIGNING_KEY_FPR, platformRelease, proPlatformKey, CATALOG_URL, CATALOG_FALLBACK, type ReleaseInfo, type Catalog, type CatalogBuild } from "./release.js";
 import { licenseUserAgent } from "./license.js";
+import { ProManifestError, defaultProLauncher, verifyProManifest } from "./promanifest.js";
 
 /**
  * Read every file under `dir` so on-access antivirus finishes scanning the freshly-extracted,
@@ -1655,7 +1656,9 @@ export async function ensureVersion(
   }
   const plan = await resolveVersion(selector, !!opts.licenseKey, opts.quiet);
   if (plan.kind === "pro") {
-    return proEnsureBinary(opts.licenseKey as string, { apiBase: opts.apiBase, cacheDir: opts.cacheDir, quiet: opts.quiet, version: plan.version, releaseChannel });
+    // The route is asked for the version the catalog names; the manifest is held to what the caller wrote
+    // (an exact version is a pin, a major or "latest" is not).
+    return proEnsure(opts.licenseKey as string, { apiBase: opts.apiBase, cacheDir: opts.cacheDir, quiet: opts.quiet, version: plan.version, releaseChannel }, selector);
   }
   const base = path.join(opts.cacheDir || defaultCacheRoot(), plan.rel.tag);
   {
@@ -1708,6 +1711,8 @@ interface ProMeta {
   tag?: string; version?: string; asset?: string; archive?: string; binary?: string;
   url?: string; sha256?: string; exe_sha256?: string; chrome_dll_sha256?: string; size?: number;
   channel?: string; resolved_channel?: string;
+  // The signed release manifest (promanifest.ts) and the revision ("r68") and platform it must name.
+  revision?: string; platform?: string; manifest?: unknown;
   // Since 156-r51: the oldest client per family that can run this build, and, when the route served an
   // OLDER build because this SDK is below the current build's minimum, one line saying so.
   min_sdk?: Record<string, string>; notice?: string;
@@ -1719,6 +1724,8 @@ interface ProMeta {
 // seconds), so a launch of an installed build does not ask for it again. Only a build that is installed
 // and passes the cached-build check (which re-hashes the protected files with the cached hashes) is
 // launched from it: a download always follows a fresh answer, whose signed url has not expired.
+// The file is writable by the user, so a kept answer is never trusted as it is: its release manifest is
+// verified every time it is read for use (proEnsure), and one that fails counts as no kept answer.
 const PRO_META_TTL_SEC = 600;
 // Each process adds its own 0-300 s (as the catalog does), so processes started together do not all ask again
 // at the same moment.
@@ -1905,6 +1912,23 @@ function proMetaUsable(meta: ProMeta, plat: "windows" | "linux" | "macos"): bool
  * would launch a binary the engine gate then refuses).
  */
 export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptions = {}): Promise<string> {
+  return proEnsure(licenseKey, opts, opts.version);
+}
+
+/**
+ * What a version selector pins, for the release manifest check: the revision of "r68" / "158.0.8127.36-r68" /
+ * "pro-158.0.8127.36-r68", and the version of "158.0.8127.36" (with or without a revision). A major ("158"),
+ * "latest" or nothing pins neither: the server picks, and the manifest only has to match its answer.
+ */
+export function proPins(selector: string | undefined): { revision?: string; version?: string } {
+  const sel = String(selector || "").trim();
+  const rev = /(?:^|-)(r\d+)$/i.exec(sel);
+  const ver = /^(?:pro-)?(\d+(?:\.\d+){3})(?:-r\d+)?$/i.exec(sel);
+  return { revision: rev ? rev[1].toLowerCase() : undefined, version: ver ? ver[1] : undefined };
+}
+
+/** {@link proEnsureBinary}; `pinned` is the selector the caller wrote (the route may be asked for another, see ensureVersion). */
+async function proEnsure(licenseKey: string, opts: ProDownloadOptions, pinned: string | undefined): Promise<string> {
   const baseUrl = (opts.apiBase || process.env.CLEARCOTE_LICENSE_API || "https://www.clearcotelabs.com").replace(/\/$/, "");
   const plat = proPlatformKey(); // throws on an Intel Mac: the macOS build is Apple Silicon only
   if (!plat) throw new Error("Clearcote PRO ships Windows x64, Linux x64 and macOS arm64 only.");
@@ -1912,15 +1936,41 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
   const channel = resolveReleaseChannel(opts.releaseChannel);
   const proUrl = proDownloadUrl(baseUrl, plat, opts.version, channel);
   const cacheRoot = opts.cacheDir || defaultCacheRoot();
-  /** The chrome path of the build `m` names when it is installed and passes its check, else null. */
+  const pin = proPins(pinned);
+  /**
+   * The release an answer names, once its release manifest has passed (promanifest.ts): signed by a pinned
+   * release key, for this platform, the pinned revision / version, and exactly the hashes in the answer.
+   * Throws ProManifestError otherwise. Every use of an answer, fresh or kept, goes through here.
+   */
+  const verifiedRelease = (m: ProMeta): ResolvedRelease => {
+    const r = proRelease(m, plat); // "the server returned no download" comes first: nothing to verify then
+    verifyProManifest(m, plat, pin.revision, pin.version);
+    return r;
+  };
+  /** The chrome path of the build `m` names when it is installed and passes its check, else null. Throws
+   * ProManifestError when `m` names a build but its manifest does not pass. */
   const installed = (m: ProMeta | null): string | null => {
     if (!m || !proMetaUsable(m, plat)) return null;
-    const r = proRelease(m, plat);
+    const r = verifiedRelease(m);
     return cachedBinary(path.join(cacheRoot, r.tag), r.binary || "chrome.exe", opts.quiet, false, undefined, launchIntegrity(r));
+  };
+  /** A kept answer whose manifest passes, else null: one that fails counts as none. */
+  const keptVerified = (maxAgeSec?: number): ProMeta | null => {
+    const m = readProMeta(licenseKey, proUrl, maxAgeSec);
+    if (!m || !proMetaUsable(m, plat)) return null;
+    try {
+      verifiedRelease(m);
+    } catch (e) {
+      if (e instanceof ProManifestError) return null;
+      throw e;
+    }
+    return m;
   };
   // Taken before the first look: an answer a peer keeps after this moment counts as fresh for this call.
   const askedAt = Date.now() / 1000;
-  const known = readProMeta(licenseKey, proUrl);
+  // A kept answer that fails the manifest check (the file was edited, or written by an SDK from before the
+  // manifest) is not used: the server is asked, as if nothing was kept.
+  const known = keptVerified();
   if (known) {
     // Never used to download (its signed URL may have expired): only for a build already installed whose
     // protected files still hash to these values.
@@ -1962,20 +2012,34 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
       throw new ProSiteBusy(fetchErrorText(e)); // cut off mid-answer, or an answer that is not JSON
     }
     if (!got || typeof got !== "object" || Array.isArray(got)) throw new ProSiteBusy("the answer is not a JSON object");
-    // Only an answer naming a download is kept: "nothing published" is asked again next time.
-    if (proMetaUsable(got as ProMeta, plat)) writeProMeta(licenseKey, proUrl, got as ProMeta);
+    // Only an answer naming a download is kept: "nothing published" is asked again next time. Its release
+    // manifest is checked first, so an answer that fails is never kept (for this process or a waiting peer).
+    if (proMetaUsable(got as ProMeta, plat)) {
+      verifiedRelease(got as ProMeta);
+      writeProMeta(licenseKey, proUrl, got as ProMeta);
+    }
     return got as ProMeta;
   };
 
   let meta: ProMeta;
   try {
     // Only an answer a peer got while this call waited counts: a download always follows a fresh answer.
+    // What a peer kept is a file like any other kept answer: used only when its manifest passes.
     meta = await singleFlight(`pro-meta-${proMetaId(licenseKey, proUrl)}`,
-      () => readProMeta(licenseKey, proUrl, Date.now() / 1000 - askedAt), ask, (e) => e instanceof ProSiteBusy);
+      () => keptVerified(Date.now() / 1000 - askedAt), ask, (e) => e instanceof ProSiteBusy);
   } catch (e) {
     if (!(e instanceof ProSiteBusy || e instanceof PeerFailed)) throw e;
     const why = e instanceof PeerFailed ? "another launch on this machine just failed to reach it" : e.message;
-    const cached = installed(readProMeta(licenseKey, proUrl, PRO_META_STALE_MAX_SEC));
+    // The stale answer is a kept file too: when its manifest does not pass, the launch fails with that
+    // (ProManifestError) and not with an unverified build.
+    let cached: string | null;
+    try {
+      cached = installed(readProMeta(licenseKey, proUrl, PRO_META_STALE_MAX_SEC));
+    } catch (bad) {
+      if (!(bad instanceof ProManifestError)) throw bad;
+      throw new ProManifestError(bad.reason,
+        `${bad.detail} (this is the answer kept from an earlier launch; the build lookup at ${baseUrl} failed: ${why})`);
+    }
     if (cached) {
       if (!(e instanceof PeerFailed)) {
         // Said once per failure, by the launch that asked; always, even when quiet: the launch did not get
@@ -1992,7 +2056,9 @@ export async function proEnsureBinary(licenseKey: string, opts: ProDownloadOptio
   }
   logResolvedChannel(meta, plat, channel, opts.quiet);
   if (meta.notice) log(opts.quiet, String(meta.notice));
-  const rel = proRelease(meta, plat);
+  // The manifest check, before any archive byte is requested. On failure this throws: there is no falling
+  // back to an unsigned answer, nor to another installed build.
+  const rel = verifiedRelease(meta);
 
   const base = path.join(cacheRoot, rel.tag);
   {
@@ -2068,7 +2134,7 @@ function proRelease(meta: ProMeta, plat: "windows" | "linux" | "macos"): Resolve
     size: meta.size || 0,
     os: process.platform,
     archive: (meta.archive as "zip" | "tar.xz") || (plat === "linux" ? "tar.xz" : "zip"),
-    binary: meta.binary || (plat === "windows" ? "chrome.exe" : plat === "macos" ? "Chromium" : "chrome"),
+    binary: meta.binary || defaultProLauncher(plat),
     assetGlob: `${plat}-${plat === "macos" ? "arm64" : "x64"}`,
     unpinned: false, // pinned -> sha256-only verify (no GPG), like the free pin
   };

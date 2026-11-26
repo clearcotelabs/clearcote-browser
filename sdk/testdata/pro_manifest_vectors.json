@@ -1,0 +1,659 @@
+{
+ "note": "TEST vectors for the signed Pro release manifest. The key is a test key: it is pinned nowhere and signs nothing real. Regenerate with sdk/scripts/gen_pro_manifest_vectors.mjs.",
+ "key_id": "test-key-1",
+ "public_key_hex": "a519e63f44d812faa5e35c617d0e50c158b344c77b5471b95bed16f83254c83d",
+ "private_seed_hex": "1447aeeb255d94d2b76af358b8aafc660b772e7b20e19289bd410bc9273fda8b",
+ "rfc8032": [
+  {
+   "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+   "message_hex": "",
+   "signature_hex": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+  },
+  {
+   "public_key_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+   "message_hex": "72",
+   "signature_hex": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
+  },
+  {
+   "public_key_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+   "message_hex": "af82",
+   "signature_hex": "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a"
+  }
+ ],
+ "cases": [
+  {
+   "name": "valid windows",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.yL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw"
+   },
+   "expect": "ok"
+  },
+  {
+   "name": "valid linux",
+   "platform": "linux",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "linux",
+    "asset": "clearcote-pro-158.0.8127.36-linux-x64-r68.tar.xz",
+    "archive": "tar.xz",
+    "binary": "chrome",
+    "url": "https://example.invalid/file?t=y",
+    "sha256": "17654c6329451477f47d7282ae377c716cb7dff6641a53819dbaa1a7fa19470e",
+    "exe_sha256": "9b7885f5345245b703036235c05bf806ede7dc95f064e4f44b36abd612f50839",
+    "size": 172176964,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6ImxpbnV4IiwiYXJjaGl2ZSI6eyJuYW1lIjoiY2xlYXJjb3RlLXByby0xNTguMC44MTI3LjM2LWxpbnV4LXg2NC1yNjgudGFyLnh6Iiwic2hhMjU2IjoiMTc2NTRjNjMyOTQ1MTQ3N2Y0N2Q3MjgyYWUzNzdjNzE2Y2I3ZGZmNjY0MWE1MzgxOWRiYWExYTdmYTE5NDcwZSIsInNpemUiOjE3MjE3Njk2NH0sImJpbmFyaWVzIjp7ImNocm9tZSI6IjliNzg4NWY1MzQ1MjQ1YjcwMzAzNjIzNWMwNWJmODA2ZWRlN2RjOTVmMDY0ZTRmNDRiMzZhYmQ2MTJmNTA4MzkifSwia2V5IjoidGVzdC1rZXktMSIsImlzc3VlZCI6IjIwMjYtMTEtMjYifQ.ca0HllOzCdw9rMvud8llfSNl-EdJVFXA537fPe8D0tN_RmYUDc-Fp_Cwy16CF87r6N8KYLC_jYLj7VO8uynkAg"
+   },
+   "expect": "ok"
+  },
+  {
+   "name": "valid, pinned to the same revision",
+   "platform": "windows",
+   "want_revision": "r68",
+   "want_version": "158.0.8127.36",
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.yL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw"
+   },
+   "expect": "ok"
+  },
+  {
+   "name": "valid, hashes in upper case in the release info",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "B5BD1EBAD7E735F83812BF696DB1C70D5FD917CAE3299D78550A4C4D38E863D1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.yL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw"
+   },
+   "expect": "ok"
+  },
+  {
+   "name": "unsigned: no manifest",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398
+   },
+   "expect": "missing"
+  },
+  {
+   "name": "unsigned: manifest is an empty string",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": ""
+   },
+   "expect": "missing"
+  },
+  {
+   "name": "manifest is not a string",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": {
+     "v": 1
+    }
+   },
+   "expect": "malformed"
+  },
+  {
+   "name": "one part only",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0"
+   },
+   "expect": "malformed"
+  },
+  {
+   "name": "three parts",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.yL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw.x"
+   },
+   "expect": "malformed"
+  },
+  {
+   "name": "payload is not JSON",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "bm90IGpzb24._qgCfEqhCpvQPVrTOybVfK2errIgxAfoCaMWWAVgTMbJVQfPVz_m1kUoxWvVC2iuHI8agB_N1vhKHwg8DBLrDg"
+   },
+   "expect": "malformed"
+  },
+  {
+   "name": "signature of the wrong length",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw"
+   },
+   "expect": "signature"
+  },
+  {
+   "name": "signature altered",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.AL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw"
+   },
+   "expect": "signature"
+  },
+  {
+   "name": "payload altered after signing (revision r68 -> r69)",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r69",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjkiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.yL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw"
+   },
+   "expect": "signature"
+  },
+  {
+   "name": "signed by a key that is not pinned, under the pinned key id",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.BePY68h6IT1KhSBiZuvXiww90R8Vxnft02agWvgmz_Mib3pPwBNu_N-tgE_cB2aI5_DrJC179bzlWAMiDuYeCg"
+   },
+   "expect": "signature"
+  },
+  {
+   "name": "unknown key id",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InNvbWVvbmUtZWxzZSIsImlzc3VlZCI6IjIwMjYtMTEtMjYifQ.tGoVtIqSCwZrMKK3VMFxN4AYD2dUMY88PfvjwXxdm0dcLr5Xc6hTqL3bJaESv3OoNL8UJJzKuom7t1tT6btrAQ"
+   },
+   "expect": "unknown-key"
+  },
+  {
+   "name": "wrong product",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLWZyZWUiLCJ2ZXJzaW9uIjoiMTU4LjAuODEyNy4zNiIsInJldmlzaW9uIjoicjY4IiwicGxhdGZvcm0iOiJ3aW5kb3dzIiwiYXJjaGl2ZSI6eyJuYW1lIjoiY2xlYXJjb3RlLXByby0xNTguMC44MTI3LjM2LXdpbmRvd3MteDY0LXI2OC56aXAiLCJzaGEyNTYiOiJiNWJkMWViYWQ3ZTczNWY4MzgxMmJmNjk2ZGIxYzcwZDVmZDkxN2NhZTMyOTlkNzg1NTBhNGM0ZDM4ZTg2M2QxIiwic2l6ZSI6MjA5NzYwMzk4fSwiYmluYXJpZXMiOnsiY2hyb21lLmV4ZSI6IjMyOTZhZjI1MzE4NTM1MTZiMTI3NjZjYWRiMGU3ODZhYmQ2MWY4N2I2YTg4OWMzM2FiYmFhYTFiMjZiMWNmNmEiLCJjaHJvbWUuZGxsIjoiMTIwZjExYTYyY2Y2OGU5YTYwN2NkZTcxMWExYzY4YjQyZmNiYWJjYzk2MTE5MGE3MDIzZWVmYzRhNzNiN2E5NSJ9LCJrZXkiOiJ0ZXN0LWtleS0xIiwiaXNzdWVkIjoiMjAyNi0xMS0yNiJ9.tLnGZ2qt2PXFW-EJUsA1HVvJNr1x3GUkD4Gr42QN-L3H1bwXhLCrY2Pmsy8updezIWmgIxxXw8XxRr3smWOxDA"
+   },
+   "expect": "product"
+  },
+  {
+   "name": "unknown manifest version",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoyLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.1pRVSp9XGjkQJK1wDw3MMhKHYIImXZD4RvVgaJbIHzH-kVYLPqyMm2kmIt51j-_tps6FEpJlf38AqPp6eRf5Aw"
+   },
+   "expect": "malformed"
+  },
+  {
+   "name": "manifest of another platform",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-linux-x64-r68.tar.xz",
+    "archive": "tar.xz",
+    "binary": "chrome",
+    "url": "https://example.invalid/file?t=y",
+    "sha256": "17654c6329451477f47d7282ae377c716cb7dff6641a53819dbaa1a7fa19470e",
+    "exe_sha256": "9b7885f5345245b703036235c05bf806ede7dc95f064e4f44b36abd612f50839",
+    "size": 172176964,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6ImxpbnV4IiwiYXJjaGl2ZSI6eyJuYW1lIjoiY2xlYXJjb3RlLXByby0xNTguMC44MTI3LjM2LWxpbnV4LXg2NC1yNjgudGFyLnh6Iiwic2hhMjU2IjoiMTc2NTRjNjMyOTQ1MTQ3N2Y0N2Q3MjgyYWUzNzdjNzE2Y2I3ZGZmNjY0MWE1MzgxOWRiYWExYTdmYTE5NDcwZSIsInNpemUiOjE3MjE3Njk2NH0sImJpbmFyaWVzIjp7ImNocm9tZSI6IjliNzg4NWY1MzQ1MjQ1YjcwMzAzNjIzNWMwNWJmODA2ZWRlN2RjOTVmMDY0ZTRmNDRiMzZhYmQ2MTJmNTA4MzkifSwia2V5IjoidGVzdC1rZXktMSIsImlzc3VlZCI6IjIwMjYtMTEtMjYifQ.ca0HllOzCdw9rMvud8llfSNl-EdJVFXA537fPe8D0tN_RmYUDc-Fp_Cwy16CF87r6N8KYLC_jYLj7VO8uynkAg"
+   },
+   "expect": "platform"
+  },
+  {
+   "name": "wrong revision: a valid r67 manifest served for r68",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjciLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.8phBUfppk4t8yiBT4H4pG36bVIrS5NVjoGOSNZf-xMSS56Wib4766JEFEG9OoA03zY7Ay9CMsLni5wFhxW_IDw"
+   },
+   "expect": "revision"
+  },
+  {
+   "name": "wrong revision: release info and manifest agree on r67, the caller pinned r68",
+   "platform": "windows",
+   "want_revision": "r68",
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r67",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjciLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.8phBUfppk4t8yiBT4H4pG36bVIrS5NVjoGOSNZf-xMSS56Wib4766JEFEG9OoA03zY7Ay9CMsLni5wFhxW_IDw"
+   },
+   "expect": "revision"
+  },
+  {
+   "name": "wrong version",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTcuMC44MDgzLjgwIiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.RLPInlLarf_G8T72tZ6UnV_TYw6mh9Hc3Tf665N3J-xXTsDTIBDSfvrZgoJASOlkBIGU3kNprAeFS8SFbKwBBw"
+   },
+   "expect": "version"
+  },
+  {
+   "name": "wrong version: the caller pinned another one",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": "157.0.8083.80",
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.yL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw"
+   },
+   "expect": "version"
+  },
+  {
+   "name": "archive hash in the release info differs from the manifest",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "2c69436dc18e5782410cdfa0e5e728985a4e51939a2ba73998e933e9921fed02",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.yL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw"
+   },
+   "expect": "archive"
+  },
+  {
+   "name": "archive size differs from the manifest",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760399,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.yL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw"
+   },
+   "expect": "archive"
+  },
+  {
+   "name": "launcher hash differs from the manifest",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "b5f20b42c1ef5955c6e9e70273044c9703eb897f56258dccc59eb9e790683ed8",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.yL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw"
+   },
+   "expect": "binary"
+  },
+  {
+   "name": "chrome.dll hash differs from the manifest",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "91232999ac4278430c30e51f49c9e81e66b0008361668121533f8e292d06d84a",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSIsImNocm9tZS5kbGwiOiIxMjBmMTFhNjJjZjY4ZTlhNjA3Y2RlNzExYTFjNjhiNDJmY2JhYmNjOTYxMTkwYTcwMjNlZWZjNGE3M2I3YTk1In0sImtleSI6InRlc3Qta2V5LTEiLCJpc3N1ZWQiOiIyMDI2LTExLTI2In0.yL6ZhSaGcqR7Z2n0Uf82_ZNbw0bnj8hl5eSAy03i2XMXoE-C1OqpCpLnIeyvX74IrjKHpHtsZ1QDWiXLRB17Cw"
+   },
+   "expect": "binary"
+  },
+  {
+   "name": "windows manifest without chrome.dll",
+   "platform": "windows",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "windows",
+    "asset": "clearcote-pro-158.0.8127.36-windows-x64-r68.zip",
+    "archive": "zip",
+    "binary": "chrome.exe",
+    "url": "https://example.invalid/file?t=x",
+    "sha256": "b5bd1ebad7e735f83812bf696db1c70d5fd917cae3299d78550a4c4d38e863d1",
+    "exe_sha256": "3296af2531853516b12766cadb0e786abd61f87b6a889c33abbaaa1b26b1cf6a",
+    "chrome_dll_sha256": "120f11a62cf68e9a607cde711a1c68b42fcbabcc961190a7023eefc4a73b7a95",
+    "size": 209760398,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6IndpbmRvd3MiLCJhcmNoaXZlIjp7Im5hbWUiOiJjbGVhcmNvdGUtcHJvLTE1OC4wLjgxMjcuMzYtd2luZG93cy14NjQtcjY4LnppcCIsInNoYTI1NiI6ImI1YmQxZWJhZDdlNzM1ZjgzODEyYmY2OTZkYjFjNzBkNWZkOTE3Y2FlMzI5OWQ3ODU1MGE0YzRkMzhlODYzZDEiLCJzaXplIjoyMDk3NjAzOTh9LCJiaW5hcmllcyI6eyJjaHJvbWUuZXhlIjoiMzI5NmFmMjUzMTg1MzUxNmIxMjc2NmNhZGIwZTc4NmFiZDYxZjg3YjZhODg5YzMzYWJiYWFhMWIyNmIxY2Y2YSJ9LCJrZXkiOiJ0ZXN0LWtleS0xIiwiaXNzdWVkIjoiMjAyNi0xMS0yNiJ9.z3J_8iNKQWEn9-W1CJdjU_Tiu_iDysPD6TNYLwCPcJZQqS1HZCQBb1zo_az6jIgYbJhROMDboEnkOmBz1p6ACw"
+   },
+   "expect": "binary"
+  },
+  {
+   "name": "manifest without the launcher",
+   "platform": "linux",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "linux",
+    "asset": "clearcote-pro-158.0.8127.36-linux-x64-r68.tar.xz",
+    "archive": "tar.xz",
+    "binary": "chrome",
+    "url": "https://example.invalid/file?t=y",
+    "sha256": "17654c6329451477f47d7282ae377c716cb7dff6641a53819dbaa1a7fa19470e",
+    "exe_sha256": "9b7885f5345245b703036235c05bf806ede7dc95f064e4f44b36abd612f50839",
+    "size": 172176964,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6ImxpbnV4IiwiYXJjaGl2ZSI6eyJuYW1lIjoiY2xlYXJjb3RlLXByby0xNTguMC44MTI3LjM2LWxpbnV4LXg2NC1yNjgudGFyLnh6Iiwic2hhMjU2IjoiMTc2NTRjNjMyOTQ1MTQ3N2Y0N2Q3MjgyYWUzNzdjNzE2Y2I3ZGZmNjY0MWE1MzgxOWRiYWExYTdmYTE5NDcwZSIsInNpemUiOjE3MjE3Njk2NH0sImJpbmFyaWVzIjp7fSwia2V5IjoidGVzdC1rZXktMSIsImlzc3VlZCI6IjIwMjYtMTEtMjYifQ.LOCPqFg6pHhIYIto-yGeo3Nz4oUE_OJgYrlIGQVhgqVYxFfUzkKmvqs48-ahW7V5g-PaV643MuPX2-ZT3S3ICw"
+   },
+   "expect": "binary"
+  },
+  {
+   "name": "release info without the launcher hash",
+   "platform": "linux",
+   "want_revision": null,
+   "want_version": null,
+   "meta": {
+    "version": "158.0.8127.36",
+    "revision": "r68",
+    "tag": "pro-158.0.8127.36-r68",
+    "platform": "linux",
+    "asset": "clearcote-pro-158.0.8127.36-linux-x64-r68.tar.xz",
+    "archive": "tar.xz",
+    "binary": "chrome",
+    "url": "https://example.invalid/file?t=y",
+    "sha256": "17654c6329451477f47d7282ae377c716cb7dff6641a53819dbaa1a7fa19470e",
+    "size": 172176964,
+    "manifest": "eyJ2IjoxLCJwcm9kdWN0IjoiY2xlYXJjb3RlLXBybyIsInZlcnNpb24iOiIxNTguMC44MTI3LjM2IiwicmV2aXNpb24iOiJyNjgiLCJwbGF0Zm9ybSI6ImxpbnV4IiwiYXJjaGl2ZSI6eyJuYW1lIjoiY2xlYXJjb3RlLXByby0xNTguMC44MTI3LjM2LWxpbnV4LXg2NC1yNjgudGFyLnh6Iiwic2hhMjU2IjoiMTc2NTRjNjMyOTQ1MTQ3N2Y0N2Q3MjgyYWUzNzdjNzE2Y2I3ZGZmNjY0MWE1MzgxOWRiYWExYTdmYTE5NDcwZSIsInNpemUiOjE3MjE3Njk2NH0sImJpbmFyaWVzIjp7ImNocm9tZSI6IjliNzg4NWY1MzQ1MjQ1YjcwMzAzNjIzNWMwNWJmODA2ZWRlN2RjOTVmMDY0ZTRmNDRiMzZhYmQ2MTJmNTA4MzkifSwia2V5IjoidGVzdC1rZXktMSIsImlzc3VlZCI6IjIwMjYtMTEtMjYifQ.ca0HllOzCdw9rMvud8llfSNl-EdJVFXA537fPe8D0tN_RmYUDc-Fp_Cwy16CF87r6N8KYLC_jYLj7VO8uynkAg"
+   },
+   "expect": "binary"
+  }
+ ]
+}

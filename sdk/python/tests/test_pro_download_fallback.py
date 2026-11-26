@@ -18,6 +18,7 @@ from _fake_build import BINARY, FakeBuildServer, verified_tree
 download = importlib.import_module("clearcote.download")  # the module: `clearcote.download` is also a function
 
 pro_platform = pytest.mark.skipif(sys.platform == "darwin", reason="the PRO route serves Windows and Linux")
+pytestmark = pytest.mark.usefixtures("pro_test_key")  # the fake route signs its answers with the test key
 
 OLD = "pro-155.0.8059.39-r48"
 NEW = "pro-155.0.8059.39-r50"

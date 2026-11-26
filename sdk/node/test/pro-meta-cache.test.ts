@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
-import { BINARY, TAG, fakeArchive, verifiedTree } from "./helpers/fake-build.js";
+import { BINARY, TAG, fakeArchive, pinTestReleaseKey, signedAnswer, verifiedTree } from "./helpers/fake-build.js";
 import { tempDir } from "./helpers/temp.js";
 
 const proPlatform = process.platform === "win32" || process.platform === "linux"; // the PRO route serves these
@@ -44,7 +44,9 @@ async function setup() {
 
 async function freshModule() {
   vi.resetModules();
-  return import("../src/download.js");
+  const dl = await import("../src/download.js");
+  await pinTestReleaseKey(); // the route below signs its answers with the test key
+  return dl;
 }
 
 /** The download route and the archives it names. `meta` and `status` can change between calls. */
@@ -60,7 +62,7 @@ async function route() {
     archiveHits: [] as string[],
   };
   let base = "";
-  const meta = () => ({
+  const meta = () => signedAnswer({
     tag: TAG, version: "0.0.0", url: `${base}${state.archivePath}`, sha256: createHash("sha256").update(archive).digest("hex"),
     exe_sha256: codeSha, chrome_dll_sha256: codeSha, asset: "fake.zip", archive: "zip", binary: BINARY, size: archive.length,
   });

@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { INSTALL_LOCK, acquireInstallLock, installLockTiming, installTestHooks, proEnsureBinary } from "../src/download.js";
-import { BINARY, TAG, startFakeBuild, verifiedTree } from "./helpers/fake-build.js";
+import { BINARY, TAG, pinTestReleaseKey, startFakeBuild, verifiedTree } from "./helpers/fake-build.js";
 import { tempDir } from "./helpers/temp.js";
 
 const proPlatform = process.platform === "win32" || process.platform === "linux"; // the PRO route serves these
@@ -39,7 +39,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // proEnsureBinary keeps the download route's answer in ~/.clearcote: a temp HOME keeps this machine's out of
 // it (the install children inherit it).
 const savedHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
-beforeAll(() => {
+beforeAll(async () => {
+  await pinTestReleaseKey(); // the fake PRO route signs its answers with the test key
   const home = tempDir("cc-lock-home-");
   process.env.HOME = home;
   process.env.USERPROFILE = home;

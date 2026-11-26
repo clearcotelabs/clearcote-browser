@@ -209,9 +209,12 @@ public class MacosNativeTests : IDisposable
                 {
                     Content = new StringContent(JsonSerializer.Serialize(new
                     {
-                        version = "155.0.8059.39", tag = "pro-155.0.8059.39-r42", platform = "macos",
+                        version = "155.0.8059.39", revision = "r42", tag = "pro-155.0.8059.39-r42", platform = "macos",
                         asset = "clearcote-pro-155.0.8059.39-macos-arm64.zip", archive = "zip",
                         url = "https://blob.test/mac.zip", sha256 = sha, exe_sha256 = exeSha, size = zip.Length,
+                        // signed with the test key; the launcher is listed under the bundle's name
+                        manifest = TestReleaseKey.Manifest("155.0.8059.39", "r42", "macos", "clearcote-pro-155.0.8059.39-macos-arm64.zip",
+                            sha, zip.Length, new Dictionary<string, string> { ["Chromium"] = exeSha }),
                     })),
                 };
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(zip) };

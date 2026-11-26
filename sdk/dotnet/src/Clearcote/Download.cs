@@ -1273,7 +1273,8 @@ public static class Download
     // ── PRO metadata cache ───────────────────────────────────────────────────
     // The PRO route's answer, reused for 10 minutes (per process, and in ~/.clearcote for other processes) to
     // START a build that is installed and passes its checks with it. A download always follows a fresh answer:
-    // a cached one's signed url may have expired.
+    // a cached one's signed url may have expired. The file is the user's to write, so a kept answer is only used
+    // after its signed release manifest has passed again (VerifiedProRelease), every time.
 
     /// How long a PRO metadata answer is reused.
     internal static readonly TimeSpan ProMetaTtl = TimeSpan.FromSeconds(600);
@@ -1397,6 +1398,29 @@ public static class Download
         };
     }
 
+    /// What a version selector pins, for the manifest check: "r7" pins a revision, "150.0.7871.114" a version and
+    /// "150.0.7871.114-r7" both. A major ("150"), "latest" or no selector pins neither.
+    internal static (string? Revision, string? Version) ProPins(string? selector)
+    {
+        var sel = (selector ?? "").Trim();
+        var rev = Regex.Match(sel, @"(?:^|-)(r\d+)$", RegexOptions.IgnoreCase);
+        var ver = Regex.Match(sel, @"^(?:pro-)?(\d+(?:\.\d+){3})(?:-r\d+)?$", RegexOptions.IgnoreCase);
+        return (rev.Success ? rev.Groups[1].Value.ToLowerInvariant() : null, ver.Success ? ver.Groups[1].Value : null);
+    }
+
+    /// The release a PRO metadata answer names, once its signed release manifest has passed
+    /// (<see cref="ProManifest.Verify"/>, docs/PRO-RELEASE-MANIFEST.md): the hashes every later check uses then
+    /// equal the signed ones. Throws when the answer names no usable download, and a
+    /// <see cref="ProManifestException"/> when the manifest is missing, is not signed by a pinned release key, or
+    /// is for another build than the answer (or than the revision / version in <paramref name="selector"/>).
+    private static ReleaseInfo VerifiedProRelease(JsonElement meta, string plat, string? selector)
+    {
+        var rel = ProRelease(meta, plat);
+        var (revision, version) = ProPins(selector);
+        ProManifest.Verify(meta, plat, revision, version);
+        return rel;
+    }
+
     private static void LogResolvedChannel(JsonElement meta, ReleaseChannel channel, string plat, bool quiet)
     {
         string? Get(string k) => meta.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
@@ -1410,10 +1434,17 @@ public static class Download
     /// a new PRO build launches the newest installed PRO build of the same Chromium major instead (unless the
     /// caller pinned an exact revision), and pauses that download for a while (see the backoff section below). A
     /// lookup the site can't answer (its host's challenge page, a 5xx, no connection; not a licence verdict)
-    /// launches the installed build the last answer (up to a week old) named.
-    public static async Task<string> ProEnsureBinaryAsync(string licenseKey, ProDownloadOptions? opts = null)
+    /// launches the installed build the last answer (up to a week old) named. Every answer, fresh or kept, is used
+    /// only after its signed release manifest has passed (a <see cref="ProManifestException"/> otherwise).
+    public static Task<string> ProEnsureBinaryAsync(string licenseKey, ProDownloadOptions? opts = null) =>
+        ProEnsureAsync(licenseKey, opts ?? new ProDownloadOptions(), opts?.Version);
+
+    /// <see cref="ProEnsureBinaryAsync"/>. <paramref name="pinned"/> is the version selector the caller wrote: the
+    /// manifest is held to the revision / version it pins (<see cref="ProPins"/>). It differs from
+    /// <c>opts.Version</c> when the route is asked for what the catalog made of it (<see cref="EnsureVersionAsync"/>:
+    /// "158" becomes the catalog's full version, which the caller did not pin).
+    private static async Task<string> ProEnsureAsync(string licenseKey, ProDownloadOptions opts, string? pinned)
     {
-        opts ??= new ProDownloadOptions();
         var baseUrl = (opts.ApiBase ?? Environment.GetEnvironmentVariable("CLEARCOTE_LICENSE_API") ?? "https://www.clearcotelabs.com").TrimEnd('/');
         var plat = Release.ProPlatformKey();   // throws on an Intel Mac: the macOS build is Apple Silicon only
         if (plat is null) throw new Exception("Clearcote PRO ships Windows x64, Linux x64 and macOS arm64 only.");
@@ -1426,16 +1457,20 @@ public static class Download
         // below counts as fresh, so this call does not ask again.
         var askedAt = NowSec();
 
-        // The chrome path of the build an answer names when it is installed and passes the cached-build check with
-        // it, protected-code hashes included; else null.
+        // The chrome path of the build a kept answer names when its signed manifest passes and the build is
+        // installed and passes the cached-build check with it, protected-code hashes included; else null. The kept
+        // answer is a file the user can write, so the manifest is checked every time; an answer that fails counts
+        // as no answer (keptRefused remembers why, for when the site cannot give a fresh one).
+        ProManifestException? keptRefused = null;
         string? Installed(string metaJson)
         {
             try
             {
                 using var d = JsonDocument.Parse(metaJson);
-                var r = ProRelease(d.RootElement, plat);
+                var r = VerifiedProRelease(d.RootElement, plat, pinned);
                 return Cached(Path.Combine(cacheRoot, r.Tag), r.Binary, opts.Quiet, repair: false, integrity: r);
             }
+            catch (ProManifestException e) { keptRefused = e; return null; }
             catch { return null; }
         }
 
@@ -1489,7 +1524,9 @@ public static class Download
                 using (got)
                 {
                     if (got.RootElement.ValueKind != JsonValueKind.Object) throw new ProSiteBusyException("the answer is not a JSON object");
-                    ProRelease(got.RootElement, plat); // throws when it names no usable download
+                    // Throws when it names no usable download, or when its signed manifest does not pass: such an
+                    // answer is never kept, and nothing is downloaded on it.
+                    VerifiedProRelease(got.RootElement, plat, pinned);
                     var raw = got.RootElement.GetRawText();
                     KeepProMeta(metaId, raw); // only an answer that names a usable build
                     return raw;
@@ -1497,16 +1534,32 @@ public static class Download
             }
         }
 
+        // An answer a peer kept while this call waited. It comes from the same file, so its manifest is checked like
+        // any kept answer's; one that fails is no answer, and this call asks for itself.
+        string? FromPeer()
+        {
+            var peer = RecentProMeta(metaId, NowSec() - askedAt);
+            if (peer is null) return null;
+            try
+            {
+                using var d = JsonDocument.Parse(peer);
+                VerifiedProRelease(d.RootElement, plat, pinned);
+                return peer;
+            }
+            catch { return null; }
+        }
+
         string metaJson;
         try
         {
             // Only an answer a peer got while this call waited counts: a download always follows a fresh answer.
-            metaJson = await SingleFlightAsync($"pro-meta-{metaId}", () => RecentProMeta(metaId, NowSec() - askedAt), Ask,
+            metaJson = await SingleFlightAsync($"pro-meta-{metaId}", FromPeer, Ask,
                                                e => e is ProSiteBusyException).ConfigureAwait(false);
         }
         catch (Exception e) when (e is ProSiteBusyException or PeerFailedException)
         {
             var why = e is PeerFailedException ? "another launch on this machine just failed to reach it" : e.Message;
+            keptRefused = null;
             var stale = RecentProMeta(metaId, ProMetaStaleMax.TotalSeconds);
             if (stale is not null && Installed(stale) is { } kept)
             {
@@ -1515,6 +1568,12 @@ public static class Download
                                             "installed build the last answer named.");
                 return kept;
             }
+            // The last answer's manifest did not pass and there is no fresh answer to check: say that, and never
+            // launch on it.
+            if (keptRefused is not null)
+                throw new ProManifestException(keptRefused.Reason,
+                    $"{keptRefused.Message} (That was the last answer kept on this machine; the build lookup at {baseUrl} " +
+                    $"failed ({why}), so there is no new one.)", keptRefused);
             throw new Exception($"Clearcote PRO: the build lookup at {baseUrl} failed ({why}) and no earlier answer names an " +
                                 "installed build. Try again in a few minutes; if it keeps failing, contact support.");
         }
@@ -1522,7 +1581,9 @@ public static class Download
         using var doc = JsonDocument.Parse(metaJson);
         var meta = doc.RootElement;
         LogResolvedChannel(meta, channel, plat, opts.Quiet);
-        var rel = ProRelease(meta, plat);
+        // Checked here whichever way the answer came, right before it is used: nothing below (the installed-build
+        // check, the archive download) runs on an answer whose signed manifest has not passed.
+        var rel = VerifiedProRelease(meta, plat, pinned);
 
         var @base = Path.Combine(cacheRoot, rel.Tag);
         {
@@ -2029,8 +2090,10 @@ public static class Download
 
         var plan = await ResolveVersionAsync(selector, !string.IsNullOrEmpty(licenseKey), quiet).ConfigureAwait(false);
         if (plan.Kind == "pro")
-            return await ProEnsureBinaryAsync(licenseKey!,
-                new ProDownloadOptions { ApiBase = apiBase, CacheDir = cacheDir, Quiet = quiet, Version = plan.Version, ReleaseChannel = channel }).ConfigureAwait(false);
+            // The route is asked for the catalog's version; the manifest is held to what the caller wrote.
+            return await ProEnsureAsync(licenseKey!,
+                new ProDownloadOptions { ApiBase = apiBase, CacheDir = cacheDir, Quiet = quiet, Version = plan.Version, ReleaseChannel = channel },
+                selector).ConfigureAwait(false);
 
         var rel = plan.Rel!;
         var @base = Path.Combine(cacheDir ?? Native.CacheRoot(), rel.Tag);

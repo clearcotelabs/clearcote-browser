@@ -133,6 +133,7 @@ export {
 export type { FingerprintOptions } from "./fingerprint.js";
 export type { DownloadOptions } from "./download.js";
 export { proEnsureBinary, type ProDownloadOptions } from "./download.js";
+export { ProManifestError, type ProManifestReason } from "./promanifest.js";
 export { checkInstall, verifyInstall } from "./download.js";
 export { applyGeoip, resolveGeo, resolveGeoDetailed, geoipTimeoutMs, geoipMode, GeoipError, type Geo, type GeoResult, type GeoipMode } from "./geoip.js";
 export { proxiedRequest, toProxySpec, type ProxySpec } from "./net.js";

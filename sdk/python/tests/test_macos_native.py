@@ -103,7 +103,9 @@ def test_intel_mac_is_told_the_build_is_apple_silicon_only(monkeypatch):
         dl.pro_ensure_binary("cc_lic_x", quiet=True)
 
 
-def test_pro_download_asks_for_macos_and_expects_the_bundle(monkeypatch, tmp_path):
+def test_pro_download_asks_for_macos_and_expects_the_bundle(monkeypatch, tmp_path, pro_test_key):
+    from _manifest_signer import signed_answer
+
     _on(monkeypatch, "darwin", "arm64")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))  # the download answer is kept in ~/.clearcote
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
@@ -111,7 +113,9 @@ def test_pro_download_asks_for_macos_and_expects_the_bundle(monkeypatch, tmp_pat
     seen = {}
     meta = {"version": "155.0.8059.39", "tag": "pro-155.0.8059.39-r42", "platform": "macos",
             "asset": "clearcote-pro-155.0.8059.39-macos-arm64.zip", "archive": "zip",
-            "url": "https://blob.example/x.zip", "sha256": "a" * 64, "exe_sha256": "b" * 64, "size": 1}
+            "url": "https://blob.example/x.zip", "sha256": "a" * 64, "exe_sha256": "b" * 64, "size": 1,
+            "revision": "r42"}
+    meta = signed_answer(meta, "macos")  # the manifest lists the launcher under the macOS default name
 
     class _Resp:
         def __enter__(self):

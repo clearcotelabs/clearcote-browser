@@ -141,6 +141,18 @@ export const REPO = "clearcotelabs/clearcote-browser";
  * before the binary is trusted. (Pinned mode trusts the baked-in sha256 instead.) */
 export const SIGNING_KEY_FPR = "CA96F185F96A693AEDB3AC1FCB00D851B7A86B0F";
 
+/**
+ * Clearcote Pro release keys: key id -> raw 32-byte Ed25519 public key, as hex. Every Pro download answer must
+ * carry a release manifest signed by one of them (docs/PRO-RELEASE-MANIFEST.md, promanifest.ts); the private
+ * halves are kept off every server. More than one key can be pinned, so a new key can ship here before it
+ * signs anything.
+ *
+ * EMPTY for now: the release key is pinned here when the first signed Pro release ships. Until then this SDK
+ * refuses every Pro build. Nothing else adds a key or skips the check: no environment variable, no option,
+ * no file.
+ */
+export const PRO_RELEASE_KEYS: Record<string, string> = {};
+
 // ── Version catalog ──────────────────────────────────────────────────────────
 // Source of truth for "which browser majors exist and what tier each is". Fetched at runtime so a NEW
 // release becomes switchable (launch({version:"150"})) without an SDK bump. Each build declares a

@@ -37,6 +37,7 @@ import urllib.request
 import uuid
 import zipfile
 
+from ._promanifest import ProManifestError, verify_pro_manifest
 from .release import RELEASE, REPO, SIGNING_KEY_FPR, platform_release, pro_platform_key
 
 
@@ -1811,6 +1812,17 @@ def _pro_release(meta, plat):
     }
 
 
+def _pro_pins(selector):
+    """``(want_revision, want_version)`` for a PRO version selector: the revision ("r68") and the exact
+    version ("158.0.8127.36") it pins, each None when the selector does not pin one. "158", "latest" and
+    None pin neither; "r68" the revision; "158.0.8127.36-r68" (also with a "pro-" prefix) both."""
+    sel = str(selector or "").strip()
+    rev = re.search(r"(?:^|-)(r\d+)$", sel, re.IGNORECASE)
+    rest = re.sub(r"^pro-", "", sel[:rev.start()] if rev else sel, flags=re.IGNORECASE)
+    return (rev.group(1).lower() if rev else None,
+            rest if re.fullmatch(r"\d+(?:\.\d+){3}", rest) else None)
+
+
 def _log_resolved_channel(meta, channel, plat, quiet):
     resolved = meta.get("resolved_channel")
     if channel == "preview" and resolved and resolved != "preview":
@@ -1819,7 +1831,7 @@ def _log_resolved_channel(meta, channel, plat, quiet):
 
 
 def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, version=None,
-                      release_channel=None):
+                      release_channel=None, pinned=None):
     """Download + verify the PRO (license-gated) browser and return its chrome path.
 
     The PRO build is not on a public releases page: the SDK asks the site for it via
@@ -1831,6 +1843,14 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     PRO build of the same Chromium major is launched instead (with a warning on stderr), unless
     ``version`` pins an exact revision; the failure pauses that download for a while (see
     _read_download_backoff).
+
+    Every answer must carry a release manifest signed by a key pinned in release.py
+    (``verify_pro_manifest``, docs/PRO-RELEASE-MANIFEST.md). A fresh answer is checked before anything is
+    downloaded, and a failure raises ProManifestError. A kept answer is checked every time before it is
+    used to launch an installed build: its file is writable by the user, so one that fails counts as no
+    answer, and the site is asked. A revision or exact version the caller pinned must be the one signed
+    (see _pro_pins). ``pinned`` is the selector the caller wrote, for when ``version`` is what the catalog
+    made of it: the route is asked for ``version``, the manifest is held to ``pinned`` (default: ``version``).
 
     The answer is kept for _PRO_META_TTL seconds (in this process and in
     ``~/.clearcote/pro-meta-<hash>.json``) and reused only while the build it names is installed and
@@ -1849,15 +1869,23 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     url = pro_download_url(base_url, plat, version, channel)
     root = cache_dir or _cache_root()
     meta_key = _pro_meta_key(license_key, url)
+    want_revision, want_version = _pro_pins(version if pinned is None else pinned)
+
+    def signed(m):
+        """``m`` once its signed release manifest checked out for this request; raises ProManifestError."""
+        verify_pro_manifest(m, plat, want_revision, want_version)
+        return m
 
     def installed(m):
-        """The chrome path of the build ``m`` names when it is installed and passes its check, else None."""
+        """The chrome path of the build ``m`` names when it is installed and passes its check, else None.
+        Raises ProManifestError when ``m`` names a build and its signed manifest does not check out."""
         try:
             r = _pro_release(m, plat)
         except (RuntimeError, KeyError, TypeError):
             return None
         if not r:
             return None
+        signed(m)  # the hashes the launch check below uses must be the signed ones
         return _cached(os.path.join(root, r["tag"]), r["binary"], quiet, repair=False,
                        integrity=_launch_integrity(r))
 
@@ -1866,7 +1894,10 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
     meta = _kept_pro_meta(meta_key)
     if meta is not None:
         # Never used to download (its signed URL may have expired): only for a build already installed.
-        cached = installed(meta)
+        try:
+            cached = installed(meta)
+        except ProManifestError:
+            cached = None  # a kept answer that fails its manifest check is no answer: the site is asked
         if cached:
             _log_resolved_channel(meta, channel, plat, quiet)
             return cached
@@ -1897,16 +1928,28 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
             _pro_release(got, plat)
         except (RuntimeError, KeyError, TypeError):
             return got  # "nothing published" is not kept: asked again next time (and raised below)
-        _keep_pro_meta(meta_key, got)
+        # Checked before it is kept and before any archive byte is asked for. A failure is raised as it
+        # is: no fall-back to an unsigned answer, and nothing is kept.
+        _keep_pro_meta(meta_key, signed(got))
         return got
+
+    def peer_answer():
+        """An answer a peer kept while this call waited, when its manifest checks out too (it is read from
+        the same user-writable file); else None, and this call asks for itself."""
+        m = _kept_pro_meta(meta_key, time.time() - asked_at)
+        try:
+            return m if m is None else signed(m)
+        except ProManifestError:
+            return None
 
     try:
         # Only an answer a peer got while this call waited counts: a download always follows a fresh answer.
-        meta = _single_flight(f"pro-meta-{meta_key}", lambda: _kept_pro_meta(meta_key, time.time() - asked_at), ask,
+        meta = _single_flight(f"pro-meta-{meta_key}", peer_answer, ask,
                               transient=lambda exc: isinstance(exc, _ProSiteBusy))
     except (_ProSiteBusy, _PeerFailed) as e:
         why = "another launch on this machine just failed to reach it" if isinstance(e, _PeerFailed) else str(e)
         stale = _kept_pro_meta(meta_key, _PRO_META_STALE_MAX)
+        # A stale answer whose manifest fails is never launched from: its ProManifestError is the error.
         cached = installed(stale) if stale is not None else None
         if cached:
             if not isinstance(e, _PeerFailed):  # said once per failure, by the launch that asked
@@ -1923,6 +1966,7 @@ def pro_ensure_binary(license_key, api_base=None, cache_dir=None, quiet=False, v
         # The route served an older build than the current one because this SDK is too old for it.
         _log(quiet, str(meta["notice"]))
     rel = _pro_release(meta, plat)
+    signed(meta)  # checked on both ways here already (ask, peer_answer); nothing below runs without it
     dst = os.path.join(root, rel["tag"])
     cached = _cached(dst, rel["binary"], quiet, repair=False, integrity=_launch_integrity(rel))
     if cached:

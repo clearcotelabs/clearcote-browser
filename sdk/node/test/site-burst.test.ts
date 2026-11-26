@@ -12,7 +12,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { CATALOG_URL } from "../src/release.js";
-import { startFakeBuild, type FakeBuild } from "./helpers/fake-build.js";
+import { pinTestReleaseKey, startFakeBuild, type FakeBuild } from "./helpers/fake-build.js";
 import { tempDir } from "./helpers/temp.js";
 
 const proPlatform = process.platform === "win32" || process.platform === "linux"; // the PRO route serves these
@@ -36,6 +36,7 @@ async function newProcess() {
   vi.spyOn(Math, "random").mockReturnValue(0);
   vi.resetModules();
   const dl = await import("../src/download.js");
+  await pinTestReleaseKey(); // the fake PRO route signs its answers with the test key
   return { dl, release: await import("../src/release.js") }; // the same module instance download.ts uses
 }
 
